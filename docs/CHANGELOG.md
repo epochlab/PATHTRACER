@@ -3,6 +3,41 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## LoG as a signed operator, and a bipolar preview for signed AOVs
+
+`LoG` shipped as a three-channel scale-selection blob detector — magnitude, the winning scale's frequency in cycles/degree, and
+its polarity. Two of those three channels were wrong to report, and the packing made the AOV unreadable as an image.
+
+- fix: the scale channel measured the wrong quantity. With γ = 1 the response of a step edge of height `h` at its peak offset is
+  `0.242 h t^(γ-1)`, identically independent of `t`, so the scale-normalised family is flat on edge structure and the argmax is
+  undetermined; at a fixed offset `x` from an edge the response is stationary at `t ≈ x²`, making the channel a map of squared
+  distance to the nearest edge. γ = 1 is the right exponent for blobs and the wrong one for edges, where Lindeberg 1998 gives
+  γ = 1/2, and a rendered image is mostly edges. Measured on a Cornell box the channel took **4 distinct values, with 63.5% of
+  the frame on the single coarsest rung** — the posterised bands the AOV showed on screen
+- fix: the polarity channel was exactly `-sign` of the signed response and carried nothing. It read -1 on 52.61% of texels,
+  matching the new signed channel's negative fraction to the digit
+- feat: `LoG` is now one signed channel, the scale-normalised extremum over the octave ladder. Signed because the zero crossings
+  are the edges (Marr & Hildreth 1980), which a magnitude erases. 3 channels to 1
+- fix: the sign is negated once, so positive means bright-on-dark and agrees with `DoG`. Lowe 2004 §3 gives
+  `G(kσ) - G(σ) ≈ (k-1)σ²∇²G`, so `fine - coarse` is *minus* the Laplacian: the two operators of one family previously read
+  opposite polarity on the same feature
+- fix: `aovCarriesRadiance` is now true for `LoG`. `t·laplacian5` is linear in luminance, hence positively homogeneous of
+  degree one, exactly as Sobel, Gabor and DoG already are
+- feat: `aovIsBipolar` routes `DoG`, `LoG` and `Opponent` through an affine display map, `0.5 + value/(2·range)`, putting zero
+  on mid-grey instead of clipping the negative half to black. The offset is a uniform beside the exposure multiply, shared by
+  the three display shaders and by the CPU encode, so `render_beauty`'s PNG and the viewer agree by construction
+- feat: the preview auto-ranges to `min(peak, σ·sqrt(2 ln n))` rather than the peak, σ being the RMS about zero and the cap the
+  concentration point of the maximum of `n` standard normals (Cramér 1946). A rendered signed response is heavy-tailed — LoG's
+  maximum sits 32x above its own 99th percentile — so a peak scan left 97% of the display range unused; the cap recovers about
+  9x of usable contrast, and a field with no tail still keeps its true peak and never clips
+- note: preview only. `aovCarriesRadiance` still describes the value, and the EXR, the HUD probe and the C ABI all read the raw
+  signed float. `DoG`'s preview no longer tracks the photographic exposure, being auto-ranged and so exposure-invariant
+- note: `LoG`'s cost is unchanged. Dropping a full-frame array and one scatter write per ladder rung is real but sits below this
+  machine's noise floor — interleaved A/B medians ran 60-74 ms either side at 2048x1152, with no resolvable difference
+- test: `log_and_dog_agree_on_polarity` replaces the polarity check, plus `log_is_homogeneous_of_degree_one`,
+  `log_responds_where_dog_cannot`, `bipolar_aovs_produce_both_signs`, `bipolar_range_caps_a_lone_outlier` and
+  `bipolar_display_maps_the_range_to_the_unit_interval`. 170 checks, each new gate mutation-tested in both directions
+
 ## The Gabor AOV re-derived as a 2-D Morlet bank
 
 The last authored constants in the AOV filters. `buildGaborKernel` carried `sigma = 1.4`, `lambda = 4.0`, `gamma = 0.5`, four

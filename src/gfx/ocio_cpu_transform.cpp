@@ -37,12 +37,12 @@ void applyOcioDisplayTransform(std::vector<float>& rgb, int width, int height) {
 }
 
 std::vector<unsigned char> encodeForDisplay(std::span<const float> rgb, int width, int height,
-                                             float exposureEv, bool applyDisplayTransform) {
+                                             float exposureEv, bool applyDisplayTransform, float displayOffset) {
     // The one copy the encode needs: OCIO applies in place and the caller's buffer is const.
     std::vector<float> exposed(rgb.size());
     const float exposure = std::pow(2.0F, exposureEv);
     for (std::size_t i = 0; i < rgb.size(); ++i) {
-        exposed[i] = rgb[i] * exposure;
+        exposed[i] = (rgb[i] * exposure) + displayOffset;
     }
 
     if (applyDisplayTransform) {

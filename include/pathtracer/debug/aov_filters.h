@@ -44,8 +44,8 @@ inline constexpr float kMorletOctaves = 1.0F;
 [[nodiscard]] pathtracer::gfx::HdrImage dogAov(const pathtracer::gfx::HdrImage& beauty,
                                             pathtracer::scene::ThreadPool& threadPool);
 
-// Scale-normalised Laplacian extremum over the octave ladder (Lindeberg 1998, gamma=1): magnitude, its cycles/degree, and its polarity.
-[[nodiscard]] pathtracer::gfx::HdrImage logAov(const pathtracer::gfx::HdrImage& beauty, float verticalFovRadians,
+// Signed scale-normalised Laplacian extremum over the octave ladder (Lindeberg 1998, gamma=1), positive on a bright blob like DoG.
+[[nodiscard]] pathtracer::gfx::HdrImage logAov(const pathtracer::gfx::HdrImage& beauty,
                                             pathtracer::scene::ThreadPool& threadPool);
 
 // Cone-opponent displacement from Rec.709 white (cone_space.h): (l - l_white, s - s_white), exactly invariant to a positive gain.

@@ -75,13 +75,14 @@ std::string buildFragmentSource(const std::string& ocioShaderText, const std::st
         << "out vec4 fragColor;\n\n"
         << "uniform sampler2D uHdrColor;\n"
         << "uniform float uExposure;\n"
+        << "uniform float uDisplayOffset;\n"
         << kChannelViewGlsl << kInvertGlsl << kAberrationGlsl << "\n"
         << kDitherGlsl
         << ocioShaderText << "\n"
         << "void main() {\n"
         << "    vec3 hdrColor = sampleAberrated(vUv);\n"
         << kApplyChannelViewGlsl
-        << "    vec4 exposed = vec4(hdrColor * uExposure, 1.0);\n"
+        << "    vec4 exposed = vec4(hdrColor * uExposure + uDisplayOffset, 1.0);\n"
         << "    vec3 displayColor = " << functionName << "(exposed).rgb;\n"
         << "    if (uInvert) { displayColor = 1.0 - displayColor; }\n"
         << "    fragColor = vec4(displayColor + ditherOffset(vUv), 1.0);\n"
@@ -95,12 +96,13 @@ std::string buildRawFragmentSource() {
                        "in vec2 vUv;\n"
                        "out vec4 fragColor;\n\n"
                        "uniform sampler2D uHdrColor;\n"
-                       "uniform float uExposure;\n") +
+                       "uniform float uExposure;\n"
+                       "uniform float uDisplayOffset;\n") +
            kChannelViewGlsl + kInvertGlsl + kAberrationGlsl + kDitherGlsl +
            "\nvoid main() {\n"
            "    vec3 hdrColor = sampleAberrated(vUv);\n" +
            kApplyChannelViewGlsl +
-           "    vec3 displayColor = hdrColor * uExposure;\n"
+           "    vec3 displayColor = hdrColor * uExposure + uDisplayOffset;\n"
            "    if (uInvert) { displayColor = 1.0 - displayColor; }\n"
            "    fragColor = vec4(displayColor + ditherOffset(vUv), 1.0);\n"
            "}\n";
@@ -187,7 +189,10 @@ OcioDisplayTransform::OcioDisplayTransform(ShaderProgram rawShader, ShaderProgra
       rec709InvertLoc_(rec709Shader_.uniformLocation("uInvert")),
       rawAberrationLoc_(rawShader_.uniformLocation("uAberration")),
       srgbAberrationLoc_(srgbShader_.uniformLocation("uAberration")),
-      rec709AberrationLoc_(rec709Shader_.uniformLocation("uAberration")) {}
+      rec709AberrationLoc_(rec709Shader_.uniformLocation("uAberration")),
+      rawDisplayOffsetLoc_(rawShader_.uniformLocation("uDisplayOffset")),
+      srgbDisplayOffsetLoc_(srgbShader_.uniformLocation("uDisplayOffset")),
+      rec709DisplayOffsetLoc_(rec709Shader_.uniformLocation("uDisplayOffset")) {}
 
 // Not wrapped in GL_CALL: runs every frame.
 void OcioDisplayTransform::bind() const {
@@ -196,22 +201,26 @@ void OcioDisplayTransform::bind() const {
     int channelViewLoc = rawChannelViewLoc_;
     int invertLoc = rawInvertLoc_;
     int aberrationLoc = rawAberrationLoc_;
+    int displayOffsetLoc = rawDisplayOffsetLoc_;
     if (activeLut_ == Lut::SRGB) {
         exposureLoc = srgbExposureLoc_;
         channelViewLoc = srgbChannelViewLoc_;
         invertLoc = srgbInvertLoc_;
         aberrationLoc = srgbAberrationLoc_;
+        displayOffsetLoc = srgbDisplayOffsetLoc_;
     } else if (activeLut_ == Lut::Rec709) {
         exposureLoc = rec709ExposureLoc_;
         channelViewLoc = rec709ChannelViewLoc_;
         invertLoc = rec709InvertLoc_;
         aberrationLoc = rec709AberrationLoc_;
+        displayOffsetLoc = rec709DisplayOffsetLoc_;
     }
     shader.use();
     glUniform1f(exposureLoc, std::pow(2.0F, exposureEv_));
     glUniform1i(channelViewLoc, channelView_);
     glUniform1i(invertLoc, invert_ ? 1 : 0);
     glUniform1f(aberrationLoc, aberration_);
+    glUniform1f(displayOffsetLoc, displayOffset_);
 }
 
 }  // namespace pathtracer::gfx

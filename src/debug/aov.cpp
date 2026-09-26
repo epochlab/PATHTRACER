@@ -3,6 +3,8 @@
 #include "pathtracer/debug/aov_routing.h"
 
 #include <cctype>
+#include <algorithm>
+#include <cmath>
 #include <string>
 #include <string_view>
 
@@ -74,6 +76,7 @@ int aovChannels(AovId aov) {
         case AovId::Sobel:
         case AovId::Gabor:
         case AovId::DoG:
+        case AovId::LoG:
             return 1;
 
         // Two-component lanes: UV's third channel is structurally zero, and Opponent spans the two cardinal chromatic axes only.
@@ -90,7 +93,6 @@ int aovChannels(AovId aov) {
         case AovId::Albedo:
         case AovId::Tangent:
         case AovId::ObjectID:
-        case AovId::LoG:
         case AovId::Retinex:
         case AovId::CLAHE:
         case AovId::Wireframe:
@@ -119,12 +121,12 @@ bool aovCarriesRadiance(AovId aov) {
         case AovId::Sobel:
         case AovId::Gabor:
         case AovId::DoG:
+        case AovId::LoG:
         case AovId::CLAHE:
             return true;
 
         // Ratios, reflectances, counts, lengths, directions and frequencies: scaling any of them by an exposure means nothing.
         case AovId::HSV:
-        case AovId::LoG:
         case AovId::Opponent:
         case AovId::Retinex:
         case AovId::Wireframe:
@@ -150,6 +152,80 @@ bool aovCarriesRadiance(AovId aov) {
             return false;
     }
     return false;
+}
+
+bool aovIsBipolar(AovId aov) {
+    switch (aov) {
+        // Responses of a zero-mean operator: zero is the operator's own centre and the two signs are equally meaningful.
+        case AovId::DoG:
+        case AovId::LoG:
+        case AovId::Opponent:
+            return true;
+
+        // Direction and position lanes are signed but not bipolar: a normal's components span a sphere, not a response about zero.
+        case AovId::Beauty:
+        case AovId::Wireframe:
+        case AovId::Alpha:
+        case AovId::Depth:
+        case AovId::Lookahead:
+        case AovId::HSV:
+        case AovId::Luminance:
+        case AovId::Sobel:
+        case AovId::Gabor:
+        case AovId::WorldPos:
+        case AovId::UV:
+        case AovId::Retinex:
+        case AovId::CLAHE:
+        case AovId::Normal:
+        case AovId::GeomNormal:
+        case AovId::Albedo:
+        case AovId::Metallic:
+        case AovId::Roughness:
+        case AovId::Tangent:
+        case AovId::ObjectID:
+        case AovId::AO:
+        case AovId::Fresnel:
+        case AovId::IOR:
+        case AovId::BounceCount:
+        case AovId::SNR:
+        case AovId::DirectDiffuse:
+        case AovId::IndirectDiffuse:
+        case AovId::DirectSpecular:
+        case AovId::IndirectSpecular:
+        case AovId::Refraction:
+        case AovId::Shadow:
+        case AovId::Count:
+            return false;
+    }
+    return false;
+}
+
+float bipolarDisplayRange(std::span<const float> rgba, int channels) {
+    double sumOfSquares = 0.0;
+    float peak = 0.0F;
+    std::size_t count = 0;
+    for (std::size_t texel = 0; texel + 3 < rgba.size(); texel += 4) {
+        for (int c = 0; c < channels; ++c) {
+            const float value = rgba[texel + static_cast<std::size_t>(c)];
+            sumOfSquares += static_cast<double>(value) * static_cast<double>(value);
+            peak = std::max(peak, std::fabs(value));
+            ++count;
+        }
+    }
+    if (count == 0) {
+        return 0.0F;
+    }
+    // Zero is the operator's own centre, so the scale is the RMS about zero rather than a sample deviation about an estimated mean.
+    const double rms = std::sqrt(sumOfSquares / static_cast<double>(count));
+    // Cramer 1946: the maximum of n standard normals concentrates at sigma*sqrt(2 ln n), so this is where a well-behaved field ends.
+    const double expectedMaximum = rms * std::sqrt(2.0 * std::log(static_cast<double>(count)));
+    // The smaller of the two: a Gaussian field keeps its true peak, and a heavy-tailed one stops a lone outlier crushing the preview.
+    return std::min(peak, static_cast<float>(expectedMaximum));
+}
+
+float bipolarDisplayExposureEv(float range) {
+    // A field that is exactly zero everywhere has no range, and any finite gain then gives mid-grey, so unity is the natural choice.
+    return range > 0.0F ? -std::log2(range / kBipolarDisplayOffset) : 0.0F;
 }
 
 PathTracedLane pathTracedLane(AovId aov) {

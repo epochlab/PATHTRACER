@@ -1,5 +1,6 @@
 #pragma once
 
+#include <span>
 #include <string_view>
 
 namespace pathtracer::debug {
@@ -74,6 +75,18 @@ enum class AovSource { PathTraced, GBuffer, BeautyFilter };
 
 // True where the AOV's value is proportional to scene radiance, so the display exposure is a gain on it rather than a distortion.
 [[nodiscard]] bool aovCarriesRadiance(AovId aov);
+
+// True where zero is the operator's own centre and both signs are meaningful, so the preview maps zero to mid-grey. Preview only.
+[[nodiscard]] bool aovIsBipolar(AovId aov);
+
+// Added after the preview's exposure gain, so a zero response lands exactly on mid-grey. The other half of bipolarDisplayExposureEv.
+inline constexpr float kBipolarDisplayOffset = 0.5F;
+
+// exp2 of this, with kBipolarDisplayOffset added, maps [-range, range] onto [0, 1]. The preview's auto-range, as Depth auto-ranges.
+[[nodiscard]] float bipolarDisplayExposureEv(float range);
+
+// Auto-range over an interleaved RGBA buffer's first `channels` lanes: the peak, capped at the expected maximum of that many normals.
+[[nodiscard]] float bipolarDisplayRange(std::span<const float> rgba, int channels);
 
 // True for AOVs needing light transport, false for the 14 primary-hit ones. Derived from aovSource, so the two cannot drift apart.
 [[nodiscard]] inline bool aovNeedsLightTransport(AovId aov) {

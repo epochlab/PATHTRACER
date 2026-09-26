@@ -594,10 +594,18 @@ int main(int argc, char** argv) {
     }
 
     const bool isBeauty = options.aov == pathtracer::debug::AovId::Beauty;
+    const bool isBipolar = pathtracer::debug::aovIsBipolar(options.aov);
     // Depth auto-ranges to its own maximum like presentFrame: raw metres quantize to white and farClip is a ray bound, not a depth span.
-    const float exposureEv = options.aov == pathtracer::debug::AovId::Depth
-                                 ? -std::log2(std::max(maxChannel(accumulated), 1e-4F))
-                                 : options.exposureEv;
+    float exposureEv = options.exposureEv;
+    float displayOffset = 0.0F;
+    if (isBipolar) {
+        // The same auto-ranged affine map presentFrame uses, so a PNG of a signed AOV reads zero at mid-grey rather than clipping it.
+        exposureEv = pathtracer::debug::bipolarDisplayExposureEv(
+            pathtracer::debug::bipolarDisplayRange(accumulated.rgba, pathtracer::debug::aovChannels(options.aov)));
+        displayOffset = pathtracer::debug::kBipolarDisplayOffset;
+    } else if (options.aov == pathtracer::debug::AovId::Depth) {
+        exposureEv = -std::log2(std::max(maxChannel(accumulated), 1e-4F));
+    }
     // HdrImage carries RGBA; the shared encode takes packed RGB, so gather the three channels the display path reads.
     std::vector<float> linearRgb(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3);
     for (std::size_t texel = 0; texel < linearRgb.size() / 3; ++texel) {
@@ -606,7 +614,7 @@ int main(int argc, char** argv) {
         }
     }
     const std::vector<unsigned char> encoded =
-        pathtracer::gfx::encodeForDisplay(linearRgb, width, height, exposureEv, isBeauty);
+        pathtracer::gfx::encodeForDisplay(linearRgb, width, height, exposureEv, isBeauty, displayOffset);
     if (!writePng(options.outPath, width, height, encoded)) {
         return EXIT_FAILURE;
     }

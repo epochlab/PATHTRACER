@@ -144,6 +144,94 @@ PT_CHECK(filters_are_zero_on_a_constant_field, Fast, Exact) {
                   "peak Morlet response " + std::to_string(worstGabor) + " over the cancellation bound " + std::to_string(bound));
 }
 
+// A bipolar AOV claims both signs are meaningful, so each must actually produce both on a pattern with structure at several scales.
+PT_CHECK(bipolar_aovs_produce_both_signs, Fast, Exact) {
+    pathtracer::scene::ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    // Large enough for the octave ladder to reach two levels: below that DoG has no band to difference and correctly reads zero.
+    constexpr int kWidth = 256;
+    constexpr int kHeight = 192;
+    HdrImage pattern = makeImage(kWidth, kHeight, 0.0F);
+    for (int y = 0; y < kHeight; ++y) {
+        for (int x = 0; x < kWidth; ++x) {
+            // Per-channel phases, so the chromatic axes swing either side of white as well as the achromatic ones.
+            const auto fx = static_cast<float>(x);
+            const auto fy = static_cast<float>(y);
+            setTexel(pattern, x, y, 0.5F + (0.4F * std::sin(0.5F * fx)), 0.5F + (0.4F * std::sin(0.11F * fy)),
+                     0.5F + (0.4F * std::cos(0.23F * (fx + fy))));
+        }
+    }
+
+    std::vector<AovId> bipolar;
+    for (int i = 0; i < kAovCount; ++i) {
+        const auto aov = static_cast<AovId>(i);
+        if (pathtracer::debug::aovIsBipolar(aov) && pathtracer::debug::aovSource(aov) == AovSource::BeautyFilter) {
+            bipolar.push_back(aov);
+        }
+    }
+    ctx.plan(static_cast<int>(bipolar.size()) + 1);
+    PT_EXPECT(ctx, !bipolar.empty(), "no bipolar filter AOV exists, so this check would assert nothing");
+
+    for (const AovId aov : bipolar) {
+        const HdrImage out = pathtracer::debug::evaluateFilterAov(
+            aov, pathtracer::debug::FilterInput{pattern, glm::radians(30.0F), nullptr, 0}, pool);
+        const int channels = pathtracer::debug::aovChannels(aov);
+        float lowest = 0.0F;
+        float highest = 0.0F;
+        for (int i = 0; i < out.width * out.height; ++i) {
+            for (int c = 0; c < channels; ++c) {
+                const float value = out.rgba[(static_cast<std::size_t>(i) * 4) + static_cast<std::size_t>(c)];
+                lowest = std::min(lowest, value);
+                highest = std::max(highest, value);
+            }
+        }
+        PT_EXPECT(ctx, lowest < 0.0F && highest > 0.0F,
+                      std::string(pathtracer::debug::kAovNames[static_cast<int>(aov)]) + " spans [" +
+                          std::to_string(lowest) + ", " + std::to_string(highest) + "], not both signs");
+    }
+}
+
+// The auto-range must equal the peak on a field with no outlier and fall below it on one, or a lone texel crushes the whole preview.
+PT_CHECK(bipolar_range_caps_a_lone_outlier, Fast, Exact) {
+    ctx.plan(4);
+    constexpr int kPixels = 4096;
+    std::vector<float> rgba(static_cast<std::size_t>(kPixels) * 4, 0.0F);
+    // A zero-centred square wave: every sample has the same magnitude, so the peak is exactly the RMS and no tail exists to cap.
+    for (int i = 0; i < kPixels; ++i) {
+        rgba[static_cast<std::size_t>(i) * 4] = (i % 2) == 0 ? 1.0F : -1.0F;
+    }
+    const float flat = pathtracer::debug::bipolarDisplayRange(rgba, 1);
+    // sqrt(2 ln n) > 1 for any n > 1, so the extreme-value cap cannot bite here and the true peak must survive it.
+    PT_EXPECT(ctx, flat == 1.0F, "a constant-magnitude field ranged to " + std::to_string(flat) + ", not its peak 1");
+
+    rgba[0] = 1024.0F;
+    const float outlier = pathtracer::debug::bipolarDisplayRange(rgba, 1);
+    PT_EXPECT(ctx, outlier < 1024.0F, "a lone outlier still set the range to " + std::to_string(outlier));
+    // One sample of 1024 among 4096 unit samples lifts the RMS to sqrt(1 + 1024^2/4096) = 16.03, and sqrt(2 ln 4096) = 4.08 scales it.
+    const double rms = std::sqrt(1.0 + ((1024.0 * 1024.0) - 1.0) / 4096.0);
+    const double expected = rms * std::sqrt(2.0 * std::log(4096.0));
+    PT_EXPECT(ctx, std::fabs(static_cast<double>(outlier) - expected) <= expected * 1e-6,
+                  "range " + std::to_string(outlier) + " against the extreme-value prediction " + std::to_string(expected));
+
+    const std::vector<float> zeros(static_cast<std::size_t>(kPixels) * 4, 0.0F);
+    PT_EXPECT(ctx, pathtracer::debug::bipolarDisplayRange(zeros, 1) == 0.0F, "an all-zero field reported a non-zero range");
+}
+
+// The preview's affine map is exp2(ev) * value + 0.5, which must carry -range to 0 and +range to 1 for any range the scan can report.
+PT_CHECK(bipolar_display_maps_the_range_to_the_unit_interval, Fast, Exact) {
+    const std::vector<float> ranges{1.0F, 0.5F, 1.0F / 1024.0F, 4096.0F, 0.0F};
+    ctx.plan(static_cast<int>(ranges.size()) * 2);
+    for (const float range : ranges) {
+        const float gain = std::exp2(pathtracer::debug::bipolarDisplayExposureEv(range));
+        const float low = (-range * gain) + pathtracer::debug::kBipolarDisplayOffset;
+        const float high = (range * gain) + pathtracer::debug::kBipolarDisplayOffset;
+        // A zero range is the one degenerate case: there is nothing to map, and both ends must land on mid-grey rather than diverge.
+        const float expectedLow = range > 0.0F ? 0.0F : pathtracer::debug::kBipolarDisplayOffset;
+        const float expectedHigh = range > 0.0F ? 1.0F : pathtracer::debug::kBipolarDisplayOffset;
+        PT_EXPECT(ctx, low == expectedLow, "range " + std::to_string(range) + " maps its floor to " + std::to_string(low));
+        PT_EXPECT(ctx, high == expectedHigh, "range " + std::to_string(range) + " maps its ceiling to " + std::to_string(high));
+    }
+}
+
 // A unit step edge has a closed-form Sobel magnitude: both adjacent columns read exactly 4 and everything further exactly 0.
 PT_CHECK(sobel_step_edge_matches_closed_form, Fast, Exact) {
     ctx.plan(4);

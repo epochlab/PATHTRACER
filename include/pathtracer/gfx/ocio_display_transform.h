@@ -34,6 +34,9 @@ public:
     // 1.0 - rgb on the final display-referred colour, after the display curve and before dither -- the 'I' toggle.
     void setInvert(bool invert) { invert_ = invert; }
 
+    // Added after the exposure multiply, making the display map affine: 0 keeps the pure gain, 0.5 lands a signed AOV's zero at mid-grey.
+    void setDisplayOffset(float offset) { displayOffset_ = offset; }
+
     // 0 = off. Radial per-channel UV offset (R toward centre, B away) at the texture fetch, before exposure and the display curve.
     void setAberration(float aberration) { aberration_ = aberration; }
 
@@ -71,11 +74,15 @@ private:
     int rawAberrationLoc_;
     int srgbAberrationLoc_;
     int rec709AberrationLoc_;
+    int rawDisplayOffsetLoc_;
+    int srgbDisplayOffsetLoc_;
+    int rec709DisplayOffsetLoc_;
     Lut activeLut_ = Lut::SRGB;
     float exposureEv_ = 0.0F;
     int channelView_ = 0;
     bool invert_ = false;
     float aberration_ = 0.0F;
+    float displayOffset_ = 0.0F;
 };
 
 }  // namespace pathtracer::gfx

@@ -295,7 +295,7 @@ PT_CHECK(scale_space_aovs_are_zero_on_a_constant_field, Fast, Exact) {
     }
     PT_EXPECT(ctx, worstDog == 0.0F, "peak DoG response " + std::to_string(worstDog));
 
-    const HdrImage log = pathtracer::debug::logAov(flat, glm::radians(30.0F), pool);
+    const HdrImage log = pathtracer::debug::logAov(flat, pool);
     float worstLog = 0.0F;
     for (int y = 0; y < kHeight; ++y) {
         for (int x = 0; x < kWidth; ++x) {
@@ -318,7 +318,7 @@ PT_CHECK(scale_space_aovs_are_flat_on_an_affine_field, Fast, Exact) {
                   "support radius " + std::to_string(radius) + " leaves no interior in " + std::to_string(kHeight) + " rows");
 
     const HdrImage dog = pathtracer::debug::dogAov(image, pool);
-    const HdrImage log = pathtracer::debug::logAov(image, glm::radians(30.0F), pool);
+    const HdrImage log = pathtracer::debug::logAov(image, pool);
     float worstDog = 0.0F;
     float worstLog = 0.0F;
     for (int y = radius; y < kHeight - radius; ++y) {
@@ -439,9 +439,9 @@ PT_CHECK(log_response_peaks_at_the_blob_scale, Fast, Exact) {
                   "peak/continuous-1 = " + std::to_string(ratio - 1.0) + ", derived leading term " + std::to_string(leading));
 }
 
-// A bright blob has a negative Laplacian at its centre, so the reported polarity must read +1 there and -1 for the inverted field.
-PT_CHECK(log_polarity_separates_bright_and_dark_blobs, Fast, Exact) {
-    ctx.plan(2);
+// One family, one sign convention: both AOVs must read positive on a bright blob, which is why logAov negates the raw Laplacian.
+PT_CHECK(log_and_dog_agree_on_polarity, Fast, Exact) {
+    ctx.plan(4);
     ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
     constexpr int kWidth = 96;
     constexpr int kHeight = 96;
@@ -453,16 +453,104 @@ PT_CHECK(log_polarity_separates_bright_and_dark_blobs, Fast, Exact) {
     std::vector<float> bright(pixels, 0.25F);
     bright[centre] += 1.0F;
     pathtracer::debug::diffuse(bright, kWidth, kHeight, pathtracer::debug::innerScaleVariance(), pool);
-    const HdrImage brightLog = pathtracer::debug::logAov(greyImage(kWidth, kHeight, bright), glm::radians(30.0F), pool);
-    PT_EXPECT(ctx, texelAt(brightLog, centreX, centreY, 2) == 1.0F,
-                  "bright-on-dark polarity read " + std::to_string(texelAt(brightLog, centreX, centreY, 2)));
+    const HdrImage brightField = greyImage(kWidth, kHeight, bright);
+    const float brightLog = texelAt(pathtracer::debug::logAov(brightField, pool), centreX, centreY, 0);
+    const float brightDog = texelAt(pathtracer::debug::dogAov(brightField, pool), centreX, centreY, 0);
+    PT_EXPECT(ctx, brightLog > 0.0F, "bright-on-dark LoG read " + std::to_string(brightLog));
+    PT_EXPECT(ctx, brightDog > 0.0F, "bright-on-dark DoG read " + std::to_string(brightDog));
 
     std::vector<float> dark(pixels, 1.25F);
     dark[centre] -= 1.0F;
     pathtracer::debug::diffuse(dark, kWidth, kHeight, pathtracer::debug::innerScaleVariance(), pool);
-    const HdrImage darkLog = pathtracer::debug::logAov(greyImage(kWidth, kHeight, dark), glm::radians(30.0F), pool);
-    PT_EXPECT(ctx, texelAt(darkLog, centreX, centreY, 2) == -1.0F,
-                  "dark-on-bright polarity read " + std::to_string(texelAt(darkLog, centreX, centreY, 2)));
+    const HdrImage darkField = greyImage(kWidth, kHeight, dark);
+    const float darkLog = texelAt(pathtracer::debug::logAov(darkField, pool), centreX, centreY, 0);
+    const float darkDog = texelAt(pathtracer::debug::dogAov(darkField, pool), centreX, centreY, 0);
+    PT_EXPECT(ctx, darkLog < 0.0F, "dark-on-bright LoG read " + std::to_string(darkLog));
+    PT_EXPECT(ctx, darkDog < 0.0F, "dark-on-bright DoG read " + std::to_string(darkDog));
+}
+
+// Every stage from the luminance dot to the normalised Laplacian is linear, so a power-of-two gain must pass through exactly.
+PT_CHECK(log_is_homogeneous_of_degree_one, Fast, Exact) {
+    ctx.plan(2);
+    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    constexpr int kWidth = 128;
+    constexpr int kHeight = 96;
+    constexpr float kGain = 64.0F;
+    std::vector<float> plane(static_cast<std::size_t>(kWidth) * kHeight);
+    for (int y = 0; y < kHeight; ++y) {
+        for (int x = 0; x < kWidth; ++x) {
+            // A pattern with structure at several octaves, so the argmax lands on different levels across the frame.
+            plane[(static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x)] =
+                0.5F + (0.25F * std::sin(0.4F * static_cast<float>(x))) + (0.25F * std::cos(0.05F * static_cast<float>(y)));
+        }
+    }
+    std::vector<float> scaled = plane;
+    for (float& value : scaled) {
+        value *= kGain;
+    }
+
+    const HdrImage base = pathtracer::debug::logAov(greyImage(kWidth, kHeight, plane), pool);
+    const HdrImage gained = pathtracer::debug::logAov(greyImage(kWidth, kHeight, scaled), pool);
+    float worst = 0.0F;
+    float peak = 0.0F;
+    for (int y = 0; y < kHeight; ++y) {
+        for (int x = 0; x < kWidth; ++x) {
+            peak = std::max(peak, std::fabs(texelAt(base, x, y, 0)));
+            worst = std::max(worst, std::fabs(texelAt(gained, x, y, 0) - (kGain * texelAt(base, x, y, 0))));
+        }
+    }
+    PT_EXPECT(ctx, peak > 0.0F, "the pattern produced no response at all, so the homogeneity check is vacuous");
+    PT_EXPECT(ctx, worst == 0.0F, "worst gain mismatch " + std::to_string(worst) + " against peak " + std::to_string(peak));
+}
+
+// The two AOVs are not redundant: DoG sees one fixed band next to pixel Nyquist, LoG the whole ladder, so a coarse blob separates them.
+PT_CHECK(log_responds_where_dog_cannot, Fast, Exact) {
+    ctx.plan(4);
+    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    constexpr int kWidth = 256;
+    constexpr int kHeight = 256;
+    // Four octaves above the inner scale, so the blob sits far outside the band DoG differences but well inside the ladder.
+    const float blobVariance = 16.0F * pathtracer::debug::innerScaleVariance();
+    const auto pixels = static_cast<std::size_t>(kWidth) * kHeight;
+    const int centreX = kWidth / 2;
+    const int centreY = kHeight / 2;
+
+    std::vector<float> blob(pixels, 0.0F);
+    blob[(static_cast<std::size_t>(centreY) * kWidth) + static_cast<std::size_t>(centreX)] = 1.0F;
+    pathtracer::debug::diffuse(blob, kWidth, kHeight, blobVariance, pool);
+    const HdrImage field = greyImage(kWidth, kHeight, blob);
+
+    const float log = texelAt(pathtracer::debug::logAov(field, pool), centreX, centreY, 0);
+    const float dog = texelAt(pathtracer::debug::dogAov(field, pool), centreX, centreY, 0);
+    PT_EXPECT(ctx, log > 0.0F, "LoG read " + std::to_string(log) + " on a bright blob");
+
+    // Lindeberg 1998: the gamma=1 response to a blob of scale t0 peaks at t = t0 with magnitude 1/(4 pi t0), here in luminance units.
+    const auto gain = static_cast<double>(greyLuminanceGain());
+    const double peak = gain / (4.0 * std::numbers::pi * static_cast<double>(blobVariance));
+    // The ladder quantises scale to one octave, so the winning rung is at worst t0/2 or 2 t0, where -t/(pi (t0+t)^2) is 8/9 of the peak.
+    const double laddered = peak * 8.0 / 9.0;
+    PT_EXPECT(ctx, static_cast<double>(log) > laddered,
+                  "LoG " + std::to_string(log) + " fell below the octave-laddered Lindeberg peak " + std::to_string(laddered));
+
+    // DoG's own oracle, no threshold: an impulse diffused to variance s has separable centre value T(0;s)^2, and DoG differences two.
+    const std::vector<ScaleSpaceLevel> pyramid =
+        pathtracer::debug::buildOctavePyramid(std::vector<float>(pixels, 0.0F), kWidth, kHeight, pool);
+    const auto centreValue = [&](float levelVariance) {
+        const auto tap = static_cast<double>(
+            pathtracer::debug::discreteGaussianKernel(static_cast<float>(blobVariance) + levelVariance)[0]);
+        return gain * tap * tap;
+    };
+    const double fineCentre = centreValue(pyramid[0].baseVariance);
+    const double dogExact = fineCentre - centreValue(pyramid[1].baseVariance);
+    const auto taps = static_cast<double>((2 * static_cast<int>(pathtracer::debug::discreteGaussianKernel(
+                                               blobVariance + pyramid[1].baseVariance).size())) - 1);
+    const double bound = 2.0 * taps * static_cast<double>(kFloatEpsilon) * fineCentre;
+    PT_EXPECT(ctx, std::abs(static_cast<double>(dog) - dogExact) <= bound,
+                  "DoG " + std::to_string(dog) + " against its oracle " + std::to_string(dogExact) + " bound " +
+                      std::to_string(bound));
+    // The separation is between two closed forms, not against a chosen threshold: the fixed band simply does not reach this scale.
+    PT_EXPECT(ctx, dogExact < laddered,
+                  "DoG's analytic response " + std::to_string(dogExact) + " is not below LoG's " + std::to_string(laddered));
 }
 
 // Justifies the retinex fast path: with every texel valid the normalising mask is a constant field, which the cascade must return intact.

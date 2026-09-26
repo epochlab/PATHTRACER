@@ -344,15 +344,12 @@ HdrImage dogAov(const HdrImage& beauty, ThreadPool& threadPool) {
     return out;
 }
 
-HdrImage logAov(const HdrImage& beauty, float verticalFovRadians, ThreadPool& threadPool) {
+HdrImage logAov(const HdrImage& beauty, ThreadPool& threadPool) {
     const std::vector<float> plane = luminancePlane(beauty, threadPool);
     const std::vector<ScaleSpaceLevel> pyramid = buildOctavePyramid(plane, beauty.width, beauty.height, threadPool);
     HdrImage out = makeBroadcastImage(beauty.width, beauty.height);
     const auto pixels = static_cast<std::size_t>(beauty.width) * static_cast<std::size_t>(beauty.height);
     std::vector<float> extremum(pixels, 0.0F);
-    std::vector<float> extremumFrequency(pixels, 0.0F);
-    // Derived from the traced height, not the authored one, so the frequency axis holds unchanged at any interactive render scale.
-    const float pixelsPerDegree = static_cast<float>(beauty.height) / glm::degrees(verticalFovRadians);
 
     for (const ScaleSpaceLevel& level : pyramid) {
         std::vector<float> response(level.plane.size());
@@ -360,9 +357,6 @@ HdrImage logAov(const HdrImage& beauty, float verticalFovRadians, ThreadPool& th
         // Own-grid Laplacian times own-grid variance is exactly the base-grid gamma-normalised response, the two decimations cancelling.
         const auto decimation = static_cast<float>(level.decimation);
         const float ownVariance = level.baseVariance / (decimation * decimation);
-        // The band's peak radial frequency: |-w^2 exp(-w^2 t/2)| is stationary at w = sqrt(2/t), carried to the camera's angular scale.
-        const float frequency =
-            (std::sqrt(2.0F / level.baseVariance) / (2.0F * glm::pi<float>())) * pixelsPerDegree;
         const std::vector<float> expanded =
             expandToBase(ScaleSpaceLevel{std::move(response), level.width, level.height, level.decimation,
                                          level.baseVariance},
@@ -371,10 +365,10 @@ HdrImage logAov(const HdrImage& beauty, float verticalFovRadians, ThreadPool& th
             const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(beauty.width);
             for (int x = 0; x < beauty.width; ++x) {
                 const std::size_t pixel = row + static_cast<std::size_t>(x);
-                const float normalised = ownVariance * expanded[pixel];
+                // Sign negated once here: a bright blob has a negative Laplacian, and DoG's fine-minus-coarse reads positive on one.
+                const float normalised = -ownVariance * expanded[pixel];
                 if (std::fabs(normalised) > std::fabs(extremum[pixel])) {
                     extremum[pixel] = normalised;
-                    extremumFrequency[pixel] = frequency;
                 }
             }
         });
@@ -384,12 +378,8 @@ HdrImage logAov(const HdrImage& beauty, float verticalFovRadians, ThreadPool& th
         const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(beauty.width);
         for (int x = 0; x < beauty.width; ++x) {
             const std::size_t pixel = row + static_cast<std::size_t>(x);
-            const std::size_t texel = pixel * 4;
-            out.rgba[texel] = std::fabs(extremum[pixel]);
-            out.rgba[texel + 1] = extremumFrequency[pixel];
-            // A bright blob has a negative Laplacian at its centre, so the reported polarity negates the response's sign.
-            out.rgba[texel + 2] = extremum[pixel] > 0.0F ? -1.0F : (extremum[pixel] < 0.0F ? 1.0F : 0.0F);
-            out.rgba[texel + 3] = 1.0F;
+            // Signed: the zero crossings are the edges (Marr & Hildreth 1980), which a magnitude would erase.
+            writeScalar(out, pixel, extremum[pixel]);
         }
     });
     return out;
@@ -633,7 +623,7 @@ HdrImage evaluateFilterAov(AovId aov, const FilterInput& input, ThreadPool& thre
         case AovId::Sobel:     return sobelAov(input.beauty, threadPool);
         case AovId::Gabor:     return gaborAov(input.beauty, threadPool);
         case AovId::DoG:       return dogAov(input.beauty, threadPool);
-        case AovId::LoG:       return logAov(input.beauty, input.verticalFovRadians, threadPool);
+        case AovId::LoG:       return logAov(input.beauty, threadPool);
         case AovId::Opponent:  return opponentAov(input.beauty, threadPool);
         case AovId::Retinex:   return retinexAov(input.beauty, threadPool);
         case AovId::CLAHE:     return claheAov(input.beauty, input.verticalFovRadians, threadPool);
