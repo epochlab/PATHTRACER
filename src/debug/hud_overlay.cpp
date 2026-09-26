@@ -331,17 +331,29 @@ void drawResolutionAndSceneSection(const HudFrameData& frame) {
 }
 
 // Names/order come from the shared AovId enum (pathtracer/debug/aov.h), not a locally duplicated array.
-void drawAovSection(int& aov) {
+void drawAovSection(int& aov, bool gbufferAvailable) {
     ImGui::TextColored(kCyan, "AOV");
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-    ImGui::Combo("##aov", &aov, kAovNames, IM_ARRAYSIZE(kAovNames));
+    if (gbufferAvailable) {
+        ImGui::Combo("##aov", &aov, kAovNames, IM_ARRAYSIZE(kAovNames));
+    } else if (ImGui::BeginCombo("##aov", kAovNames[aov])) {
+        for (int i = 0; i < IM_ARRAYSIZE(kAovNames); ++i) {
+            // Greyed rather than hidden: the rasterizer cannot serve these under a fisheye, and the list is the place that says so.
+            const bool rasterized = aovSource(static_cast<AovId>(i)) == AovSource::GBuffer;
+            const ImGuiSelectableFlags flags = rasterized ? ImGuiSelectableFlags_Disabled : 0;
+            if (ImGui::Selectable(kAovNames[i], i == aov, flags)) {
+                aov = i;
+            }
+        }
+        ImGui::EndCombo();
+    }
     ImGui::Separator();
 }
 
-// pos/rot/clip read-only; filmback a preset dropdown; focal length, aperture, shutter, ISO and aberration editable sliders.
+// pos/rot/clip/lens polynomial read-only; filmback and projection dropdowns; focal length, aperture, shutter, ISO, aberration sliders.
 void drawCameraSection(const HudFrameData& frame, float& focalLengthMm, float& aperture,
                         float& shutterSeconds, float& iso, int& filmBackPresetIndex,
-                        const std::vector<const char*>& filmBackPresetNames,
+                        const std::vector<const char*>& filmBackPresetNames, int& lensProjection,
                         float& aberrationStrength) {
     ImGui::TextColored(kCyan, "Camera");
     const glm::vec3 camPos = frame.camera.position();
@@ -352,12 +364,20 @@ void drawCameraSection(const HudFrameData& frame, float& focalLengthMm, float& a
     ImGui::Text("Filmback  %.2f x %.2f mm  (%.2f:1)", filmBack.widthMm, filmBack.heightMm,
                 filmBack.widthMm / filmBack.heightMm);
     ImGui::Text("Near  %.2f  Far  %.1f", frame.camera.nearClip(), frame.camera.farClip());
+    const pathtracer::scene::Lens lens = frame.camera.lens();
+    // Read-only: k1..k4 and the field of view are measured calibration data, authored in profile.json, and only the projection switches.
+    ImGui::Text("Circle  %.0f deg  k %.4f %.4f %.4f %.4f", lens.maxFieldOfViewDegrees,
+                lens.radialCoefficients[0], lens.radialCoefficients[1], lens.radialCoefficients[2],
+                lens.radialCoefficients[3]);
     if (frame.cameraOrbiting) {
         ImGui::TextColored(kCyan, "orbiting");
     }
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
     ImGui::Combo("##filmBackPreset", &filmBackPresetIndex, filmBackPresetNames.data(),
                  static_cast<int>(filmBackPresetNames.size()));
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+    ImGui::Combo("##lensProjection", &lensProjection, pathtracer::scene::kLensProjectionNames,
+                 IM_ARRAYSIZE(pathtracer::scene::kLensProjectionNames));
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
     ImGui::SliderFloat("##focalLength", &focalLengthMm, 10.0F, 300.0F, "Focal Length  %.0f mm");
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
@@ -493,7 +513,7 @@ void HudOverlay::beginFrame() const {
 
 void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm, float& aperture,
                        float& shutterSeconds, float& iso, int& filmBackPresetIndex,
-                       const std::vector<const char*>& filmBackPresetNames, bool& showSky,
+                       const std::vector<const char*>& filmBackPresetNames, int& lensProjection, bool& showSky,
                        bool& envLightEnabled, int& envRotationDegrees, float& envExposureStops,
                        float& aberrationStrength, const FramingOverlayState& framing,
                        const PixelProbeSample& pixelProbe) const {
@@ -515,9 +535,9 @@ void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm,
         ImGui::Separator();
     }
 
-    drawAovSection(aov);
+    drawAovSection(aov, lensProjection == static_cast<int>(pathtracer::scene::LensProjection::Spherical));
     drawCameraSection(frame, focalLengthMm, aperture, shutterSeconds, iso, filmBackPresetIndex,
-                       filmBackPresetNames, aberrationStrength);
+                       filmBackPresetNames, lensProjection, aberrationStrength);
     drawHdriSection(showSky, envLightEnabled, envRotationDegrees, envExposureStops);
 
     ImGui::End();

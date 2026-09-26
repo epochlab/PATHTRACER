@@ -473,16 +473,18 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                     const float ndcX = ((filmX / static_cast<float>(width)) * 2.0F) - 1.0F;
                     // HdrImage row 0 is the top (EXR/glTF convention); NDC +Y is up -- flip.
                     const float ndcY = 1.0F - ((filmY / static_cast<float>(height)) * 2.0F);
-                    const Ray primary = camera.primaryRay(basis, ndcX, ndcY);
+                    const std::optional<Ray> primary = camera.primaryRay(basis, ndcX, ndcY);
                     // AO and Fresnel draw from their own stream: taking dimensions from `sampler` would shift every later dimension.
                     Sampler aoSampler(x, y, sampleIndex, sampleCount, scrambleSeed ^ kAoSeedOffset);
                     const glm::vec2 aoSample = aoSampler.next2D();
                     Sampler fresnelSampler(x, y, sampleIndex, sampleCount, scrambleSeed ^ kFresnelSeedOffset);
                     const glm::vec2 fresnelSample = fresnelSampler.next2D();
+                    // Nullopt is a fisheye sample outside the image circle: no ray exists, so every lane reads zero for it.
                     const TraceResult trace =
-                        tracePath(primary, accel, shadingTriangles, instances, instanceLightIndex,
-                                  lights, showSky, settings, perInstanceSettings, sampler,
-                                  aoSample, fresnelSample, tileRays);
+                        primary ? tracePath(*primary, accel, shadingTriangles, instances, instanceLightIndex,
+                                            lights, showSky, settings, perInstanceSettings, sampler,
+                                            aoSample, fresnelSample, tileRays)
+                                : TraceResult{};
                     const std::array<float, kSampleLanes> values{
                         trace.radiance.x,          trace.radiance.y,
                         trace.radiance.z,          static_cast<float>(trace.terminationBounce),
@@ -533,7 +535,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                 const float* lanes = accumulator.data() +
                                       ((static_cast<std::size_t>(y - tileY0) * tileSize) +
                                        static_cast<std::size_t>(x - tileX0)) * kTileLanes;
-                // Always positive: a pixel's own samples land within half a pixel of its centre, well inside the 1.5px support.
+                // Always positive: a film sample carries weight even where the lens formed no ray, and lands inside the 1.5px support.
                 const float invWeight = 1.0F / lanes[kSampleLanes];
                 writeTexel(out.beauty, x, y, glm::vec3(lanes[0], lanes[1], lanes[2]) * invWeight);
                 writeTexel(out.bounceHeatmap, x, y, glm::vec3(lanes[3] * invWeight));

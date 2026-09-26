@@ -9,7 +9,12 @@
         "farClip": 100.0,
         "aperture": 2.8,
         "shutterSeconds": 0.008,
-        "iso": 400.0
+        "iso": 400.0,
+        "lens": {
+            "projection": "spherical",
+            "maxFieldOfViewDegrees": 180.0,
+            "radialCoefficients": [0.0, 0.0, 0.0, 0.0]
+        }
     },
     "controls": {
         "flySpeedMetersPerSecond": 1.0,

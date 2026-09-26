@@ -145,7 +145,8 @@ bool checkPose(const char* poseName, const Camera& camera, const EmbreeAccel& ac
         for (int x = 0; x < kWidth; ++x) {
             const float ndcX = (((static_cast<float>(x) + 0.5F) / static_cast<float>(kWidth)) * 2.0F) - 1.0F;
             const float ndcY = 1.0F - (((static_cast<float>(y) + 0.5F) / static_cast<float>(kHeight)) * 2.0F);
-            const Ray ray = camera.primaryRay(ndcX, ndcY, aspect);
+            // The rasterizer's own oracle, so the camera is spherical by construction and every ndc point images.
+            const Ray ray = camera.primaryRay(ndcX, ndcY, aspect).value();
             const std::optional<Hit> hit = accel.intersect(ray);
             const float rasterAlpha = texelAt(raster.alpha, x, y).x;
             const bool rasterHit = rasterAlpha > 0.5F;

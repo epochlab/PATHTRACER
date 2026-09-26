@@ -18,7 +18,7 @@ public:
     // position/yaw/pitch are the initial pose and what resetToDefault() restores; the lens parameters pass through to every snapshot().
     DebugCameraController(const glm::vec3& position, float yawDegrees, float pitchDegrees,
                            Camera::FilmBack filmBack, float focalLengthMm, float nearClip,
-                           float farClip, float aperture, float shutterSeconds, float iso,
+                           float farClip, float aperture, float shutterSeconds, float iso, Lens lens,
                            float flySpeedMetersPerSecond, float orbitSensitivityDegPerPixel);
 
     // Builds an immutable Camera from the current pose. Call once per frame: this is the only point where a Camera value exists.
@@ -44,6 +44,7 @@ public:
     [[nodiscard]] float aperture() const { return aperture_; }
     [[nodiscard]] float shutterSeconds() const { return shutterSeconds_; }
     [[nodiscard]] float iso() const { return iso_; }
+    [[nodiscard]] Lens lens() const { return lens_; }
 
     // Bound to the HUD's Camera section sliders/dropdown via setter, not a bare reference (controller-owned state).
     void setFocalLengthMm(float focalLengthMm) { focalLengthMm_ = focalLengthMm; }
@@ -51,6 +52,8 @@ public:
     void setAperture(float aperture) { aperture_ = aperture; }
     void setShutterSeconds(float shutterSeconds) { shutterSeconds_ = shutterSeconds; }
     void setIso(float iso) { iso_ = iso; }
+    // Projection only: the polynomial and its field of view are measured calibration data, authored in profile.json and immutable here.
+    void setLensProjection(LensProjection projection) { lens_.projection = projection; }
 
     // EV100 delta against profile.json defaults, applied at the display stage as pow(2,ev): the scene is not photometrically calibrated.
     [[nodiscard]] float relativeExposureEv() const {
@@ -75,6 +78,7 @@ private:
     float aperture_;
     float shutterSeconds_;
     float iso_;
+    Lens lens_;
 
     const float defaultAperture_;
     const float defaultShutterSeconds_;

@@ -82,6 +82,8 @@ struct ViewInputState {
     float focalLengthMm = 0.0F;
     // The only FilmBack component feeding the render; widthMm is display-only, so tracking it would retrace for no visible effect.
     float filmBackHeightMm = 0.0F;
+    // The HUD switches it, and it changes every primary ray; the polynomial and field of view cannot change, so they are not tracked.
+    pathtracer::scene::LensProjection lensProjection = pathtracer::scene::LensProjection::Spherical;
 
     bool operator==(const ViewInputState&) const = default;
 };
@@ -309,7 +311,7 @@ std::optional<AppResources> initializeApp(const pathtracer::config::SceneConfig&
         profileConfig.camera.pitchDegrees, filmBackPresetIt->filmBack,
         profileConfig.camera.focalLengthMm, profileConfig.camera.nearClip,
         profileConfig.camera.farClip, profileConfig.camera.aperture,
-        profileConfig.camera.shutterSeconds, profileConfig.camera.iso,
+        profileConfig.camera.shutterSeconds, profileConfig.camera.iso, profileConfig.camera.lens,
         profileConfig.controls.flySpeedMetersPerSecond,
         profileConfig.controls.orbitSensitivityDegPerPixel);
     // Scene-level placement (scene.json model.position/model.rotation), order X,Y,Z.
@@ -667,7 +669,7 @@ const pathtracer::gfx::HdrImage* ensureFilterImage(
     const pathtracer::debug::ScopedCpuTimer filterTimer(app.stages.filterMs);
     cache.image = pathtracer::debug::evaluateFilterAov(
         aov,
-        pathtracer::debug::FilterInput{snapshot->beauty, camera.verticalFovRadians(),
+        pathtracer::debug::FilterInput{snapshot->beauty, camera.verticalAngularExtentRadians(),
                                         snapshot->beautyLuminanceM2.data(), snapshot->samples},
         *app.rasterThreadPool);
     cache.aov = aov;
@@ -831,7 +833,8 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const pathtracer::scene
                                app.debugCamera.yawDegrees(),
                                app.debugCamera.pitchDegrees(),
                                app.debugCamera.focalLengthMm(),
-                               app.debugCamera.filmBack().heightMm};
+                               app.debugCamera.filmBack().heightMm,
+                               camera.lens().projection};
     const PathTraceInputState input{view, app.envRotationDegrees, app.showSky, app.envLightEnabled,
                                      app.envExposureStops};
 
@@ -859,7 +862,9 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const pathtracer::scene
     }
 
     const RasterTriggerState raster{view, renderScale};
-    if (needsLightTransport || raster == app.lastRasterTrigger || traceWidth <= 0 || traceHeight <= 0) {
+    const bool rasterizable = camera.lens().projection == pathtracer::scene::LensProjection::Spherical;
+    if (needsLightTransport || !rasterizable || raster == app.lastRasterTrigger || traceWidth <= 0 ||
+        traceHeight <= 0) {
         return;
     }
     {
@@ -937,6 +942,7 @@ void updateHud(AppResources& app, const pathtracer::platform::Window& window,
     float shutterSeconds = app.debugCamera.shutterSeconds();
     float iso = app.debugCamera.iso();
     int filmBackPresetIndex = app.filmBackPresetIndex;
+    int lensProjection = static_cast<int>(app.debugCamera.lens().projection);
     // Only the HUD reads it, so with the HUD hidden the fetch is skipped outright rather than computed and thrown away.
     const pathtracer::debug::PixelProbeSample pixelProbe =
         app.showHud ? samplePixelProbe(window, pathTraceSnapshot, app, camera,
@@ -945,7 +951,7 @@ void updateHud(AppResources& app, const pathtracer::platform::Window& window,
     const pathtracer::debug::ScopedCpuTimer hudTimer(app.stages.hudMs);
     if (app.showHud) {
         app.hud.draw(hudFrameData, app.aov, focalLengthMm, aperture, shutterSeconds, iso,
-                     filmBackPresetIndex, app.filmBackPresetNames, app.showSky, app.envLightEnabled,
+                     filmBackPresetIndex, app.filmBackPresetNames, lensProjection, app.showSky, app.envLightEnabled,
                      app.envRotationDegrees, app.envExposureStops, app.aberrationStrength,
                      app.framingState, pixelProbe);
     }
@@ -953,6 +959,12 @@ void updateHud(AppResources& app, const pathtracer::platform::Window& window,
     app.debugCamera.setAperture(aperture);
     app.debugCamera.setShutterSeconds(shutterSeconds);
     app.debugCamera.setIso(iso);
+    app.debugCamera.setLensProjection(static_cast<pathtracer::scene::LensProjection>(lensProjection));
+    // A rasterizer AOV has no fisheye producer, so switching projection with one selected falls back to the lane that always has one.
+    if (lensProjection != static_cast<int>(pathtracer::scene::LensProjection::Spherical) &&
+        !aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(app.aov))) {
+        app.aov = static_cast<int>(pathtracer::debug::AovId::Beauty);
+    }
     app.filmBackPresetIndex = filmBackPresetIndex;
     app.debugCamera.setFilmBack(
         app.filmBackPresets[static_cast<std::size_t>(filmBackPresetIndex)].filmBack);
@@ -1071,6 +1083,17 @@ void captureBenchFrame(pathtracer::platform::Window& window, AppResources& app, 
     app.aov = bench.aovs[bench.stage];
 }
 
+// True when every AOV the session starts on -- profile.json's default and the whole bench schedule -- needs light transport.
+bool aovSelectionAvoidsRasterizer(const pathtracer::config::ProfileConfig& profileConfig,
+                               const std::vector<int>& benchAovs) {
+    if (!aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(profileConfig.render.defaultAov))) {
+        return false;
+    }
+    return std::all_of(benchAovs.begin(), benchAovs.end(), [](int aov) {
+        return aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(aov));
+    });
+}
+
 // Everything the captured workload's cost depends on; two engine records are comparable iff these are equal.
 nlohmann::json benchConfig(const AppResources& app, const BenchCapture& bench) {
     const pathtracer::scene::Camera camera = app.debugCamera.snapshot();
@@ -1092,7 +1115,9 @@ nlohmann::json benchConfig(const AppResources& app, const BenchCapture& bench) {
                         {"yaw", app.debugCamera.yawDegrees()},
                         {"pitch", app.debugCamera.pitchDegrees()},
                         {"focal_mm", app.debugCamera.focalLengthMm()},
-                        {"film_height_mm", app.debugCamera.filmBack().heightMm}}},
+                        {"film_height_mm", app.debugCamera.filmBack().heightMm},
+                        {"lens", pathtracer::scene::kLensProjectionNames[static_cast<int>(
+                                      app.debugCamera.lens().projection)]}}},
             {"env", {{"rotation_deg", app.envRotationDegrees}, {"exposure_stops", app.envExposureStops},
                      {"light", app.envLightEnabled}, {"show_sky", app.showSky}}},
             {"hud", app.showHud},
@@ -1376,6 +1401,11 @@ int main(int argc, char** argv) {
             exitCode = EXIT_FAILURE;
         } else if (options->benchLogPath.empty() && !options->benchAovs.empty()) {
             std::cerr << "main: -bench-aovs is the schedule -bench walks; it does nothing on its own\n";
+            exitCode = EXIT_FAILURE;
+        } else if (profileConfig->camera.lens.projection != pathtracer::scene::LensProjection::Spherical &&
+                   !aovSelectionAvoidsRasterizer(*profileConfig, options->benchAovs)) {
+            // The rasterizer has no fisheye projection, so a G-buffer AOV asked for up front would wait on a G-buffer that never arrives.
+            std::cerr << "main: a fisheye lens cannot serve the selected rasterizer AOV; choose a path-traced AOV\n";
             exitCode = EXIT_FAILURE;
         } else if (!options->benchLogPath.empty() &&
                    (profileConfig->pathTracer.maxSamples <= 0 ||

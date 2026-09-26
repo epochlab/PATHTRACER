@@ -18,6 +18,7 @@
 #include "pathtracer/debug/colormap.h"
 #include "pathtracer/debug/scale_space.h"
 #include "pathtracer/debug/aov_routing.h"
+#include "pathtracer/scene/camera.h"
 #include "pathtracer/scene/thread_pool.h"
 
 namespace {
@@ -726,6 +727,55 @@ PT_CHECK(aov_filter_dispatch_is_total, Fast, Exact) {
                               pathtracer::debug::kAovNames[static_cast<int>(filters[b])] + " returned identical images");
         }
     }
+}
+
+// The one projection/producer pairing that has no answer: scan conversion inverts a perspective divide the fisheye does not have.
+PT_CHECK(gbuffer_aov_with_a_fisheye_lens_is_rejected, Fast, Exact) {
+    ctx.plan(4);
+    std::string error;
+    const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", error);
+    if (!renderer) {
+        for (int i = 0; i < 4; ++i) {
+            PT_EXPECT(ctx, false, "scene load failed: " + error);
+        }
+        return;
+    }
+
+    constexpr int kWidth = 16;
+    constexpr int kHeight = 12;
+    const pathtracer::scene::Camera& spherical = renderer->defaultCamera();
+    // Equidistant, so the lens is admissible on every axis but the one under test: the rejection can only be the projection.
+    const pathtracer::scene::Lens fisheyeLens{pathtracer::scene::LensProjection::FisheyePolynomial, {}, 180.0F};
+    const pathtracer::scene::Camera fisheye{spherical.position(),
+                                            spherical.yawDegrees(),
+                                            spherical.pitchDegrees(),
+                                            spherical.filmBack(),
+                                            spherical.focalLengthMm(),
+                                            spherical.nearClip(),
+                                            spherical.farClip(),
+                                            spherical.aperture(),
+                                            spherical.shutterSeconds(),
+                                            spherical.iso(),
+                                            fisheyeLens};
+
+    const auto request = [&](const pathtracer::scene::Camera& camera, AovId aov) {
+        return pathtracer::api::HeadlessRenderer::Request{
+            .camera = camera, .width = kWidth, .height = kHeight, .samples = 1, .scrambleSeed = 3, .aovs = {aov}};
+    };
+    const auto attempt = [&](const pathtracer::scene::Camera& camera, AovId aov) {
+        std::vector<float> buffer(static_cast<std::size_t>(kWidth) * kHeight *
+                                  static_cast<std::size_t>(pathtracer::debug::aovChannels(aov)));
+        float* pointer = buffer.data();
+        error.clear();
+        return renderer->render(request(camera, aov), std::span<float* const>(&pointer, 1), error);
+    };
+
+    PT_EXPECT(ctx, !attempt(fisheye, AovId::Depth), "a G-buffer AOV was rendered through a fisheye lens");
+    PT_EXPECT(ctx, error.find("fisheye") != std::string::npos,
+              "the rejection did not name the fisheye lens: " + error);
+    PT_EXPECT(ctx, attempt(fisheye, AovId::Beauty), "a path-traced AOV failed under a fisheye lens: " + error);
+    PT_EXPECT(ctx, attempt(spherical, AovId::Depth),
+              "a G-buffer AOV failed under the default spherical lens: " + error);
 }
 
 PT_CHECK_MAIN("api")

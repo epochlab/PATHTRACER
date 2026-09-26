@@ -19,7 +19,8 @@ A CPU path tracer. For each pixel it follows light backwards from the camera, bo
 
 | Feature | Mechanism |
 |---|---|
-| Camera / lens | Position/yaw/pitch, film-back and focal length to a derived vertical FOV, feeding pinhole primary rays — the geometric ground truth the ray and BSDF math is measured against |
+| Camera / lens | Position/yaw/pitch, film-back and focal length to a derived vertical FOV, feeding spherical (rectilinear pinhole) primary rays — the geometric ground truth the ray and BSDF math is measured against |
+| Fisheye lens | Kannala-Brandt polynomial `r(theta) = f·(theta + k1·theta³ + k2·theta⁵ + k3·theta⁷ + k4·theta⁹)`, selected per render, inverted per ray by safeguarded Newton — the OpenCV `fisheye` convention, so a measured lens's radial geometry drops in |
 | Photographic exposure | EV100 from aperture/shutter/ISO, as a relative-stops delta against `profile.json`'s default triple (Filament/Frostbite) — a familiar brightness control, not an absolute photometric quantity |
 | Linear light pipeline | `HdrImage`/`loadExr`; all shading in linear light, display-encoded only at the final blit — a precondition for correct PBR colour math |
 | Display transform | OCIO Display/View (sRGB, Rec.709, Raw), cycled with `L` — a colourimetric encode only, no tone mapping, so values above 1.0 clip honestly instead of hiding under a filmic shoulder |
@@ -69,6 +70,18 @@ Session settings live in `assets/config/profile.json`.
 `render.width`/`render.height` are the authored image in **pixels** and the single authority on what gets traced: the GUI, `render_beauty`, `raster_bench` and the C/Python API all size from them. `renderScale` and `interactiveRenderScale` are fractions of that, not of the window.
 
 The window is an independent viewport. It opens 1:1 in points — a 1024x576 image is a 512x288-point window on a 2x display — and resizes freely without changing what is traced or restarting an accumulation: the image is letterboxed to preserve aspect and magnified with `GL_NEAREST`, so one traced pixel reads as one block rather than an interpolated value that was never rendered, and a 320x180 render can be inspected full-screen. The pixel probe reads nothing over a bar; the histogram bins the image rect alone.
+
+`camera.lens` selects the projection and always carries the polynomial, so the HUD dropdown (`Spherical` / `Fisheye Polynomial`) can switch either way without reloading. `projection` is `"spherical"` (the rectilinear pinhole) or `"fisheyePolynomial"`; `radialCoefficients` are `k1..k4` of `r(theta) = focalLengthMm·(theta + k1·theta³ + k2·theta⁵ + k3·theta⁷ + k4·theta⁹)`, dimensionless and identical to what OpenCV's `fisheye` module or COLMAP's `OPENCV_FISHEYE` reports; `maxFieldOfViewDegrees` is the full angle across the image circle. Loading rejects a field of view outside `(0, 360]` and any coefficient set whose `r(theta)` is not *provably* monotone over it, because a non-monotone radius has no unique inverse for `primaryRay` to recover.
+
+Only the radial geometry of a calibration transfers: one focal length means `fx == fy`, and the image circle is centred on the sensor, so a calibrated camera's principal point and pixel aspect are not reproduced. A worked equisolid-angle authoring, whose coefficients are the degree-9 Taylor expansion of `2f·sin(theta/2)`:
+
+```json
+"focalLengthMm": 10.0,
+"lens": { "projection": "fisheyePolynomial", "maxFieldOfViewDegrees": 180.0,
+          "radialCoefficients": [-0.0416667, 0.000520833, -3.100198e-06, 1.0764e-08] }
+```
+
+The focal length matters more than it looks: `r_max = f·theta_d(theta_max)`, so a 180-degree lens at the shipped 70 mm puts a 110 mm image circle behind a 12.5 mm gate and the frame shows the central ~13 degrees — physically correct, and indistinguishable from a long lens with faint barrel distortion. Short focal lengths are what make the projection visible. Where the circle falls inside the gate the corners are unimaged and render black in every AOV; the samples still carry their reconstruction-filter weight, so the circle edge antialiases. A fisheye has no rasterizer projection, so the 14 scan-converted G-buffer AOVs are refused rather than approximated: the headless request fails, and the HUD greys those entries out and falls back to Beauty.
 
 `render.vsync` caps the frame rate to the display's vblank (`true`) or runs uncapped (`false`). Uncapped, the render thread competes with the trace workers for cores: `pass_ms` **1.58x** on cornell, **1.47x** on a 4K-textured asset, 8 cores.
 
@@ -396,7 +409,9 @@ Observer models over Beauty, as against the Utility block's image-space derivati
 - Giesen, F. (2013). Triangle rasterization in practice: integer edge functions, the top-left bias, incremental row stepping.
 - Williams, L. (1983). Pyramidal Parametrics. SIGGRAPH: MIP-mapping — [roadmap](ROADMAP.md), texture minification, not implemented.
 - Cook, R.L., Porter, T., Carpenter, L. (1984). Distributed Ray Tracing. SIGGRAPH — [roadmap](ROADMAP.md), depth of field and motion blur, not implemented.
-- Kannala, J., Brandt, S.S. (2006). IEEE TPAMI: the fisheye projection families — [roadmap](ROADMAP.md), fisheye lens, not implemented.
+- Kannala, J., Brandt, S.S. (2006). IEEE TPAMI: the polynomial fisheye projection `Camera` builds under `LensProjection::FisheyePolynomial`, in the `k1..k4` parameterisation OpenCV's `fisheye` module and COLMAP's `OPENCV_FISHEYE` report.
+- Press, W.H. et al. Numerical Recipes 3rd ed. §9.4 (`rtsafe`): the safeguarded Newton that inverts `r(theta)` per ray, bisecting whenever a step leaves the bracket.
+- Farouki, R.T., Rajan, V.T. (1987/88). CAGD: the power-to-Bernstein basis change and de Casteljau subdivision behind `kannalaBrandtIsInvertible`, whose convex-hull test proves `r'(theta) > 0` rather than sampling for it.
 - Kalibera, T., Jones, R. (2013). Rigorous Benchmarking in Reasonable Time. ISMM: the process invocation as the unit of replication.
 - Abedi, A., Brecht, T. (2017). ICPE: randomized multiple interleaved trials, which `bench_compare run` automates; Mytkowicz, T. et al. (2009). ASPLOS: the ordering and environment bias randomization removes.
 - Hodges, J.L., Lehmann, E.L. (1963); Hollander, M., Wolfe, D.A., Chicken, E. (2014) 3.2/4.3: the shift estimators and exact rank intervals in `tools/stats.h`, on the log scale so a shift is a ratio (Fleming, P.J., Wallace, J.J. (1986). CACM 29(3)); Hoefler, T., Belli, R. (2015). SC: nonparametric intervals for performance data.

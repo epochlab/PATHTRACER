@@ -145,6 +145,36 @@ def test_camera_override_changes_the_image(renderer: Renderer) -> None:
     )
 
 
+def test_fisheye_lens_changes_the_image(renderer: Renderer) -> None:
+    default = renderer.default_camera
+    # Short focal length, or the 180-degree image circle dwarfs the gate and the frame is the central few degrees of the fisheye.
+    fisheye = dataclasses.replace(default, lens="fisheye_polynomial", focal_length_mm=10.0)
+    size = {"width": 32, "height": 32, "samples": 2, "seed": 5}
+    assert not np.array_equal(
+        renderer.render(aovs=("beauty",), **size)["beauty"],
+        renderer.render(aovs=("beauty",), camera=fisheye, **size)["beauty"],
+    )
+
+
+def test_fisheye_lens_rejects_a_gbuffer_aov(renderer: Renderer) -> None:
+    fisheye = dataclasses.replace(renderer.default_camera, lens="fisheye_polynomial", focal_length_mm=10.0)
+    with pytest.raises(RuntimeError, match="fisheye"):
+        renderer.render(aovs=("depth",), camera=fisheye, width=16, height=16, samples=1)
+
+
+def test_unknown_lens_is_rejected_before_the_abi(renderer: Renderer) -> None:
+    with pytest.raises(ValueError, match="pinhole"):
+        renderer.render(aovs=("beauty",), camera=dataclasses.replace(renderer.default_camera, lens="pinhole"),
+                        width=8, height=8, samples=1)
+
+
+def test_default_camera_reports_the_profile_lens(renderer: Renderer) -> None:
+    camera = renderer.default_camera
+    assert camera.lens == "spherical"
+    assert len(camera.fisheye_coefficients) == 4
+    assert 0.0 < camera.fisheye_field_of_view_degrees <= 360.0
+
+
 def test_unknown_aov_names_the_offender(renderer: Renderer) -> None:
     with pytest.raises(ValueError, match="nonsense"):
         renderer.render(aovs=("nonsense",), width=8, height=8)

@@ -1,6 +1,8 @@
 #include "pathtracer/scene/camera.h"
 
+#include <algorithm>
 #include <cmath>
+#include <optional>
 
 namespace pathtracer::scene {
 
@@ -15,11 +17,32 @@ glm::vec3 forwardFromEuler(float yawRadians, float pitchRadians) {
                                      -std::cos(yawRadians) * cosPitch));
 }
 
+// Kannala-Brandt arm: the sensor point in mm sets the image radius, the model inverts it to a polar angle about the optical axis.
+std::optional<Ray> fisheyeRay(const Camera::ViewBasis& basis, const glm::vec3& origin, float nearClip,
+                               float farClip, float ndcX, float ndcY) {
+    const float xMm = ndcX * basis.halfWidthMm;
+    const float yMm = ndcY * basis.halfHeightMm;
+    const float radiusMm = std::hypot(xMm, yMm);
+    // Past the image circle the lens forms no image at all, which is the black corner of a real circular fisheye, not a clamp.
+    if (radiusMm > basis.maxRadiusMm) {
+        return std::nullopt;
+    }
+    if (radiusMm == 0.0F) {
+        return Ray{origin, basis.forward, nearClip, farClip};
+    }
+    const float theta = kannalaBrandtTheta(basis.lens.radialCoefficients, radiusMm / basis.focalLengthMm,
+                                            basis.maxThetaRadians);
+    // The sensor offset normalised is the azimuth, so this is the polar reconstruction of the direction the lens imaged onto that point.
+    const glm::vec3 azimuth = ((xMm * basis.right) + (yMm * basis.up)) / radiusMm;
+    const glm::vec3 dir = glm::normalize((std::cos(theta) * basis.forward) + (std::sin(theta) * azimuth));
+    return Ray{origin, dir, nearClip, farClip};
+}
+
 }  // namespace
 
 Camera::Camera(const glm::vec3& position, float yawDegrees, float pitchDegrees, FilmBack filmBack,
                float focalLengthMm, float nearClip, float farClip, float aperture,
-               float shutterSeconds, float iso)
+               float shutterSeconds, float iso, Lens lens)
     : position_(position),
       yawRadians_(glm::radians(yawDegrees)),
       pitchRadians_(glm::radians(pitchDegrees)),
@@ -29,7 +52,8 @@ Camera::Camera(const glm::vec3& position, float yawDegrees, float pitchDegrees, 
       farClip_(farClip),
       aperture_(aperture),
       shutterSeconds_(shutterSeconds),
-      iso_(iso) {}
+      iso_(iso),
+      lens_(lens) {}
 
 glm::vec3 Camera::forward() const {
     return forwardFromEuler(yawRadians_, pitchRadians_);
@@ -39,20 +63,39 @@ float Camera::verticalFovRadians() const {
     return 2.0F * std::atan(filmBack_.heightMm / (2.0F * focalLengthMm_));
 }
 
+float Camera::verticalAngularExtentRadians() const {
+    if (lens_.projection == LensProjection::Spherical) {
+        return verticalFovRadians();
+    }
+    // The angle imaged at the top of the gate, or the circle's edge where the circle falls inside it: the frame's real vertical extent.
+    const float thetaMax = 0.5F * glm::radians(lens_.maxFieldOfViewDegrees);
+    const float halfHeightRadii = (0.5F * filmBack_.heightMm) / focalLengthMm_;
+    return 2.0F * std::min(kannalaBrandtTheta(lens_.radialCoefficients, halfHeightRadii, thetaMax), thetaMax);
+}
+
 Camera::ViewBasis Camera::viewBasis(float aspect) const {
     const glm::vec3 fwd = forwardFromEuler(yawRadians_, pitchRadians_);
     const glm::vec3 right = glm::normalize(glm::cross(fwd, kWorldUp));
     const glm::vec3 up = glm::cross(right, fwd);
     const float halfHeight = std::tan(verticalFovRadians() * 0.5F);
     const float halfWidth = halfHeight * aspect;
-    return ViewBasis{fwd, right, up, halfWidth, halfHeight};
+    // Sensor width from the gate height and the render aspect, as the pinhole vfov is: widthMm stays display-only, so pixels stay square.
+    const float halfHeightMm = 0.5F * filmBack_.heightMm;
+    const float halfWidthMm = halfHeightMm * aspect;
+    const float maxTheta = 0.5F * glm::radians(lens_.maxFieldOfViewDegrees);
+    const float maxRadiusMm = focalLengthMm_ * kannalaBrandtRadius(lens_.radialCoefficients, maxTheta);
+    return ViewBasis{fwd, right, up, halfWidth, halfHeight, halfWidthMm, halfHeightMm, maxTheta,
+                     maxRadiusMm, focalLengthMm_, lens_};
 }
 
-Ray Camera::primaryRay(float ndcX, float ndcY, float aspect) const {
+std::optional<Ray> Camera::primaryRay(float ndcX, float ndcY, float aspect) const {
     return primaryRay(viewBasis(aspect), ndcX, ndcY);
 }
 
-Ray Camera::primaryRay(const ViewBasis& basis, float ndcX, float ndcY) const {
+std::optional<Ray> Camera::primaryRay(const ViewBasis& basis, float ndcX, float ndcY) const {
+    if (basis.lens.projection == LensProjection::FisheyePolynomial) {
+        return fisheyeRay(basis, position_, nearClip_, farClip_, ndcX, ndcY);
+    }
     const glm::vec3 dir = glm::normalize(basis.forward + (ndcX * basis.halfWidth * basis.right) +
                                           (ndcY * basis.halfHeight * basis.up));
     return Ray{position_, dir, nearClip_, farClip_};

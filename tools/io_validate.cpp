@@ -354,6 +354,63 @@ PT_CHECK(profile_config_render_display_settings, Fast, Exact) {
     }
 }
 
+// camera.lens selects the projection and carries the polynomial; both are validated whichever projection the profile selects.
+PT_CHECK(profile_config_camera_lens, Fast, Exact) {
+    struct Case {
+        std::string name;
+        nlohmann::json lens;
+        bool accepted;
+    };
+    // theta_d' = 1 + 3*k1*theta^2 with k1 = -1/3 vanishes at theta = 1 rad, so a 180-degree circle (thetaMax = pi/2) crosses it.
+    const nlohmann::json nonMonotone = {{"projection", "fisheyePolynomial"},
+                                        {"maxFieldOfViewDegrees", 180.0},
+                                        {"radialCoefficients", {-1.0 / 3.0, 0.0, 0.0, 0.0}}};
+    const nlohmann::json spherical = {{"projection", "spherical"},
+                                      {"maxFieldOfViewDegrees", 180.0},
+                                      {"radialCoefficients", {0.0, 0.0, 0.0, 0.0}}};
+    nlohmann::json fisheye = spherical;
+    fisheye["projection"] = "fisheyePolynomial";
+    nlohmann::json threeCoefficients = spherical;
+    threeCoefficients["radialCoefficients"] = {0.0, 0.0, 0.0};
+    nlohmann::json zeroFov = spherical;
+    zeroFov["maxFieldOfViewDegrees"] = 0.0;
+    nlohmann::json overFov = spherical;
+    overFov["maxFieldOfViewDegrees"] = 360.5;
+    nlohmann::json unknownProjection = spherical;
+    unknownProjection["projection"] = "pinhole";
+    nlohmann::json missingProjection = spherical;
+    missingProjection.erase("projection");
+
+    const std::vector<Case> cases = {
+        {"spherical with a zero polynomial", spherical, true},
+        {"fisheyePolynomial with an equidistant polynomial", fisheye, true},
+        {"an unknown projection name", unknownProjection, false},
+        {"no projection at all", missingProjection, false},
+        {"three coefficients instead of four", threeCoefficients, false},
+        {"a zero field of view", zeroFov, false},
+        {"a field of view past 360 degrees", overFov, false},
+        // Rejected under a spherical projection too: the HUD can switch to the fisheye at runtime, so the polynomial must hold either way.
+        {"a non-monotone polynomial", nonMonotone, false},
+    };
+
+    const std::filesystem::path shippedPath = std::filesystem::path(ASSET_ROOT_DIR) / "config" / "profile.json";
+    std::ifstream shippedFile(shippedPath);
+    const nlohmann::json shipped = nlohmann::json::parse(shippedFile);
+    ctx.plan(static_cast<int>(cases.size()));
+    for (const Case& testCase : cases) {
+        nlohmann::json edited = shipped;
+        edited["camera"]["lens"] = testCase.lens;
+        const std::filesystem::path path = writeJson("engine_io_profile_lens.json", edited.dump());
+        const std::optional<pathtracer::config::ProfileConfig> loaded =
+            pathtracer::config::loadProfileConfig(path.string());
+        std::filesystem::remove(path);
+        char detail[224];
+        std::snprintf(detail, sizeof(detail), "loadProfileConfig %s %s",
+                      testCase.accepted ? "rejected" : "accepted", testCase.name.c_str());
+        PT_EXPECT(ctx, loaded.has_value() == testCase.accepted, detail);
+    }
+}
+
 // render.defaultAOV is a raw index main.cpp dereferences unchecked, so the bound holds at load: both ends plus the first past the top.
 PT_CHECK(profile_config_default_aov_is_in_range, Fast, Exact) {
     const int aovCount = static_cast<int>(pathtracer::debug::AovId::Count);

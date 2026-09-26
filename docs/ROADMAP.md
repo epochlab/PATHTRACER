@@ -61,7 +61,9 @@
   changes the AOV's values, not its preview: it needs a third state the filter can write and every consumer can read.
 
 - **Adaptive per-pixel sample budget**: variance-driven; `samplesPerPixel` is one fixed global today. The per-pixel variance it needs now ships — `PathTraceResult::beautyLuminanceM2`, the Welford second moment the `SNR` AOV reports, one float per texel — so this item is unblocked and needs only the allocation policy. It is also the variance input Large #6's denoising wants (Zwicker et al. 2015). **Foveal/peripheral sampling density** lands here too, not as its own AOV: a non-uniform sample allocation is the same mechanism with an eccentricity weight instead of a variance one.
-- **Fisheye lens**: equidistant/equisolid-angle/orthographic/stereographic projection families in `primaryRay` (Kannala & Brandt 2006, [references](PIPELINE.md#references)).
+- **Closed-form fisheye families**: the Kannala-Brandt polynomial ships (`LensProjection::FisheyePolynomial`), and its `k = 0` case *is* the equidistant family exactly. Equisolid-angle `2f·sin(theta/2)`, stereographic `2f·tan(theta/2)` and orthographic `f·sin(theta)` are **not** KB special cases: they are reachable only as truncated Taylor polynomials (the degree-9 coefficients `camera_validate` uses), so they carry a truncation error that grows toward the circle edge. Adding them as their own projections is a per-family closed-form `theta(r)` and no root-finding.
+- **Calibrated principal point and non-square pixels**: one `focalLengthMm` and a centred image circle mean `fx == fy` and `cx, cy` at the sensor centre, so a calibration's radial geometry transfers but its pixel grid does not. Matching a real photograph needs both.
+- **Fisheye G-buffer AOVs**: the rasterizer's `projectToScreen` is a perspective divide, so the 14 scan-converted lanes are rejected under a fisheye rather than approximated. A primary-ray-only G-buffer producer sharing `primaryRay` would make every AOV projection-correct.
 - **Physical camera filters**: CPL/polarising filters, which need polarised transport (Chandrasekhar 1960, [references](PIPELINE.md#references)).
 
 **Geometry and texture**
