@@ -109,13 +109,16 @@ struct PathTraceResult {
     // E[F(wo.wh)] at the primary hit, wh ~ D_vis(wo), one VNDF draw per sample (bsdf.h). 0 where bounce 0 has no BSDF vertex.
     pathtracer::gfx::HdrImage fresnel;
 
+    // Welford second moment of each texel's per-pass Rec.709 luminance, one float and not an image: an SNR needs no chromaticity.
+    std::vector<float> beautyLuminanceM2;
+
     // Reduced from `beauty` immediately before publish, so it describes exactly the pixels published with it, unlike PassRecord.
     OverRangeStats overRange;
     std::uint64_t generation = 0;  // the request whose accumulation this is, stamped by PathTraceDriver at publish; 0 from renderPathTraced
     int samples = 0;  // passes averaged in, stamped with generation so image and count publish as one snapshot
 };
 
-// All 10 images zeroed at width x height -- what renderPathTraced's `out` must be, allocated once and reused.
+// All 10 images and the second-moment lane zeroed at width x height -- what renderPathTraced's `out` must be, allocated once.
 [[nodiscard]] PathTraceResult makePathTraceResult(int width, int height);
 
 // Blocking multithreaded path trace: BSDF bounces, NEE with MIS, RR; a worker drops its tile when generation != requestedGeneration.

@@ -120,6 +120,8 @@ private:
     // One running sum per path-traced lane this request needs, parallel to accumulatedAovs_.
     std::vector<pathtracer::debug::AovId> accumulatedAovs_;
     std::vector<pathtracer::gfx::HdrImage> accumulators_;
+    // Welford second moment of the per-pass Beauty luminance, carried beside the naive sum so the published mean stays bit-identical.
+    std::vector<float> beautyLuminanceM2_;
     // One evaluated filter per distinct BeautyFilter AOV, so lastImage() can return one and two AOVs sharing a filter evaluate it once.
     std::vector<pathtracer::debug::AovId> filteredAovs_;
     std::vector<pathtracer::gfx::HdrImage> filtered_;

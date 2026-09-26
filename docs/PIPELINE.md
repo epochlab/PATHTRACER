@@ -8,7 +8,7 @@ A CPU path tracer. For each pixel it follows light backwards from the camera, bo
 
 **Per frame.** Any camera or scene change triggers two independent lanes:
 
-- **Path tracer** — `PathTraceDriver` hands a request to a background pool (one worker per core, row-parallel) and restarts accumulation. Pinhole rays, Embree intersection, then per bounce: sample the BSDF — how the material scatters light ([materials](#materials--lighting)) — and sample a light by NEE, the two combined by multiple importance sampling (MIS) so neither's weak case shows (power heuristic, Veach 1997). Russian roulette terminates recursion, with shadow-terminator-corrected secondary origins (Chiang/Li/Burley 2019) and Beer-Lambert absorption inside transmissive media. Beauty and the nine other path-traced AOVs — an AOV being one selectable output channel, 28 in all — accumulate per pass and publish lock-free to the render thread.
+- **Path tracer** — `PathTraceDriver` hands a request to a background pool (one worker per core, row-parallel) and restarts accumulation. Pinhole rays, Embree intersection, then per bounce: sample the BSDF — how the material scatters light ([materials](#materials--lighting)) — and sample a light by NEE, the two combined by multiple importance sampling (MIS) so neither's weak case shows (power heuristic, Veach 1997). Russian roulette terminates recursion, with shadow-terminator-corrected secondary origins (Chiang/Li/Burley 2019) and Beer-Lambert absorption inside transmissive media. Beauty and the nine other path-traced AOVs — an AOV being one selectable output channel, 30 in all — accumulate per pass and publish lock-free to the render thread.
 - **Rasterizer** — a synchronous CPU pass (`rasterizer.cpp`) scan-converts the 14 primary-hit AOVs on the render thread every frame: the G-buffer, the surface data visible directly from the camera. It shares `gbuffer_shading.h`'s material sampling with the path tracer, but uses no Embree, no BSDF and no recursion. It is watertight — vertices snap to a fixed-point grid whose precision is derived per frame to keep the int64 edge functions exact, so two triangles sharing an edge cover each pixel centre on it exactly once. That is what keeps these AOVs glitch-free during camera motion; the traced lane restarts only when the selected AOV needs light transport.
 
 **Display.** The render thread blits the selected AOV through OCIO's display transform and draws the HUD, converging over later passes rather than blocking on one long render. No GPU rasterization anywhere: OpenGL is the window, the OCIO blit and ImGui.
@@ -114,7 +114,139 @@ Presets live in `assets/materials/*.json`, parsed into `MaterialConfig` (`scene_
 
 # AOV
 
-28 selectable channels (`aov.h`), in HUD order. **Source** is which producer computes one: `traced` accumulates over passes (10 lanes), `raster` is exact and instant every frame (14), `filter` is an image-space pass over a finished Beauty (4).
+34 selectable channels (`aov.h`), in HUD order. **Source** is which producer computes one: `traced` accumulates over passes (10 lanes), `raster` is exact and instant every frame (14), `filter` is an image-space pass over a finished Beauty (10).
+
+Filters run on the CPU only (`debug/aov_filters.cpp`), for both the viewer and the headless API — there is no GLSL copy. `evaluateFilterAov` is the single dispatch, with no `default` arm, so `-Werror` rejects a new filter AOV that nothing routes. In the viewer one filter evaluation is cached per published pass (`FilterCache`), keyed on the pass's owner, generation and sample count, so a filter costs nothing per displayed frame; `filterMs` on the `-stats` dashboard and in the benchmark log reports it.
+
+Display exposure now follows `aovCarriesRadiance`, not the AOV's producer: the six radiance lanes and the six filters that are positively homogeneous of degree one in radiance (Luminance, Sobel, Gabor, DoG, LoG, CLAHE) take the photographic exposure, and everything else — ratios, reflectances, counts, lengths, directions, frequencies — stays at unity gain. `relativeExposureEv()` is 0 at the authored camera, so the default appearance of every AOV is unchanged.
+
+### Signed preview
+
+`DoG`, `LoG` and `Colour Opponent` are responses of a zero-mean operator: zero is the operator's own centre and both signs are equally meaningful. A plain gain clips the negative half to black, so `aovIsBipolar` routes them through an affine display map instead — `0.5 + value/(2·range)`, zero landing exactly on mid-grey. The whole display path is that one affine map, `gain ⊙ value + offset`, carried as two `vec3` uniforms on the shader and as two `glm::vec3` arguments on the CPU encode `render_beauty` and the C ABI share, so a PNG and the viewer agree by construction. Radiance is the case where the gain is a scalar photographic exposure broadcast to three lanes and the offset is zero. It is a *preview*: `aovCarriesRadiance` still describes the value, the EXR, the HUD probe and the C ABI all read the raw signed float, and no headless output changes.
+
+The range is not the peak. A rendered signed response is heavy-tailed — a Cornell box emitter puts `LoG`'s maximum 32× above its own 99th percentile — so scanning for `max |value|` leaves 97% of the display range unused. The range is instead `min(peak, σ·sqrt(2 ln n))`, with σ the RMS about zero and the cap the concentration point of the maximum of `n` standard normals (Cramér 1946). A field with no tail keeps its true peak and never clips; a field with one outlier lets that outlier saturate rather than crush everything else. Both limbs are gated, in either direction.
+
+**The range is per lane, not per image.** Lanes of one AOV can be different physical quantities. `Colour Opponent`'s `l - l_white` is a dimensionless cone fraction spanning `[-0.150, +0.170]` over the entire Rec.709 gamut, while its `s - s_white` is S excitation per unit luminance and reaches `+13.087` on the blue primary — a 77× disparity. Pooling both into one range is a category error, and it cost the `l` axis all but 20 of 256 display levels on a Cornell box, hiding the red and green walls entirely. Equalising the two axes inside the filter was the alternative, and it has no principled form: that needs Mullen 1985's chromatic CSFs, which wait on a spectral path (ROADMAP), so any scaling written now would be an invented constant. Ranging each lane on its own statistics is exact by construction and collapses to the scalar case for a broadcast AOV, whose three lanes are replicas and therefore range identically.
+
+**A lane the AOV does not define stays black.** `aovChannels` reports what the operator means, so for `Colour Opponent`'s third lane — a structural zero, never a measurement — the map takes zero gain and zero offset rather than sending it to mid-grey. Otherwise an absent lane is indistinguishable from a genuine zero response, and the constant it contributes tints the whole frame. `UV`, whose third lane is also structurally zero, already read black. A scalar AOV is the exception and must not be blanked: `writeScalar` broadcasts it across all three lanes, so all three are ranged and its preview stays grey.
+
+Direction and position lanes are signed but deliberately excluded: a normal's components span a sphere, not a response about zero.
+
+### Log preview, and the one shared display decision
+
+`SNR` is positive, dimensionless and unbounded, so neither an exposure nor a bipolar map suits it. At unity gain every texel at or above 1.0 encodes to 255 and the frame is solid white, carrying exactly one bit: *is this texel above its own noise floor*. Its preview is therefore decibels, `20·log10(SNR)` — the factor is 20, not 10, because `mu/SE` is a ratio of like-dimensioned amplitudes whose power ratio is its square (EMVA 1288's convention for imaging SNR).
+
+**Both anchors of the window are definitional, so neither is an authored constant.** The floor is **0 dB, the ratio 1**, where a texel's value equals its own uncertainty and nothing is resolved. The ceiling is **`10·log10(n)` dB, the ratio sqrt(n)**: since `SNR = sqrt(n)·(mu/sigma)`, that is the SNR of a texel whose *per-sample* coefficient of variation is unity, so the grey reads how far in decibels a texel has come from its noise floor toward that reference. The decibel factor cancels between the two, so the implementation is `2·ln(SNR)/ln(n)` and no base conversion is written. This window is not invariant to the pass count — `grey = 1 − log(CV)/log(sqrt(n))`, so a fixed-`CV` texel drifts toward white as `n` grows, which is the convergence progress one selects `SNR` to watch. True invariance would need a second anchor on `log(CV)` beyond `CV = 1`, and there is no definitional one.
+
+The window deliberately saturates the easy majority. On a Cornell box at 64 passes 78% of texels already exceed `sqrt(n)`, and at 1024 passes 67% do; the remaining fifth to third is the noisy tail — caustics, indirect corners, grazing geometry — and it holds 211 distinct display levels where the linear preview held one. Nothing sits at the floor, so the full range serves the texels that are actually undecided.
+
+A log is not affine, so it cannot ride the shader's two `vec3` uniforms. It is a **pre-map**: one CPU pass over the frame, at upload rather than per frame, writing the display's texels. `Bounce Count`'s Turbo false colour (Mikhailov 2019) is the same mechanism and the same cost, its domain the real bound `maxBounces + 1`. Both live in `aovDisplay`, which is the one function making every display decision that has to read the values — the bipolar per-lane range, `Depth`'s auto-range and these two pre-maps — so the viewer and `render_beauty` share it and a PNG matches the viewer by construction rather than by two copies staying level. The photographic exposure is the one arm left to the caller, because the slider moves without rebuilding the texture; `aovTakesDisplayExposure` states its precedence once, since an auto-ranged AOV has already absorbed the scene's scale and applying an exposure on top would range it twice.
+
+## Scale space
+
+`debug/scale_space.h` is the one Gaussian facility, shared by DoG, LoG and Retinex. The kernel is Lindeberg's **discrete** Gaussian `T(n;t) = e^{-t} I_n(t)` (Lindeberg 1990), not a sampled continuous Gaussian, because only it satisfies the discrete scale-space axioms and because the exactness is what makes the validators exact rather than approximate:
+
+| Property | Sampled Gaussian | `e^{-t} I_n(t)` |
+|---|---|---|
+| `sum w = 1` | needs renormalising | exact, by `sum I_n(t) = e^t` |
+| variance | approximately `t` | exactly `t` |
+| semi-group `T(t1)*T(t2) = T(t1+t2)` | approximate | exact on the grid |
+| transfer function | approximate | exactly `exp(-t(1 - cos w))` |
+| `dL/dt = laplacian5(L)/2` | approximate | exact, so `laplacian5` of a level **is** its discrete LoG |
+
+`std::cyl_bessel_i` does not exist on libc++, so `I_n(t)` comes from the ascending series `I_n(t) = sum_k (t/2)^(n+2k) / (k! (n+k)!)`. Every term is positive, so there is no cancellation and the sum is relatively accurate to double precision; the magnitude is carried in the exponent and the series summed relative to its own first term, so neither a large order nor a large `t` can overflow or underflow it. Miller's downward recurrence was rejected: it needs a starting order chosen by a rule of thumb, which is exactly the authored constant this codebase's numerics avoid.
+
+**Every threshold in the file is float32's unit roundoff, 2^-24**, and nothing else:
+
+- **Truncation.** Taps are emitted outward until the discarded tail mass falls below 2^-24, below which it cannot perturb a float result. That lands near `R = 5.4 sqrt(t)`, wider than the customary 4σ, which is the point. Truncated weights are renormalised over the emitted taps, not against the infinite sum: a kernel with gain `1 - 2^-24` would compound across the cascade.
+- **Inner scale.** The finest scale the base grid represents faithfully is where the transfer at the grid Nyquist `w = pi` reaches 2^-24: `exp(-2t) = 2^-24`, so `t = 12 ln2 = 8.3178` (σ = 2.884 px). Below that a level still carries energy at Nyquist and is not a sampling of a band-limited function.
+- **Decimation.** The same criterion at the post-decimation Nyquist `w = pi/2` gives `exp(-t) = 2^-24`, so `t = 24 ln2`, exactly twice the inner scale because `(1 - cos pi) = 2 (1 - cos pi/2)`. Above it, halving the grid discards nothing, so the cascade subsamples rather than averaging — averaging would add variance the bookkeeping does not account for. (For scale: this is within 15% of SIFT's empirically chosen `sigma_0 = 1.6` per octave, independent corroboration from the representation rather than from repeatability experiments.)
+
+The structure is an octave-spaced cascaded decimated pyramid (Burt & Adelson 1983's structure, Lindeberg's kernels). One octave per level is not a tuning choice: successive-octave DoG has ≈1.2-octave bandwidth, matching the measured human spatial-frequency channels (Wilson & Bergen 1979; De Valois et al. 1982); successive octave DoGs sum to `(1 - lowpass)` exactly, so the decomposition is complete; and it is what permits decimation at all. The ladder **ends where a step's kernel support outgrows its own plane** — such a level reports the mirrored boundary at every sample, not the image — which gives 6 levels at 2048×1152, σ from 2.88 to 92.3 base pixels.
+
+Rejected, with reasons, so they are not revisited:
+
+- *Repeated full-σ convolution from the original.* The top octave alone is ~760 taps/px/direction at 2048×1152, ≈2.6 Gtap. Dead on cost.
+- *Recursive IIR* (Deriche 1993; Young & van Vliet 1995; Alvarez & Mazorra 1994). O(1)/px, but rejected on **correctness**: it approximates the Gaussian, so the semi-group is approximate; its boundary initialisation is itself an approximation (Triggs & Sdika 2006 exists to patch it); and it is not a symmetric FIR, so it does not annihilate affine fields exactly. That last property is what gives "LoG reads zero on a ramp". The cost advantage evaporates once decimation makes the FIR path O(N).
+- *Burt & Adelson's 5-tap binomial kernel.* Right structure, but it is only approximately Gaussian and its variance is not `t`. The structure is kept and the kernel replaced.
+
+Two implementation choices carry the exactness. **Convolution is centre-relative**, `out = c + sum_n w_n ((l - c) + (r - c))`: on an affine field every tap pair cancels bit-exactly, so diffusion reproduces a ramp identically and DC gain is exactly 1 by construction rather than by normalisation. It also reduces cancellation in DoG, which differences two nearly equal blurs. **The boundary mirrors about the edge sample without repeating it** (whole-sample symmetry), so every tap lands on real data and the finite operator stays diagonal in the cosine basis; a mirror turns a ramp into a tent, so validators scope to the interior by the radius the facility reports.
+
+## Estimator noise
+
+`SNR` reports how well each published texel is known, not how noisy one sample is: `beauty` is a mean, so the denominator is the standard error **of the mean**, `sqrt(M2 / (n(n-1)))`. The *value* is linear, matching the repo's raw-value convention — the EXR, the HUD probe and the C ABI all read the raw ratio; only the preview is in decibels, exactly as the signed preview is a preview of a raw signed float.
+
+**Single-image spatial estimators are rejected on principle.** Immerkaer 1996 (whose 3x3 mask is a scaled discrete Laplacian) and Donoho & Johnstone 1994's MAD of the finest wavelet subband both estimate *one global sigma under additive white Gaussian noise*. Monte Carlo render noise violates that on three counts: it is heteroscedastic by orders of magnitude between a directly lit diffuse texel and a caustic, it is signal-dependent, and it is spatially correlated through NEE, environment importance sampling and the shared Owen-scrambled Sobol sequence. Both would also report a tessellated silhouette as noise.
+
+The estimate is instead exact and free: `accumulateMean` already holds this pass's radiance in the destination and the previous mean in the source, which is precisely what Welford's recurrence needs, so the second moment is one extra pass over `beauty` in a loop that was already streaming it. `renderPathTraced` is untouched, so the hot path pays nothing. It is Welford 1962 in West 1979's `(x - m_prev)(x - m_new)` form, the same recurrence and the same `invN` the ten RGB lanes use; `running_m2_matches_batch_variance` gates it against the two-pass sum of squared deviations under the forward-error bound `running_mean_matches_batch_mean` already derives.
+
+**One float per texel, not an eleventh image.** 9 MiB a pool slot at 2048x1152 against 36 MiB for a full RGBA lane, and luminance M2 is computed on the per-pass luminance directly, so it is exact for luminance — it is *not* recoverable from three per-channel moments, which would need the inter-channel covariance shared paths induce.
+
+The headless path accumulates by naive summation and one divide, not Welford, and that is deliberately unchanged: the moment is carried *beside* the sum, reading the previous mean back out of it, so every published mean stays bit-identical to what it was.
+
+## Oriented bands
+
+`Gabor` is a 2-D Morlet wavelet bank (Morlet 1982; Antoine & Murenzi 1996) — an isotropic Gaussian envelope times a plane wave, minus its own mean. Its three parameters were authored (`sigma = 1.4`, `lambda = 4.0`, `gamma = 0.5`, on a 5x5 support); all three now follow from the shared scale space and from one another.
+
+**Envelope.** `sigma^2 = innerScaleVariance()`, the finest scale the grid resolves at float32 precision and the rung the octave ladder starts from, so the bank sits on the same frequency plane the pyramid tiles. `sigma = 2.884 px`.
+
+**Carrier.** The half-response radial bandwidth fixes `sigma/lambda` alone (Petkov 1995 eq. 4): `sigma/lambda = (1/pi) sqrt(ln2/2) (2^b + 1)/(2^b - 1)`. The bandwidth is the ladder's own octave spacing, `b = 1`, so `sigma*omega0 = 2 sqrt(ln2/2) * 3 = 3.532` and `lambda = 5.130 px` — a carrier 2.57x inside the grid Nyquist, which is checked rather than assumed.
+
+**Orientations.** Because `sigma*omega0` depends only on `b`, so does the angular half-response width: the filter is a Gaussian bump of radial standard deviation `1/sigma` centred at radius `omega0`, half response at a chord of `sqrt(2 ln2)/sigma`, giving `2 asin(sqrt(2 ln2)/(2 sigma omega0))` either side, **38.4 degrees** in total. Covering a half turn at half response or better therefore needs `ceil(180/38.4) = 5` orientations. There is no free choice here: the bandwidth fixes the count. A half turn suffices because the bank is complex and `theta` and `theta + pi` are conjugates with the same magnitude.
+
+**Quadrature, so no carrier phase to choose.** The old bank used an odd (sine) carrier, which was an authored decision between edge and ridge sensitivity. The Morlet response is complex and the AOV reports its magnitude, which is phase-invariant.
+
+**Implementation: modulate, blur, correct.** `(f * G_theta)` factors as `exp(i omega0 x.u) [(f exp(-i omega0 x.u)) * g_sigma]`, an exact identity, so every orientation reduces to two separable Gaussian convolutions of the shared `diffuse` rather than a rotated 2-D kernel. The final remodulation is a rotation by the carrier phase, which the magnitude discards, so it is not computed. At the derived scale a direct 2-D bank would need a 35x35 support per orientation, 6125 taps a texel; this is 11 separable passes instead.
+
+**Admissibility, exactly, at the border too.** A Morlet wavelet is defined with its own mean subtracted. Rather than the ideal `exp(-sigma^2 omega0^2 / 2)`, the term used is the blurred plane wave itself, taken under the same mirror the image gets — which is what a constant field actually produces at that texel. That field is separable, so it is the product of one width-long and one height-long 1-D blur and costs nothing, and it zeroes the DC response everywhere rather than only in the interior. Zero to rounding, not bitwise: the image goes through one fused 2-D blur and the correction through a product of two 1-D ones, and float multiplication does not distribute. Measured at 1.0 to 1.4 float epsilons of the field, over fields spanning four decades. `filters_are_zero_on_a_constant_field` asserts it on a frame smaller than the kernel, where every texel is a border texel.
+
+**The response changed, and the unit changed with it.** The envelope has unit DC gain, so the reported magnitude is the amplitude of the oriented component in radiance units, directly comparable against Luminance; the old bank's weights were unnormalised, so its peak ran about 43x higher with no unit attached. The old bank's passband also sat near pixel Nyquist, so most of what it reported on an unconverged frame was Monte Carlo noise rather than scene structure. `results/wave-morlet-gabor/` holds the before and after.
+
+## Cone space
+
+`scene/cone_space.h` takes linear Rec.709 to cone excitations and then to the two cardinal chromatic axes. Every link is exact on the data this repository already holds, which decides which fundamentals are usable.
+
+**Hunt-Pointer-Estevez, not Smith-Pokorny.** Smith & Pokorny 1975 is the basis MacLeod & Boynton 1979 and every standard DKL implementation are built on, and it was the first choice — but its fundamentals are defined as a linear transform of the **Judd-Vos modified** 2° colour matching functions, not the CIE 1931 ones `cie_1931.inc` tabulates. Nor can that be bridged: Rec.709's primaries are specified as CIE 1931 *chromaticities*, not spectra, so they have no Judd-Vos tristimulus values at all, and no exact route from this codebase's RGB to any Judd-Vos-based cone space exists. Hunt-Pointer-Estevez (Estevez 1979; Hunt 1998 App. 1) is stated **as** a 3×3 on CIE 1931 2° XYZ, normalised so equal energy excites the three cones equally, so the chain is exact by construction and needs no new `.inc`.
+
+The cost is stated rather than hidden: `L + M` is not `V(lambda)`. The Judd modification exists precisely to make luminous efficiency a linear combination of the fundamentals, and *no* fundamentals on the unmodified 1931 basis can satisfy it, so the `(l, s)` plane is not strictly isoluminant. The `s` axis is therefore rescaled so that one unit is one S excitation per unit luminance at the achromatic point, which recovers MacLeod & Boynton's own unit as closely as this observer permits, and leaves `l` untouched.
+
+**MacLeod-Boynton's form, not DKL.** `(l, s) = (L, S)/(L+M)` is exactly invariant to scaling by any positive scalar, which is the property that matters on unbounded scene-referred HDR: it needs no exposure decision. DKL needs an adaptation level, so it would.
+
+The white is Rec.709's own, which is `xyzToRec709()`'s construction point, so RGB `(v, v, v)` is the achromatic origin by definition rather than by a second spectral integration. Each opponent numerator's three RGB coefficients therefore sum to zero, and a zero-sum row is `r.x (R-G) + r.z (B-G)` identically — so the basis stores those two coefficients and an achromatic texel reads **exactly** zero at any intensity, not merely within a rounding of it. Same device as the convolution's centre-relative form.
+
+## Retinex
+
+`Retinex` is Land 1986's Gaussian-surround formulation (PNAS 83:3078), equivalently Stockham 1972 homomorphic filtering: per channel, `r = l - G_t * l` in log radiance, output `exp2(r)`. Surveyed and rejected, each for a reason worth keeping:
+
+- *Jobson, Rahman & Woodell 1997 MSR.* Canonical, but `G = 192`, `b = -30` and the colour-restoration α/β are unjustified display-referred constants, and they belong to a display mapping a scene-referred AOV going through OCIO does not need. Land's own formulation is the same operator before those were bolted on.
+- *Land & McCann 1971 path-based.* The output depends on a random path ensemble and an iteration count, so there is no closed-form invariant and therefore no exact validator.
+- *Horn 1974 / Blake 1985 Poisson re-integration.* Rests on a gradient-magnitude threshold separating reflectance steps from smooth illumination, and every defensible derivation of it fails — a noise-derived threshold degenerates as the render converges, since σ→0 drives the threshold to 0 and retinex to the identity. Illumination/reflectance separation needs a *scale* prior, not a magnitude or noise prior. A Poisson solve is also a whole numerical subsystem for one AOV.
+
+**The surround scale is the pyramid's coarsest level**, its endpoint — the only parameter-free option, since any intermediate level requires choosing an index, and it is the maximal illumination/reflectance scale separation the frame supports, which is exactly what homomorphic filtering asks for. It reuses the cascade with no extra convolution and no photometric dependency.
+
+**Zero radiance is handled exactly.** `log(L)` is undefined at `L = 0`, and flooring at a small constant would pollute the surround for tens of pixels around any black region. Validity is per channel — a channel can be exactly zero where its neighbours are not — and the surround is normalised convolution (Knutsson & Westin 1993): cascade `l·m` and `m` separately, divide at the end. Where a channel is everywhere valid the mask cascade is skipped, which is bit-identical because the cascade returns a constant field exactly (`expansion_reproduces_a_constant_level_exactly`).
+
+**The log is relative, not absolute.** `l` is `log2(L / L_min)` computed as an exact integer exponent difference plus a mantissa term, so a power-of-two gain on the frame cancels *bitwise* rather than rounding. Written with an absolute `log2`, `(e + k) + log2(m)` and `(e + log2(m)) + k` round differently and the invariance is only approximate; the relative form is what makes `retinex_is_invariant_to_a_uniform_gain` an exact check rather than a tolerance.
+
+## CLAHE
+
+`CLAHE` is Zuiderveld 1994's structure — per-tile histogram equalisation with a clip limit, bilinearly blended — on log2 luminance, with every one of its four normally-authored parameters derived.
+
+**Domain.** Equalisation's implicit "uniform output density" criterion is only meaningful on a perceptually uniform axis, and luminance response is approximately logarithmic across the photopic range (Weber-Fechner); log2 luminance is what the canonical HDR histogram operator uses (Ward Larson, Rushmeier & Piatko 1997, IEEE TVCG 3(4)). No clamping anywhere.
+
+**Bin width.** Freedman & Diaconis 1981, `h = 2 · IQR · n^(-1/3)` on the sample one tile holds, with Scott 1979's `3.49 σ n^(-1/3)` where the quartiles coincide. Both constants are analytically derived from the asymptotic integrated mean squared error of the histogram as a density estimate, not fitted. The count is capped where the expected occupancy reaches one, since a histogram cannot occupy more bins than it has samples.
+
+`overRangeBin()` (`path_tracer.h`) was the first choice, for reusing validated machinery, and is **rejected**: it is uniform in the float's bit pattern, not in log2. The true width of a lattice bin varies by a factor of two within a binade — `d log2(1+f)/df` runs from 1.443 at `f = 0` to 0.721 at `f = 1` — so the uniform reference density the ceiling is measured against would be systematically wrong by up to 2×.
+
+**Clip ceiling.** Ward Larson 1997 §5's linear ceiling: the transfer's slope may never exceed a contrast-preserving map, so no bin may hold more than a uniform distribution would. The reference range is **the support the tile actually occupies**, not the global range, and that is load-bearing. Against the global range the ceiling is exactly `1/B`, and since the clipped densities must still total 1 over `B` bins the only feasible distribution is the uniform one: the operator collapses to the identity for every input. That is not a hypothetical — the first implementation returned Beauty bit for bit. Against the occupied support the ceiling is `1/K` with `K ≤ B`, the slope is capped at `B/K`, and a tile that already spans the whole range maps by the identity exactly, which is the correct limit. It is the same criterion read adaptively, and it is the only non-vacuous reading for a range-preserving operator.
+
+**Redistribution.** Ward Larson's truncate-and-redistribute is iterative, but its fixed point is closed form: `p_b = min(p̂_b + δ, c)` with `δ` fixed by `Σ p_b = 1`. `Σ min(p̂_b + δ, c)` is continuous and non-decreasing in `δ`, is at most 1 at `δ = 0` and exactly `B/K ≥ 1` at `δ = c`, so the root exists and is unique; it is found by one sweep over the densities sorted descending. No iteration count, no convergence tolerance.
+
+**Tile grid.** One degree of visual angle, the extent retinal light adaptation pools over (Ward Larson et al. 1997), through the camera's vertical FOV and the *traced* height. The tile count is then the FOV in degrees, independent of resolution, so the operator's angular extent is invariant to render scale — the same anchoring LoG's cycles-per-degree channel uses. A derivation from histogram adequacy alone was tried first and is rejected: it fixes only the product of bin count and tile area, and at any ordinary resolution it drives the grid to a single tile, which is global equalisation, not adaptive.
+
+The grid is capped at one tile per pixel, which matters below one pixel per degree: there the pitch would fall under a sample and a tile row could hold no rows at all. In that regime one sample per tile caps the histogram at one bin, whose cumulative *is* the linear transfer, so CLAHE degenerates to the identity — correctly, since a frame whose pixels each span more than a degree has no sub-degree adaptation left to model. `clahe_is_the_identity_below_one_tile_per_pixel` pins it.
+
+**Blend and output.** Zuiderveld's bilinear blend of the four surrounding tile transfer functions, clamped at the border, written as nested lerps so the four weights are a partition of unity by construction rather than by normalisation. Output is chromaticity-preserving, `RGB_out = RGB_in · (L_out / L_in)`. As with retinex the log is relative, so the whole operator is exactly homogeneous of degree one in radiance under a power-of-two gain, which is why it takes the display exposure.
 
 ## Utility
 
@@ -128,9 +260,21 @@ Presets live in `assets/materials/*.json`, parsed into `MaterialConfig` (`scene_
 | HSV | filter | Beauty in HSV — isolates hue and saturation shifts a pure RGB view hides |
 | Luminance | filter | Rec.709 luminance of Beauty — perceived brightness without colour |
 | Sobel | filter | 3×3 Sobel gradient magnitude of Luminance — a cheap edge signal |
-| Gabor | filter | 4-orientation Gabor bank, max response, over Luminance — directional edges Sobel's isotropic magnitude cannot distinguish |
+| Gabor | filter | Peak quadrature magnitude of a 5-orientation 2-D Morlet bank over Luminance — directional structure Sobel's isotropic magnitude cannot distinguish. Every parameter is derived from the shared scale space; see Oriented bands below. Zero on a constant field to one float epsilon, border included |
+| DoG | filter | Signed difference of the two finest pyramid octaves of Luminance (Marr & Hildreth 1980) — the retinal centre-surround band next to pixel Nyquist. Signed, not a magnitude: polarity separates a bright blob from a dark one, and Sobel already reports magnitude. Exactly zero on any affine field, so it does not fire on a smooth gradient. Zero everywhere on a frame too small for two octaves |
+| LoG | filter | Signed scale-normalised Laplacian over the whole octave ladder, `t · laplacian5(L_t)` with γ = 1 (Lindeberg 1998), reported at the scale whose response is largest in magnitude. Signed, not a magnitude: the zero crossings are the edges (Marr & Hildreth 1980), which `abs` would erase. The sign is negated once so positive means bright-on-dark, agreeing with DoG — Lowe 2004 §3 gives `G(kσ) − G(σ) ≈ (k−1)σ²∇²G`, so `fine − coarse` is *minus* the Laplacian and the two operators would otherwise read opposite polarity on the same feature. γ = 1 is not a knob: it is the unique exponent for which the response to a Gaussian blob of scale `t0` peaks at exactly `t = t0`, with closed form `-t/(pi (t0+t)^2)` and peak `1/(4 pi t0)`. A response *field*, not detected extrema — detection needs a magnitude threshold, which is the authored constant this codebase rejects, and a sparse point set is not an image |
 | WorldPos | raster | Raw world-space primary-hit position — geometry and UV placement independent of shading |
 | UV | raster | Interpolated UV at the primary hit, fractional part |
+
+## Perceptual
+
+Observer models over Beauty, as against the Utility block's image-space derivative operators. Derivations below.
+
+| AOV | Source | Meaning |
+|---|---|---|
+| Colour Opponent | filter | Cone-excitation displacement from Rec.709 white, 2 channels: **R** is `l - l_white`, the L-versus-M axis, **G** is `s - s_white`, the S-versus-(L+M) axis in S excitation per unit luminance. Exactly zero on any achromatic texel at any intensity, and exactly invariant to a gain, so it needs no exposure decision on unbounded scene-referred data |
+| Retinex | filter | Per-channel dimensionless reflectance estimate, `exp2(l - surround(l))` in log radiance with the surround at the pyramid's coarsest scale (Land 1986; Stockham 1972). Exactly 1.0 on a uniform field, and directly comparable against the rasterizer's Albedo AOV — the pairing is the point of doing it per channel rather than on luminance |
+| CLAHE | filter | Contrast-limited adaptive histogram equalisation of log2 luminance over a 1°-per-tile grid (Zuiderveld 1994), under Ward Larson 1997's contrast ceiling. Chromaticity-preserving: only luminance is remapped and RGB is scaled by the ratio, so the output is positively homogeneous of degree one and takes the display exposure |
 
 ## Material
 
@@ -152,6 +296,7 @@ Presets live in `assets/materials/*.json`, parsed into `MaterialConfig` (`scene_
 | Fresnel | traced | Expected Fresnel reflectance over the **visible** microfacet normals, `E[F]` from one VNDF draw per sample — the distribution `sampleBsdf` itself draws from, so it is roughness-dependent where a macro-normal value cannot be: on an `ior` 1.5 dielectric at `n.wo` 0.05 it reads 0.7521, 0.4406 and 0.1692 at the roughness floor, 0.3 and 0.6, against 0.7521 throughout for a macro normal. Full RGB, since a conductor's Fresnel is chromatic by construction |
 | IOR | raster | Per-instance dielectric IOR, -1 on a miss — the raw index driving Fresnel and transmission |
 | BounceCount | traced | Mean path termination depth per pixel — Russian roulette and termination behaviour |
+| SNR | filter | Rec.709 luminance of Beauty over the standard error of that mean, `mu / sqrt(M2 / (n(n-1)))`. 0 below two passes, where a variance is undefined, and 0 on a texel every pass agreed on. Reads the Welford second moment `renderPathTraced` never touches — see Estimator noise below |
 
 ## Lighting
 
@@ -208,7 +353,31 @@ Presets live in `assets/materials/*.json`, parsed into `MaterialConfig` (`scene_
 - Miller, G. (1994); Landis, H. (2002): the cosine-weighted distance-bounded AO the AO AOV path-traces, whose pdf cancels to the mean of the visibility term.
 - Zhukov, S. et al. (1998); Iones, A. et al. (2003); surveyed in Mendez-Feliu, A., Sbert, M. (2009): obscurance, the distance falloff rho(x) = 1 - (1-x)^2 the AO AOV uses.
 - Bitterli, B. et al. (2020). ReSTIR. SIGGRAPH — [roadmap](ROADMAP.md) transport #2, not implemented: reservoir resampling needs many lights to be worth it.
-- Sobel filtering: the edge-detection AOV computed from Luminance, arXiv:2601.16806.
+- Sobel, I., Feldman, G. (1968). A 3x3 isotropic gradient operator for image processing. Stanford AI Project: the Sobel AOV's fixed kernel.
+- Gabor, D. (1946). Theory of communication. J. IEE 93(26); Daugman, J.G. (1985). JOSA A 2(7): the oriented Gabor filter the Morlet bank is the wavelet form of.
+- Morlet, J. et al. (1982). Geophysics 47(2); Antoine, J.-P., Murenzi, R. (1996). Signal Processing 52(3): the 2-D Morlet wavelet, its admissibility correction and the isotropic-envelope form the Gabor AOV uses.
+- Petkov, N. (1995). Biological Cybernetics 76(2) eq. 4: the half-response bandwidth in octaves fixes sigma/lambda, which is where the carrier comes from instead of an authored wavelength.
+- Field, D.J. (1987). JOSA A 4(12); Kovesi, P. (1999). Videre 1(3): log-Gabor banks and the coverage argument behind the orientation count.
+- Lindeberg, T. (1990). Scale-space for discrete signals. IEEE TPAMI 12(3); Lindeberg, T. (1994). Scale-Space Theory in Computer Vision, ch. 3-4: the discrete Gaussian `e^-t I_n(t)`, its axiomatic uniqueness, and the semi-group and diffusion identities `scale_space.h` is built on.
+- Lindeberg, T. (1998). Feature detection with automatic scale selection. IJCV 30(2): gamma-normalised derivatives and gamma = 1 as the exponent that makes the blob response peak at the blob's own scale, the LoG AOV's scale channel and its validator.
+- Koenderink, J.J. (1984). The structure of images. Biol. Cybern. 50(5); Witkin, A.P. (1983). Scale-space filtering. IJCAI: scale space as the causal one-parameter family the ladder samples.
+- Burt, P.J., Adelson, E.H. (1983). The Laplacian pyramid as a compact image code. IEEE Trans. Comm. 31(4): the cascaded decimated structure, with the binomial kernel replaced by Lindeberg's.
+- Marr, D., Hildreth, E. (1980). Theory of edge detection. Proc. R. Soc. B 207: DoG as the retinal centre-surround operator, and the zero-crossing reading of the Laplacian.
+- Lowe, D.G. (2004). Distinctive image features from scale-invariant keypoints. IJCV 60(2) §3: `DoG(sigma, k sigma) ≈ (k-1) sigma^2 laplacian(G)`, which is why DoG and LoG are one family and not a redundant pair.
+- Estevez, O. (1979). On the fundamental data-base of normal and dichromatic colour vision. PhD thesis, Amsterdam; Hunt, R.W.G. (1998). Measuring Colour, 3rd ed. App. 1: the cone fundamentals stated as a 3x3 on CIE 1931 2-degree XYZ, which is what makes the Colour Opponent chain exact on `cie_1931.inc`.
+- Smith, V.C., Pokorny, J. (1975). Vision Research 15(2): the cone fundamentals MacLeod-Boynton and DKL are built on, surveyed and **not** adopted — they are defined on the Judd-Vos modified CMFs, which this repository's observer is not and cannot be bridged to.
+- MacLeod, D.I.A., Boynton, R.M. (1979). JOSA 69(8): the `(L, S)/(L+M)` chromaticity whose exact invariance to a positive gain is why the Colour Opponent AOV needs no exposure decision.
+- Derrington, A.M., Krauskopf, J., Lennie, P. (1984). J. Physiol. 357: the cardinal chromatic axes the MacLeod-Boynton plane spans; DKL itself needs an adaptation level, so it is not what the AOV reports.
+- Land, E.H. (1986). An alternative technique for the computation of the designator in the retinex theory of color vision. PNAS 83:3078; Stockham, T.G. (1972). Proc. IEEE 60(7): Gaussian-surround retinex and homomorphic filtering, the Retinex AOV's formulation.
+- Jobson, D.J., Rahman, Z., Woodell, G.A. (1997). IEEE TIP 6(7); Land, E.H., McCann, J.J. (1971). JOSA 61(1); Horn, B.K.P. (1974). CGIP 3(4); Blake, A. (1985). CVGIP 32(3): retinex formulations surveyed and rejected, for authored display-referred constants, for path-ensemble dependence, and for a gradient threshold with no defensible derivation.
+- Knutsson, H., Westin, C.-F. (1993). Normalized and differential convolution. CVPR: the exact handling of zero-radiance texels in the retinex surround.
+- Zuiderveld, K. (1994). Contrast limited adaptive histogram equalization. Graphics Gems IV; Pizer, S.M. et al. (1987). CVGIP 39(3): the CLAHE AOV's tile structure and bilinear blend.
+- Ward Larson, G., Rushmeier, H., Piatko, C. (1997). A visibility matching tone reproduction operator for high dynamic range scenes. IEEE TVCG 3(4): the log-luminance domain, the linear contrast ceiling, truncate-and-redistribute, and the one-degree local adaptation extent the tile grid is anchored to.
+- Freedman, D., Diaconis, P. (1981). Z. Wahrscheinlichkeitstheorie 57; Scott, D.W. (1979). Biometrika 66(3): the analytically derived L2-optimal histogram bin widths, which is where CLAHE's bin count comes from instead of an authored one.
+- Immerkaer, J. (1996). Fast noise variance estimation. CVIU 64(2); Donoho, D.L., Johnstone, I.M. (1994). Biometrika 81(3): single-image noise estimators surveyed and rejected, both assuming one global sigma of additive white Gaussian noise, which Monte Carlo render noise is not.
+- Wilson, H.R., Bergen, J.J. (1979). Vision Res. 19(1); De Valois, R.L. et al. (1982). Vision Res. 22(5): the ≈1.2-octave spatial-frequency channel bandwidth the one-octave ladder matches.
+- Abramowitz, M., Stegun, I.A. (1964) 9.6.10: the ascending series for `I_n(t)`, used in place of the absent `std::cyl_bessel_i`.
+- Deriche, R. (1993); Young, I.T., van Vliet, L.J. (1995); Alvarez, L., Mazorra, L. (1994); Triggs, B., Sdika, M. (2006): recursive O(1) Gaussian approximations, surveyed and **not** adopted — an approximate semi-group and an asymmetric kernel would give up the exact affine and ramp invariants the validators assert.
 - CIE 018:2019 Table 6 (ISO/CIE 11664-1:2019): the 1931 2° colour-matching functions at 1 nm, `cie_1931.inc`.
 - ISO/CIE 11664-2:2022 Table B.1: D65 at 1 nm, `cie_1931.inc`.
 - CIE 015:2018: tristimulus integration at the 1 nm interval, `cie::reflectanceToRec709`.

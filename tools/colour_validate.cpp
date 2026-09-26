@@ -1,4 +1,4 @@
-// Gate for CIE 1931 (scene/cie.cpp), the measured-metal fit on it (tools/metal_fit.h), and the Fresnel shading the shipped chrome.
+// Gate for CIE 1931 (scene/cie.cpp), the cone space on it (scene/cone_space.cpp), the metal fit, and the Fresnel shading chrome.
 
 #include <cfloat>
 #include <cmath>
@@ -13,11 +13,13 @@
 #include "pathtracer/config/scene_config.h"
 #include "pathtracer/scene/bsdf.h"
 #include "pathtracer/scene/cie.h"
+#include "pathtracer/scene/cone_space.h"
 #include "metal_fit.h"
 
 namespace {
 
 namespace cie = pathtracer::scene::cie;
+namespace cone = pathtracer::scene::cone;
 using tools::metal_fit::Interpolation;
 
 const std::string kChromiumTable = std::string(TOOLS_DATA_DIR) + "/chromium_johnson_christy_1974.csv";
@@ -146,5 +148,51 @@ PT_CHECK(nk_table_and_fit_reject_invalid_input, Fast, Exact) {
 }
 
 }  // namespace
+
+// Hunt-Pointer-Estevez is the cone basis defined AS a 3x3 on CIE 1931 XYZ: S is Z alone, and equal energy excites the three equally.
+PT_CHECK(cone_fundamentals_are_the_equal_energy_normalised_transform, Fast, Exact) {
+    ctx.plan(2);
+    const glm::dmat3& matrix = cone::xyzToLms();
+    const glm::dvec3 shortRow(matrix[0][2], matrix[1][2], matrix[2][2]);
+    PT_EXPECT(ctx, shortRow == glm::dvec3(0.0, 0.0, 1.0),
+                  "the S row is not Z alone, so the transform is not stated on CIE 1931 XYZ");
+    // Equal energy is XYZ (1,1,1) since the CMFs share a normalisation; the residual is the published matrix's own five decimals.
+    const glm::dvec3 equalEnergy = matrix * glm::dvec3(1.0);
+    const double spread = maxAbs(equalEnergy - glm::dvec3(equalEnergy.y));
+    PT_EXPECT(ctx, spread <= 1e-4,
+                  "equal energy excites the cones unequally, by " + std::to_string(spread));
+}
+
+// The per-texel basis folds four matrices and a white point into three rows, so it must reproduce the chromaticity it was folded from.
+PT_CHECK(opponent_basis_matches_the_cone_chromaticity_definition, Fast, Exact) {
+    const std::array<glm::dvec3, 5> stimuli = {glm::dvec3(1.0, 0.0, 0.0), glm::dvec3(0.0, 1.0, 0.0),
+                                               glm::dvec3(0.0, 0.0, 1.0), glm::dvec3(0.31, 0.72, 0.09),
+                                               glm::dvec3(0.5, 0.25, 0.875)};
+    ctx.plan(static_cast<int>(stimuli.size()));
+    const cone::OpponentBasis& basis = cone::opponentBasis();
+    const glm::dmat3 rgbToXyz = glm::inverse(cie::xyzToRec709());
+    const glm::dvec2 white = cone::whiteConeChromaticity();
+    // The s axis is rescaled so that one unit is one S excitation per unit luminance, which is this sum and nothing else.
+    const double axisScale = static_cast<double>(basis.denominator.r) + static_cast<double>(basis.denominator.g) +
+                             static_cast<double>(basis.denominator.b);
+
+    char detail[192];
+    for (std::size_t index = 0; index < stimuli.size(); ++index) {
+        const glm::dvec3& rgb = stimuli[index];
+        const glm::dvec2 chromaticity = cone::coneChromaticity(cone::xyzToLms() * (rgbToXyz * rgb));
+        const glm::dvec2 expected(chromaticity.x - white.x, axisScale * (chromaticity.y - white.y));
+        const glm::dvec2 difference(rgb.r - rgb.g, rgb.b - rgb.g);
+        const double denominator = (basis.denominator.r * rgb.r) + (basis.denominator.g * rgb.g) +
+                                   (basis.denominator.b * rgb.b);
+        const glm::dvec2 folded(((basis.redGreenNumerator.x * difference.x) + (basis.redGreenNumerator.y * difference.y)) /
+                                    denominator,
+                                ((basis.blueYellowNumerator.x * difference.x) +
+                                 (basis.blueYellowNumerator.y * difference.y)) / denominator);
+        const double error = std::max(std::abs(folded.x - expected.x), std::abs(folded.y - expected.y));
+        std::snprintf(detail, sizeof(detail), "stimulus %zu folds to (%.9g, %.9g) against (%.9g, %.9g)", index, folded.x,
+                      folded.y, expected.x, expected.y);
+        PT_EXPECT(ctx, error <= kFloatResolution * std::max(1.0, std::abs(expected.y)), detail);
+    }
+}
 
 PT_CHECK_MAIN("colour")

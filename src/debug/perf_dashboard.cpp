@@ -21,7 +21,7 @@ constexpr double kGiB = 1024.0 * 1024.0 * 1024.0;
 constexpr double kMillion = 1.0e6;
 
 // Index into PerfDashboard's burst arrays. Bursty means it runs on a small fraction of frames, on a trigger change or a republish.
-enum BurstStage { kBurstRaster = 0, kBurstUpload = 1 };
+enum BurstStage { kBurstRaster = 0, kBurstUpload = 1, kBurstFilter = 2 };
 
 // Frames per firing, "1/88", in the column a per-frame stage puts its percentage. "never" is a real state, not a missing measurement.
 void formatDuty(std::array<char, 8>& out, double framesPerFiring) {
@@ -134,6 +134,7 @@ void PerfDashboard::accumulate(const DashboardFrame& frame) {
     sums_.swapMs += stages.swapMs;
     sums_.uploadMs += stages.uploadMs;
     sums_.rasterMs += stages.rasterMs;
+    sums_.filterMs += stages.filterMs;
     sums_.overRangeMs += stages.overRangeMs;
     // Every stage, bursty included: this must reconcile against the measured frame time, so it cannot exclude the costliest.
     cpuTotalSum_ += stages.fenceMs + stages.paceMs + stages.pollMs + stages.cameraMs + stages.rasterMs + stages.presentMs +
@@ -145,7 +146,7 @@ void PerfDashboard::accumulate(const DashboardFrame& frame) {
     ++totalFrames_;
 
     // A stage that did not run reads exactly 0, so a non-zero value is a firing and the value kept is real, not a diluted mean.
-    const std::array<float, 2> burst{stages.rasterMs, stages.uploadMs};
+    const std::array<float, 3> burst{stages.rasterMs, stages.uploadMs, stages.filterMs};
     for (std::size_t i = 0; i < burst.size(); ++i) {
         if (burst[i] > 0.0F) {
             burstLastMs_[i] = burst[i];
@@ -256,7 +257,7 @@ void PerfDashboard::drawStageRows(const DashboardFrame& frame) {
     const auto mean = [&](float sum) { return static_cast<double>(windowMean(sum)); };
     const auto pct = [&](float sum) { return static_cast<double>(percentOf(windowMean(sum), cpu)); };
     // presentMs and hudMs each measure a nested stage too, so the outer half's own cost is the difference -- arithmetic, not a probe.
-    const double blitMs = std::max(mean(sums_.presentMs) - mean(sums_.uploadMs), 0.0);
+    const double blitMs = std::max(mean(sums_.presentMs) - mean(sums_.uploadMs) - mean(sums_.filterMs), 0.0);
     const double hudBuildMs = std::max(mean(sums_.hudMs) - mean(sums_.hudRenderMs), 0.0);
     // One buffer, rewritten per row: formatBar always overwrites and terminates, and no row's bar is read after its own append.
     Bar bar{};
@@ -304,6 +305,9 @@ void PerfDashboard::drawStageRows(const DashboardFrame& frame) {
     append("\x1b[2K  %-15s%8.3f %5.1f %s |  suspended %s\n", "hud build", hudBuildMs,
             static_cast<double>(percentOf(static_cast<float>(hudBuildMs), cpu)), bar.data(),
             frame.driverSuspended ? "yes" : "no");
+    formatDuty(duty, burstDutyFrames(kBurstFilter));
+    append("\x1b[2K  %-15s%8.2f %5s %s |\n", "aov filter",
+            static_cast<double>(burstLastMs_[kBurstFilter]), duty.data(), kBarBlank);
     barFor(sums_.hudRenderMs);
     append("\x1b[2K  %-15s%8.3f %5.1f %s |\n", "hud render", mean(sums_.hudRenderMs),
             pct(sums_.hudRenderMs), bar.data());

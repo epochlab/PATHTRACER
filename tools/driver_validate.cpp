@@ -1,5 +1,6 @@
 // Correctness gate for PathTraceDriver, driven only through its public API; also pins the request invariant driverLoop relies on.
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -19,6 +20,7 @@
 #include "check.h"
 #include "fixtures.h"
 #include "stats.h"
+#include "pathtracer/debug/aov_filters.h"
 #include "pathtracer/scene/camera.h"
 #include "pathtracer/scene/embree_accel.h"
 #include "pathtracer/scene/environment_map.h"
@@ -181,7 +183,7 @@ std::shared_ptr<const PathTraceResult> waitForPublished(const PathTraceDriver& d
     return published ? result : nullptr;
 }
 
-// Every image the driver averages, index-aligned with accumulateMean's lists (path_trace_driver.cpp).
+// Every image the driver averages, index-aligned with accumulateMean's lists; beautyLuminanceM2 is not one, see below.
 struct Lane {
     pathtracer::gfx::HdrImage PathTraceResult::*image;
     const char* name;
@@ -748,5 +750,133 @@ PT_CHECK(render_is_invariant_to_thread_count, Slow, Exact) {
 }
 
 }  // namespace
+
+// The second moment is not an averaged image, so it is absent from kLanes and from the two checks above; this is what covers it.
+PT_CHECK(running_m2_matches_batch_variance, Slow, Exact) {
+    constexpr int kPasses = 8;
+    ctx.plan(3);
+    std::unique_ptr<DriverFixture> fixture = makeFixture();
+    if (!fixture->valid()) {
+        for (int i = 0; i < 3; ++i) {
+            PT_EXPECT(ctx, false, "scene/driver construction failed");
+        }
+        return;
+    }
+    const Camera camera = makeCamera();
+    const std::uint64_t generation = fixture->driver->requestTrace(makeRequest(kPasses, camera));
+    const std::shared_ptr<const PathTraceResult> published =
+        waitForPublished(*fixture->driver, generation, kPasses);
+    if (published == nullptr) {
+        for (int i = 0; i < 3; ++i) {
+            PT_EXPECT(ctx, false, "driver never published its maxSamples cap");
+        }
+        return;
+    }
+
+    constexpr double kUnitRoundoff = std::numeric_limits<float>::epsilon() / 2.0;
+    constexpr double kGamma3 = (3.0 * kUnitRoundoff) / (1.0 - (3.0 * kUnitRoundoff));
+    constexpr double kGamma4 = (4.0 * kUnitRoundoff) / (1.0 - (4.0 * kUnitRoundoff));
+    const auto pixels = static_cast<std::size_t>(kImageSize) * kImageSize;
+    const std::size_t floats = pixels * 4;
+    const glm::dvec3 weights(pathtracer::debug::kRec709LuminanceWeights);
+
+    // The same passes the driver ran, synchronously, with every per-texel luminance kept in double for an exact two-pass variance.
+    const pathtracer::scene::LightSet lights(&fixture->environment, 0.0F, 1.0F, fixture->scene.quadLights);
+    PathTraceResult pass = pathtracer::scene::makePathTraceResult(kImageSize, kImageSize);
+    const auto scrambleSeed = static_cast<std::uint32_t>(generation);
+    const std::atomic<std::uint64_t> oracleGeneration{scrambleSeed};
+    pathtracer::debug::PassStats stats;
+    std::vector<std::vector<double>> luminance(kPasses, std::vector<double>(pixels, 0.0));
+    std::vector<double> sum(floats, 0.0);
+    // The driver reads its previous mean out of the float RGB lane, so the luminance it differences carries that lane's own error.
+    std::vector<double> meanError(floats, 0.0);
+    std::vector<double> previousLuminanceError(pixels, 0.0);
+    std::vector<double> bound(pixels, 0.0);
+
+    for (int p = 0; p < kPasses; ++p) {
+        stats.reset();
+        pathtracer::scene::renderPathTraced(camera, *fixture->accel, fixture->scene.shadingTriangles,
+                                         fixture->scene.instances, fixture->scene.instanceLightIndex, lights,
+                                         kImageSize, kImageSize, /*showSky=*/true, makeSettings(),
+                                         fixture->scene.perInstanceSettings, scrambleSeed, /*sampleBase=*/p,
+                                         /*sampleCount=*/kPasses, oracleGeneration, scrambleSeed, fixture->pool,
+                                         stats, pass);
+        const double k = p + 1;
+        const std::vector<float>& drawn = pass.beauty.rgba;
+        for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
+            const std::size_t texel = pixel * 4;
+            glm::dvec3 before(0.0);
+            glm::dvec3 sample(0.0);
+            double beforeError = 0.0;
+            for (int c = 0; c < 3; ++c) {
+                before[c] = p == 0 ? 0.0 : sum[texel + static_cast<std::size_t>(c)] / (k - 1.0);
+                sample[c] = drawn[texel + static_cast<std::size_t>(c)];
+                beforeError += weights[c] * meanError[texel + static_cast<std::size_t>(c)];
+            }
+            const double sampleLuminance = glm::dot(sample, weights);
+            luminance[static_cast<std::size_t>(p)][pixel] = sampleLuminance;
+            if (p > 0) {
+                // Welford's own step in exact arithmetic, against which the float recurrence's departure is bounded below.
+                const double beforeLuminance = glm::dot(before, weights);
+                const double afterLuminance = beforeLuminance + ((sampleLuminance - beforeLuminance) / k);
+                const double term = (sampleLuminance - beforeLuminance) * (sampleLuminance - afterLuminance);
+                // The three-term dot rounds too, so the float mean's luminance is off by the lane errors plus that.
+                beforeError += kGamma3 * std::fabs(beforeLuminance);
+                const double afterError = previousLuminanceError[pixel] + ((beforeError + previousLuminanceError[pixel]) / k);
+                bound[pixel] = (bound[pixel] * (1.0 + kUnitRoundoff)) +
+                               (std::fabs(sampleLuminance - afterLuminance) * beforeError) +
+                               (std::fabs(sampleLuminance - beforeLuminance) * afterError) +
+                               (beforeError * afterError) + (kGamma4 * std::fabs(term));
+                previousLuminanceError[pixel] = beforeError;
+            }
+            for (int c = 0; c < 3; ++c) {
+                const std::size_t i = texel + static_cast<std::size_t>(c);
+                sum[i] += sample[c];
+                if (p > 0) {
+                    const double e = meanError[i];
+                    meanError[i] = ((1.0 - (1.0 / k)) * (1.0 + kUnitRoundoff) * e) +
+                                   (kGamma4 * (std::fabs(sample[c] - before[c]) + e) / k) +
+                                   (kUnitRoundoff * std::fabs(sum[i] / k));
+                }
+            }
+        }
+    }
+
+    std::size_t violations = 0;
+    double worstRatio = 0.0;
+    double largest = 0.0;
+    for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
+        // Two-pass sum of squared deviations, the definition, in double: the reference the incremental form must reproduce.
+        double mean = 0.0;
+        for (int p = 0; p < kPasses; ++p) {
+            mean += luminance[static_cast<std::size_t>(p)][pixel];
+        }
+        mean /= static_cast<double>(kPasses);
+        double expected = 0.0;
+        for (int p = 0; p < kPasses; ++p) {
+            const double deviation = luminance[static_cast<std::size_t>(p)][pixel] - mean;
+            expected += deviation * deviation;
+        }
+        largest = std::max(largest, expected);
+        const double error = std::fabs(static_cast<double>(published->beautyLuminanceM2[pixel]) - expected);
+        // Plus the oracle's own single rounding of the exact moment to float, as the mean's bound carries.
+        const double tolerance = bound[pixel] + (kUnitRoundoff * expected);
+        violations += !(error <= tolerance) ? 1 : 0;
+        const double ratio = tolerance > 0.0 ? error / tolerance
+                                             : (error == 0.0 ? 0.0 : std::numeric_limits<double>::infinity());
+        worstRatio = std::max(worstRatio, ratio);
+    }
+    char detail[192];
+    std::snprintf(detail, sizeof(detail),
+                  "%zu of %zu texels over their forward-error bound; worst |running - batch|/bound = %.3e", violations,
+                  pixels, worstRatio);
+    PT_EXPECT(ctx, violations == 0, detail);
+    // A frame the passes agree on everywhere would satisfy the bound with an all-zero lane, proving nothing about the recurrence.
+    std::snprintf(detail, sizeof(detail), "largest batch second moment across the frame is %.6g", largest);
+    PT_EXPECT(ctx, largest > 0.0, detail);
+    const bool nonNegative = std::all_of(published->beautyLuminanceM2.begin(), published->beautyLuminanceM2.end(),
+                                          [](float value) { return value >= 0.0F; });
+    PT_EXPECT(ctx, nonNegative, "a sum of squared deviations came back negative");
+}
 
 PT_CHECK_MAIN("driver")

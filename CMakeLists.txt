@@ -116,6 +116,12 @@ target_include_directories(vendored_imgui PRIVATE ${IMGUI_DIR} ${IMGUI_DIR}/back
 target_link_libraries(vendored_imgui PRIVATE glfw)
 target_compile_options(vendored_imgui PRIVATE -w)
 
+# Colorimetry, shared by pathtracer_core and metal_fit. No -march=native or IPO: albedo_table's committed output must reproduce exactly.
+add_library(pathtracer_cie OBJECT src/scene/cie.cpp src/scene/cone_space.cpp)
+target_include_directories(pathtracer_cie PUBLIC include)
+pathtracer_target_defaults(pathtracer_cie)
+target_link_libraries(pathtracer_cie PRIVATE glm::glm)
+
 # The renderer proper: every source that includes no GL, GLFW or imgui header, which is what lets tools/ and the C ABI link it.
 add_library(pathtracer_core STATIC
     src/config/profile_config.cpp
@@ -128,6 +134,7 @@ add_library(pathtracer_core STATIC
     src/debug/memory_tracker.cpp
     src/debug/perf_dashboard.cpp
     src/debug/power_spectrum.cpp
+    src/debug/scale_space.cpp
     src/gfx/hdr_image.cpp
     src/gfx/ocio_cpu_transform.cpp
     src/gfx/viewport.cpp
@@ -148,6 +155,7 @@ add_library(pathtracer_core STATIC
     src/scene/shading_scene.cpp
     src/scene/thread_pool.cpp
     src/api/headless_renderer.cpp
+    $<TARGET_OBJECTS:pathtracer_cie>
     $<TARGET_OBJECTS:vendored_cgltf>)
 # include/ and the json headers are PUBLIC because every consumer includes them; cgltf and the SHA header are implementation details.
 target_include_directories(pathtracer_core PUBLIC include ${JSON_DIR})
@@ -221,12 +229,12 @@ pathtracer_target_defaults(albedo_table)
 target_link_libraries(albedo_table PRIVATE glm::glm)
 
 # Measured conductor (lambda, n, k) to a material JSON's reflectivity/edgeTint. No -march=native or IPO, for albedo_table's reason.
-add_library(metal_fit_core OBJECT tools/metal_fit.cpp src/scene/cie.cpp)
+add_library(metal_fit_core OBJECT tools/metal_fit.cpp)
 target_include_directories(metal_fit_core PUBLIC include tools)
 pathtracer_target_defaults(metal_fit_core)
 target_link_libraries(metal_fit_core PRIVATE glm::glm)
 
-add_executable(metal_fit tools/metal_fit_main.cpp $<TARGET_OBJECTS:metal_fit_core>)
+add_executable(metal_fit tools/metal_fit_main.cpp $<TARGET_OBJECTS:metal_fit_core> $<TARGET_OBJECTS:pathtracer_cie>)
 target_include_directories(metal_fit PRIVATE include tools)
 pathtracer_target_defaults(metal_fit)
 target_link_libraries(metal_fit PRIVATE glm::glm)
@@ -245,7 +253,7 @@ target_link_libraries(check_selftest PRIVATE glm::glm)
 
 # Every validator links pathtracer_core and pathtracer_check; what each asserts is documented at the top of its own tools/*.cpp.
 foreach(validator embree_validate bsdf_validate sampler_validate nee_validate rasterizer_validate
-                  integrator_validate driver_validate io_validate display_validate)
+                  integrator_validate driver_validate io_validate display_validate filter_validate)
     add_executable(${validator} tools/${validator}.cpp $<TARGET_OBJECTS:pathtracer_check>)
     target_include_directories(${validator} PRIVATE tools)
     pathtracer_target_defaults(${validator} NATIVE IPO)
@@ -351,4 +359,5 @@ pathtracer_discover_checks(io_validate)
 pathtracer_discover_checks(display_validate)
 pathtracer_discover_checks(colour_validate)
 pathtracer_discover_checks(api_validate)
+pathtracer_discover_checks(filter_validate)
 

@@ -298,6 +298,13 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
             laneSources.push_back(&(pathTraced_.*pathtracer::debug::pathTracedLane(aov)).rgba);
         }
         const auto rowFloats = static_cast<std::size_t>(request.width) * 4;
+        // Only Beauty carries a second moment, and only where it is accumulated at all; -1 leaves the lane zero and SNR black.
+        const auto beautyLane = std::find(accumulatedAovs_.begin(), accumulatedAovs_.end(), AovId::Beauty);
+        const auto beautyIndex = beautyLane == accumulatedAovs_.end()
+                                     ? -1
+                                     : static_cast<int>(beautyLane - accumulatedAovs_.begin());
+        beautyLuminanceM2_.assign(static_cast<std::size_t>(request.width) * static_cast<std::size_t>(request.height), 0.0F);
+        const glm::vec3 weights = pathtracer::debug::kRec709LuminanceWeights;
         for (int pass = 0; pass < request.samples; ++pass) {
             // Only the trace is timed: the accumulation below it is O(pixels) and identical across revisions.
             const auto passStart = std::chrono::steady_clock::now();
@@ -313,6 +320,23 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
             // By row, as the interactive driver's accumulateMean is: each element's chain stays in order, so the sum is bit-identical.
             threadPool_.parallelFor(request.height, [&](int y) {
                 const std::size_t begin = static_cast<std::size_t>(y) * rowFloats;
+                if (beautyIndex >= 0) {
+                    const float* drawnLane = laneSources[static_cast<std::size_t>(beautyIndex)]->data();
+                    // Still the passes before this one, so dividing recovers exactly the mean the driver's own lane would hold.
+                    const float* runningSum = accumulators_[static_cast<std::size_t>(beautyIndex)].rgba.data();
+                    const float inversePrevious = pass == 0 ? 0.0F : 1.0F / static_cast<float>(pass);
+                    const float inverseCount = 1.0F / static_cast<float>(pass + 1);
+                    for (std::size_t i = begin; i < begin + rowFloats; i += 4) {
+                        const float drawn = (drawnLane[i] * weights.r) + (drawnLane[i + 1] * weights.g) +
+                                            (drawnLane[i + 2] * weights.b);
+                        // At the first pass the mean is the draw, so Welford's product is exactly zero with no branch of its own.
+                        const float before = pass == 0 ? drawn
+                                                       : ((runningSum[i] * weights.r) + (runningSum[i + 1] * weights.g) +
+                                                          (runningSum[i + 2] * weights.b)) * inversePrevious;
+                        const float after = before + ((drawn - before) * inverseCount);
+                        beautyLuminanceM2_[i / 4] += (drawn - before) * (drawn - after);
+                    }
+                }
                 for (std::size_t lane = 0; lane < laneSources.size(); ++lane) {
                     const float* source = laneSources[lane]->data();
                     float* sum = accumulators_[lane].rgba.data();
@@ -350,18 +374,15 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
     if (wantsFilter) {
         const auto filterStart = std::chrono::steady_clock::now();
         const pathtracer::gfx::HdrImage& beauty = lastImage(AovId::Beauty);
+        const pathtracer::debug::FilterInput filterInput{beauty, request.camera.verticalFovRadians(),
+                                                          beautyLuminanceM2_.data(), request.samples};
         for (const AovId aov : request.aovs) {
             if (pathtracer::debug::aovSource(aov) != AovSource::BeautyFilter ||
                 std::find(filteredAovs_.begin(), filteredAovs_.end(), aov) != filteredAovs_.end()) {
                 continue;
             }
             filteredAovs_.push_back(aov);
-            switch (aov) {
-                case AovId::Luminance: filtered_.push_back(pathtracer::debug::luminanceAov(beauty, threadPool_)); break;
-                case AovId::Sobel:     filtered_.push_back(pathtracer::debug::sobelAov(beauty, threadPool_)); break;
-                case AovId::Gabor:     filtered_.push_back(pathtracer::debug::gaborAov(beauty, threadPool_)); break;
-                default:               filtered_.push_back(pathtracer::debug::hsvAov(beauty, threadPool_)); break;
-            }
+            filtered_.push_back(pathtracer::debug::evaluateFilterAov(aov, filterInput, threadPool_));
         }
         stats_.filterMilliseconds =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - filterStart).count();

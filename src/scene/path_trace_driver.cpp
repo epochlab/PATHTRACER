@@ -1,5 +1,7 @@
 #include "pathtracer/scene/path_trace_driver.h"
 
+#include "pathtracer/debug/aov_filters.h"
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -32,8 +34,21 @@ void accumulateMean(PathTraceResult& sample, const PathTraceResult& previousMean
         &previousMean.refraction,      &previousMean.fresnel};
     const float invN = 1.0F / static_cast<float>(n);
     const auto rowFloats = static_cast<std::size_t>(sample.beauty.width) * 4;
+    const glm::vec3 weights = pathtracer::debug::kRec709LuminanceWeights;
     threadPool.parallelFor(sample.beauty.height, [&](int y) {
         const std::size_t begin = static_cast<std::size_t>(y) * rowFloats;
+        // Before the loop below overwrites it: `beauty` still holds this pass's own radiance and its source the mean of the rest.
+        const float* passBeauty = sample.beauty.rgba.data();
+        const float* meanBeauty = previousMean.beauty.rgba.data();
+        const float* previousM2 = previousMean.beautyLuminanceM2.data();
+        float* secondMoment = sample.beautyLuminanceM2.data();
+        for (std::size_t i = begin; i < begin + rowFloats; i += 4) {
+            const float drawn = (passBeauty[i] * weights.r) + (passBeauty[i + 1] * weights.g) + (passBeauty[i + 2] * weights.b);
+            const float before = (meanBeauty[i] * weights.r) + (meanBeauty[i + 1] * weights.g) + (meanBeauty[i + 2] * weights.b);
+            // Welford 1962 in West 1979's (x - m_prev)(x - m_new) form, the same recurrence and the same invN the RGB lanes use.
+            const float after = before + ((drawn - before) * invN);
+            secondMoment[i / 4] = previousM2[i / 4] + ((drawn - before) * (drawn - after));
+        }
         for (std::size_t image = 0; image < destinations.size(); ++image) {
             float* destination = destinations[image]->rgba.data();
             const float* source = sources[image]->rgba.data();
@@ -266,6 +281,9 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
         const auto accumulateStart = std::chrono::steady_clock::now();
         if (passIndex > 1) {
             accumulateMean(*pass, *currentMean, passIndex, threadPool_);
+        } else {
+            // One sample has no dispersion, so the second moment starts at exactly zero rather than at whatever the reused slot held.
+            std::fill(pass->beautyLuminanceM2.begin(), pass->beautyLuminanceM2.end(), 0.0F);
         }
         const double accumulateMs = millisecondsSince(accumulateStart);
 

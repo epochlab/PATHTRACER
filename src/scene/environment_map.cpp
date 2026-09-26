@@ -16,7 +16,7 @@ glm::vec3 rotateAboutY(const glm::vec3& v, YRotation rotation) {
     return {(v.x * c) + (v.z * s), v.y, (-v.x * s) + (v.z * c)};
 }
 
-// Rec.709 weights as edge_filter.frag, floored at 0: a negative texel makes the CDF non-monotonic, which invertCdf's search needs.
+// Rec.709 weights, kRec709LuminanceWeights, floored at 0: a negative texel makes the CDF non-monotonic, which invertCdf's search needs.
 float luminanceOf(const pathtracer::gfx::ImageTexture& image, int x, int y) {
     const glm::vec4 texel = image.texel(x, y);
     return std::max(0.0F, (0.2126F * texel.r) + (0.7152F * texel.g) + (0.0722F * texel.b));
