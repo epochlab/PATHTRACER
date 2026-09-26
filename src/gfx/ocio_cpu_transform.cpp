@@ -37,12 +37,16 @@ void applyOcioDisplayTransform(std::vector<float>& rgb, int width, int height) {
 }
 
 std::vector<unsigned char> encodeForDisplay(std::span<const float> rgb, int width, int height,
-                                             float exposureEv, bool applyDisplayTransform, float displayOffset) {
+                                             const glm::vec3& gain, bool applyDisplayTransform,
+                                             const glm::vec3& displayOffset) {
     // The one copy the encode needs: OCIO applies in place and the caller's buffer is const.
     std::vector<float> exposed(rgb.size());
-    const float exposure = std::pow(2.0F, exposureEv);
-    for (std::size_t i = 0; i < rgb.size(); ++i) {
-        exposed[i] = (rgb[i] * exposure) + displayOffset;
+    // Packed RGB triples, walked a texel at a time so the lane is the inner index rather than a division on every element.
+    for (std::size_t texel = 0; texel < rgb.size(); texel += 3) {
+        for (glm::length_t lane = 0; lane < 3; ++lane) {
+            const std::size_t i = texel + static_cast<std::size_t>(lane);
+            exposed[i] = (rgb[i] * gain[lane]) + displayOffset[lane];
+        }
     }
 
     if (applyDisplayTransform) {

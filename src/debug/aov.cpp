@@ -32,7 +32,7 @@ AovSource aovSource(AovId aov) {
         case AovId::Gabor:
         case AovId::DoG:
         case AovId::LoG:
-        case AovId::Opponent:
+        case AovId::ColourOpponent:
         case AovId::Retinex:
         case AovId::CLAHE:
         case AovId::SNR:
@@ -79,9 +79,9 @@ int aovChannels(AovId aov) {
         case AovId::LoG:
             return 1;
 
-        // Two-component lanes: UV's third channel is structurally zero, and Opponent spans the two cardinal chromatic axes only.
+        // Two-component lanes: UV's third channel is structurally zero, and Colour Opponent spans the two cardinal chromatic axes only.
         case AovId::UV:
-        case AovId::Opponent:
+        case AovId::ColourOpponent:
             return 2;
 
         // Radiance triples, world-space vectors and the two false-coloured lanes, all needing three channels, not a broadcast scalar.
@@ -127,7 +127,7 @@ bool aovCarriesRadiance(AovId aov) {
 
         // Ratios, reflectances, counts, lengths, directions and frequencies: scaling any of them by an exposure means nothing.
         case AovId::HSV:
-        case AovId::Opponent:
+        case AovId::ColourOpponent:
         case AovId::Retinex:
         case AovId::Wireframe:
         case AovId::Alpha:
@@ -159,7 +159,7 @@ bool aovIsBipolar(AovId aov) {
         // Responses of a zero-mean operator: zero is the operator's own centre and the two signs are equally meaningful.
         case AovId::DoG:
         case AovId::LoG:
-        case AovId::Opponent:
+        case AovId::ColourOpponent:
             return true;
 
         // Direction and position lanes are signed but not bipolar: a normal's components span a sphere, not a response about zero.
@@ -200,32 +200,39 @@ bool aovIsBipolar(AovId aov) {
     return false;
 }
 
-float bipolarDisplayRange(std::span<const float> rgba, int channels) {
-    double sumOfSquares = 0.0;
-    float peak = 0.0F;
-    std::size_t count = 0;
-    for (std::size_t texel = 0; texel + 3 < rgba.size(); texel += 4) {
-        for (int c = 0; c < channels; ++c) {
-            const float value = rgba[texel + static_cast<std::size_t>(c)];
+BipolarDisplay bipolarDisplay(std::span<const float> rgba, int channels) {
+    const auto laneRange = [rgba](int lane) {
+        double sumOfSquares = 0.0;
+        float peak = 0.0F;
+        std::size_t count = 0;
+        for (std::size_t sample = static_cast<std::size_t>(lane); sample < rgba.size(); sample += 4) {
+            const float value = rgba[sample];
             sumOfSquares += static_cast<double>(value) * static_cast<double>(value);
             peak = std::max(peak, std::fabs(value));
             ++count;
         }
-    }
-    if (count == 0) {
-        return 0.0F;
-    }
-    // Zero is the operator's own centre, so the scale is the RMS about zero rather than a sample deviation about an estimated mean.
-    const double rms = std::sqrt(sumOfSquares / static_cast<double>(count));
-    // Cramer 1946: the maximum of n standard normals concentrates at sigma*sqrt(2 ln n), so this is where a well-behaved field ends.
-    const double expectedMaximum = rms * std::sqrt(2.0 * std::log(static_cast<double>(count)));
-    // The smaller of the two: a Gaussian field keeps its true peak, and a heavy-tailed one stops a lone outlier crushing the preview.
-    return std::min(peak, static_cast<float>(expectedMaximum));
-}
+        if (count == 0) {
+            return 0.0F;
+        }
+        // Zero is the operator's own centre, so the scale is the RMS about zero rather than a sample deviation about an estimated mean.
+        const double rms = std::sqrt(sumOfSquares / static_cast<double>(count));
+        // Cramer 1946: the maximum of n standard normals concentrates at sigma*sqrt(2 ln n), so this is where a well-behaved field ends.
+        const double expectedMaximum = rms * std::sqrt(2.0 * std::log(static_cast<double>(count)));
+        // The smaller of the two: a Gaussian field keeps its true peak, and a heavy-tailed one stops a lone outlier crushing the preview.
+        return std::min(peak, static_cast<float>(expectedMaximum));
+    };
 
-float bipolarDisplayExposureEv(float range) {
-    // A field that is exactly zero everywhere has no range, and any finite gain then gives mid-grey, so unity is the natural choice.
-    return range > 0.0F ? -std::log2(range / kBipolarDisplayOffset) : 0.0F;
+    // Ranged per lane, because each lane is its own operator in its own unit: sharing one range would crush the narrower axis to nothing.
+    BipolarDisplay display{glm::vec3(0.0F), glm::vec3(0.0F)};
+    // writeScalar broadcasts a scalar AOV to all three lanes, so those are replicas to range, not absences to leave at zero gain.
+    const int lanes = channels == 1 ? 3 : std::min(channels, 3);
+    for (int lane = 0; lane < lanes; ++lane) {
+        const float range = laneRange(lane);
+        // A lane with no range has no scale to fit, and every finite gain then reads mid-grey, so unity is the choice that assumes least.
+        display.gain[lane] = range > 0.0F ? kBipolarDisplayOffset / range : 1.0F;
+        display.offset[lane] = kBipolarDisplayOffset;
+    }
+    return display;
 }
 
 PathTracedLane pathTracedLane(AovId aov) {

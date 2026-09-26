@@ -3,6 +3,34 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Colour Opponent, and a per-lane range for the signed preview
+
+`Opponent` previewed as a near-uniform magenta wash with no visible red/green separation on a Cornell box. The filter was exact;
+the preview was pooling two axes that have no common unit, and painting a lane the AOV never defined.
+
+- fix: the bipolar auto-range is now per lane. `Opponent`'s two axes are different physical quantities — `l - l_white` is a
+  dimensionless cone fraction spanning `[-0.150, +0.170]` over the whole Rec.709 gamut, `s - s_white` is S excitation per unit
+  luminance and reaches `+13.087` on the blue primary, a **77× disparity** — and one shared range let the second own the display.
+  Measured on a Cornell box, the `l` axis held **20 of 256 levels**; it now holds 167, and the red and green walls are visible
+- fix: a lane the AOV does not define renders black, not mid-grey. `Opponent`'s third lane is a structural zero, never a
+  measurement, and sending it to mid-grey put a constant blue floor over every frame — the magenta. `UV`, also two-channel,
+  already read black. A scalar AOV is exempt: `writeScalar` broadcasts it across all three lanes, so all three are ranged
+- refactor: the display path is one affine map, `gain ⊙ value + offset`, with both terms per channel. `uExposure` and
+  `uDisplayOffset` become `vec3`, `setExposureEv`/`setDisplayOffset` collapse into `setDisplayAffine`, and
+  `bipolarDisplayRange`/`bipolarDisplayExposureEv` collapse into `bipolarDisplay`. Radiance is the case where the gain is a
+  scalar exposure broadcast to three lanes and the offset is zero; `pow(2, ev)` moves out of the per-frame `bind()`
+- feat: `Opponent` is renamed **`Colour Opponent`** — `AovId::ColourOpponent`, `colourOpponentAov`. `normalizeAovName` ignores
+  case and separators, so `colour-opponent`, `colour_opponent` and `colourOpponent` all resolve
+- **breaking**: the bare name `Opponent` no longer resolves. `aovIdFromName("Opponent")` returns `AovId::Count` and
+  `pt_aov_name` reports `"Colour Opponent"`. No alias is kept, so a stale caller fails loudly rather than silently
+- fix: the channel-isolation view now runs *after* the affine map, not before it. A per-lane gain would otherwise multiply the
+  broadcast lane by three different gains and tint the grey, and an isolated view of an undefined lane would read as black.
+  With a scalar gain and a zero offset the two orders agree exactly, so no non-bipolar preview moves
+- test: `bipolar_lanes_range_independently` and `bipolar_absent_lanes_render_black` are new; the two existing bipolar checks move
+  to the collapsed entry point. Every non-bipolar preview is byte-identical against binaries built from the previous commit
+- fix: `results/log-signed-bipolar/after-DoG.png` was stale — captured mid-wave, before the Cramér range landed, and it does not
+  reproduce from its own commit. A fresh render of that commit is byte-identical to this one's, so `DoG`'s preview is unchanged
+
 ## LoG as a signed operator, and a bipolar preview for signed AOVs
 
 `LoG` shipped as a three-channel scale-selection blob detector — magnitude, the winning scale's frequency in cycles/degree, and

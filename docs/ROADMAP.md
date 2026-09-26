@@ -60,7 +60,8 @@
   noise floor saturates to white. The numeric value is right and is what the HUD probe, the C ABI and the headless path read;
   only the preview is uninformative. Depth's auto-range is the existing precedent for a non-radiance AOV with no natural unit,
   but a linear auto-range over six decades puts the median at 1e-5. The fix is a log display for this class, which needs a
-  third arm on the exposure decision rather than a second special case, and `Opponent`'s signed axes want the same attention.
+  third arm on the exposure decision rather than a second special case. The signed half of this is closed: the display map is now
+  an affine `gain * value + offset` per lane, and `DoG`, `LoG` and `Colour Opponent` auto-range through it.
 
 - **Adaptive per-pixel sample budget**: variance-driven; `samplesPerPixel` is one fixed global today. The per-pixel variance it needs now ships — `PathTraceResult::beautyLuminanceM2`, the Welford second moment the `SNR` AOV reports, one float per texel — so this item is unblocked and needs only the allocation policy. It is also the variance input Large #6's denoising wants (Zwicker et al. 2015). **Foveal/peripheral sampling density** lands here too, not as its own AOV: a non-uniform sample allocation is the same mechanism with an eccentricity weight instead of a variance one.
 - **Fisheye lens**: equidistant/equisolid-angle/orthographic/stereographic projection families in `primaryRay` (Kannala & Brandt 2006, [references](PIPELINE.md#references)).

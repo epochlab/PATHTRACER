@@ -49,8 +49,8 @@ inline constexpr float kMorletOctaves = 1.0F;
                                             pathtracer::scene::ThreadPool& threadPool);
 
 // Cone-opponent displacement from Rec.709 white (cone_space.h): (l - l_white, s - s_white), exactly invariant to a positive gain.
-[[nodiscard]] pathtracer::gfx::HdrImage opponentAov(const pathtracer::gfx::HdrImage& beauty,
-                                                 pathtracer::scene::ThreadPool& threadPool);
+[[nodiscard]] pathtracer::gfx::HdrImage colourOpponentAov(const pathtracer::gfx::HdrImage& beauty,
+                                                          pathtracer::scene::ThreadPool& threadPool);
 
 // Per-channel Gaussian-surround retinex (Land 1986; Stockham 1972) at the pyramid's coarsest scale: a dimensionless reflectance estimate.
 [[nodiscard]] pathtracer::gfx::HdrImage retinexAov(const pathtracer::gfx::HdrImage& beauty,

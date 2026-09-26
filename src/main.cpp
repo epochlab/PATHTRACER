@@ -234,8 +234,8 @@ struct AppResources {
     const pathtracer::gfx::HdrImage* pathTraceDisplayedImage;  // nullptr = nothing uploaded yet
     // Max raw Depth in the last rebuilt pathTraceDisplayTexture; only meaningful when aov==Depth.
     float pathTraceDisplayedDepthMax;
-    // Max |value| over the carried channels of the last rebuilt pathTraceDisplayTexture; only meaningful when aovIsBipolar.
-    float pathTraceDisplayedSignedRange;
+    // Per-lane affine display map for the last rebuilt pathTraceDisplayTexture; only meaningful when aovIsBipolar.
+    pathtracer::debug::BipolarDisplay pathTraceBipolarDisplay;
     // Which RasterGBuffer generation the texture holds; 0 when it was built from a PathTraceResult instead.
     std::uint64_t pathTraceDisplayedGeneration;
     // Strong ref, not just an identity pointer, to whichever published object pathTraceDisplayTexture currently reflects.
@@ -491,7 +491,7 @@ std::optional<AppResources> initializeApp(const pathtracer::config::SceneConfig&
         .pathTraceDisplayTexture = std::nullopt,
         .pathTraceDisplayedImage = nullptr,
         .pathTraceDisplayedDepthMax = 0.0F,
-        .pathTraceDisplayedSignedRange = 0.0F,
+        .pathTraceBipolarDisplay = {glm::vec3(1.0F), glm::vec3(0.0F)},
         .pathTraceDisplayedGeneration = 0,
         .pathTraceDisplayedOwner = nullptr,
         .lastPathTraceTrigger = PathTraceTriggerState{},
@@ -766,11 +766,11 @@ void ensurePathTraceDisplayTexture(AppResources& app, const std::shared_ptr<cons
         }
         app.pathTraceDisplayedDepthMax = maxDepth;
     }
-    // The bipolar preview's auto-range, over the channels the AOV declares so an unused lane cannot widen it.
+    // The bipolar preview's per-lane auto-range, over the channels the AOV declares so a lane it does not define stays black.
     const auto uploadedAov = static_cast<pathtracer::debug::AovId>(app.aov);
     if (pathtracer::debug::aovIsBipolar(uploadedAov)) {
-        app.pathTraceDisplayedSignedRange =
-            pathtracer::debug::bipolarDisplayRange(image.rgba, pathtracer::debug::aovChannels(uploadedAov));
+        app.pathTraceBipolarDisplay =
+            pathtracer::debug::bipolarDisplay(image.rgba, pathtracer::debug::aovChannels(uploadedAov));
     }
     // BounceCount is a scalar mapped through Turbo on the CPU before upload; it runs once per rebuilt pass, so it costs nothing per frame.
     if (app.aov == static_cast<int>(pathtracer::debug::AovId::BounceCount)) {
@@ -837,19 +837,16 @@ void presentFrame(AppResources& app,
     const bool isBeauty = aovId == pathtracer::debug::AovId::Beauty;
     app.ocioTransform.setActiveLut(isBeauty ? app.userLut
                                              : pathtracer::gfx::OcioDisplayTransform::Lut::Raw);
-    // A signed response auto-ranges to mid-grey; radiance takes the photographic exposure; Depth auto-ranges, farClip being a tMax.
-    float exposureEv = 0.0F;
-    float displayOffset = 0.0F;
+    // A signed response auto-ranges per lane to mid-grey; radiance takes the photographic exposure; Depth auto-ranges, farClip a tMax.
+    pathtracer::debug::BipolarDisplay display{glm::vec3(1.0F), glm::vec3(0.0F)};
     if (pathtracer::debug::aovIsBipolar(aovId)) {
-        exposureEv = pathtracer::debug::bipolarDisplayExposureEv(app.pathTraceDisplayedSignedRange);
-        displayOffset = pathtracer::debug::kBipolarDisplayOffset;
+        display = app.pathTraceBipolarDisplay;
     } else if (pathtracer::debug::aovCarriesRadiance(aovId)) {
-        exposureEv = app.debugCamera.relativeExposureEv();
+        display.gain = glm::vec3(std::pow(2.0F, app.debugCamera.relativeExposureEv()));
     } else if (aovId == pathtracer::debug::AovId::Depth) {
-        exposureEv = -std::log2(std::max(app.pathTraceDisplayedDepthMax, 1e-4F));
+        display.gain = glm::vec3(std::pow(2.0F, -std::log2(std::max(app.pathTraceDisplayedDepthMax, 1e-4F))));
     }
-    app.ocioTransform.setExposureEv(exposureEv);
-    app.ocioTransform.setDisplayOffset(displayOffset);
+    app.ocioTransform.setDisplayAffine(display.gain, display.offset);
     app.ocioTransform.setChannelView(app.channelView);
     app.ocioTransform.setInvert(app.invert);
     // Beauty only -- an artistic lens effect over the rendered image, not meaningful on a raw data AOV like Normal/Depth/Albedo.

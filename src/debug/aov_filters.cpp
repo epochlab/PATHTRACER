@@ -385,7 +385,7 @@ HdrImage logAov(const HdrImage& beauty, ThreadPool& threadPool) {
     return out;
 }
 
-HdrImage opponentAov(const HdrImage& beauty, ThreadPool& threadPool) {
+HdrImage colourOpponentAov(const HdrImage& beauty, ThreadPool& threadPool) {
     const pathtracer::scene::cone::OpponentBasis& basis = pathtracer::scene::cone::opponentBasis();
     HdrImage out = makeBroadcastImage(beauty.width, beauty.height);
     threadPool.parallelFor(beauty.height, [&](int y) {
@@ -624,7 +624,7 @@ HdrImage evaluateFilterAov(AovId aov, const FilterInput& input, ThreadPool& thre
         case AovId::Gabor:     return gaborAov(input.beauty, threadPool);
         case AovId::DoG:       return dogAov(input.beauty, threadPool);
         case AovId::LoG:       return logAov(input.beauty, threadPool);
-        case AovId::Opponent:  return opponentAov(input.beauty, threadPool);
+        case AovId::ColourOpponent:  return colourOpponentAov(input.beauty, threadPool);
         case AovId::Retinex:   return retinexAov(input.beauty, threadPool);
         case AovId::CLAHE:     return claheAov(input.beauty, input.verticalFovRadians, threadPool);
         case AovId::SNR:       return snrAov(input.beauty, input.beautyLuminanceM2, input.samples, threadPool);

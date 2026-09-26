@@ -3,6 +3,8 @@
 #include <span>
 #include <string_view>
 
+#include <glm/glm.hpp>
+
 namespace pathtracer::debug {
 
 // Single source of truth for every selectable AOV. AppResources.aov stays int because ImGui::Combo needs int&.
@@ -22,7 +24,7 @@ enum class AovId : int {
     WorldPos,
     UV,
     // Perceptual: observer models over Beauty, as against the Utility block's image-space derivative operators.
-    Opponent,
+    ColourOpponent,
     Retinex,
     CLAHE,
     // Material.
@@ -55,7 +57,7 @@ inline constexpr const char* kAovNames[] = {
     "Lookahead",    "HSV",            "Luminance",       "Sobel",
     "Gabor",        "DoG",            "LoG",             "WorldPos",
     "UV",
-    "Opponent",     "Retinex",        "CLAHE",
+    "Colour Opponent", "Retinex",   "CLAHE",
     "Normal",       "GeomNormal",     "Albedo",          "Metallic",
     "Roughness",    "Tangent",        "ObjectID",        "AO",
     "Fresnel",      "IOR",            "Bounce Count",    "SNR",
@@ -79,14 +81,17 @@ enum class AovSource { PathTraced, GBuffer, BeautyFilter };
 // True where zero is the operator's own centre and both signs are meaningful, so the preview maps zero to mid-grey. Preview only.
 [[nodiscard]] bool aovIsBipolar(AovId aov);
 
-// Added after the preview's exposure gain, so a zero response lands exactly on mid-grey. The other half of bipolarDisplayExposureEv.
+// Added after the preview's gain so a zero response lands exactly on mid-grey; the gain divides by it, so the two halves cannot drift.
 inline constexpr float kBipolarDisplayOffset = 0.5F;
 
-// exp2 of this, with kBipolarDisplayOffset added, maps [-range, range] onto [0, 1]. The preview's auto-range, as Depth auto-ranges.
-[[nodiscard]] float bipolarDisplayExposureEv(float range);
+// The preview's affine display map, per lane: display = gain * value + offset. A lane the AOV does not define keeps zero, reading black.
+struct BipolarDisplay {
+    glm::vec3 gain;
+    glm::vec3 offset;
+};
 
-// Auto-range over an interleaved RGBA buffer's first `channels` lanes: the peak, capped at the expected maximum of that many normals.
-[[nodiscard]] float bipolarDisplayRange(std::span<const float> rgba, int channels);
+// Auto-ranged per lane over an interleaved RGBA buffer, because lanes of one AOV can be different quantities in incomparable units.
+[[nodiscard]] BipolarDisplay bipolarDisplay(std::span<const float> rgba, int channels);
 
 // True for AOVs needing light transport, false for the 14 primary-hit ones. Derived from aovSource, so the two cannot drift apart.
 [[nodiscard]] inline bool aovNeedsLightTransport(AovId aov) {

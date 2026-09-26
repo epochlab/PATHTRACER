@@ -1,11 +1,14 @@
 #include "pathtracer/api/pathtracer_c.h"
 
+#include <cmath>
 #include <cstring>
 #include <memory>
 #include <optional>
 #include <span>
 #include <string>
 #include <vector>
+
+#include <glm/glm.hpp>
 
 #include "pathtracer/api/headless_renderer.h"
 #include "pathtracer/debug/aov.h"
@@ -212,8 +215,10 @@ int pt_display_encode(const float* rgb, int width, int height, float exposure_ev
             return PT_ERROR;
         }
         const auto count = static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3;
-        const std::vector<unsigned char> encoded = pathtracer::gfx::encodeForDisplay(
-            std::span<const float>(rgb, count), width, height, exposure_ev, display_transform != 0);
+        // Caller-driven with no AOV context, so the map stays a scalar photographic gain with no offset, as this entry point always was.
+        const std::vector<unsigned char> encoded =
+            pathtracer::gfx::encodeForDisplay(std::span<const float>(rgb, count), width, height,
+                                               glm::vec3(std::pow(2.0F, exposure_ev)), display_transform != 0);
         std::memcpy(out, encoded.data(), encoded.size());
         return PT_OK;
     } catch (const std::exception& e) {

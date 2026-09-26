@@ -569,7 +569,7 @@ PT_CHECK(expansion_reproduces_a_constant_level_exactly, Fast, Exact) {
 }
 
 // A cone chromaticity is a ratio of two linear forms, and writing the numerators on (R-G, B-G) makes the achromatic axis exactly zero.
-PT_CHECK(opponent_is_zero_on_every_achromatic_texel, Fast, Exact) {
+PT_CHECK(colour_opponent_is_zero_on_every_achromatic_texel, Fast, Exact) {
     ctx.plan(2);
     ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
     constexpr int kWidth = 64;
@@ -579,7 +579,7 @@ PT_CHECK(opponent_is_zero_on_every_achromatic_texel, Fast, Exact) {
     for (std::size_t pixel = 0; pixel < grey.size(); ++pixel) {
         grey[pixel] = 1e-5F * std::pow(1.37F, static_cast<float>(pixel % 97));
     }
-    const HdrImage opponent = pathtracer::debug::opponentAov(greyImage(kWidth, kHeight, grey), pool);
+    const HdrImage opponent = pathtracer::debug::colourOpponentAov(greyImage(kWidth, kHeight, grey), pool);
     float worstRedGreen = 0.0F;
     float worstBlueYellow = 0.0F;
     for (int y = 0; y < kHeight; ++y) {
@@ -593,7 +593,7 @@ PT_CHECK(opponent_is_zero_on_every_achromatic_texel, Fast, Exact) {
 }
 
 // MacLeod & Boynton coordinates are ratios, so a gain cancels; at a power of two every product is exact and the cancellation is bitwise.
-PT_CHECK(opponent_is_invariant_to_exposure, Fast, Exact) {
+PT_CHECK(colour_opponent_is_invariant_to_exposure, Fast, Exact) {
     ctx.plan(1);
     ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
     constexpr int kWidth = 48;
@@ -607,18 +607,18 @@ PT_CHECK(opponent_is_invariant_to_exposure, Fast, Exact) {
             scaled.rgba[(pixel * 4) + static_cast<std::size_t>(channel)] = value * 256.0F;
         }
     }
-    const HdrImage base = pathtracer::debug::opponentAov(image, pool);
-    const HdrImage gained = pathtracer::debug::opponentAov(scaled, pool);
+    const HdrImage base = pathtracer::debug::colourOpponentAov(image, pool);
+    const HdrImage gained = pathtracer::debug::colourOpponentAov(scaled, pool);
     PT_EXPECT(ctx, base.rgba == gained.rgba, "a 256x gain changed the opponent response");
 }
 
 // The two axes are the L-versus-M and S-versus-(L+M) cardinal directions, so each Rec.709 primary must sit on its own side of white.
-PT_CHECK(opponent_separates_the_rec709_primaries, Fast, Exact) {
+PT_CHECK(colour_opponent_separates_the_rec709_primaries, Fast, Exact) {
     ctx.plan(3);
     ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
     const auto axis = [&pool](const glm::vec3& rgb, int channel) {
         HdrImage image{1, 1, {rgb.r, rgb.g, rgb.b, 1.0F}};
-        return texelAt(pathtracer::debug::opponentAov(image, pool), 0, 0, channel);
+        return texelAt(pathtracer::debug::colourOpponentAov(image, pool), 0, 0, channel);
     };
     const float red = axis({1.0F, 0.0F, 0.0F}, 0);
     const float green = axis({0.0F, 1.0F, 0.0F}, 0);
