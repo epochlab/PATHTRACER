@@ -860,4 +860,68 @@ PT_CHECK(snr_is_zero_where_the_ratio_is_undefined, Fast, Exact) {
                   "a texel with no dispersion did not read zero");
 }
 
+// The Morlet bank's admissibility term is a 2-D blur written as two 1-D ones, which is only sound if the mirror separates too.
+PT_CHECK(the_blurred_plane_wave_separates_into_its_two_axes, Fast, Exact) {
+    const std::array<std::pair<int, int>, 5> shapes{{{24, 16}, {31, 9}, {1, 40}, {40, 1}, {97, 61}}};
+    ctx.plan(static_cast<int>(shapes.size()));
+    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    const float variance = pathtracer::debug::innerScaleVariance();
+    const double carrier = pathtracer::debug::morletCarrier(variance);
+    const int orientations = pathtracer::debug::morletOrientations();
+
+    for (const auto& [width, height] : shapes) {
+        double worst = 0.0;
+        for (int orientation = 0; orientation < orientations; ++orientation) {
+            const double theta = (std::numbers::pi * static_cast<double>(orientation)) / static_cast<double>(orientations);
+            const double stepX = carrier * std::cos(theta);
+            const double stepY = carrier * std::sin(theta);
+            // The whole plane wave through the 2-D blur, which is what the bank would have to compute if it did not separate.
+            std::vector<float> real(static_cast<std::size_t>(width) * static_cast<std::size_t>(height));
+            std::vector<float> imaginary(real.size());
+            for (int y = 0; y < height; ++y) {
+                for (int x = 0; x < width; ++x) {
+                    const double phase = (stepX * static_cast<double>(x)) + (stepY * static_cast<double>(y));
+                    real[(static_cast<std::size_t>(y) * width) + static_cast<std::size_t>(x)] = static_cast<float>(std::cos(phase));
+                    imaginary[(static_cast<std::size_t>(y) * width) + static_cast<std::size_t>(x)] = static_cast<float>(-std::sin(phase));
+                }
+            }
+            pathtracer::debug::diffuse(real, width, height, variance, pool);
+            pathtracer::debug::diffuse(imaginary, width, height, variance, pool);
+
+            std::vector<float> cosX(static_cast<std::size_t>(width));
+            std::vector<float> sinX(static_cast<std::size_t>(width));
+            std::vector<float> cosY(static_cast<std::size_t>(height));
+            std::vector<float> sinY(static_cast<std::size_t>(height));
+            for (int x = 0; x < width; ++x) {
+                cosX[static_cast<std::size_t>(x)] = static_cast<float>(std::cos(stepX * static_cast<double>(x)));
+                sinX[static_cast<std::size_t>(x)] = static_cast<float>(std::sin(stepX * static_cast<double>(x)));
+            }
+            for (int y = 0; y < height; ++y) {
+                cosY[static_cast<std::size_t>(y)] = static_cast<float>(std::cos(stepY * static_cast<double>(y)));
+                sinY[static_cast<std::size_t>(y)] = static_cast<float>(std::sin(stepY * static_cast<double>(y)));
+            }
+            // A width x 1 and a 1 x height plane exercise one separable pass each, the other folding to a no-op on a unit extent.
+            pathtracer::debug::diffuse(cosX, width, 1, variance, pool);
+            pathtracer::debug::diffuse(sinX, width, 1, variance, pool);
+            pathtracer::debug::diffuse(cosY, 1, height, variance, pool);
+            pathtracer::debug::diffuse(sinY, 1, height, variance, pool);
+
+            for (int y = 0; y < height; ++y) {
+                for (int x = 0; x < width; ++x) {
+                    const auto pixel = (static_cast<std::size_t>(y) * width) + static_cast<std::size_t>(x);
+                    const float productReal = (cosX[static_cast<std::size_t>(x)] * cosY[static_cast<std::size_t>(y)]) -
+                                               (sinX[static_cast<std::size_t>(x)] * sinY[static_cast<std::size_t>(y)]);
+                    const float productImaginary = -((sinX[static_cast<std::size_t>(x)] * cosY[static_cast<std::size_t>(y)]) +
+                                                     (cosX[static_cast<std::size_t>(x)] * sinY[static_cast<std::size_t>(y)]));
+                    worst = std::max({worst, std::fabs(static_cast<double>(productReal - real[pixel])),
+                                      std::fabs(static_cast<double>(productImaginary - imaginary[pixel]))});
+                }
+            }
+        }
+        // Both routes convolve unit-magnitude values with a unit-mass kernel, so the gap is the two extra roundings of the product.
+        PT_EXPECT(ctx, worst <= 2.0 * static_cast<double>(kFloatEpsilon),
+                      std::to_string(width) + "x" + std::to_string(height) + " separates to within " + std::to_string(worst));
+    }
+}
+
 PT_CHECK_MAIN("filter")

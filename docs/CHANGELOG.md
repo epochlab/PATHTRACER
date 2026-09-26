@@ -3,6 +3,46 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## The Gabor AOV re-derived as a 2-D Morlet bank
+
+The last authored constants in the AOV filters. `buildGaborKernel` carried `sigma = 1.4`, `lambda = 4.0`, `gamma = 0.5`, four
+hand-picked orientations and a 5x5 support; all of them now follow from the shared scale space and from one another. This
+changes the AOV's output and its unit, which is why it was held back as its own change with a before/after capture.
+
+- feat: the bank is a 2-D Morlet wavelet (Morlet 1982; Antoine & Murenzi 1996) — an isotropic Gaussian envelope times a plane
+  wave, minus its own mean. `sigma^2 = innerScaleVariance()`, the finest scale the grid resolves and the rung the octave
+  ladder starts from, so the bank tiles the frequency plane the pyramid already does
+- feat: the carrier follows from the bandwidth alone (Petkov 1995 eq. 4), and the bandwidth is the ladder's own octave
+  spacing: `sigma*omega0 = 2 sqrt(ln2/2) * 3 = 3.532`, `lambda = 5.130 px`, 2.57x inside the grid Nyquist — asserted, not
+  assumed
+- feat: **the orientation count is not a choice either.** `sigma*omega0` depends only on the bandwidth, so the angular
+  half-response width does too: 38.4 degrees, so covering a half turn takes `ceil(180/38.4) = 5` orientations. A half turn
+  suffices because the bank is complex and opposite directions are conjugates
+- feat: the response is the quadrature magnitude, so the old bank's odd-versus-even carrier decision disappears with it
+- feat: `(f * G_theta) = exp(i omega0 x.u) [(f exp(-i omega0 x.u)) * g_sigma]` exactly, so each orientation is two separable
+  `diffuse` calls rather than a rotated 2-D kernel — 11 separable passes against the 6125 taps a texel a direct 35x35 bank at
+  this scale would need. The closing remodulation is a rotation the magnitude discards, so it is not computed at all
+- feat: admissibility is exact **at the border too**. Instead of the ideal `exp(-sigma^2 omega0^2 / 2)`, the subtracted term
+  is the blurred plane wave under the same mirror the image gets — what a constant field actually produces at that texel.
+  That field is separable, so it is one width-long and one height-long 1-D blur and costs nothing.
+  Zero to rounding rather than bitwise -- the image takes one fused 2-D blur and the correction a product of two 1-D ones, and
+  float multiplication does not distribute -- measured at 1.0 to 1.4 float epsilons of the field over four decades of field.
+  `filters_are_zero_on_a_constant_field` now asserts it on a 24x16 frame, smaller than the kernel, where every texel is a
+  border texel; the old bank only cancelled to 1e-6 and only away from the edge
+- perf: 16.0 -> 100.0 ms at 2048x1152, 8 threads. The envelope is 2.06x wider in each axis and there is one more orientation,
+  and the operator is exact rather than a 5x5 approximation of it; it now sits between CLAHE (58) and Retinex (119)
+- fix: **the old bank was largely a noise detector.** Its passband sat near pixel Nyquist, so on an unconverged frame most of
+  what it reported was Monte Carlo noise, not scene structure — visible directly in `results/wave-morlet-gabor/`. The unit
+  changed with it: the envelope has unit DC gain, so the magnitude is the oriented component's amplitude in radiance units,
+  comparable against Luminance, where the old unnormalised weights ran about 43x higher with no unit attached
+- test: `gabor_bank_rejects_dc` is replaced by `morlet_bank_is_admissible_and_covers_every_orientation`, which reads the
+  bandwidth relation back out of the shipped carrier over four envelope variances, checks the carrier is inside the grid
+  Nyquist, and asserts the orientation count is both sufficient and minimal -- one fewer must fail to cover. The first draft
+  of that last assertion compared `ceil(x)` against a recomputed `x` and was a tautology; review caught it
+- test: `the_blurred_plane_wave_separates_into_its_two_axes` gates the separable implementation directly -- the product of a
+  width-long and a height-long 1-D blur must equal the full 2-D blur of the plane wave under the same mirror, over every
+  orientation at five shapes including the degenerate `1x40` and `40x1`
+
 ## Monte Carlo noise: the Welford second moment and the SNR AOV
 
 The last AOV of the perceptual wave, and the only one needing a new lane in `PathTraceResult` rather than a new read of Beauty.

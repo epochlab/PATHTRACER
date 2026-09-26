@@ -1,7 +1,10 @@
 // Correctness gate for the headless path: the AOV tables, the four CPU Beauty filters, and headless_renderer's dispatch.
 
 #include <algorithm>
+#include <array>
+#include <cfloat>
 #include <cmath>
+#include <numbers>
 #include <cstdio>
 #include <optional>
 #include <span>
@@ -12,6 +15,7 @@
 #include "pathtracer/api/headless_renderer.h"
 #include "pathtracer/debug/aov.h"
 #include "pathtracer/debug/aov_filters.h"
+#include "pathtracer/debug/scale_space.h"
 #include "pathtracer/debug/aov_routing.h"
 #include "pathtracer/scene/thread_pool.h"
 
@@ -40,20 +44,6 @@ void setTexel(HdrImage& image, int x, int y, float r, float g, float b) {
 [[nodiscard]] float texelR(const HdrImage& image, int x, int y) {
     return image.rgba[((static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width)) +
                        static_cast<std::size_t>(x)) * 4];
-}
-
-// The bank's DC response: an odd carrier is antisymmetric about the envelope's centre, so every orientation's 25 weights must cancel.
-[[nodiscard]] float worstOrientationWeightSum() {
-    const auto kernel = pathtracer::debug::buildGaborKernel();
-    float worst = 0.0F;
-    for (int o = 0; o < pathtracer::debug::kGaborOrientations; ++o) {
-        float sum = 0.0F;
-        for (int tap = 0; tap < pathtracer::debug::kGaborTaps; ++tap) {
-            sum += kernel[(static_cast<std::size_t>(o) * pathtracer::debug::kGaborTaps) + static_cast<std::size_t>(tap)];
-        }
-        worst = std::max(worst, std::fabs(sum));
-    }
-    return worst;
 }
 
 }  // namespace
@@ -95,12 +85,34 @@ PT_CHECK(aov_names_round_trip, Fast, Exact) {
     PT_EXPECT(ctx, pathtracer::debug::aovIdFromName("not an aov") == AovId::Count, "unknown name must not resolve");
 }
 
-// A Gaussian envelope times an odd carrier integrates to zero over symmetric support. Asserted on the weights, so a regression localises.
-PT_CHECK(gabor_bank_rejects_dc, Fast, Exact) {
-    ctx.plan(1);
-    const float worst = worstOrientationWeightSum();
-    // Float summation of 25 transcendentals, so the bound is accumulated rounding, not a tuned threshold.
-    PT_EXPECT(ctx, worst < 1e-6F, "worst orientation weight sum " + std::to_string(worst));
+// Morlet's admissibility term subtracts the envelope's own response to a constant, so the bank's parameters must leave zero mean.
+PT_CHECK(morlet_bank_is_admissible_and_covers_every_orientation, Fast, Exact) {
+    const std::array<float, 4> variances{1.0F, 4.0F, pathtracer::debug::innerScaleVariance(), 64.0F};
+    ctx.plan(static_cast<int>(variances.size()) + 3);
+    // Petkov 1995 eq. 4 read back: sigma*omega is fixed by the bandwidth alone, at one octave 2 sqrt(ln2/2) * 3.
+    const double expected = 2.0 * std::sqrt(std::numbers::ln2 / 2.0) * 3.0;
+    // Swept over the envelope, because the product is what the bandwidth fixes: a carrier not falling as 1/sigma would still pass at one.
+    for (const float variance : variances) {
+        const double sigmaOmega = pathtracer::debug::morletCarrier(variance) * std::sqrt(static_cast<double>(variance));
+        PT_EXPECT(ctx, std::fabs(sigmaOmega - expected) <= 1e-6 * expected,
+                      "at t=" + std::to_string(variance) + " sigma*omega is " + std::to_string(sigmaOmega) + ", not " +
+                          std::to_string(expected));
+    }
+
+    const float variance = pathtracer::debug::innerScaleVariance();
+    const double carrier = pathtracer::debug::morletCarrier(variance);
+    // Below the Nyquist of the grid it runs on, or the carrier itself aliases and the bank measures a frequency that is not there.
+    PT_EXPECT(ctx, carrier < std::numbers::pi,
+                  "carrier " + std::to_string(carrier) + " is at or past the grid Nyquist");
+    // Half response at a chord of sqrt(2 ln2)/sigma from the carrier, so this is how much of a half turn one orientation covers.
+    const double angularWidth = 4.0 * std::asin(std::sqrt(2.0 * std::numbers::ln2) / (2.0 * expected));
+    const double needed = std::numbers::pi / angularWidth;
+    const int orientations = pathtracer::debug::morletOrientations();
+    PT_EXPECT(ctx, static_cast<double>(orientations) >= needed,
+                  std::to_string(orientations) + " orientations leave a gap, " + std::to_string(needed) + " being needed");
+    // And no more than that: one fewer must fail to cover, or the count is not the one the bandwidth forces but a larger choice.
+    PT_EXPECT(ctx, static_cast<double>(orientations - 1) < needed,
+                  std::to_string(orientations) + " orientations exceed the " + std::to_string(needed) + " the bandwidth needs");
 }
 
 // No gradient and no AC content, so both filters must read exactly zero, including at the border where clamping repeats the constant.
@@ -126,8 +138,10 @@ PT_CHECK(filters_are_zero_on_a_constant_field, Fast, Exact) {
             worstGabor = std::max(worstGabor, texelR(gabor, x, y));
         }
     }
-    // Not exactly zero: the weights cancel to rounding, and the convolution scales that residue by the field value.
-    PT_EXPECT(ctx, worstGabor < 1e-6F, "peak Gabor response " + std::to_string(worstGabor));
+    // Two epsilons for the separability gap the filter suite bounds, plus one each for scaling that term by the field and differencing.
+    const double bound = static_cast<double>(0.375F) * 4.0 * static_cast<double>(FLT_EPSILON);
+    PT_EXPECT(ctx, static_cast<double>(worstGabor) <= bound,
+                  "peak Morlet response " + std::to_string(worstGabor) + " over the cancellation bound " + std::to_string(bound));
 }
 
 // A unit step edge has a closed-form Sobel magnitude: both adjacent columns read exactly 4 and everything further exactly 0.

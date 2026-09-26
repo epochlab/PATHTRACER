@@ -1,6 +1,5 @@
 #pragma once
 
-#include <array>
 #include <cstddef>
 
 #include <glm/glm.hpp>
@@ -11,19 +10,19 @@
 
 namespace pathtracer::debug {
 
-// CPU implementations of the ten Beauty-reading AOVs. Sobel and Gabor clamp at the edge; the scale-space AOVs mirror, see scale_space.h.
+// CPU implementations of the ten Beauty-reading AOVs. Sobel clamps at the edge; everything built on scale_space.h mirrors, Gabor included.
 
 // Rec.709 luminance weights (ITU-R BT.709-6), the one triple every luminance reduction in the engine dots against.
 inline constexpr glm::vec3 kRec709LuminanceWeights{0.2126F, 0.7152F, 0.0722F};
 
-inline constexpr int kGaborOrientations = 4;
-inline constexpr int kGaborRadius = 2;  // 5x5 support
-inline constexpr int kGaborTaps = (2 * kGaborRadius + 1) * (2 * kGaborRadius + 1);
-// Extent of the flattened orientation-major bank. size_t because it is only ever an array bound.
-inline constexpr std::size_t kGaborKernelSize = std::size_t{kGaborOrientations} * std::size_t{kGaborTaps};
+// Radial half-response bandwidth of the Morlet bank, in octaves: the shared ladder's own spacing, so the bank tiles its frequency plane.
+inline constexpr float kMorletOctaves = 1.0F;
 
-// 4 orientations x 25 taps of an odd-carrier Gabor filter (Gabor 1946; Daugman 1985), orientation-major: index o * 25 + tap.
-[[nodiscard]] std::array<float, kGaborKernelSize> buildGaborKernel();
+// Carrier frequency in radians per pixel at envelope variance t: sigma*omega depends on the bandwidth alone (Petkov 1995 eq. 4).
+[[nodiscard]] float morletCarrier(float variance);
+
+// Orientations needed to cover every direction at half response or better, from the angular bandwidth the carrier already fixes.
+[[nodiscard]] int morletOrientations();
 
 // Rec.709 luminance, broadcast to RGB. Single centre tap, no neighbourhood.
 [[nodiscard]] pathtracer::gfx::HdrImage luminanceAov(const pathtracer::gfx::HdrImage& beauty,
@@ -33,7 +32,7 @@ inline constexpr std::size_t kGaborKernelSize = std::size_t{kGaborOrientations} 
 [[nodiscard]] pathtracer::gfx::HdrImage sobelAov(const pathtracer::gfx::HdrImage& beauty,
                                               pathtracer::scene::ThreadPool& threadPool);
 
-// Maximum absolute response of the 4-orientation Gabor bank over Luminance, broadcast to RGB.
+// Peak quadrature magnitude of the 2-D Morlet wavelet bank over Luminance (Morlet 1982; Antoine & Murenzi 1996), broadcast to RGB.
 [[nodiscard]] pathtracer::gfx::HdrImage gaborAov(const pathtracer::gfx::HdrImage& beauty,
                                               pathtracer::scene::ThreadPool& threadPool);
 

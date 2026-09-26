@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstddef>
 #include <functional>
+#include <numbers>
 #include <numeric>
 #include <span>
 #include <vector>
@@ -20,7 +21,7 @@ namespace {
 using pathtracer::gfx::HdrImage;
 using pathtracer::scene::ThreadPool;
 
-// Single-channel Rec.709 luminance, shared by Sobel and Gabor. Materialised once: Sobel reads 8 neighbours per pixel and Gabor 25.
+// Single-channel Rec.709 luminance, shared by every filter that reads intensity alone. Materialised once: Sobel reads 8 neighbours.
 [[nodiscard]] std::vector<float> luminancePlane(const HdrImage& beauty, ThreadPool& threadPool) {
     std::vector<float> plane(static_cast<std::size_t>(beauty.width) * static_cast<std::size_t>(beauty.height));
     threadPool.parallelFor(beauty.height, [&](int y) {
@@ -144,35 +145,6 @@ void clippedTransfer(const float* counts, int bins, int samples, float* knots) {
 
 }  // namespace
 
-std::array<float, kGaborKernelSize> buildGaborKernel() {
-    constexpr float kSigma = 1.4F;
-    constexpr float kLambda = 4.0F;
-    constexpr float kGamma = 0.5F;
-    constexpr std::array<float, kGaborOrientations> kOrientationsDeg = {0.0F, 45.0F, 90.0F, 135.0F};
-
-    std::array<float, kGaborKernelSize> kernel{};
-    for (int o = 0; o < kGaborOrientations; ++o) {
-        const float theta = glm::radians(kOrientationsDeg[static_cast<std::size_t>(o)]);
-        int tapIndex = 0;
-        for (int dy = -kGaborRadius; dy <= kGaborRadius; ++dy) {
-            for (int dx = -kGaborRadius; dx <= kGaborRadius; ++dx) {
-                const auto x = static_cast<float>(dx);
-                const auto y = static_cast<float>(dy);
-                const float xp = (x * std::cos(theta)) + (y * std::sin(theta));
-                const float yp = (-x * std::sin(theta)) + (y * std::cos(theta));
-                const float envelope = std::exp(
-                    -((xp * xp) + (kGamma * kGamma * yp * yp)) / (2.0F * kSigma * kSigma));
-                // Odd/quadrature carrier (sin, not cos) -- edge-sensitive, not bar/ridge-sensitive.
-                const float carrier = std::sin(2.0F * glm::pi<float>() * xp / kLambda);
-                kernel[(static_cast<std::size_t>(o) * kGaborTaps) + static_cast<std::size_t>(tapIndex)] =
-                    envelope * carrier;
-                ++tapIndex;
-            }
-        }
-    }
-    return kernel;
-}
-
 HdrImage luminanceAov(const HdrImage& beauty, ThreadPool& threadPool) {
     const std::vector<float> plane = luminancePlane(beauty, threadPool);
     HdrImage out = makeBroadcastImage(beauty.width, beauty.height);
@@ -209,35 +181,105 @@ HdrImage sobelAov(const HdrImage& beauty, ThreadPool& threadPool) {
     return out;
 }
 
-HdrImage gaborAov(const HdrImage& beauty, ThreadPool& threadPool) {
-    // Built once per process, not per call: the bank depends only on its compile-time parameters, as at shader setup.
-    static const std::array<float, kGaborKernelSize> kernel = buildGaborKernel();
+float morletCarrier(float variance) {
+    // Petkov 1995 eq. 4: the half-response bandwidth in octaves fixes sigma/lambda alone, so the carrier follows from the envelope.
+    const double octaves = static_cast<double>(kMorletOctaves);
+    const double ratio = (std::exp2(octaves) + 1.0) / (std::exp2(octaves) - 1.0);
+    return static_cast<float>((2.0 * std::sqrt(std::numbers::ln2 / 2.0) * ratio) / std::sqrt(static_cast<double>(variance)));
+}
 
-    const std::vector<float> plane = luminancePlane(beauty, threadPool);
-    HdrImage out = makeBroadcastImage(beauty.width, beauty.height);
+int morletOrientations() {
+    // sigma*omega depends only on the bandwidth, so the angular half-response width does too, and with it the cover of a half turn.
+    const double octaves = static_cast<double>(kMorletOctaves);
+    const double sigmaOmega = 2.0 * std::sqrt(std::numbers::ln2 / 2.0) * ((std::exp2(octaves) + 1.0) / (std::exp2(octaves) - 1.0));
+    // Half response at a chord of sqrt(2 ln2)/sigma from the carrier, so adjacent orientations may be no further apart than this.
+    const double angularWidth = 4.0 * std::asin(std::sqrt(2.0 * std::numbers::ln2) / (2.0 * sigmaOmega));
+    return static_cast<int>(std::ceil(std::numbers::pi / angularWidth));
+}
+
+HdrImage gaborAov(const HdrImage& beauty, ThreadPool& threadPool) {
     const int width = beauty.width;
     const int height = beauty.height;
-    threadPool.parallelFor(height, [&](int y) {
+    const auto pixels = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    const std::vector<float> plane = luminancePlane(beauty, threadPool);
+    HdrImage out = makeBroadcastImage(width, height);
+
+    // The finest scale the grid resolves, so the bank sits on the same rung the octave ladder starts from.
+    const float variance = innerScaleVariance();
+    const float carrier = morletCarrier(variance);
+    const int orientations = morletOrientations();
+
+    std::vector<float> lowpass = plane;
+    diffuse(lowpass, width, height, variance, threadPool);
+
+    std::vector<float> peak(pixels, 0.0F);
+    std::vector<float> real(pixels);
+    std::vector<float> imaginary(pixels);
+    std::vector<float> phaseCos(static_cast<std::size_t>(width));
+    std::vector<float> phaseSin(static_cast<std::size_t>(width));
+    for (int orientation = 0; orientation < orientations; ++orientation) {
+        // A half turn covers the bank: the magnitude at theta and theta+pi is the same, the two being complex conjugates.
+        const double theta = (std::numbers::pi * static_cast<double>(orientation)) / static_cast<double>(orientations);
+        const double stepX = static_cast<double>(carrier) * std::cos(theta);
+        const double stepY = static_cast<double>(carrier) * std::sin(theta);
+        // Split by the angle-addition formula, so the row loop carries no transcendental at all.
         for (int x = 0; x < width; ++x) {
-            std::array<float, kGaborOrientations> response{};
-            int tapIndex = 0;
-            // Each neighbourhood texel is fetched once and reused across all four orientations, as the shader does.
-            for (int dy = -kGaborRadius; dy <= kGaborRadius; ++dy) {
-                for (int dx = -kGaborRadius; dx <= kGaborRadius; ++dx) {
-                    const float lum = tap(plane, width, height, x + dx, y + dy);
-                    for (int o = 0; o < kGaborOrientations; ++o) {
-                        response[static_cast<std::size_t>(o)] +=
-                            kernel[(static_cast<std::size_t>(o) * kGaborTaps) + static_cast<std::size_t>(tapIndex)] * lum;
-                    }
-                    ++tapIndex;
-                }
+            phaseCos[static_cast<std::size_t>(x)] = static_cast<float>(std::cos(stepX * static_cast<double>(x)));
+            phaseSin[static_cast<std::size_t>(x)] = static_cast<float>(std::sin(stepX * static_cast<double>(x)));
+        }
+        // Morlet's admissibility term as the blurred plane wave itself, under the same mirror: zero mean at the border, not just inside.
+        std::vector<float> meanCosX(phaseCos);
+        std::vector<float> meanSinX(phaseSin);
+        diffuse(meanCosX, width, 1, variance, threadPool);
+        diffuse(meanSinX, width, 1, variance, threadPool);
+        // Separable, so its own blur is the product of a width-long and a height-long one and costs nothing against the 2-D passes.
+        std::vector<float> meanCosY(static_cast<std::size_t>(height));
+        std::vector<float> meanSinY(static_cast<std::size_t>(height));
+        for (int y = 0; y < height; ++y) {
+            meanCosY[static_cast<std::size_t>(y)] = static_cast<float>(std::cos(stepY * static_cast<double>(y)));
+            meanSinY[static_cast<std::size_t>(y)] = static_cast<float>(std::sin(stepY * static_cast<double>(y)));
+        }
+        diffuse(meanCosY, 1, height, variance, threadPool);
+        diffuse(meanSinY, 1, height, variance, threadPool);
+        threadPool.parallelFor(height, [&](int y) {
+            const auto rowCos = static_cast<float>(std::cos(stepY * static_cast<double>(y)));
+            const auto rowSin = static_cast<float>(std::sin(stepY * static_cast<double>(y)));
+            const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
+            for (int x = 0; x < width; ++x) {
+                const std::size_t pixel = row + static_cast<std::size_t>(x);
+                const float cosPhase = (phaseCos[static_cast<std::size_t>(x)] * rowCos) - (phaseSin[static_cast<std::size_t>(x)] * rowSin);
+                const float sinPhase = (phaseSin[static_cast<std::size_t>(x)] * rowCos) + (phaseCos[static_cast<std::size_t>(x)] * rowSin);
+                // Demodulate, blur, remodulate: the plane wave factors out of the convolution, so every orientation stays separable.
+                real[pixel] = plane[pixel] * cosPhase;
+                imaginary[pixel] = -plane[pixel] * sinPhase;
             }
-            float magnitude = 0.0F;
-            for (const float value : response) {
-                magnitude = std::max(magnitude, std::fabs(value));
+        });
+        diffuse(real, width, height, variance, threadPool);
+        diffuse(imaginary, width, height, variance, threadPool);
+        // Remodulating is a rotation by the carrier's phase, which a magnitude discards, so only the admissibility term is left to apply.
+        threadPool.parallelFor(height, [&](int y) {
+            const float rowCos = meanCosY[static_cast<std::size_t>(y)];
+            const float rowSin = meanSinY[static_cast<std::size_t>(y)];
+            const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
+            for (int x = 0; x < width; ++x) {
+                const std::size_t pixel = row + static_cast<std::size_t>(x);
+                // The blurred plane wave under the same mirror, which is what a constant field would have produced right here.
+                const float meanReal = (meanCosX[static_cast<std::size_t>(x)] * rowCos) -
+                                        (meanSinX[static_cast<std::size_t>(x)] * rowSin);
+                const float meanImaginary = (meanSinX[static_cast<std::size_t>(x)] * rowCos) +
+                                             (meanCosX[static_cast<std::size_t>(x)] * rowSin);
+                const float centredReal = real[pixel] - (meanReal * lowpass[pixel]);
+                const float centredImaginary = imaginary[pixel] + (meanImaginary * lowpass[pixel]);
+                // Squared, so the root is paid once per texel at the end rather than once per texel per orientation; max commutes with it.
+                peak[pixel] = std::max(peak[pixel], (centredReal * centredReal) + (centredImaginary * centredImaginary));
             }
-            writeScalar(out, (static_cast<std::size_t>(y) * static_cast<std::size_t>(width)) + static_cast<std::size_t>(x),
-                        magnitude);
+        });
+    }
+
+    threadPool.parallelFor(height, [&](int y) {
+        const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
+        for (int x = 0; x < width; ++x) {
+            writeScalar(out, row + static_cast<std::size_t>(x), std::sqrt(peak[row + static_cast<std::size_t>(x)]));
         }
     });
     return out;

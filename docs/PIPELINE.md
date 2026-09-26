@@ -162,6 +162,24 @@ The estimate is instead exact and free: `accumulateMean` already holds this pass
 
 The headless path accumulates by naive summation and one divide, not Welford, and that is deliberately unchanged: the moment is carried *beside* the sum, reading the previous mean back out of it, so every published mean stays bit-identical to what it was.
 
+## Oriented bands
+
+`Gabor` is a 2-D Morlet wavelet bank (Morlet 1982; Antoine & Murenzi 1996) — an isotropic Gaussian envelope times a plane wave, minus its own mean. Its three parameters were authored (`sigma = 1.4`, `lambda = 4.0`, `gamma = 0.5`, on a 5x5 support); all three now follow from the shared scale space and from one another.
+
+**Envelope.** `sigma^2 = innerScaleVariance()`, the finest scale the grid resolves at float32 precision and the rung the octave ladder starts from, so the bank sits on the same frequency plane the pyramid tiles. `sigma = 2.884 px`.
+
+**Carrier.** The half-response radial bandwidth fixes `sigma/lambda` alone (Petkov 1995 eq. 4): `sigma/lambda = (1/pi) sqrt(ln2/2) (2^b + 1)/(2^b - 1)`. The bandwidth is the ladder's own octave spacing, `b = 1`, so `sigma*omega0 = 2 sqrt(ln2/2) * 3 = 3.532` and `lambda = 5.130 px` — a carrier 2.57x inside the grid Nyquist, which is checked rather than assumed.
+
+**Orientations.** Because `sigma*omega0` depends only on `b`, so does the angular half-response width: the filter is a Gaussian bump of radial standard deviation `1/sigma` centred at radius `omega0`, half response at a chord of `sqrt(2 ln2)/sigma`, giving `2 asin(sqrt(2 ln2)/(2 sigma omega0))` either side, **38.4 degrees** in total. Covering a half turn at half response or better therefore needs `ceil(180/38.4) = 5` orientations. There is no free choice here: the bandwidth fixes the count. A half turn suffices because the bank is complex and `theta` and `theta + pi` are conjugates with the same magnitude.
+
+**Quadrature, so no carrier phase to choose.** The old bank used an odd (sine) carrier, which was an authored decision between edge and ridge sensitivity. The Morlet response is complex and the AOV reports its magnitude, which is phase-invariant.
+
+**Implementation: modulate, blur, correct.** `(f * G_theta)` factors as `exp(i omega0 x.u) [(f exp(-i omega0 x.u)) * g_sigma]`, an exact identity, so every orientation reduces to two separable Gaussian convolutions of the shared `diffuse` rather than a rotated 2-D kernel. The final remodulation is a rotation by the carrier phase, which the magnitude discards, so it is not computed. At the derived scale a direct 2-D bank would need a 35x35 support per orientation, 6125 taps a texel; this is 11 separable passes instead.
+
+**Admissibility, exactly, at the border too.** A Morlet wavelet is defined with its own mean subtracted. Rather than the ideal `exp(-sigma^2 omega0^2 / 2)`, the term used is the blurred plane wave itself, taken under the same mirror the image gets — which is what a constant field actually produces at that texel. That field is separable, so it is the product of one width-long and one height-long 1-D blur and costs nothing, and it zeroes the DC response everywhere rather than only in the interior. Zero to rounding, not bitwise: the image goes through one fused 2-D blur and the correction through a product of two 1-D ones, and float multiplication does not distribute. Measured at 1.0 to 1.4 float epsilons of the field, over fields spanning four decades. `filters_are_zero_on_a_constant_field` asserts it on a frame smaller than the kernel, where every texel is a border texel.
+
+**The response changed, and the unit changed with it.** The envelope has unit DC gain, so the reported magnitude is the amplitude of the oriented component in radiance units, directly comparable against Luminance; the old bank's weights were unnormalised, so its peak ran about 43x higher with no unit attached. The old bank's passband also sat near pixel Nyquist, so most of what it reported on an unconverged frame was Monte Carlo noise rather than scene structure. `results/wave-morlet-gabor/` holds the before and after.
+
 ## Cone space
 
 `scene/cone_space.h` takes linear Rec.709 to cone excitations and then to the two cardinal chromatic axes. Every link is exact on the data this repository already holds, which decides which fundamentals are usable.
@@ -220,7 +238,7 @@ The grid is capped at one tile per pixel, which matters below one pixel per degr
 | HSV | filter | Beauty in HSV — isolates hue and saturation shifts a pure RGB view hides |
 | Luminance | filter | Rec.709 luminance of Beauty — perceived brightness without colour |
 | Sobel | filter | 3×3 Sobel gradient magnitude of Luminance — a cheap edge signal |
-| Gabor | filter | 4-orientation Gabor bank, max response, over Luminance — directional edges Sobel's isotropic magnitude cannot distinguish |
+| Gabor | filter | Peak quadrature magnitude of a 5-orientation 2-D Morlet bank over Luminance — directional structure Sobel's isotropic magnitude cannot distinguish. Every parameter is derived from the shared scale space; see Oriented bands below. Zero on a constant field to one float epsilon, border included |
 | DoG | filter | Signed difference of the two finest pyramid octaves of Luminance (Marr & Hildreth 1980) — the retinal centre-surround band next to pixel Nyquist. Signed, not a magnitude: polarity separates a bright blob from a dark one, and Sobel already reports magnitude. Exactly zero on any affine field, so it does not fire on a smooth gradient. Zero everywhere on a frame too small for two octaves |
 | LoG | filter | Scale-normalised blob response over the whole octave ladder, `t · laplacian5(L_t)` with γ = 1 (Lindeberg 1998). **R** is the extremal magnitude over scale, **G** the frequency of the scale that won, in cycles/degree via the rendering camera's vertical FOV and the *traced* height, **B** its polarity (+1 bright-on-dark, −1 dark-on-bright, 0 for no response). γ = 1 is not a knob: it is the unique exponent for which the response to a Gaussian blob of scale `t0` peaks at exactly `t = t0`, with closed form `-t/(pi (t0+t)^2)` and peak `1/(4 pi t0)`. A response *field*, not detected extrema — detection needs a magnitude threshold, which is the authored constant this codebase rejects, and a sparse point set is not an image. Scale is quantised to one octave by the ladder |
 | WorldPos | raster | Raw world-space primary-hit position — geometry and UV placement independent of shading |
@@ -314,7 +332,10 @@ Observer models over Beauty, as against the Utility block's image-space derivati
 - Zhukov, S. et al. (1998); Iones, A. et al. (2003); surveyed in Mendez-Feliu, A., Sbert, M. (2009): obscurance, the distance falloff rho(x) = 1 - (1-x)^2 the AO AOV uses.
 - Bitterli, B. et al. (2020). ReSTIR. SIGGRAPH — [roadmap](ROADMAP.md) transport #2, not implemented: reservoir resampling needs many lights to be worth it.
 - Sobel, I., Feldman, G. (1968). A 3x3 isotropic gradient operator for image processing. Stanford AI Project: the Sobel AOV's fixed kernel.
-- Gabor, D. (1946). Theory of communication. J. IEE 93(26); Daugman, J.G. (1985). JOSA A 2(7): the oriented Gabor bank, whose parameters are still authored — see [roadmap](ROADMAP.md).
+- Gabor, D. (1946). Theory of communication. J. IEE 93(26); Daugman, J.G. (1985). JOSA A 2(7): the oriented Gabor filter the Morlet bank is the wavelet form of.
+- Morlet, J. et al. (1982). Geophysics 47(2); Antoine, J.-P., Murenzi, R. (1996). Signal Processing 52(3): the 2-D Morlet wavelet, its admissibility correction and the isotropic-envelope form the Gabor AOV uses.
+- Petkov, N. (1995). Biological Cybernetics 76(2) eq. 4: the half-response bandwidth in octaves fixes sigma/lambda, which is where the carrier comes from instead of an authored wavelength.
+- Field, D.J. (1987). JOSA A 4(12); Kovesi, P. (1999). Videre 1(3): log-Gabor banks and the coverage argument behind the orientation count.
 - Lindeberg, T. (1990). Scale-space for discrete signals. IEEE TPAMI 12(3); Lindeberg, T. (1994). Scale-Space Theory in Computer Vision, ch. 3-4: the discrete Gaussian `e^-t I_n(t)`, its axiomatic uniqueness, and the semi-group and diffusion identities `scale_space.h` is built on.
 - Lindeberg, T. (1998). Feature detection with automatic scale selection. IJCV 30(2): gamma-normalised derivatives and gamma = 1 as the exponent that makes the blob response peak at the blob's own scale, the LoG AOV's scale channel and its validator.
 - Koenderink, J.J. (1984). The structure of images. Biol. Cybern. 50(5); Witkin, A.P. (1983). Scale-space filtering. IJCAI: scale space as the causal one-parameter family the ladder samples.
