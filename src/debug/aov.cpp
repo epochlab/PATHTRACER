@@ -33,6 +33,7 @@ AovSource aovSource(AovId aov) {
         case AovId::Opponent:
         case AovId::Retinex:
         case AovId::CLAHE:
+        case AovId::SNR:
             return AovSource::BeautyFilter;
 
         // The 14 primary-hit lanes renderRasterGBuffer scan-converts. No default: -Werror makes an unclassified AovId a compile error.
@@ -68,6 +69,7 @@ int aovChannels(AovId aov) {
         case AovId::AO:
         case AovId::Shadow:
         case AovId::BounceCount:
+        case AovId::SNR:
         case AovId::Luminance:
         case AovId::Sobel:
         case AovId::Gabor:
@@ -142,6 +144,7 @@ bool aovCarriesRadiance(AovId aov) {
         case AovId::Fresnel:
         case AovId::IOR:
         case AovId::BounceCount:
+        case AovId::SNR:
         case AovId::Shadow:
         case AovId::Count:
             return false;

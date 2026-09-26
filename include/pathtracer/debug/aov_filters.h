@@ -11,7 +11,7 @@
 
 namespace pathtracer::debug {
 
-// CPU implementations of the nine Beauty-reading AOVs. Sobel and Gabor clamp at the edge; the scale-space AOVs mirror, see scale_space.h.
+// CPU implementations of the ten Beauty-reading AOVs. Sobel and Gabor clamp at the edge; the scale-space AOVs mirror, see scale_space.h.
 
 // Rec.709 luminance weights (ITU-R BT.709-6), the one triple every luminance reduction in the engine dots against.
 inline constexpr glm::vec3 kRec709LuminanceWeights{0.2126F, 0.7152F, 0.0722F};
@@ -61,10 +61,18 @@ inline constexpr std::size_t kGaborKernelSize = std::size_t{kGaborOrientations} 
 [[nodiscard]] pathtracer::gfx::HdrImage claheAov(const pathtracer::gfx::HdrImage& beauty, float verticalFovRadians,
                                               pathtracer::scene::ThreadPool& threadPool);
 
+// Signal-to-noise ratio of each texel's published radiance: its Rec.709 luminance over the standard error of that mean.
+[[nodiscard]] pathtracer::gfx::HdrImage snrAov(const pathtracer::gfx::HdrImage& beauty,
+                                            const float* beautyLuminanceM2, int samples,
+                                            pathtracer::scene::ThreadPool& threadPool);
+
 // Everything a BeautyFilter AOV reads, as explicit fields rather than a PathTraceResult, so a validator can build one with no renderer.
 struct FilterInput {
     const pathtracer::gfx::HdrImage& beauty;  // published mean radiance, linear Rec.709, scene-referred and unbounded
     float verticalFovRadians;                 // the rendering camera's, the sole anchor turning pixels into cycles per degree
+    // Welford second moment of the per-pass luminance and the passes averaged in; a variance is undefined below two of them.
+    const float* beautyLuminanceM2 = nullptr;
+    int samples = 0;
 };
 
 // The one dispatch for every BeautyFilter AOV; a non-filter id yields an empty image. No default arm, so a new filter must be routed.

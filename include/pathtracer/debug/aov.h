@@ -37,6 +37,7 @@ enum class AovId : int {
     Fresnel,
     IOR,
     BounceCount,
+    SNR,
     // Lighting.
     DirectDiffuse,
     IndirectDiffuse,
@@ -56,14 +57,14 @@ inline constexpr const char* kAovNames[] = {
     "Opponent",     "Retinex",        "CLAHE",
     "Normal",       "GeomNormal",     "Albedo",          "Metallic",
     "Roughness",    "Tangent",        "ObjectID",        "AO",
-    "Fresnel",      "IOR",            "Bounce Count",
+    "Fresnel",      "IOR",            "Bounce Count",    "SNR",
     "Direct Diffuse", "Indirect Diffuse", "Direct Specular",
     "Indirect Specular", "Refraction", "Shadow",
 };
 static_assert(sizeof(kAovNames) / sizeof(kAovNames[0]) == static_cast<int>(AovId::Count),
               "kAovNames must stay index-parallel with AovId");
 
-// Which of the three producers computes each AOV: 10 accumulated path-traced lanes, 14 primary-hit rasterizer lanes, 9 filters over Beauty.
+// Which of the three producers computes each AOV: 10 accumulated path-traced lanes, 14 rasterizer lanes, 10 filters over Beauty.
 enum class AovSource { PathTraced, GBuffer, BeautyFilter };
 
 [[nodiscard]] AovSource aovSource(AovId aov);

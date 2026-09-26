@@ -1,6 +1,7 @@
 // Correctness gate for the shared scale space and the AOVs built on it: kernel identities, the octave cascade, then DoG and LoG.
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <numbers>
@@ -769,6 +770,94 @@ PT_CHECK(clahe_preserves_chromaticity, Fast, Exact) {
     // One rounding of the scale into each of the two products, so the two recovered ratios may differ by two ulps and no more.
     PT_EXPECT(ctx, worst <= 2.0 * static_cast<double>(kFloatEpsilon),
                   "per-channel scale factors differ by a relative " + std::to_string(worst));
+}
+
+// x_i = mu +/- delta over an even count gives M2 = n delta^2 exactly, so the reported ratio has a closed form and no tolerance.
+PT_CHECK(snr_matches_the_closed_form_of_an_alternating_sequence, Fast, Exact) {
+    // 65536 is past the 46341 at which the degrees-of-freedom product leaves int, so this sweep covers that widening too.
+    const std::array<int, 5> counts{2, 8, 64, 1024, 65536};
+    ctx.plan(static_cast<int>(counts.size()));
+    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    constexpr int kWidth = 64;
+    constexpr int kHeight = 48;
+    constexpr std::size_t kPixels = static_cast<std::size_t>(kWidth) * kHeight;
+    // Powers of two, so mu, delta and every product below are exact and the comparison is against an exactly representable value.
+    constexpr float kValue = 0.25F;
+    constexpr float kDelta = 0.03125F;
+    const float mean = greyLuminanceGain() * kValue;
+    const HdrImage beauty = greyImage(kWidth, kHeight, std::vector<float>(kPixels, kValue));
+
+    for (const int samples : counts) {
+        const std::vector<float> secondMoment(kPixels, static_cast<float>(samples) * kDelta * kDelta);
+        const HdrImage snr = pathtracer::debug::snrAov(beauty, secondMoment.data(), samples, pool);
+        // SEM = delta / sqrt(n-1), so the ratio is mu sqrt(n-1) / delta.
+        const double expected = (static_cast<double>(mean) * std::sqrt(static_cast<double>(samples) - 1.0)) / kDelta;
+        double worst = 0.0;
+        for (int y = 0; y < kHeight; ++y) {
+            for (int x = 0; x < kWidth; ++x) {
+                worst = std::max(worst, std::fabs(static_cast<double>(texelAt(snr, x, y, 0)) - expected) / expected);
+            }
+        }
+        // One rounding each in the luminance dot, the product under the root, the root itself and the divide.
+        PT_EXPECT(ctx, worst <= 4.0 * static_cast<double>(kFloatEpsilon),
+                      "n=" + std::to_string(samples) + " reports a relative " + std::to_string(worst) + " off " +
+                          std::to_string(expected));
+    }
+}
+
+// Independent draws of variance sigma^2 have E[M2] = (n-1) sigma^2, so the standard error of the mean must fall as sigma/sqrt(n).
+PT_CHECK(snr_falls_with_the_root_of_the_pass_count, Fast, Exact) {
+    const std::array<int, 5> counts{4, 16, 64, 256, 1024};
+    ctx.plan(static_cast<int>(counts.size()));
+    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    constexpr int kWidth = 32;
+    constexpr int kHeight = 32;
+    constexpr std::size_t kPixels = static_cast<std::size_t>(kWidth) * kHeight;
+    constexpr float kValue = 0.5F;
+    constexpr float kSigma = 0.125F;
+    const float mean = greyLuminanceGain() * kValue;
+    const HdrImage beauty = greyImage(kWidth, kHeight, std::vector<float>(kPixels, kValue));
+
+    for (const int samples : counts) {
+        const std::vector<float> secondMoment(kPixels, static_cast<float>(samples - 1) * kSigma * kSigma);
+        const HdrImage snr = pathtracer::debug::snrAov(beauty, secondMoment.data(), samples, pool);
+        const double expected = (static_cast<double>(mean) * std::sqrt(static_cast<double>(samples))) / kSigma;
+        const double worst = std::fabs(static_cast<double>(texelAt(snr, 0, 0, 0)) - expected) / expected;
+        PT_EXPECT(ctx, worst <= 4.0 * static_cast<double>(kFloatEpsilon),
+                      "n=" + std::to_string(samples) + " reports a relative " + std::to_string(worst) + " off " +
+                          std::to_string(expected));
+    }
+}
+
+// A variance needs two draws, and a texel every pass agreed on has none: both report zero rather than an infinity or a stale number.
+PT_CHECK(snr_is_zero_where_the_ratio_is_undefined, Fast, Exact) {
+    ctx.plan(4);
+    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    constexpr int kWidth = 32;
+    constexpr int kHeight = 24;
+    constexpr std::size_t kPixels = static_cast<std::size_t>(kWidth) * kHeight;
+    const HdrImage beauty = greyImage(kWidth, kHeight, std::vector<float>(kPixels, 0.75F));
+    const std::vector<float> secondMoment(kPixels, 0.125F);
+    const std::vector<float> converged(kPixels, 0.0F);
+    // Colour only: alpha is 1 by the broadcast convention, so admitting it here would let an all-ones response pass as zero.
+    const auto allZero = [](const HdrImage& image) {
+        for (std::size_t pixel = 0; pixel < image.rgba.size() / 4; ++pixel) {
+            for (int channel = 0; channel < 3; ++channel) {
+                if (image.rgba[(pixel * 4) + static_cast<std::size_t>(channel)] != 0.0F) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+    PT_EXPECT(ctx, allZero(pathtracer::debug::snrAov(beauty, nullptr, 64, pool)),
+                  "an absent second moment did not read zero");
+    PT_EXPECT(ctx, allZero(pathtracer::debug::snrAov(beauty, secondMoment.data(), 0, pool)),
+                  "zero passes did not read zero");
+    PT_EXPECT(ctx, allZero(pathtracer::debug::snrAov(beauty, secondMoment.data(), 1, pool)),
+                  "a single pass did not read zero");
+    PT_EXPECT(ctx, allZero(pathtracer::debug::snrAov(beauty, converged.data(), 64, pool)),
+                  "a texel with no dispersion did not read zero");
 }
 
 PT_CHECK_MAIN("filter")

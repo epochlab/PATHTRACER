@@ -416,11 +416,13 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
 }  // namespace
 
 PathTraceResult makePathTraceResult(int width, int height) {
-    // 10 images in PathTraceResult's declaration order, which this positional init must match; overRange is left default.
+    // 10 images then the second-moment lane, in PathTraceResult's declaration order, which this positional init must match.
     return {makeImage(width, height), makeImage(width, height), makeImage(width, height),
             makeImage(width, height), makeImage(width, height), makeImage(width, height),
             makeImage(width, height), makeImage(width, height), makeImage(width, height),
-            makeImage(width, height), OverRangeStats{}};
+            makeImage(width, height),
+            std::vector<float>(static_cast<std::size_t>(width) * static_cast<std::size_t>(height), 0.0F),
+            OverRangeStats{}};
 }
 
 void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,

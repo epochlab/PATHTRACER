@@ -114,7 +114,7 @@ Presets live in `assets/materials/*.json`, parsed into `MaterialConfig` (`scene_
 
 # AOV
 
-33 selectable channels (`aov.h`), in HUD order. **Source** is which producer computes one: `traced` accumulates over passes (10 lanes), `raster` is exact and instant every frame (14), `filter` is an image-space pass over a finished Beauty (9).
+34 selectable channels (`aov.h`), in HUD order. **Source** is which producer computes one: `traced` accumulates over passes (10 lanes), `raster` is exact and instant every frame (14), `filter` is an image-space pass over a finished Beauty (10).
 
 Filters run on the CPU only (`debug/aov_filters.cpp`), for both the viewer and the headless API — there is no GLSL copy. `evaluateFilterAov` is the single dispatch, with no `default` arm, so `-Werror` rejects a new filter AOV that nothing routes. In the viewer one filter evaluation is cached per published pass (`FilterCache`), keyed on the pass's owner, generation and sample count, so a filter costs nothing per displayed frame; `filterMs` on the `-stats` dashboard and in the benchmark log reports it.
 
@@ -149,6 +149,18 @@ Rejected, with reasons, so they are not revisited:
 - *Burt & Adelson's 5-tap binomial kernel.* Right structure, but it is only approximately Gaussian and its variance is not `t`. The structure is kept and the kernel replaced.
 
 Two implementation choices carry the exactness. **Convolution is centre-relative**, `out = c + sum_n w_n ((l - c) + (r - c))`: on an affine field every tap pair cancels bit-exactly, so diffusion reproduces a ramp identically and DC gain is exactly 1 by construction rather than by normalisation. It also reduces cancellation in DoG, which differences two nearly equal blurs. **The boundary mirrors about the edge sample without repeating it** (whole-sample symmetry), so every tap lands on real data and the finite operator stays diagonal in the cosine basis; a mirror turns a ramp into a tent, so validators scope to the interior by the radius the facility reports.
+
+## Estimator noise
+
+`SNR` reports how well each published texel is known, not how noisy one sample is: `beauty` is a mean, so the denominator is the standard error **of the mean**, `sqrt(M2 / (n(n-1)))`. Linear, not dB, matching the repo's raw-value convention.
+
+**Single-image spatial estimators are rejected on principle.** Immerkaer 1996 (whose 3x3 mask is a scaled discrete Laplacian) and Donoho & Johnstone 1994's MAD of the finest wavelet subband both estimate *one global sigma under additive white Gaussian noise*. Monte Carlo render noise violates that on three counts: it is heteroscedastic by orders of magnitude between a directly lit diffuse texel and a caustic, it is signal-dependent, and it is spatially correlated through NEE, environment importance sampling and the shared Owen-scrambled Sobol sequence. Both would also report a tessellated silhouette as noise.
+
+The estimate is instead exact and free: `accumulateMean` already holds this pass's radiance in the destination and the previous mean in the source, which is precisely what Welford's recurrence needs, so the second moment is one extra pass over `beauty` in a loop that was already streaming it. `renderPathTraced` is untouched, so the hot path pays nothing. It is Welford 1962 in West 1979's `(x - m_prev)(x - m_new)` form, the same recurrence and the same `invN` the ten RGB lanes use; `running_m2_matches_batch_variance` gates it against the two-pass sum of squared deviations under the forward-error bound `running_mean_matches_batch_mean` already derives.
+
+**One float per texel, not an eleventh image.** 9 MiB a pool slot at 2048x1152 against 36 MiB for a full RGBA lane, and luminance M2 is computed on the per-pass luminance directly, so it is exact for luminance — it is *not* recoverable from three per-channel moments, which would need the inter-channel covariance shared paths induce.
+
+The headless path accumulates by naive summation and one divide, not Welford, and that is deliberately unchanged: the moment is carried *beside* the sum, reading the previous mean back out of it, so every published mean stays bit-identical to what it was.
 
 ## Cone space
 
@@ -244,6 +256,7 @@ Observer models over Beauty, as against the Utility block's image-space derivati
 | Fresnel | traced | Expected Fresnel reflectance over the **visible** microfacet normals, `E[F]` from one VNDF draw per sample — the distribution `sampleBsdf` itself draws from, so it is roughness-dependent where a macro-normal value cannot be: on an `ior` 1.5 dielectric at `n.wo` 0.05 it reads 0.7521, 0.4406 and 0.1692 at the roughness floor, 0.3 and 0.6, against 0.7521 throughout for a macro normal. Full RGB, since a conductor's Fresnel is chromatic by construction |
 | IOR | raster | Per-instance dielectric IOR, -1 on a miss — the raw index driving Fresnel and transmission |
 | BounceCount | traced | Mean path termination depth per pixel — Russian roulette and termination behaviour |
+| SNR | filter | Rec.709 luminance of Beauty over the standard error of that mean, `mu / sqrt(M2 / (n(n-1)))`. 0 below two passes, where a variance is undefined, and 0 on a texel every pass agreed on. Reads the Welford second moment `renderPathTraced` never touches — see Estimator noise below |
 
 ## Lighting
 
@@ -318,6 +331,7 @@ Observer models over Beauty, as against the Utility block's image-space derivati
 - Zuiderveld, K. (1994). Contrast limited adaptive histogram equalization. Graphics Gems IV; Pizer, S.M. et al. (1987). CVGIP 39(3): the CLAHE AOV's tile structure and bilinear blend.
 - Ward Larson, G., Rushmeier, H., Piatko, C. (1997). A visibility matching tone reproduction operator for high dynamic range scenes. IEEE TVCG 3(4): the log-luminance domain, the linear contrast ceiling, truncate-and-redistribute, and the one-degree local adaptation extent the tile grid is anchored to.
 - Freedman, D., Diaconis, P. (1981). Z. Wahrscheinlichkeitstheorie 57; Scott, D.W. (1979). Biometrika 66(3): the analytically derived L2-optimal histogram bin widths, which is where CLAHE's bin count comes from instead of an authored one.
+- Immerkaer, J. (1996). Fast noise variance estimation. CVIU 64(2); Donoho, D.L., Johnstone, I.M. (1994). Biometrika 81(3): single-image noise estimators surveyed and rejected, both assuming one global sigma of additive white Gaussian noise, which Monte Carlo render noise is not.
 - Wilson, H.R., Bergen, J.J. (1979). Vision Res. 19(1); De Valois, R.L. et al. (1982). Vision Res. 22(5): the ≈1.2-octave spatial-frequency channel bandwidth the one-octave ladder matches.
 - Abramowitz, M., Stegun, I.A. (1964) 9.6.10: the ascending series for `I_n(t)`, used in place of the absent `std::cyl_bessel_i`.
 - Deriche, R. (1993); Young, I.T., van Vliet, L.J. (1995); Alvarez, L., Mazorra, L. (1994); Triggs, B., Sdika, M. (2006): recursive O(1) Gaussian approximations, surveyed and **not** adopted — an approximate semi-group and an asymmetric kernel would give up the exact affine and ramp invariants the validators assert.

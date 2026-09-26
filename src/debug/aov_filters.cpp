@@ -558,6 +558,32 @@ HdrImage claheAov(const HdrImage& beauty, float verticalFovRadians, ThreadPool& 
     return out;
 }
 
+HdrImage snrAov(const HdrImage& beauty, const float* beautyLuminanceM2, int samples, ThreadPool& threadPool) {
+    HdrImage out = makeBroadcastImage(beauty.width, beauty.height);
+    // A single sample carries no dispersion, so the ratio is undefined rather than infinite, and a black frame says so.
+    if (beautyLuminanceM2 == nullptr || samples < 2) {
+        return out;
+    }
+    // Standard error of the MEAN, not of one sample: `beauty` is a mean, and the question is how well its value is known.
+    const float passes = static_cast<float>(samples);
+    // Widened before the product, not after: n(n-1) leaves int at 46341 passes, which an uncapped accumulation reaches.
+    const float inverseDegrees = 1.0F / (passes * (passes - 1.0F));
+    threadPool.parallelFor(beauty.height, [&](int y) {
+        const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(beauty.width);
+        for (int x = 0; x < beauty.width; ++x) {
+            const std::size_t pixel = row + static_cast<std::size_t>(x);
+            const std::size_t texel = pixel * 4;
+            const float luminance = (beauty.rgba[texel] * kRec709LuminanceWeights.r) +
+                                    (beauty.rgba[texel + 1] * kRec709LuminanceWeights.g) +
+                                    (beauty.rgba[texel + 2] * kRec709LuminanceWeights.b);
+            const float standardError = std::sqrt(beautyLuminanceM2[pixel] * inverseDegrees);
+            // Zero dispersion is a converged texel, not an infinite ratio; a background pixel every pass agrees on is the usual case.
+            writeScalar(out, pixel, standardError > 0.0F ? luminance / standardError : 0.0F);
+        }
+    });
+    return out;
+}
+
 HdrImage evaluateFilterAov(AovId aov, const FilterInput& input, ThreadPool& threadPool) {
     switch (aov) {
         case AovId::HSV:       return hsvAov(input.beauty, threadPool);
@@ -569,6 +595,7 @@ HdrImage evaluateFilterAov(AovId aov, const FilterInput& input, ThreadPool& thre
         case AovId::Opponent:  return opponentAov(input.beauty, threadPool);
         case AovId::Retinex:   return retinexAov(input.beauty, threadPool);
         case AovId::CLAHE:     return claheAov(input.beauty, input.verticalFovRadians, threadPool);
+        case AovId::SNR:       return snrAov(input.beauty, input.beautyLuminanceM2, input.samples, threadPool);
 
         // The lanes their own producers write. No default arm: -Werror then makes an unrouted new filter a compile error.
         case AovId::Beauty:

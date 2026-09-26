@@ -3,6 +3,43 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Monte Carlo noise: the Welford second moment and the SNR AOV
+
+The last AOV of the perceptual wave, and the only one needing a new lane in `PathTraceResult` rather than a new read of Beauty.
+33 AOVs become 34, nine filters become ten. It also unblocks the parked variance-driven adaptive-sampling item, which needed
+exactly this measurement.
+
+- feat: `PathTraceResult::beautyLuminanceM2` -- the Welford second moment of each texel's per-pass Rec.709 luminance. One
+  float per texel, not an eleventh image: an SNR needs no chromaticity, and luminance M2 computed on the per-pass luminance
+  is exact for luminance, where three per-channel moments would need the inter-channel covariance shared paths induce
+- feat: the recurrence lives in `accumulateMean`, which already holds this pass's radiance in the destination and the previous
+  mean in the source -- precisely Welford's two operands, so the moment is one extra pass over a buffer already being streamed.
+  `renderPathTraced` is untouched, so the hot path pays nothing. Welford 1962 in West 1979's `(x - m_prev)(x - m_new)` form,
+  the same recurrence and the same `invN` the ten RGB lanes use
+- feat: `AovId::SNR` (1 ch) reports `mu / sqrt(M2 / (n(n-1)))` -- the standard error **of the mean**, because `beauty` is a
+  mean and the question is how well its published value is known, not how noisy one sample was. Zero below two passes, where
+  a variance is undefined, and zero on a texel every pass agreed on, rather than an infinity. Linear, not dB
+- feat: single-image spatial estimators are recorded as evaluated and rejected. Immerkaer 1996 and Donoho & Johnstone 1994
+  both estimate one global sigma under additive white Gaussian noise; Monte Carlo render noise is heteroscedastic by orders of
+  magnitude, signal-dependent, and spatially correlated through NEE, environment importance sampling and the shared
+  Owen-scrambled Sobol sequence. Both would also report a tessellated silhouette as noise
+- feat: the headless path keeps its naive summation and single divide, with the moment carried *beside* the sum and the
+  previous mean read back out of it. Verified: `render_beauty --compare-exr` against the pre-change Beauty is RMSE 0
+- perf: peak RSS 1296.3 -> 1327.8 MiB at 2048x1152 on a matched three-stage benchmark, **+31.5 MiB, +2.43%**. The SNR filter
+  itself is 6.95 ms, one streaming pass with a square root
+- test: `running_m2_matches_batch_variance` gates the driver's recurrence against the two-pass sum of squared deviations in
+  double, under a forward-error bound built the same way `running_mean_matches_batch_mean` builds its own -- the float mean's
+  per-lane error carried through the luminance dot and into both Welford operands. Mutation-tested: dropping the mean update
+  and dropping the carried moment are both caught. It also asserts the moment is somewhere non-zero, so a frame the passes
+  agreed on cannot satisfy the bound vacuously
+- fix: `samples * (samples - 1)` was evaluated in `int` before widening, which is signed overflow past 46341 passes -- an
+  uncapped interactive accumulation or a large headless request reaches it, and the result is a negative degrees-of-freedom
+  count, a NaN standard error and a silently black AOV. Found by review, confirmed undefined by UBSan on a reduction.
+  The sweep now runs to 65536 passes, though it cannot gate the overflow itself: the count is a compile-time constant there
+  and clang folds the product, so `PATHTRACER_SANITIZE` is what covers that class
+- test: 3 SNR checks in `filter_validate`, all closed form and exact -- the alternating sequence `mu +/- delta` whose moment is
+  `n delta^2`, the `sigma/sqrt(n)` fall of the standard error, and the four undefined cases reading zero
+
 ## Colour opponency, retinex and CLAHE: the three perceptual AOVs
 
 The second wave on `scale_space.h`. All three are observer models rather than image-space derivative operators, so they get
