@@ -16,6 +16,8 @@ enum class AovId : int {
     Luminance,
     Sobel,
     Gabor,
+    DoG,
+    LoG,
     WorldPos,
     UV,
     // Material.
@@ -45,7 +47,8 @@ enum class AovId : int {
 inline constexpr const char* kAovNames[] = {
     "Beauty",       "Wireframe",      "Alpha",           "Depth",
     "Lookahead",    "HSV",            "Luminance",       "Sobel",
-    "Gabor",        "WorldPos",       "UV",
+    "Gabor",        "DoG",            "LoG",             "WorldPos",
+    "UV",
     "Normal",       "GeomNormal",     "Albedo",          "Metallic",
     "Roughness",    "Tangent",        "ObjectID",        "AO",
     "Fresnel",      "IOR",            "Bounce Count",
@@ -55,13 +58,16 @@ inline constexpr const char* kAovNames[] = {
 static_assert(sizeof(kAovNames) / sizeof(kAovNames[0]) == static_cast<int>(AovId::Count),
               "kAovNames must stay index-parallel with AovId");
 
-// Which of the three producers computes each AOV: 10 accumulated path-traced lanes, 14 primary-hit rasterizer lanes, 4 filters over Beauty.
+// Which of the three producers computes each AOV: 10 accumulated path-traced lanes, 14 primary-hit rasterizer lanes, 6 filters over Beauty.
 enum class AovSource { PathTraced, GBuffer, BeautyFilter };
 
 [[nodiscard]] AovSource aovSource(AovId aov);
 
 // Channels the AOV means, not how it is stored: HdrImage is always 4 floats/texel, so this is what a packed consumer must allocate.
 [[nodiscard]] int aovChannels(AovId aov);
+
+// True where the AOV's value is proportional to scene radiance, so the display exposure is a gain on it rather than a distortion.
+[[nodiscard]] bool aovCarriesRadiance(AovId aov);
 
 // True for AOVs needing light transport, false for the 14 primary-hit ones. Derived from aovSource, so the two cannot drift apart.
 [[nodiscard]] inline bool aovNeedsLightTransport(AovId aov) {

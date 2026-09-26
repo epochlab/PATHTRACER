@@ -5,14 +5,15 @@
 
 #include <glm/glm.hpp>
 
+#include "pathtracer/debug/aov.h"
 #include "pathtracer/gfx/hdr_image.h"
 #include "pathtracer/scene/thread_pool.h"
 
 namespace pathtracer::debug {
 
-// CPU implementations of the four Beauty-reading AOVs. Taps clamp to the edge; HdrImage row 0 is the top, flipping Sobel's gy vs GL.
+// CPU implementations of the six Beauty-reading AOVs. Sobel and Gabor clamp at the edge; the scale-space AOVs mirror, see scale_space.h.
 
-// Rec.709 luminance weights (ITU-R BT.709-6), the same triple edge_filter.frag's sampleLuminance dots against.
+// Rec.709 luminance weights (ITU-R BT.709-6), the one triple every luminance reduction in the engine dots against.
 inline constexpr glm::vec3 kRec709LuminanceWeights{0.2126F, 0.7152F, 0.0722F};
 
 inline constexpr int kGaborOrientations = 4;
@@ -39,5 +40,23 @@ inline constexpr std::size_t kGaborKernelSize = std::size_t{kGaborOrientations} 
 // Hue, saturation and value in RGB; hue and saturation normalised to [0,1], value left scene-referred so it is not clamped at white.
 [[nodiscard]] pathtracer::gfx::HdrImage hsvAov(const pathtracer::gfx::HdrImage& beauty,
                                             pathtracer::scene::ThreadPool& threadPool);
+
+// Signed difference of the two finest pyramid octaves (Marr & Hildreth 1980), broadcast to RGB. Zero if the frame carries no such band.
+[[nodiscard]] pathtracer::gfx::HdrImage dogAov(const pathtracer::gfx::HdrImage& beauty,
+                                            pathtracer::scene::ThreadPool& threadPool);
+
+// Scale-normalised Laplacian extremum over the octave ladder (Lindeberg 1998, gamma=1): magnitude, its cycles/degree, and its polarity.
+[[nodiscard]] pathtracer::gfx::HdrImage logAov(const pathtracer::gfx::HdrImage& beauty, float verticalFovRadians,
+                                            pathtracer::scene::ThreadPool& threadPool);
+
+// Everything a BeautyFilter AOV reads, as explicit fields rather than a PathTraceResult, so a validator can build one with no renderer.
+struct FilterInput {
+    const pathtracer::gfx::HdrImage& beauty;  // published mean radiance, linear Rec.709, scene-referred and unbounded
+    float verticalFovRadians;                 // the rendering camera's, the sole anchor turning pixels into cycles per degree
+};
+
+// The one dispatch for every BeautyFilter AOV; a non-filter id yields an empty image. No default arm, so a new filter must be routed.
+[[nodiscard]] pathtracer::gfx::HdrImage evaluateFilterAov(AovId aov, const FilterInput& input,
+                                                       pathtracer::scene::ThreadPool& threadPool);
 
 }  // namespace pathtracer::debug

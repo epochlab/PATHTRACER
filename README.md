@@ -4,7 +4,7 @@
 
 ![Sample render](sample.png)
 
-[Pipeline](docs/PIPELINE.md) — how a frame is made, every subsystem, the material library and all 28 AOVs. [Roadmap](docs/ROADMAP.md) — what is deliberately not implemented.
+[Pipeline](docs/PIPELINE.md) — how a frame is made, every subsystem, the material library and all 30 AOVs. [Roadmap](docs/ROADMAP.md) — what is deliberately not implemented.
 
 ## Build
 

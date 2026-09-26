@@ -8,7 +8,7 @@ A CPU path tracer. For each pixel it follows light backwards from the camera, bo
 
 **Per frame.** Any camera or scene change triggers two independent lanes:
 
-- **Path tracer** — `PathTraceDriver` hands a request to a background pool (one worker per core, row-parallel) and restarts accumulation. Pinhole rays, Embree intersection, then per bounce: sample the BSDF — how the material scatters light ([materials](#materials--lighting)) — and sample a light by NEE, the two combined by multiple importance sampling (MIS) so neither's weak case shows (power heuristic, Veach 1997). Russian roulette terminates recursion, with shadow-terminator-corrected secondary origins (Chiang/Li/Burley 2019) and Beer-Lambert absorption inside transmissive media. Beauty and the nine other path-traced AOVs — an AOV being one selectable output channel, 28 in all — accumulate per pass and publish lock-free to the render thread.
+- **Path tracer** — `PathTraceDriver` hands a request to a background pool (one worker per core, row-parallel) and restarts accumulation. Pinhole rays, Embree intersection, then per bounce: sample the BSDF — how the material scatters light ([materials](#materials--lighting)) — and sample a light by NEE, the two combined by multiple importance sampling (MIS) so neither's weak case shows (power heuristic, Veach 1997). Russian roulette terminates recursion, with shadow-terminator-corrected secondary origins (Chiang/Li/Burley 2019) and Beer-Lambert absorption inside transmissive media. Beauty and the nine other path-traced AOVs — an AOV being one selectable output channel, 30 in all — accumulate per pass and publish lock-free to the render thread.
 - **Rasterizer** — a synchronous CPU pass (`rasterizer.cpp`) scan-converts the 14 primary-hit AOVs on the render thread every frame: the G-buffer, the surface data visible directly from the camera. It shares `gbuffer_shading.h`'s material sampling with the path tracer, but uses no Embree, no BSDF and no recursion. It is watertight — vertices snap to a fixed-point grid whose precision is derived per frame to keep the int64 edge functions exact, so two triangles sharing an edge cover each pixel centre on it exactly once. That is what keeps these AOVs glitch-free during camera motion; the traced lane restarts only when the selected AOV needs light transport.
 
 **Display.** The render thread blits the selected AOV through OCIO's display transform and draws the HUD, converging over later passes rather than blocking on one long render. No GPU rasterization anywhere: OpenGL is the window, the OCIO blit and ImGui.
@@ -114,7 +114,41 @@ Presets live in `assets/materials/*.json`, parsed into `MaterialConfig` (`scene_
 
 # AOV
 
-28 selectable channels (`aov.h`), in HUD order. **Source** is which producer computes one: `traced` accumulates over passes (10 lanes), `raster` is exact and instant every frame (14), `filter` is an image-space pass over a finished Beauty (4).
+30 selectable channels (`aov.h`), in HUD order. **Source** is which producer computes one: `traced` accumulates over passes (10 lanes), `raster` is exact and instant every frame (14), `filter` is an image-space pass over a finished Beauty (6).
+
+Filters run on the CPU only (`debug/aov_filters.cpp`), for both the viewer and the headless API — there is no GLSL copy. `evaluateFilterAov` is the single dispatch, with no `default` arm, so `-Werror` rejects a new filter AOV that nothing routes. In the viewer one filter evaluation is cached per published pass (`FilterCache`), keyed on the pass's owner, generation and sample count, so a filter costs nothing per displayed frame; `filterMs` on the `-stats` dashboard and in the benchmark log reports it.
+
+Display exposure now follows `aovCarriesRadiance`, not the AOV's producer: the six radiance lanes and the four filters that are positively homogeneous of degree one in radiance (Luminance, Sobel, Gabor, DoG) take the photographic exposure, and everything else — ratios, reflectances, counts, lengths, directions, frequencies — stays at unity gain. `relativeExposureEv()` is 0 at the authored camera, so the default appearance of every AOV is unchanged.
+
+## Scale space
+
+`debug/scale_space.h` is the one Gaussian facility, shared by DoG and LoG. The kernel is Lindeberg's **discrete** Gaussian `T(n;t) = e^{-t} I_n(t)` (Lindeberg 1990), not a sampled continuous Gaussian, because only it satisfies the discrete scale-space axioms and because the exactness is what makes the validators exact rather than approximate:
+
+| Property | Sampled Gaussian | `e^{-t} I_n(t)` |
+|---|---|---|
+| `sum w = 1` | needs renormalising | exact, by `sum I_n(t) = e^t` |
+| variance | approximately `t` | exactly `t` |
+| semi-group `T(t1)*T(t2) = T(t1+t2)` | approximate | exact on the grid |
+| transfer function | approximate | exactly `exp(-t(1 - cos w))` |
+| `dL/dt = laplacian5(L)/2` | approximate | exact, so `laplacian5` of a level **is** its discrete LoG |
+
+`std::cyl_bessel_i` does not exist on libc++, so `I_n(t)` comes from the ascending series `I_n(t) = sum_k (t/2)^(n+2k) / (k! (n+k)!)`. Every term is positive, so there is no cancellation and the sum is relatively accurate to double precision; the magnitude is carried in the exponent and the series summed relative to its own first term, so neither a large order nor a large `t` can overflow or underflow it. Miller's downward recurrence was rejected: it needs a starting order chosen by a rule of thumb, which is exactly the authored constant this codebase's numerics avoid.
+
+**Every threshold in the file is float32's unit roundoff, 2^-24**, and nothing else:
+
+- **Truncation.** Taps are emitted outward until the discarded tail mass falls below 2^-24, below which it cannot perturb a float result. That lands near `R = 5.4 sqrt(t)`, wider than the customary 4σ, which is the point. Truncated weights are renormalised over the emitted taps, not against the infinite sum: a kernel with gain `1 - 2^-24` would compound across the cascade.
+- **Inner scale.** The finest scale the base grid represents faithfully is where the transfer at the grid Nyquist `w = pi` reaches 2^-24: `exp(-2t) = 2^-24`, so `t = 12 ln2 = 8.3178` (σ = 2.884 px). Below that a level still carries energy at Nyquist and is not a sampling of a band-limited function.
+- **Decimation.** The same criterion at the post-decimation Nyquist `w = pi/2` gives `exp(-t) = 2^-24`, so `t = 24 ln2`, exactly twice the inner scale because `(1 - cos pi) = 2 (1 - cos pi/2)`. Above it, halving the grid discards nothing, so the cascade subsamples rather than averaging — averaging would add variance the bookkeeping does not account for. (For scale: this is within 15% of SIFT's empirically chosen `sigma_0 = 1.6` per octave, independent corroboration from the representation rather than from repeatability experiments.)
+
+The structure is an octave-spaced cascaded decimated pyramid (Burt & Adelson 1983's structure, Lindeberg's kernels). One octave per level is not a tuning choice: successive-octave DoG has ≈1.2-octave bandwidth, matching the measured human spatial-frequency channels (Wilson & Bergen 1979; De Valois et al. 1982); successive octave DoGs sum to `(1 - lowpass)` exactly, so the decomposition is complete; and it is what permits decimation at all. The ladder **ends where a step's kernel support outgrows its own plane** — such a level reports the mirrored boundary at every sample, not the image — which gives 6 levels at 2048×1152, σ from 2.88 to 92.3 base pixels.
+
+Rejected, with reasons, so they are not revisited:
+
+- *Repeated full-σ convolution from the original.* The top octave alone is ~760 taps/px/direction at 2048×1152, ≈2.6 Gtap. Dead on cost.
+- *Recursive IIR* (Deriche 1993; Young & van Vliet 1995; Alvarez & Mazorra 1994). O(1)/px, but rejected on **correctness**: it approximates the Gaussian, so the semi-group is approximate; its boundary initialisation is itself an approximation (Triggs & Sdika 2006 exists to patch it); and it is not a symmetric FIR, so it does not annihilate affine fields exactly. That last property is what gives "LoG reads zero on a ramp". The cost advantage evaporates once decimation makes the FIR path O(N).
+- *Burt & Adelson's 5-tap binomial kernel.* Right structure, but it is only approximately Gaussian and its variance is not `t`. The structure is kept and the kernel replaced.
+
+Two implementation choices carry the exactness. **Convolution is centre-relative**, `out = c + sum_n w_n ((l - c) + (r - c))`: on an affine field every tap pair cancels bit-exactly, so diffusion reproduces a ramp identically and DC gain is exactly 1 by construction rather than by normalisation. It also reduces cancellation in DoG, which differences two nearly equal blurs. **The boundary mirrors about the edge sample without repeating it** (whole-sample symmetry), so every tap lands on real data and the finite operator stays diagonal in the cosine basis; a mirror turns a ramp into a tent, so validators scope to the interior by the radius the facility reports.
 
 ## Utility
 
@@ -129,6 +163,8 @@ Presets live in `assets/materials/*.json`, parsed into `MaterialConfig` (`scene_
 | Luminance | filter | Rec.709 luminance of Beauty — perceived brightness without colour |
 | Sobel | filter | 3×3 Sobel gradient magnitude of Luminance — a cheap edge signal |
 | Gabor | filter | 4-orientation Gabor bank, max response, over Luminance — directional edges Sobel's isotropic magnitude cannot distinguish |
+| DoG | filter | Signed difference of the two finest pyramid octaves of Luminance (Marr & Hildreth 1980) — the retinal centre-surround band next to pixel Nyquist. Signed, not a magnitude: polarity separates a bright blob from a dark one, and Sobel already reports magnitude. Exactly zero on any affine field, so it does not fire on a smooth gradient. Zero everywhere on a frame too small for two octaves |
+| LoG | filter | Scale-normalised blob response over the whole octave ladder, `t · laplacian5(L_t)` with γ = 1 (Lindeberg 1998). **R** is the extremal magnitude over scale, **G** the frequency of the scale that won, in cycles/degree via the rendering camera's vertical FOV and the *traced* height, **B** its polarity (+1 bright-on-dark, −1 dark-on-bright, 0 for no response). γ = 1 is not a knob: it is the unique exponent for which the response to a Gaussian blob of scale `t0` peaks at exactly `t = t0`, with closed form `-t/(pi (t0+t)^2)` and peak `1/(4 pi t0)`. A response *field*, not detected extrema — detection needs a magnitude threshold, which is the authored constant this codebase rejects, and a sparse point set is not an image. Scale is quantised to one octave by the ladder |
 | WorldPos | raster | Raw world-space primary-hit position — geometry and UV placement independent of shading |
 | UV | raster | Interpolated UV at the primary hit, fractional part |
 
@@ -208,7 +244,17 @@ Presets live in `assets/materials/*.json`, parsed into `MaterialConfig` (`scene_
 - Miller, G. (1994); Landis, H. (2002): the cosine-weighted distance-bounded AO the AO AOV path-traces, whose pdf cancels to the mean of the visibility term.
 - Zhukov, S. et al. (1998); Iones, A. et al. (2003); surveyed in Mendez-Feliu, A., Sbert, M. (2009): obscurance, the distance falloff rho(x) = 1 - (1-x)^2 the AO AOV uses.
 - Bitterli, B. et al. (2020). ReSTIR. SIGGRAPH — [roadmap](ROADMAP.md) transport #2, not implemented: reservoir resampling needs many lights to be worth it.
-- Sobel filtering: the edge-detection AOV computed from Luminance, arXiv:2601.16806.
+- Sobel, I., Feldman, G. (1968). A 3x3 isotropic gradient operator for image processing. Stanford AI Project: the Sobel AOV's fixed kernel.
+- Gabor, D. (1946). Theory of communication. J. IEE 93(26); Daugman, J.G. (1985). JOSA A 2(7): the oriented Gabor bank, whose parameters are still authored — see [roadmap](ROADMAP.md).
+- Lindeberg, T. (1990). Scale-space for discrete signals. IEEE TPAMI 12(3); Lindeberg, T. (1994). Scale-Space Theory in Computer Vision, ch. 3-4: the discrete Gaussian `e^-t I_n(t)`, its axiomatic uniqueness, and the semi-group and diffusion identities `scale_space.h` is built on.
+- Lindeberg, T. (1998). Feature detection with automatic scale selection. IJCV 30(2): gamma-normalised derivatives and gamma = 1 as the exponent that makes the blob response peak at the blob's own scale, the LoG AOV's scale channel and its validator.
+- Koenderink, J.J. (1984). The structure of images. Biol. Cybern. 50(5); Witkin, A.P. (1983). Scale-space filtering. IJCAI: scale space as the causal one-parameter family the ladder samples.
+- Burt, P.J., Adelson, E.H. (1983). The Laplacian pyramid as a compact image code. IEEE Trans. Comm. 31(4): the cascaded decimated structure, with the binomial kernel replaced by Lindeberg's.
+- Marr, D., Hildreth, E. (1980). Theory of edge detection. Proc. R. Soc. B 207: DoG as the retinal centre-surround operator, and the zero-crossing reading of the Laplacian.
+- Lowe, D.G. (2004). Distinctive image features from scale-invariant keypoints. IJCV 60(2) §3: `DoG(sigma, k sigma) ≈ (k-1) sigma^2 laplacian(G)`, which is why DoG and LoG are one family and not a redundant pair.
+- Wilson, H.R., Bergen, J.J. (1979). Vision Res. 19(1); De Valois, R.L. et al. (1982). Vision Res. 22(5): the ≈1.2-octave spatial-frequency channel bandwidth the one-octave ladder matches.
+- Abramowitz, M., Stegun, I.A. (1964) 9.6.10: the ascending series for `I_n(t)`, used in place of the absent `std::cyl_bessel_i`.
+- Deriche, R. (1993); Young, I.T., van Vliet, L.J. (1995); Alvarez, L., Mazorra, L. (1994); Triggs, B., Sdika, M. (2006): recursive O(1) Gaussian approximations, surveyed and **not** adopted — an approximate semi-group and an asymmetric kernel would give up the exact affine and ramp invariants the validators assert.
 - CIE 018:2019 Table 6 (ISO/CIE 11664-1:2019): the 1931 2° colour-matching functions at 1 nm, `cie_1931.inc`.
 - ISO/CIE 11664-2:2022 Table B.1: D65 at 1 nm, `cie_1931.inc`.
 - CIE 015:2018: tristimulus integration at the 1 nm interval, `cie::reflectanceToRec709`.

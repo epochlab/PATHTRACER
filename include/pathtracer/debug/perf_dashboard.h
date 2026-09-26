@@ -88,8 +88,8 @@ private:
     float unbilledDrawMs_ = 0.0F;
 
     // Bursty stages run on few frames: a per-frame mean reads ~1.7ms for a 150ms stall, so these report over the frames they ran on.
-    std::array<float, 2> burstLastMs_{};
-    std::array<std::uint64_t, 2> burstFireCount_{};
+    std::array<float, 3> burstLastMs_{};
+    std::array<std::uint64_t, 3> burstFireCount_{};
     std::uint64_t totalFrames_ = 0;
 
     bool tty_ = false;

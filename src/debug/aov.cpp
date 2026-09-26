@@ -28,6 +28,8 @@ AovSource aovSource(AovId aov) {
         case AovId::Luminance:
         case AovId::Sobel:
         case AovId::Gabor:
+        case AovId::DoG:
+        case AovId::LoG:
             return AovSource::BeautyFilter;
 
         // The 14 primary-hit lanes renderRasterGBuffer scan-converts. No default: -Werror makes an unclassified AovId a compile error.
@@ -66,6 +68,7 @@ int aovChannels(AovId aov) {
         case AovId::Luminance:
         case AovId::Sobel:
         case AovId::Gabor:
+        case AovId::DoG:
             return 1;
 
         // Surface parameterisation, written as vec3(fract(uv), 0) -- the third component is structurally zero, not data.
@@ -81,6 +84,7 @@ int aovChannels(AovId aov) {
         case AovId::Albedo:
         case AovId::Tangent:
         case AovId::ObjectID:
+        case AovId::LoG:
         case AovId::Wireframe:
         case AovId::Fresnel:
         case AovId::DirectDiffuse:
@@ -92,6 +96,48 @@ int aovChannels(AovId aov) {
             return 3;
     }
     return 3;
+}
+
+bool aovCarriesRadiance(AovId aov) {
+    switch (aov) {
+        // Radiance lanes and the filters that are positively homogeneous of degree one in it, so a gain commutes with the filter.
+        case AovId::Beauty:
+        case AovId::DirectDiffuse:
+        case AovId::IndirectDiffuse:
+        case AovId::DirectSpecular:
+        case AovId::IndirectSpecular:
+        case AovId::Refraction:
+        case AovId::Luminance:
+        case AovId::Sobel:
+        case AovId::Gabor:
+        case AovId::DoG:
+            return true;
+
+        // Ratios, reflectances, counts, lengths, directions and frequencies: scaling any of them by an exposure means nothing.
+        case AovId::HSV:
+        case AovId::LoG:
+        case AovId::Wireframe:
+        case AovId::Alpha:
+        case AovId::Depth:
+        case AovId::Lookahead:
+        case AovId::WorldPos:
+        case AovId::UV:
+        case AovId::Normal:
+        case AovId::GeomNormal:
+        case AovId::Albedo:
+        case AovId::Metallic:
+        case AovId::Roughness:
+        case AovId::Tangent:
+        case AovId::ObjectID:
+        case AovId::AO:
+        case AovId::Fresnel:
+        case AovId::IOR:
+        case AovId::BounceCount:
+        case AovId::Shadow:
+        case AovId::Count:
+            return false;
+    }
+    return false;
 }
 
 PathTracedLane pathTracedLane(AovId aov) {

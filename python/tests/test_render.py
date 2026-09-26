@@ -29,8 +29,8 @@ def renderer() -> Renderer:
 
 
 def test_aov_table_is_populated() -> None:
-    assert len(AOVS) == 28
-    for name in ("Beauty", "Depth", "Lookahead", "Normal", "Sobel", "Luminance", "Gabor", "HSV"):
+    assert len(AOVS) == 30
+    for name in ("Beauty", "Depth", "Lookahead", "Normal", "Sobel", "Luminance", "Gabor", "HSV", "DoG", "LoG"):
         assert name in AOVS
 
 

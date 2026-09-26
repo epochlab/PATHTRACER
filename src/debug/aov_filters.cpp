@@ -7,6 +7,8 @@
 
 #include <glm/gtc/constants.hpp>
 
+#include "pathtracer/debug/scale_space.h"
+
 namespace pathtracer::debug {
 
 namespace {
@@ -187,6 +189,119 @@ HdrImage hsvAov(const HdrImage& beauty, ThreadPool& threadPool) {
         }
     });
     return out;
+}
+
+HdrImage dogAov(const HdrImage& beauty, ThreadPool& threadPool) {
+    const std::vector<float> plane = luminancePlane(beauty, threadPool);
+    const std::vector<ScaleSpaceLevel> pyramid = buildOctavePyramid(plane, beauty.width, beauty.height, threadPool);
+    HdrImage out = makeBroadcastImage(beauty.width, beauty.height);
+    // Below roughly six pixels the inner scale already fills the frame, so there are not two octaves to difference and the band is empty.
+    if (pyramid.size() < 2) {
+        return out;
+    }
+    // Both finest levels sit on the base grid: the inner scale is half the decimation variance, so the cascade cannot have halved yet.
+    const std::vector<float>& fine = pyramid[0].plane;
+    const std::vector<float>& coarse = pyramid[1].plane;
+    threadPool.parallelFor(beauty.height, [&](int y) {
+        const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(beauty.width);
+        for (int x = 0; x < beauty.width; ++x) {
+            const std::size_t pixel = row + static_cast<std::size_t>(x);
+            // Signed, not a magnitude: polarity separates a bright blob from a dark one, and Sobel already reports gradient magnitude.
+            writeScalar(out, pixel, fine[pixel] - coarse[pixel]);
+        }
+    });
+    return out;
+}
+
+HdrImage logAov(const HdrImage& beauty, float verticalFovRadians, ThreadPool& threadPool) {
+    const std::vector<float> plane = luminancePlane(beauty, threadPool);
+    const std::vector<ScaleSpaceLevel> pyramid = buildOctavePyramid(plane, beauty.width, beauty.height, threadPool);
+    HdrImage out = makeBroadcastImage(beauty.width, beauty.height);
+    const auto pixels = static_cast<std::size_t>(beauty.width) * static_cast<std::size_t>(beauty.height);
+    std::vector<float> extremum(pixels, 0.0F);
+    std::vector<float> extremumFrequency(pixels, 0.0F);
+    // Derived from the traced height, not the authored one, so the frequency axis holds unchanged at any interactive render scale.
+    const float pixelsPerDegree = static_cast<float>(beauty.height) / glm::degrees(verticalFovRadians);
+
+    for (const ScaleSpaceLevel& level : pyramid) {
+        std::vector<float> response(level.plane.size());
+        laplacian5(level.plane, level.width, level.height, response, threadPool);
+        // Own-grid Laplacian times own-grid variance is exactly the base-grid gamma-normalised response, the two decimations cancelling.
+        const auto decimation = static_cast<float>(level.decimation);
+        const float ownVariance = level.baseVariance / (decimation * decimation);
+        // The band's peak radial frequency: |-w^2 exp(-w^2 t/2)| is stationary at w = sqrt(2/t), carried to the camera's angular scale.
+        const float frequency =
+            (std::sqrt(2.0F / level.baseVariance) / (2.0F * glm::pi<float>())) * pixelsPerDegree;
+        const std::vector<float> expanded =
+            expandToBase(ScaleSpaceLevel{std::move(response), level.width, level.height, level.decimation,
+                                         level.baseVariance},
+                         beauty.width, beauty.height, threadPool);
+        threadPool.parallelFor(beauty.height, [&](int y) {
+            const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(beauty.width);
+            for (int x = 0; x < beauty.width; ++x) {
+                const std::size_t pixel = row + static_cast<std::size_t>(x);
+                const float normalised = ownVariance * expanded[pixel];
+                if (std::fabs(normalised) > std::fabs(extremum[pixel])) {
+                    extremum[pixel] = normalised;
+                    extremumFrequency[pixel] = frequency;
+                }
+            }
+        });
+    }
+
+    threadPool.parallelFor(beauty.height, [&](int y) {
+        const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(beauty.width);
+        for (int x = 0; x < beauty.width; ++x) {
+            const std::size_t pixel = row + static_cast<std::size_t>(x);
+            const std::size_t texel = pixel * 4;
+            out.rgba[texel] = std::fabs(extremum[pixel]);
+            out.rgba[texel + 1] = extremumFrequency[pixel];
+            // A bright blob has a negative Laplacian at its centre, so the reported polarity negates the response's sign.
+            out.rgba[texel + 2] = extremum[pixel] > 0.0F ? -1.0F : (extremum[pixel] < 0.0F ? 1.0F : 0.0F);
+            out.rgba[texel + 3] = 1.0F;
+        }
+    });
+    return out;
+}
+
+HdrImage evaluateFilterAov(AovId aov, const FilterInput& input, ThreadPool& threadPool) {
+    switch (aov) {
+        case AovId::HSV:       return hsvAov(input.beauty, threadPool);
+        case AovId::Luminance: return luminanceAov(input.beauty, threadPool);
+        case AovId::Sobel:     return sobelAov(input.beauty, threadPool);
+        case AovId::Gabor:     return gaborAov(input.beauty, threadPool);
+        case AovId::DoG:       return dogAov(input.beauty, threadPool);
+        case AovId::LoG:       return logAov(input.beauty, input.verticalFovRadians, threadPool);
+
+        // The lanes their own producers write. No default arm: -Werror then makes an unrouted new filter a compile error.
+        case AovId::Beauty:
+        case AovId::Wireframe:
+        case AovId::Alpha:
+        case AovId::Depth:
+        case AovId::Lookahead:
+        case AovId::WorldPos:
+        case AovId::UV:
+        case AovId::Normal:
+        case AovId::GeomNormal:
+        case AovId::Albedo:
+        case AovId::Metallic:
+        case AovId::Roughness:
+        case AovId::Tangent:
+        case AovId::ObjectID:
+        case AovId::AO:
+        case AovId::Fresnel:
+        case AovId::IOR:
+        case AovId::BounceCount:
+        case AovId::DirectDiffuse:
+        case AovId::IndirectDiffuse:
+        case AovId::DirectSpecular:
+        case AovId::IndirectSpecular:
+        case AovId::Refraction:
+        case AovId::Shadow:
+        case AovId::Count:
+            break;
+    }
+    return {};
 }
 
 }  // namespace pathtracer::debug

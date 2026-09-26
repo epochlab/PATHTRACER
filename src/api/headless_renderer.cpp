@@ -350,18 +350,14 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
     if (wantsFilter) {
         const auto filterStart = std::chrono::steady_clock::now();
         const pathtracer::gfx::HdrImage& beauty = lastImage(AovId::Beauty);
+        const pathtracer::debug::FilterInput filterInput{beauty, request.camera.verticalFovRadians()};
         for (const AovId aov : request.aovs) {
             if (pathtracer::debug::aovSource(aov) != AovSource::BeautyFilter ||
                 std::find(filteredAovs_.begin(), filteredAovs_.end(), aov) != filteredAovs_.end()) {
                 continue;
             }
             filteredAovs_.push_back(aov);
-            switch (aov) {
-                case AovId::Luminance: filtered_.push_back(pathtracer::debug::luminanceAov(beauty, threadPool_)); break;
-                case AovId::Sobel:     filtered_.push_back(pathtracer::debug::sobelAov(beauty, threadPool_)); break;
-                case AovId::Gabor:     filtered_.push_back(pathtracer::debug::gaborAov(beauty, threadPool_)); break;
-                default:               filtered_.push_back(pathtracer::debug::hsvAov(beauty, threadPool_)); break;
-            }
+            filtered_.push_back(pathtracer::debug::evaluateFilterAov(aov, filterInput, threadPool_));
         }
         stats_.filterMilliseconds =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - filterStart).count();

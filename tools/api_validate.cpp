@@ -378,4 +378,47 @@ PT_CHECK(show_sky_changes_only_the_background, Slow, Exact) {
     PT_EXPECT(ctx, interiorIdentical, "showSky must not change a texel the camera hits");
 }
 
+// A new filter AOV reaching the dispatch's default arm is exactly the class of bug this catches: identical output for two distinct AOVs.
+PT_CHECK(aov_filter_dispatch_is_total, Fast, Exact) {
+    pathtracer::scene::ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    // Large enough for two pyramid octaves, so the scale-space AOVs are not legitimately empty, and chromatic so none of the six agree.
+    constexpr int kWidth = 96;
+    constexpr int kHeight = 64;
+    HdrImage source = makeImage(kWidth, kHeight, 0.0F);
+    for (int y = 0; y < kHeight; ++y) {
+        for (int x = 0; x < kWidth; ++x) {
+            const auto fx = static_cast<float>(x);
+            const auto fy = static_cast<float>(y);
+            setTexel(source, x, y, 0.2F + (0.03F * fx), 0.5F + (0.01F * fy), 0.1F + (0.02F * ((x * y) % 5)));
+        }
+    }
+
+    std::vector<AovId> filters;
+    for (int i = 0; i < kAovCount; ++i) {
+        if (pathtracer::debug::aovSource(static_cast<AovId>(i)) == AovSource::BeautyFilter) {
+            filters.push_back(static_cast<AovId>(i));
+        }
+    }
+    const int pairs = static_cast<int>(filters.size() * (filters.size() - 1) / 2);
+    ctx.plan(static_cast<int>(filters.size()) + pairs);
+
+    std::vector<HdrImage> outputs;
+    outputs.reserve(filters.size());
+    for (const AovId aov : filters) {
+        outputs.push_back(pathtracer::debug::evaluateFilterAov(
+            aov, pathtracer::debug::FilterInput{source, 0.5F}, pool));
+        const HdrImage& out = outputs.back();
+        PT_EXPECT(ctx, out.width == kWidth && out.height == kHeight &&
+                          out.rgba.size() == source.rgba.size(),
+                      std::string(pathtracer::debug::kAovNames[static_cast<int>(aov)]) + " returned a wrong-sized image");
+    }
+    for (std::size_t a = 0; a < outputs.size(); ++a) {
+        for (std::size_t b = a + 1; b < outputs.size(); ++b) {
+            PT_EXPECT(ctx, outputs[a].rgba != outputs[b].rgba,
+                          std::string(pathtracer::debug::kAovNames[static_cast<int>(filters[a])]) + " and " +
+                              pathtracer::debug::kAovNames[static_cast<int>(filters[b])] + " returned identical images");
+        }
+    }
+}
+
 PT_CHECK_MAIN("api")

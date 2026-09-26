@@ -91,12 +91,13 @@ struct FrameStageTimes {
     float pollMs = 0.0F;
     float cameraMs = 0.0F;
     float rasterMs = 0.0F;      // renderRasterGBuffer, only on a trigger change into a rasterizer AOV
+    float filterMs = 0.0F;      // evaluateFilterAov, only when a newly published pass invalidates the filter cache
     float uploadMs = 0.0F;      // the display texture upload, only when a newly published pass invalidates it
     bool uploaded = false;      // the upload ran this frame: an explicit event flag, since a timed stage can legitimately read 0
-    float presentMs = 0.0F;     // presentFrame, INCLUSIVE of uploadMs -- the blit's own cost is the difference
+    float presentMs = 0.0F;     // presentFrame, INCLUSIVE of uploadMs and filterMs -- the blit's own cost is the difference
     float histogramMs = 0.0F;
     float overRangeMs = 0.0F;   // the O(kOverRangeBinCount) read of the driver's reduction, every frame
-    float probeMs = 0.0F;       // samplePixelProbe, including its synchronous glReadPixels on the post-filter AOVs
+    float probeMs = 0.0F;       // samplePixelProbe: one HdrImage texel fetch, the filter cache already warm from presentFrame
     float hudMs = 0.0F;         // HUD draw + camera write-back + render, INCLUSIVE of hudRenderMs -- the build half is the difference
     float hudRenderMs = 0.0F;   // HudOverlay::render (ImGui::Render + RenderDrawData), unconditional so it is paid with the HUD hidden
     // swapBuffers at swap interval 0: the hand-off to the compositor, no vblank wait. Its tail is WindowServer latency, not engine time.
