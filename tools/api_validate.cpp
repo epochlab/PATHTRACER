@@ -15,6 +15,7 @@
 #include "pathtracer/api/headless_renderer.h"
 #include "pathtracer/debug/aov.h"
 #include "pathtracer/debug/aov_filters.h"
+#include "pathtracer/debug/colormap.h"
 #include "pathtracer/debug/scale_space.h"
 #include "pathtracer/debug/aov_routing.h"
 #include "pathtracer/scene/thread_pool.h"
@@ -294,6 +295,146 @@ PT_CHECK(bipolar_absent_lanes_render_black, Fast, Exact) {
     PT_EXPECT(ctx, one.gain == glm::vec3(one.gain[0]), "a scalar AOV's three lanes gained differently, so its grey would tint");
     PT_EXPECT(ctx, one.offset == glm::vec3(pathtracer::debug::kBipolarDisplayOffset),
                   "a scalar AOV lost the mid-grey offset on a lane");
+}
+
+// Builds one interleaved RGBA frame from a scalar broadcast across its three lanes, as writeScalar does for every scalar AOV.
+[[nodiscard]] std::vector<float> broadcastScalarFrame(const std::vector<float>& values) {
+    std::vector<float> rgba(values.size() * 4, 0.0F);
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        for (std::size_t lane = 0; lane < 3; ++lane) {
+            rgba[(i * 4) + lane] = values[i];
+        }
+        rgba[(i * 4) + 3] = 1.0F;
+    }
+    return rgba;
+}
+
+// Reads a pre-mapped display lane, or a sentinel neither pre-map can produce, so a vanished pre-map fails an assertion not the process.
+[[nodiscard]] float displayLane(const pathtracer::debug::AovDisplay& display, std::size_t index) {
+    return index < display.rgba.size() ? display.rgba[index] : -1.0F;
+}
+
+// The log window's ceiling is the ratio sqrt(n), the SNR of a texel at unit per-sample coefficient of variation, so it must read white.
+PT_CHECK(snr_display_maps_the_root_of_the_pass_count_to_white, Fast, Exact) {
+    // Powers of four, so sqrt(n) is an exact power of two and log(sqrt(n)) * 2/log(n) rounds to exactly 1 rather than near it.
+    const std::vector<int> passCounts{4, 64, 1024, 4096};
+    ctx.plan(static_cast<int>(passCounts.size()) * 2);
+    for (const int samples : passCounts) {
+        const float ceiling = std::sqrt(static_cast<float>(samples));
+        const std::vector<float> rgba = broadcastScalarFrame({ceiling, ceiling * 4.0F});
+        const pathtracer::debug::AovDisplay display =
+            pathtracer::debug::aovDisplay(AovId::SNR, rgba, {samples, 0});
+        PT_EXPECT(ctx, displayLane(display, 0) == 1.0F,
+                      "the ratio sqrt(" + std::to_string(samples) + ") displayed " + std::to_string(displayLane(display, 0)) +
+                          ", not white");
+        // Beyond the reference there is no more window, so the clamp must hold rather than let a well-converged texel run past 1.
+        PT_EXPECT(ctx, displayLane(display, 4) == 1.0F,
+                      "a ratio past the reference displayed " + std::to_string(displayLane(display, 4)) + ", unclamped");
+    }
+}
+
+// Decibels are a log scale, so squaring the ratio must double the displayed value; any linear or power map fails this identically.
+PT_CHECK(snr_display_is_logarithmic_in_the_ratio, Fast, Exact) {
+    const std::vector<float> ratios{1.5F, 2.0F, 3.0F, 4.0F};
+    ctx.plan(static_cast<int>(ratios.size()));
+    constexpr int kSamples = 1024;
+    for (const float ratio : ratios) {
+        const std::vector<float> rgba = broadcastScalarFrame({ratio, ratio * ratio});
+        const pathtracer::debug::AovDisplay display =
+            pathtracer::debug::aovDisplay(AovId::SNR, rgba, {kSamples, 0});
+        // Toleranced at float's unit roundoff, not exact: the identity is the property, and its bit-exactness here is a rounding accident.
+        PT_EXPECT(ctx, std::fabs(displayLane(display, 4) - (2.0F * displayLane(display, 0))) <= 0x1p-23F * displayLane(display, 4),
+                      "ratio " + std::to_string(ratio) + " displayed " + std::to_string(displayLane(display, 0)) +
+                          " but its square displayed " + std::to_string(displayLane(display, 4)) + ", not twice that");
+    }
+}
+
+// Below the unit ratio a texel's value is under its own uncertainty and nothing is resolved, which is also where snrAov's zero lands.
+PT_CHECK(snr_display_floors_the_unit_ratio_and_below, Fast, Exact) {
+    const std::vector<float> ratios{1.0F, 0.5F, 0.0F};
+    ctx.plan(static_cast<int>(ratios.size()) + 1);
+    const std::vector<float> rgba = broadcastScalarFrame(ratios);
+    const pathtracer::debug::AovDisplay display = pathtracer::debug::aovDisplay(AovId::SNR, rgba, {1024, 0});
+    for (std::size_t i = 0; i < ratios.size(); ++i) {
+        PT_EXPECT(ctx, displayLane(display, i * 4) == 0.0F,
+                      "the ratio " + std::to_string(ratios[i]) + " displayed " + std::to_string(displayLane(display, i * 4)) +
+                          " rather than the floor");
+    }
+    // A scalar AOV is broadcast, so a lane that drifted from lane 0 would tint the grey the whole point of this display is to keep.
+    PT_EXPECT(ctx, displayLane(display, 1) == displayLane(display, 0) && displayLane(display, 2) == displayLane(display, 0),
+                  "the three display lanes disagree, so the preview would tint");
+}
+
+// A variance needs two passes, so below that snrAov is uniformly zero and log(n) offers no positive ceiling to divide by.
+PT_CHECK(snr_display_is_absent_below_two_passes, Fast, Exact) {
+    ctx.plan(3);
+    const std::vector<float> rgba = broadcastScalarFrame({4.0F, 16.0F});
+    for (const int samples : {0, 1}) {
+        PT_EXPECT(ctx, pathtracer::debug::aovDisplay(AovId::SNR, rgba, {samples, 0}).rgba.empty(),
+                      "SNR pre-mapped at " + std::to_string(samples) + " passes, where its own value is undefined");
+    }
+    PT_EXPECT(ctx, !pathtracer::debug::aovDisplay(AovId::SNR, rgba, {2, 0}).rgba.empty(),
+                  "SNR did not pre-map at two passes, the fewest a variance is defined for");
+}
+
+// Bounce Count's domain is maxBounces + 1 terminations, a real bound, so the shared path must reproduce the colormap exactly.
+PT_CHECK(bounce_count_display_matches_the_turbo_colormap, Fast, Exact) {
+    constexpr int kMaxBounces = 8;
+    const std::vector<float> counts{0.0F, 1.0F, 2.5F, 4.0F, 8.0F, 9.0F};
+    ctx.plan(static_cast<int>(counts.size()));
+    const std::vector<float> rgba = broadcastScalarFrame(counts);
+    const pathtracer::debug::AovDisplay display =
+        pathtracer::debug::aovDisplay(AovId::BounceCount, rgba, {0, kMaxBounces});
+    for (std::size_t i = 0; i < counts.size(); ++i) {
+        const glm::vec3 expected = pathtracer::debug::turbo(counts[i] / (static_cast<float>(kMaxBounces) + 1.0F));
+        const glm::vec3 got{displayLane(display, i * 4), displayLane(display, (i * 4) + 1), displayLane(display, (i * 4) + 2)};
+        PT_EXPECT(ctx, got == expected,
+                      "bounce depth " + std::to_string(counts[i]) + " displayed (" + std::to_string(got.r) + ", " +
+                          std::to_string(got.g) + ", " + std::to_string(got.b) + "), not the colormap's colour");
+    }
+}
+
+// Raw metres quantize to white and farClip is a ray bound rather than a depth span, so Depth's gain comes from the depth present.
+PT_CHECK(depth_display_ranges_to_its_own_maximum, Fast, Exact) {
+    // Powers of two, so 2^-log2(max) is exact and the product with the maximum must be exactly 1 rather than within a rounding.
+    const std::vector<float> maxima{0.25F, 1.0F, 64.0F};
+    ctx.plan(static_cast<int>(maxima.size()));
+    for (const float maximum : maxima) {
+        const std::vector<float> rgba = broadcastScalarFrame({maximum * 0.5F, maximum});
+        const pathtracer::debug::AovDisplay display = pathtracer::debug::aovDisplay(AovId::Depth, rgba, {0, 0});
+        const float white = (maximum * display.affine.gain[0]) + display.affine.offset[0];
+        PT_EXPECT(ctx, white == 1.0F,
+                      "the farthest depth " + std::to_string(maximum) + " displayed " + std::to_string(white) + ", not white");
+    }
+}
+
+// An auto-ranged AOV has already absorbed the scene's scale, so applying the photographic exposure on top would range it twice.
+PT_CHECK(an_auto_ranged_aov_never_also_takes_the_exposure, Fast, Exact) {
+    ctx.plan(kAovCount);
+    // Spread over two decades and positive, so every arm of aovDisplay that ranges at all leaves a map this can tell from identity.
+    const std::vector<float> rgba = broadcastScalarFrame({0.5F, 4.0F, 16.0F});
+    for (int i = 0; i < kAovCount; ++i) {
+        const auto aov = static_cast<AovId>(i);
+        const pathtracer::debug::AovDisplay display = pathtracer::debug::aovDisplay(aov, rgba, {1024, 8});
+        // Whatever aovDisplay decided from the values -- a pre-map or any map but unity gain at zero offset -- is a range already taken.
+        const bool ranged = !display.rgba.empty() || display.affine.gain != glm::vec3(1.0F) ||
+                            display.affine.offset != glm::vec3(0.0F);
+        PT_EXPECT(ctx, !(ranged && pathtracer::debug::aovTakesDisplayExposure(aov)),
+                      std::string(pathtracer::debug::kAovNames[i]) + " auto-ranges and takes the exposure, so it would range twice");
+    }
+}
+
+// A nonlinear pre-map costs a full frame copy, so it must apply only where the affine map genuinely cannot express the display.
+PT_CHECK(display_premap_applies_to_exactly_two_aovs, Fast, Exact) {
+    ctx.plan(kAovCount);
+    const std::vector<float> rgba = broadcastScalarFrame({0.5F, 4.0F, 16.0F});
+    for (int i = 0; i < kAovCount; ++i) {
+        const auto aov = static_cast<AovId>(i);
+        const bool premapped = aov == AovId::SNR || aov == AovId::BounceCount;
+        PT_EXPECT(ctx, pathtracer::debug::aovDisplay(aov, rgba, {1024, 8}).rgba.empty() != premapped,
+                      std::string(pathtracer::debug::kAovNames[i]) +
+                          (premapped ? " lost its pre-map" : " gained a pre-map it does not need"));
+    }
 }
 
 // A unit step edge has a closed-form Sobel magnitude: both adjacent columns read exactly 4 and everything further exactly 0.

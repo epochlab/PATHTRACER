@@ -29,7 +29,6 @@
 #include "pathtracer/debug/aov_routing.h"
 #include "pathtracer/debug/aov_filters.h"
 #include "pathtracer/debug/bench_log.h"
-#include "pathtracer/debug/colormap.h"
 #include "pathtracer/debug/frame_stats.h"
 #include "pathtracer/debug/gpu_timer.h"
 #include "pathtracer/debug/histogram.h"
@@ -232,10 +231,8 @@ struct AppResources {
     std::optional<pathtracer::gfx::Texture> pathTraceDisplayTexture;
     // Which image the texture holds, not the AovId that selected it, so AOVs sharing a buffer share one upload.
     const pathtracer::gfx::HdrImage* pathTraceDisplayedImage;  // nullptr = nothing uploaded yet
-    // Max raw Depth in the last rebuilt pathTraceDisplayTexture; only meaningful when aov==Depth.
-    float pathTraceDisplayedDepthMax;
-    // Per-lane affine display map for the last rebuilt pathTraceDisplayTexture; only meaningful when aovIsBipolar.
-    pathtracer::debug::BipolarDisplay pathTraceBipolarDisplay;
+    // The display decision for the last rebuilt pathTraceDisplayTexture; its pre-mapped texels are what that texture already holds.
+    pathtracer::debug::AovDisplay pathTraceDisplay;
     // Which RasterGBuffer generation the texture holds; 0 when it was built from a PathTraceResult instead.
     std::uint64_t pathTraceDisplayedGeneration;
     // Strong ref, not just an identity pointer, to whichever published object pathTraceDisplayTexture currently reflects.
@@ -490,8 +487,7 @@ std::optional<AppResources> initializeApp(const pathtracer::config::SceneConfig&
         .pathTraceDriver = nullptr,
         .pathTraceDisplayTexture = std::nullopt,
         .pathTraceDisplayedImage = nullptr,
-        .pathTraceDisplayedDepthMax = 0.0F,
-        .pathTraceBipolarDisplay = {glm::vec3(1.0F), glm::vec3(0.0F)},
+        .pathTraceDisplay = {{}, {glm::vec3(1.0F), glm::vec3(0.0F)}},
         .pathTraceDisplayedGeneration = 0,
         .pathTraceDisplayedOwner = nullptr,
         .lastPathTraceTrigger = PathTraceTriggerState{},
@@ -751,7 +747,8 @@ pathtracer::debug::PixelProbeSample samplePixelProbe(
 
 // Re-uploads only when the owning published object changed: 33MB a frame for texels the GPU holds is work without a reason.
 void ensurePathTraceDisplayTexture(AppResources& app, const std::shared_ptr<const void>& owner,
-                                    const pathtracer::gfx::HdrImage& image, std::uint64_t generation) {
+                                    const pathtracer::gfx::HdrImage& image, std::uint64_t generation,
+                                    int samples) {
     if (app.pathTraceDisplayTexture.has_value() && app.pathTraceDisplayedImage == &image &&
         app.pathTraceDisplayedOwner == owner && app.pathTraceDisplayedGeneration == generation) {
         return;
@@ -759,53 +756,19 @@ void ensurePathTraceDisplayTexture(AppResources& app, const std::shared_ptr<cons
     // Started after the cache-key check, never before: on a hit this does nothing and must report 0, not the last real upload's cost.
     const pathtracer::debug::ScopedCpuTimer uploadTimer(app.stages.uploadMs);
     app.stages.uploaded = true;
-    if (app.aov == static_cast<int>(pathtracer::debug::AovId::Depth)) {
-        float maxDepth = 0.0F;
-        for (int i = 0; i < image.width * image.height; ++i) {
-            maxDepth = std::max(maxDepth, image.rgba[static_cast<std::size_t>(i) * 4]);
-        }
-        app.pathTraceDisplayedDepthMax = maxDepth;
-    }
-    // The bipolar preview's per-lane auto-range, over the channels the AOV declares so a lane it does not define stays black.
-    const auto uploadedAov = static_cast<pathtracer::debug::AovId>(app.aov);
-    if (pathtracer::debug::aovIsBipolar(uploadedAov)) {
-        app.pathTraceBipolarDisplay =
-            pathtracer::debug::bipolarDisplay(image.rgba, pathtracer::debug::aovChannels(uploadedAov));
-    }
-    // BounceCount is a scalar mapped through Turbo on the CPU before upload; it runs once per rebuilt pass, so it costs nothing per frame.
-    if (app.aov == static_cast<int>(pathtracer::debug::AovId::BounceCount)) {
-        const float maxBounceCount = static_cast<float>(app.pathTraceSettings.maxBounces) + 1.0F;
-        pathtracer::gfx::HdrImage mapped;
-        mapped.width = image.width;
-        mapped.height = image.height;
-        mapped.rgba.resize(image.rgba.size());
-        for (int i = 0; i < image.width * image.height; ++i) {
-            const std::size_t idx = static_cast<std::size_t>(i) * 4;
-            const float t = image.rgba[idx] / maxBounceCount;
-            const glm::vec3 mappedColor = pathtracer::debug::turbo(t);
-            mapped.rgba[idx + 0] = mappedColor.r;
-            mapped.rgba[idx + 1] = mappedColor.g;
-            mapped.rgba[idx + 2] = mappedColor.b;
-            mapped.rgba[idx + 3] = image.rgba[idx + 3];
-        }
-        if (app.pathTraceDisplayTexture.has_value()) {
-            app.pathTraceDisplayTexture->upload(mapped.width, mapped.height, mapped.rgba.data());
-        } else {
-            app.pathTraceDisplayTexture = pathtracer::gfx::Texture::createFromFloatPixels(
-                mapped.width, mapped.height, mapped.rgba.data(), app.displayFormat);
-        }
-        app.pathTraceDisplayedImage = &image;
-        app.pathTraceDisplayedOwner = owner;
-        app.pathTraceDisplayedGeneration = generation;
-        return;
-    }
+    // Every display decision that has to read the texels, made once here rather than per frame; the exposure stays in presentFrame.
+    app.pathTraceDisplay = pathtracer::debug::aovDisplay(
+        static_cast<pathtracer::debug::AovId>(app.aov), image.rgba,
+        {samples, app.pathTraceSettings.maxBounces});
+    // A nonlinear pre-map cannot ride the shader's two vec3 uniforms, so where one applies the texture carries its output instead.
+    const float* texels =
+        app.pathTraceDisplay.rgba.empty() ? image.rgba.data() : app.pathTraceDisplay.rgba.data();
     // Uploaded straight from the HdrImage: the vertex shader resolves row order, and upload reallocates only on a resolution change.
     if (app.pathTraceDisplayTexture.has_value()) {
-        app.pathTraceDisplayTexture->upload(image.width, image.height, image.rgba.data());
+        app.pathTraceDisplayTexture->upload(image.width, image.height, texels);
     } else {
-        app.pathTraceDisplayTexture =
-            pathtracer::gfx::Texture::createFromFloatPixels(image.width, image.height, image.rgba.data(),
-                                                         app.displayFormat);
+        app.pathTraceDisplayTexture = pathtracer::gfx::Texture::createFromFloatPixels(
+            image.width, image.height, texels, app.displayFormat);
     }
     app.pathTraceDisplayedImage = &image;
     app.pathTraceDisplayedOwner = owner;
@@ -833,18 +796,15 @@ void presentFrame(AppResources& app,
     if (source.image == nullptr) {
         return;
     }
-    ensurePathTraceDisplayTexture(app, source.owner, *source.image, source.generation);
+    ensurePathTraceDisplayTexture(app, source.owner, *source.image, source.generation,
+                                   pathTraceSnapshot != nullptr ? pathTraceSnapshot->samples : 0);
     const bool isBeauty = aovId == pathtracer::debug::AovId::Beauty;
     app.ocioTransform.setActiveLut(isBeauty ? app.userLut
                                              : pathtracer::gfx::OcioDisplayTransform::Lut::Raw);
-    // A signed response auto-ranges per lane to mid-grey; radiance takes the photographic exposure; Depth auto-ranges, farClip a tMax.
-    pathtracer::debug::BipolarDisplay display{glm::vec3(1.0F), glm::vec3(0.0F)};
-    if (pathtracer::debug::aovIsBipolar(aovId)) {
-        display = app.pathTraceBipolarDisplay;
-    } else if (pathtracer::debug::aovCarriesRadiance(aovId)) {
+    // The photographic exposure is the one arm that cannot be cached with the upload: the slider moves without rebuilding the texture.
+    pathtracer::debug::BipolarDisplay display = app.pathTraceDisplay.affine;
+    if (pathtracer::debug::aovTakesDisplayExposure(aovId)) {
         display.gain = glm::vec3(std::pow(2.0F, app.debugCamera.relativeExposureEv()));
-    } else if (aovId == pathtracer::debug::AovId::Depth) {
-        display.gain = glm::vec3(std::pow(2.0F, -std::log2(std::max(app.pathTraceDisplayedDepthMax, 1e-4F))));
     }
     app.ocioTransform.setDisplayAffine(display.gain, display.offset);
     app.ocioTransform.setChannelView(app.channelView);

@@ -132,7 +132,15 @@ The range is not the peak. A rendered signed response is heavy-tailed — a Corn
 
 Direction and position lanes are signed but deliberately excluded: a normal's components span a sphere, not a response about zero.
 
-The one AOV still wanting attention here is `SNR`, which is positive and spans six decades, so it needs a log display rather than a bipolar one — see [ROADMAP](ROADMAP.md).
+### Log preview, and the one shared display decision
+
+`SNR` is positive, dimensionless and unbounded, so neither an exposure nor a bipolar map suits it. At unity gain every texel at or above 1.0 encodes to 255 and the frame is solid white, carrying exactly one bit: *is this texel above its own noise floor*. Its preview is therefore decibels, `20·log10(SNR)` — the factor is 20, not 10, because `mu/SE` is a ratio of like-dimensioned amplitudes whose power ratio is its square (EMVA 1288's convention for imaging SNR).
+
+**Both anchors of the window are definitional, so neither is an authored constant.** The floor is **0 dB, the ratio 1**, where a texel's value equals its own uncertainty and nothing is resolved. The ceiling is **`10·log10(n)` dB, the ratio sqrt(n)**: since `SNR = sqrt(n)·(mu/sigma)`, that is the SNR of a texel whose *per-sample* coefficient of variation is unity, so the grey reads how far in decibels a texel has come from its noise floor toward that reference. The decibel factor cancels between the two, so the implementation is `2·ln(SNR)/ln(n)` and no base conversion is written. This window is not invariant to the pass count — `grey = 1 − log(CV)/log(sqrt(n))`, so a fixed-`CV` texel drifts toward white as `n` grows, which is the convergence progress one selects `SNR` to watch. True invariance would need a second anchor on `log(CV)` beyond `CV = 1`, and there is no definitional one.
+
+The window deliberately saturates the easy majority. On a Cornell box at 64 passes 78% of texels already exceed `sqrt(n)`, and at 1024 passes 67% do; the remaining fifth to third is the noisy tail — caustics, indirect corners, grazing geometry — and it holds 211 distinct display levels where the linear preview held one. Nothing sits at the floor, so the full range serves the texels that are actually undecided.
+
+A log is not affine, so it cannot ride the shader's two `vec3` uniforms. It is a **pre-map**: one CPU pass over the frame, at upload rather than per frame, writing the display's texels. `Bounce Count`'s Turbo false colour (Mikhailov 2019) is the same mechanism and the same cost, its domain the real bound `maxBounces + 1`. Both live in `aovDisplay`, which is the one function making every display decision that has to read the values — the bipolar per-lane range, `Depth`'s auto-range and these two pre-maps — so the viewer and `render_beauty` share it and a PNG matches the viewer by construction rather than by two copies staying level. The photographic exposure is the one arm left to the caller, because the slider moves without rebuilding the texture; `aovTakesDisplayExposure` states its precedence once, since an auto-ranged AOV has already absorbed the scene's scale and applying an exposure on top would range it twice.
 
 ## Scale space
 
@@ -166,7 +174,7 @@ Two implementation choices carry the exactness. **Convolution is centre-relative
 
 ## Estimator noise
 
-`SNR` reports how well each published texel is known, not how noisy one sample is: `beauty` is a mean, so the denominator is the standard error **of the mean**, `sqrt(M2 / (n(n-1)))`. Linear, not dB, matching the repo's raw-value convention.
+`SNR` reports how well each published texel is known, not how noisy one sample is: `beauty` is a mean, so the denominator is the standard error **of the mean**, `sqrt(M2 / (n(n-1)))`. The *value* is linear, matching the repo's raw-value convention — the EXR, the HUD probe and the C ABI all read the raw ratio; only the preview is in decibels, exactly as the signed preview is a preview of a raw signed float.
 
 **Single-image spatial estimators are rejected on principle.** Immerkaer 1996 (whose 3x3 mask is a scaled discrete Laplacian) and Donoho & Johnstone 1994's MAD of the finest wavelet subband both estimate *one global sigma under additive white Gaussian noise*. Monte Carlo render noise violates that on three counts: it is heteroscedastic by orders of magnitude between a directly lit diffuse texel and a caustic, it is signal-dependent, and it is spatially correlated through NEE, environment importance sampling and the shared Owen-scrambled Sobol sequence. Both would also report a tessellated silhouette as noise.
 

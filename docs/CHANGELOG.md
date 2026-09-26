@@ -3,6 +3,41 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## A log display for SNR, and one shared display decision
+
+`SNR` previewed as a solid white frame. `aovCarriesRadiance` correctly reports false for it, which pins the display at unity
+gain, and the AOV is unbounded — the HUD probe read 22.216 on a Cornell box — so every lit texel encoded to 255. The preview
+carried exactly one bit: is this texel above its own noise floor.
+
+- feat: `SNR` previews in decibels, `20·log10(SNR)`, the factor being 20 rather than 10 because `mu/SE` is a ratio of
+  like-dimensioned amplitudes whose power ratio is its square (EMVA 1288). **Both anchors of the window are definitional.**
+  The floor is 0 dB, the ratio 1, where a texel's value equals its own uncertainty. The ceiling is `10·log10(n)` dB, the ratio
+  `sqrt(n)`, which since `SNR = sqrt(n)·(mu/sigma)` is the SNR of a texel at unit per-sample coefficient of variation. The
+  decibel factor cancels, so the implementation is `2·ln(SNR)/ln(n)`. Measured on a Cornell box at 64 passes: **1 distinct
+  display level before, 211 after**. The window saturates the converged majority by design — 78% of texels at 64 passes,
+  67% at 1024 — and resolves the noisy tail, which is what one selects `SNR` to find. Nothing lands on the floor
+- fix: `render_beauty --aov "Bounce Count"` wrote a raw scalar PNG while the viewer showed Turbo false colour, contradicting
+  the pipeline's own "a PNG and the viewer agree by construction". **This is the one visible output change**: Bounce Count
+  PNGs are now false-coloured, matching the viewer byte for byte
+- refactor: `aovDisplay` is the one function making every display decision that has to read an AOV's values — the bipolar
+  per-lane range, `Depth`'s auto-range, and the two nonlinear pre-maps a `vec3` uniform pair cannot express. It replaces two
+  hand-synchronised copies of that decision in `main.cpp` and `render_beauty.cpp`, deletes `AppResources::pathTraceDisplayedDepthMax`
+  and `render_beauty`'s now-dead `maxChannel`, and returns an empty buffer where the source texels pass through unchanged, so
+  the common path copies nothing. The photographic exposure stays with the caller: the slider moves without rebuilding the texture
+- fix: `aovTakesDisplayExposure` states once that an auto-ranged AOV does not also take the exposure. `DoG` and `LoG` are both
+  bipolar *and* degree one in radiance, so collapsing the old `if/else` into two independent arms double-ranged them; caught by
+  a byte-identity check against the previous build, and now gated for all 34 AOVs
+- test: 8 new checks in `api_validate` — the log window's two anchors, its logarithmicity (`grey(r²) == 2·grey(r)`, exact in
+  float), its absence below two passes, Bounce Count against the colormap, Depth's migrated auto-range, that a pre-map applies
+  to exactly two of the 34 AOVs, and that no AOV both auto-ranges and takes the exposure. `ctest` 181/181
+- perf: not measurable. The pre-map is one pass over the frame with one `log` per texel, at upload rather than per frame.
+  Interleaved A/B over three runs put `SNR` at +1.5% and the `Beauty` control, which never touches this path, at +0.3%,
+  both inside a spread larger than either
+
+Unchanged: every EXR, the HUD probe, the C ABI (`pt_aov_count()` 34, `pt_display_encode` untouched) and the PNGs of `Beauty`,
+`Depth`, `LoG`, `DoG`, `Colour Opponent`, `Sobel`, `Normal` and `Luminance`, all verified byte-identical against binaries built
+from the previous commit.
+
 ## Colour Opponent, and a per-lane range for the signed preview
 
 `Opponent` previewed as a near-uniform magenta wash with no visible red/green separation on a Cornell box. The filter was exact;

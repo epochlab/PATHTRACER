@@ -1,12 +1,14 @@
 #include "pathtracer/debug/aov.h"
 
 #include "pathtracer/debug/aov_routing.h"
+#include "pathtracer/debug/colormap.h"
 
 #include <cctype>
 #include <algorithm>
 #include <cmath>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace pathtracer::debug {
 
@@ -233,6 +235,72 @@ BipolarDisplay bipolarDisplay(std::span<const float> rgba, int channels) {
         display.offset[lane] = kBipolarDisplayOffset;
     }
     return display;
+}
+
+namespace {
+
+// SNR's preview is decibels, the domain-standard unit for a ratio of like-dimensioned amplitudes, so the factor is 20 (EMVA 1288).
+void mapSnrForDisplay(std::span<const float> rgba, int samples, std::vector<float>& out) {
+    // From 0 dB, the ratio 1 where a texel equals its own uncertainty, to 10*log10(n), the ratio sqrt(n); the shared factor cancels.
+    const double inverseCeiling = 2.0 / std::log(static_cast<double>(samples));
+    out.resize(rgba.size());
+    for (std::size_t texel = 0; texel + 3 < rgba.size(); texel += 4) {
+        // snrAov broadcasts its scalar, so lane 0 is the ratio; at or below the floor nothing is resolved, which absorbs its zero too.
+        const float ratio = rgba[texel];
+        // sqrt(n) is the SNR at unit per-sample coefficient of variation, since SNR = sqrt(n)*mu/sigma, so that reference is white.
+        const auto grey = static_cast<float>(
+            ratio > 1.0F ? std::min(std::log(static_cast<double>(ratio)) * inverseCeiling, 1.0) : 0.0);
+        out[texel] = grey;
+        out[texel + 1] = grey;
+        out[texel + 2] = grey;
+        out[texel + 3] = rgba[texel + 3];
+    }
+}
+
+// Bounce Count's domain is a real bound -- maxBounces + 1 possible terminations -- so the colormap's argument is exact and frame-stable.
+void mapBounceCountForDisplay(std::span<const float> rgba, int maxBounces, std::vector<float>& out) {
+    const float ceiling = static_cast<float>(maxBounces) + 1.0F;
+    out.resize(rgba.size());
+    for (std::size_t texel = 0; texel + 3 < rgba.size(); texel += 4) {
+        const glm::vec3 mapped = turbo(rgba[texel] / ceiling);
+        out[texel] = mapped.r;
+        out[texel + 1] = mapped.g;
+        out[texel + 2] = mapped.b;
+        out[texel + 3] = rgba[texel + 3];
+    }
+}
+
+}  // namespace
+
+AovDisplay aovDisplay(AovId aov, std::span<const float> rgba, const AovDisplayContext& context) {
+    AovDisplay display{{}, {glm::vec3(1.0F), glm::vec3(0.0F)}};
+    if (aovIsBipolar(aov)) {
+        display.affine = bipolarDisplay(rgba, aovChannels(aov));
+        return display;
+    }
+    switch (aov) {
+        // Raw metres quantize to white and farClip is a ray bound, not a depth span, so Depth ranges to the depth actually present.
+        case AovId::Depth: {
+            float maxDepth = 0.0F;
+            for (std::size_t texel = 0; texel < rgba.size(); texel += 4) {
+                maxDepth = std::max(maxDepth, rgba[texel]);
+            }
+            display.affine.gain = glm::vec3(std::pow(2.0F, -std::log2(std::max(maxDepth, 1e-4F))));
+            return display;
+        }
+        // A variance is undefined below two passes, where snrAov is uniformly zero and the log window has no positive ceiling.
+        case AovId::SNR:
+            if (context.samples >= 2) {
+                mapSnrForDisplay(rgba, context.samples, display.rgba);
+            }
+            return display;
+        case AovId::BounceCount:
+            mapBounceCountForDisplay(rgba, context.maxBounces, display.rgba);
+            return display;
+        // Every other AOV's values reach the display unchanged, under the unity gain and zero offset this was initialised with.
+        default:
+            return display;
+    }
 }
 
 PathTracedLane pathTracedLane(AovId aov) {

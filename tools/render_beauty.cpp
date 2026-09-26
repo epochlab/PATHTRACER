@@ -219,15 +219,6 @@ bool readPng(const std::string& path, int& width, int& height, std::vector<unsig
     return true;
 }
 
-// Largest RGB value, for an AOV whose raw range is not [0,1]; alpha is excluded, being 1 by convention and pinning every scalar AOV at 1.
-float maxChannel(const pathtracer::gfx::HdrImage& image) {
-    float peak = 0.0F;
-    for (std::size_t texel = 0; texel + 3 < image.rgba.size(); texel += 4) {
-        peak = std::max({peak, image.rgba[texel], image.rgba[texel + 1], image.rgba[texel + 2]});
-    }
-    return peak;
-}
-
 // Each octave band's share of total error power.
 void reportErrorSpectrum(const pathtracer::gfx::HdrImage& image, const pathtracer::gfx::HdrImage& reference) {
     const auto pixels = static_cast<std::size_t>(image.width) * static_cast<std::size_t>(image.height);
@@ -594,23 +585,20 @@ int main(int argc, char** argv) {
     }
 
     const bool isBeauty = options.aov == pathtracer::debug::AovId::Beauty;
-    // Depth auto-ranges to its own maximum like presentFrame: raw metres quantize to white and farClip is a ray bound, not a depth span.
-    float exposureEv = options.exposureEv;
-    pathtracer::debug::BipolarDisplay display{glm::vec3(1.0F), glm::vec3(0.0F)};
-    if (pathtracer::debug::aovIsBipolar(options.aov)) {
-        // The same per-lane auto-ranged map presentFrame uses, so a PNG of a signed AOV reads zero at mid-grey rather than clipping it.
-        display = pathtracer::debug::bipolarDisplay(accumulated.rgba, pathtracer::debug::aovChannels(options.aov));
-    } else {
-        if (options.aov == pathtracer::debug::AovId::Depth) {
-            exposureEv = -std::log2(std::max(maxChannel(accumulated), 1e-4F));
-        }
-        display.gain = glm::vec3(std::pow(2.0F, exposureEv));
+    // The same display decision presentFrame makes, so a PNG and the viewer agree by construction rather than by two copies staying level.
+    const pathtracer::debug::AovDisplay prepared = pathtracer::debug::aovDisplay(
+        options.aov, accumulated.rgba, {options.passes, renderer->baseSettings().maxBounces});
+    pathtracer::debug::BipolarDisplay display = prepared.affine;
+    // The photographic exposure, which only the caller knows; aovDisplay leaves the gain at unity for every AOV that takes one.
+    if (pathtracer::debug::aovTakesDisplayExposure(options.aov)) {
+        display.gain = glm::vec3(std::pow(2.0F, options.exposureEv));
     }
     // HdrImage carries RGBA; the shared encode takes packed RGB, so gather the three channels the display path reads.
+    const std::vector<float>& source = prepared.rgba.empty() ? accumulated.rgba : prepared.rgba;
     std::vector<float> linearRgb(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3);
     for (std::size_t texel = 0; texel < linearRgb.size() / 3; ++texel) {
         for (std::size_t channel = 0; channel < 3; ++channel) {
-            linearRgb[(texel * 3) + channel] = accumulated.rgba[(texel * 4) + channel];
+            linearRgb[(texel * 3) + channel] = source[(texel * 4) + channel];
         }
     }
     const std::vector<unsigned char> encoded =

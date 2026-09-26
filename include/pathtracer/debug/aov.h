@@ -2,6 +2,7 @@
 
 #include <span>
 #include <string_view>
+#include <vector>
 
 #include <glm/glm.hpp>
 
@@ -92,6 +93,26 @@ struct BipolarDisplay {
 
 // Auto-ranged per lane over an interleaved RGBA buffer, because lanes of one AOV can be different quantities in incomparable units.
 [[nodiscard]] BipolarDisplay bipolarDisplay(std::span<const float> rgba, int channels);
+
+// What the display needs that an AOV's own texels do not carry: the pass count anchoring SNR's log window, the path-depth ceiling.
+struct AovDisplayContext {
+    int samples = 0;
+    int maxBounces = 0;
+};
+
+// Every display decision that has to read the values: a nonlinear pre-map where one applies, and the affine map for everything else.
+struct AovDisplay {
+    std::vector<float> rgba;  // the pre-mapped texels; empty where the source passes through, so the common path copies nothing
+    BipolarDisplay affine;
+};
+
+// One call per rebuilt pass, never per frame. The photographic exposure stays with the caller: it changes without a re-upload.
+[[nodiscard]] AovDisplay aovDisplay(AovId aov, std::span<const float> rgba, const AovDisplayContext& context);
+
+// True where the display's gain is the photographic exposure: degree one in radiance, and not already auto-ranged by aovDisplay.
+[[nodiscard]] inline bool aovTakesDisplayExposure(AovId aov) {
+    return aovCarriesRadiance(aov) && !aovIsBipolar(aov);
+}
 
 // True for AOVs needing light transport, false for the 14 primary-hit ones. Derived from aovSource, so the two cannot drift apart.
 [[nodiscard]] inline bool aovNeedsLightTransport(AovId aov) {
