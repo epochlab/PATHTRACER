@@ -3,6 +3,74 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Colour opponency, retinex and CLAHE: the three perceptual AOVs
+
+The second wave on `scale_space.h`. All three are observer models rather than image-space derivative operators, so they get
+their own `// Perceptual.` block in the enum, between Utility and Material. 30 AOVs become 33, six filters become nine. Three
+of the designs recorded in [ROADMAP](ROADMAP.md) did not survive contact and were replaced; each replacement is stated below
+with what was wrong, because the rejected reasoning is the part worth keeping.
+
+- feat: `include/pathtracer/scene/cone_space.{h,cpp}` (new) -- linear Rec.709 to cone excitations to the two cardinal
+  chromatic axes, every link exact on data this repo already holds. `AovId::Opponent` reports `(l - l_white, s - s_white)`,
+  the L-versus-M and S-versus-(L+M) displacements from Rec.709 white
+- fix: **Smith & Pokorny 1975 was the planned basis and cannot be used.** The plan's justification was that it is *by
+  definition* an exact linear transform of the CIE 1931 2-degree CMFs; it is not -- it is defined on the **Judd-Vos modified**
+  CMFs. Nor is that bridgeable: Rec.709's primaries are specified as CIE 1931 chromaticities, not spectra, so they have no
+  Judd-Vos tristimulus values at all, and no exact route from this codebase's RGB to any Judd-Vos-based cone space exists.
+  Hunt-Pointer-Estevez (Estevez 1979; Hunt 1998 App. 1) is stated **as** a 3x3 on CIE 1931 XYZ, so it is the only exact choice.
+  The cost is stated rather than hidden: `L + M` is not `V(lambda)` -- the Judd modification exists precisely to make it so --
+  and the `(l, s)` plane is therefore not strictly isoluminant. The `s` axis is rescaled so one unit is one S excitation per
+  unit luminance at the achromatic point, recovering MacLeod & Boynton's unit as far as this observer permits
+- feat: each opponent numerator's three RGB coefficients sum to zero, and a zero-sum row is `r.x (R-G) + r.z (B-G)`
+  identically, so the basis stores those two coefficients. An achromatic texel then reads **exactly** zero at any intensity,
+  not within a rounding of it -- the same structural device as the convolution's centre-relative form
+- feat: `AovId::Retinex` is Land 1986's Gaussian-surround formulation (equivalently Stockham 1972 homomorphic filtering), per
+  channel, with the surround at the pyramid's coarsest level -- its endpoint, so no extent is chosen. Jobson et al. 1997 MSR
+  (`G = 192`, `b = -30`, display-referred), Land & McCann 1971 (path-ensemble dependent, no closed-form invariant) and
+  Horn 1974 / Blake 1985 (a gradient threshold with no defensible derivation) are recorded as rejected
+- feat: zero radiance is exact, not floored. Validity is per channel, and the surround is Knutsson & Westin 1993 normalised
+  convolution: cascade `l*m` and `m`, divide at the end. An everywhere-valid channel skips the mask cascade, bit-identically,
+  because the cascade returns a constant field exactly
+- feat: `AovId::CLAHE` is Zuiderveld 1994's structure on log2 luminance, with all four normally-authored parameters derived:
+  bin width from Freedman & Diaconis 1981 (Scott 1979 where the quartiles coincide), the clip ceiling from Ward Larson et al.
+  1997, the tile grid from one degree of visual angle through the camera's vertical FOV, and the blend written as nested lerps
+  so the four weights are a partition of unity by construction. Output is chromaticity-preserving
+- fix: **Ward Larson's ceiling against the global range makes CLAHE the identity, exactly.** The ceiling is then `1/B`, and
+  since the clipped densities must still total 1 over `B` bins, the only feasible distribution is the uniform one. This was
+  not hypothetical -- the first implementation returned Beauty bit for bit through the C ABI. The ceiling is now measured
+  against the support each tile actually occupies: `1/K` with `K <= B`, capping the slope at `B/K`, and reducing to the
+  identity exactly when a tile already spans the whole range. It is the same criterion read adaptively, and the only
+  non-vacuous reading for an operator that preserves the overall range
+- fix: **`overRangeBin()` is not a log2 lattice** and the plan's reuse of it for CLAHE's binning is rejected. It is uniform in
+  the float's bit pattern, so the true width of a bin varies by a factor of two within a binade (`d log2(1+f)/df` runs 1.443
+  to 0.721), which would make the uniform reference density the ceiling compares against wrong by up to 2x
+- fix: **the plan's tile-grid derivation degenerates.** Sizing tiles from histogram adequacy alone fixes only the product of
+  bin count and tile area, and at any ordinary resolution drives the grid to a single tile -- global equalisation, not
+  adaptive. The grid is now anchored in degrees, so the tile count is the FOV in degrees and the operator's angular extent is
+  invariant to render scale, the same anchoring LoG's cycles-per-degree channel uses
+- fix: both operators now work in a **relative** log, `log2(L / L_min)` as an exact integer exponent difference plus a mantissa
+  term. With an absolute `log2`, `(e + k) + log2(m)` and `(e + log2(m)) + k` round differently, so a power-of-two gain on the
+  frame perturbed every bin index and CLAHE was not exactly homogeneous. The relative form cancels the gain bitwise, which is
+  what makes the two invariance checks exact rather than toleranced
+- refactor: `pathtracer_cie` (new OBJECT library) holds `cie.cpp` and `cone_space.cpp`, deliberately without `-march=native`
+  or IPO so `albedo_table`'s committed output still reproduces exactly. `pathtracer_core` and `metal_fit` both consume its
+  objects and `metal_fit_core` no longer carries `cie.cpp`, which is what keeps `colour_validate` free of duplicate symbols
+- refactor: the planned `diffuseNormalised` entry point was dropped. Normalised convolution at the coarsest scale is two calls
+  to `buildOctavePyramid` and a divide, so a function with one caller composing two existing ones earns nothing
+- fix: the tile grid is capped at one tile per pixel. Below one pixel per degree the pitch falls under a sample, a tile row can hold
+  no rows, and its scatter then runs on into the next row's pixels. Found by review; it cannot change a pixel, because that is
+  exactly the regime where the one-sample-per-tile bin cap makes the transfer linear, so the fix is to the structure's own
+  contiguity invariant and to an O(height x tiles) blow-up in the scatter, not to an output
+- test: 13 checks in `filter_validate` and 2 in `colour_validate`. Exactly-zero or bit-identical: opponency on any achromatic
+  texel at any intensity, opponency under a gain, retinex on a uniform field, retinex against normalised convolution spelled
+  out independently against the facility, retinex under a gain, CLAHE on a uniform field, CLAHE's homogeneity under a gain,
+  CLAHE's blend mapping equal radiances equally, and the cascade returning a constant level intact. `api_validate`'s
+  `aov_filter_dispatch_is_total` picked the three up with no change, at 45 assertions. Two checks carry explicit anti-vacuity
+  assertions -- that dropping retinex's mask changes the result, and that CLAHE is not the identity where its homogeneity is
+  asserted -- because the first draft of each would have passed with the feature removed
+- docs: PIPELINE gains a Perceptual AOV table and three derivation sections (Cone space, Retinex, CLAHE) with 11 references;
+  ROADMAP retires the shipped item and replaces it with the measured-observer gap that only a spectral path can close
+
 ## A shared discrete scale space, the Beauty filters unified on the CPU, and the DoG/LoG AOVs
 
 Seven perceptual AOVs were asked for. Two structural problems stood in front of all of them: the four Beauty filters existed

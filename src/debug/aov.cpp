@@ -30,6 +30,9 @@ AovSource aovSource(AovId aov) {
         case AovId::Gabor:
         case AovId::DoG:
         case AovId::LoG:
+        case AovId::Opponent:
+        case AovId::Retinex:
+        case AovId::CLAHE:
             return AovSource::BeautyFilter;
 
         // The 14 primary-hit lanes renderRasterGBuffer scan-converts. No default: -Werror makes an unclassified AovId a compile error.
@@ -71,8 +74,9 @@ int aovChannels(AovId aov) {
         case AovId::DoG:
             return 1;
 
-        // Surface parameterisation, written as vec3(fract(uv), 0) -- the third component is structurally zero, not data.
+        // Two-component lanes: UV's third channel is structurally zero, and Opponent spans the two cardinal chromatic axes only.
         case AovId::UV:
+        case AovId::Opponent:
             return 2;
 
         // Radiance triples, world-space vectors and the two false-coloured lanes, all needing three channels, not a broadcast scalar.
@@ -85,6 +89,8 @@ int aovChannels(AovId aov) {
         case AovId::Tangent:
         case AovId::ObjectID:
         case AovId::LoG:
+        case AovId::Retinex:
+        case AovId::CLAHE:
         case AovId::Wireframe:
         case AovId::Fresnel:
         case AovId::DirectDiffuse:
@@ -111,11 +117,14 @@ bool aovCarriesRadiance(AovId aov) {
         case AovId::Sobel:
         case AovId::Gabor:
         case AovId::DoG:
+        case AovId::CLAHE:
             return true;
 
         // Ratios, reflectances, counts, lengths, directions and frequencies: scaling any of them by an exposure means nothing.
         case AovId::HSV:
         case AovId::LoG:
+        case AovId::Opponent:
+        case AovId::Retinex:
         case AovId::Wireframe:
         case AovId::Alpha:
         case AovId::Depth:

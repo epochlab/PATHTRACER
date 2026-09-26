@@ -11,7 +11,7 @@
 
 namespace pathtracer::debug {
 
-// CPU implementations of the six Beauty-reading AOVs. Sobel and Gabor clamp at the edge; the scale-space AOVs mirror, see scale_space.h.
+// CPU implementations of the nine Beauty-reading AOVs. Sobel and Gabor clamp at the edge; the scale-space AOVs mirror, see scale_space.h.
 
 // Rec.709 luminance weights (ITU-R BT.709-6), the one triple every luminance reduction in the engine dots against.
 inline constexpr glm::vec3 kRec709LuminanceWeights{0.2126F, 0.7152F, 0.0722F};
@@ -48,6 +48,18 @@ inline constexpr std::size_t kGaborKernelSize = std::size_t{kGaborOrientations} 
 // Scale-normalised Laplacian extremum over the octave ladder (Lindeberg 1998, gamma=1): magnitude, its cycles/degree, and its polarity.
 [[nodiscard]] pathtracer::gfx::HdrImage logAov(const pathtracer::gfx::HdrImage& beauty, float verticalFovRadians,
                                             pathtracer::scene::ThreadPool& threadPool);
+
+// Cone-opponent displacement from Rec.709 white (cone_space.h): (l - l_white, s - s_white), exactly invariant to a positive gain.
+[[nodiscard]] pathtracer::gfx::HdrImage opponentAov(const pathtracer::gfx::HdrImage& beauty,
+                                                 pathtracer::scene::ThreadPool& threadPool);
+
+// Per-channel Gaussian-surround retinex (Land 1986; Stockham 1972) at the pyramid's coarsest scale: a dimensionless reflectance estimate.
+[[nodiscard]] pathtracer::gfx::HdrImage retinexAov(const pathtracer::gfx::HdrImage& beauty,
+                                                pathtracer::scene::ThreadPool& threadPool);
+
+// Contrast-limited adaptive histogram equalisation (Zuiderveld 1994) on log2 luminance under Ward Larson 1997's linear contrast ceiling.
+[[nodiscard]] pathtracer::gfx::HdrImage claheAov(const pathtracer::gfx::HdrImage& beauty, float verticalFovRadians,
+                                              pathtracer::scene::ThreadPool& threadPool);
 
 // Everything a BeautyFilter AOV reads, as explicit fields rather than a PathTraceResult, so a validator can build one with no renderer.
 struct FilterInput {

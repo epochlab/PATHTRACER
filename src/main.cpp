@@ -1311,7 +1311,7 @@ struct Options {
     std::vector<int> benchAovs;
 };
 
-// Resolves a comma-separated AOV list against kAovNames, so -bench-aovs and the HUD name the same 28 AOVs. nullopt on an unknown name.
+// Resolves a comma-separated AOV list against kAovNames, so -bench-aovs and the HUD name the same AOVs. nullopt on an unknown name.
 std::optional<std::vector<int>> parseAovList(const char* list) {
     std::vector<int> aovs;
     const std::string text(list);

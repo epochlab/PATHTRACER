@@ -20,6 +20,10 @@ enum class AovId : int {
     LoG,
     WorldPos,
     UV,
+    // Perceptual: observer models over Beauty, as against the Utility block's image-space derivative operators.
+    Opponent,
+    Retinex,
+    CLAHE,
     // Material.
     Normal,
     GeomNormal,
@@ -49,6 +53,7 @@ inline constexpr const char* kAovNames[] = {
     "Lookahead",    "HSV",            "Luminance",       "Sobel",
     "Gabor",        "DoG",            "LoG",             "WorldPos",
     "UV",
+    "Opponent",     "Retinex",        "CLAHE",
     "Normal",       "GeomNormal",     "Albedo",          "Metallic",
     "Roughness",    "Tangent",        "ObjectID",        "AO",
     "Fresnel",      "IOR",            "Bounce Count",
@@ -58,7 +63,7 @@ inline constexpr const char* kAovNames[] = {
 static_assert(sizeof(kAovNames) / sizeof(kAovNames[0]) == static_cast<int>(AovId::Count),
               "kAovNames must stay index-parallel with AovId");
 
-// Which of the three producers computes each AOV: 10 accumulated path-traced lanes, 14 primary-hit rasterizer lanes, 6 filters over Beauty.
+// Which of the three producers computes each AOV: 10 accumulated path-traced lanes, 14 primary-hit rasterizer lanes, 9 filters over Beauty.
 enum class AovSource { PathTraced, GBuffer, BeautyFilter };
 
 [[nodiscard]] AovSource aovSource(AovId aov);
