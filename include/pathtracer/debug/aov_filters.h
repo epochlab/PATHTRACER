@@ -56,9 +56,9 @@ inline constexpr float kMorletOctaves = 1.0F;
 [[nodiscard]] pathtracer::gfx::HdrImage retinexAov(const pathtracer::gfx::HdrImage& beauty,
                                                 pathtracer::scene::ThreadPool& threadPool);
 
-// Contrast-limited adaptive histogram equalisation (Zuiderveld 1994) on log2 luminance under Ward Larson 1997's linear contrast ceiling.
-[[nodiscard]] pathtracer::gfx::HdrImage claheAov(const pathtracer::gfx::HdrImage& beauty, float pixelsPerRadian,
-                                              pathtracer::scene::ThreadPool& threadPool);
+// Ward Larson, Rushmeier & Piatko 1997 histogram adjustment, linear ceiling, onto the sRGB reference display's range; chromaticity kept.
+[[nodiscard]] pathtracer::gfx::HdrImage histogramAdjustmentAov(const pathtracer::gfx::HdrImage& beauty, float pixelsPerRadian,
+                                                            pathtracer::scene::ThreadPool& threadPool);
 
 // Signal-to-noise ratio of each texel's published radiance: its Rec.709 luminance over the standard error of that mean.
 [[nodiscard]] pathtracer::gfx::HdrImage snrAov(const pathtracer::gfx::HdrImage& beauty,

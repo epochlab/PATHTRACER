@@ -705,28 +705,131 @@ PT_CHECK(retinex_is_invariant_to_a_uniform_gain, Fast, Exact) {
     PT_EXPECT(ctx, base.rgba == bright.rgba, "a 512x gain changed the retinex reflectance");
 }
 
-// No dynamic range is no histogram to equalise, and the operator is then exactly the identity rather than approximately one.
-PT_CHECK(clahe_passes_a_uniform_field_through_unchanged, Fast, Exact) {
+// Eight pixels per degree, so a 1-degree foveal block is eight pixels on a side and a test frame holds a few hundred samples.
+const float kEightPixelsPerDegree = 8.0F * glm::degrees(1.0F);
+
+// Display stops the operator targets: the IEC 61966-2-1 sRGB reference medium, white 80 cd/m^2 over black 0.2 cd/m^2.
+const double kReferenceDisplayStops = std::log2(80.0 / 0.2);
+
+// A frame of constant 8x8 blocks spanning `stops`, levels in a scrambled order, so each foveal sample is one exact level.
+[[nodiscard]] std::vector<float> blockLevels(int width, int height, float stops) {
+    std::vector<float> plane(static_cast<std::size_t>(width) * static_cast<std::size_t>(height));
+    const int blocksX = width / 8;
+    const std::size_t levels = static_cast<std::size_t>(blocksX) * static_cast<std::size_t>(height / 8);
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const auto block = static_cast<std::size_t>(((y / 8) * blocksX) + (x / 8));
+            const float unit = static_cast<float>((block * 2654435761U) % levels) / static_cast<float>(levels - 1);
+            plane[(static_cast<std::size_t>(y) * static_cast<std::size_t>(width)) + static_cast<std::size_t>(x)] =
+                std::exp2(stops * (unit - 0.5F));
+        }
+    }
+    return plane;
+}
+
+// No dynamic range is no histogram to adjust, and the operator is then exactly the identity rather than approximately one.
+PT_CHECK(histogram_adjustment_passes_a_uniform_field_through_unchanged, Fast, Exact) {
     ctx.plan(1);
     ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
     constexpr int kWidth = 128;
     constexpr int kHeight = 96;
     const HdrImage flat = greyImage(kWidth, kHeight, std::vector<float>(static_cast<std::size_t>(kWidth) * kHeight, 0.375F));
-    const HdrImage clahe = pathtracer::debug::claheAov(flat, static_cast<float>(kHeight) / glm::radians(30.0F), pool);
-    PT_EXPECT(ctx, clahe.rgba == flat.rgba, "a uniform field was not passed through unchanged");
+    const HdrImage out = pathtracer::debug::histogramAdjustmentAov(flat, kEightPixelsPerDegree, pool);
+    PT_EXPECT(ctx, out.rgba == flat.rgba, "a uniform field was not passed through unchanged");
 }
 
-// Every bin index, bin width and transfer value is a difference of log radiances, so a power-of-two gain moves only the output exponent.
-PT_CHECK(clahe_is_homogeneous_of_degree_one, Fast, Exact) {
+// Ward Larson's linear case: a world range the display already spans is shown as it is, bit for bit.
+PT_CHECK(histogram_adjustment_is_the_identity_within_the_display_range, Fast, Exact) {
     ctx.plan(2);
     ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
     constexpr int kWidth = 192;
     constexpr int kHeight = 128;
-    const HdrImage image = greyImage(kWidth, kHeight, affinePlane(kWidth, kHeight));
-    std::vector<float> gainedPlane = affinePlane(kWidth, kHeight);
+    const float inside = static_cast<float>(kReferenceDisplayStops) - 0.5F;
+    const HdrImage image = greyImage(kWidth, kHeight, blockLevels(kWidth, kHeight, inside));
+    PT_EXPECT(ctx, pathtracer::debug::histogramAdjustmentAov(image, kEightPixelsPerDegree, pool).rgba == image.rgba,
+              "a frame inside the display range was changed");
+    // The same structure half a stop past the display range must move, so the identity above is the criterion, not a dead operator.
+    const HdrImage beyond = greyImage(kWidth, kHeight, blockLevels(kWidth, kHeight, inside + 1.0F));
+    PT_EXPECT(ctx, pathtracer::debug::histogramAdjustmentAov(beyond, kEightPixelsPerDegree, pool).rgba != beyond.rgba,
+              "a frame beyond the display range was left untouched");
+}
+
+// The linear ceiling caps every bin's display share at its world share, so sorted by input, output never rises faster than input.
+PT_CHECK(histogram_adjustment_is_monotone_and_never_expands_contrast, Fast, Exact) {
+    ctx.plan(3);
+    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    constexpr int kWidth = 256;
+    constexpr int kHeight = 192;
+    constexpr float kStops = 16.0F;
+    std::vector<float> plane = blockLevels(kWidth, kHeight, kStops);
+    // A flat patch with a twentieth of a stop of texture: an equaliser without a ceiling would stretch it across the whole range.
+    for (int y = 64; y < 128; ++y) {
+        for (int x = 64; x < 192; ++x) {
+            const auto pixel = (static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x);
+            plane[pixel] = std::exp2(0.05F * static_cast<float>((pixel * 2654435761U) % 64U) / 63.0F);
+        }
+    }
+    const HdrImage image = greyImage(kWidth, kHeight, plane);
+    const HdrImage out = pathtracer::debug::histogramAdjustmentAov(image, kEightPixelsPerDegree, pool);
+    std::vector<std::pair<double, double>> logs(plane.size());
+    for (std::size_t pixel = 0; pixel < plane.size(); ++pixel) {
+        logs[pixel] = {std::log2(static_cast<double>(image.rgba[pixel * 4])), std::log2(static_cast<double>(out.rgba[pixel * 4]))};
+    }
+    std::sort(logs.begin(), logs.end());
+    // Per texel: bin position and exponent in (world + display stops) ulps, six rescale roundings at 1/ln2; a pair carries it twice.
+    const double ulp = static_cast<double>(kFloatEpsilon);
+    const double bound = 2.0 * (((static_cast<double>(kStops) + kReferenceDisplayStops) * ulp) + (6.0 * ulp / std::numbers::ln2));
+    double worstExpansion = 0.0;
+    double worstReversal = 0.0;
+    for (std::size_t index = 1; index < logs.size(); ++index) {
+        const double in = logs[index].first - logs[index - 1].first;
+        const double outStep = logs[index].second - logs[index - 1].second;
+        worstExpansion = std::max(worstExpansion, outStep - in);
+        worstReversal = std::max(worstReversal, -outStep);
+    }
+    PT_EXPECT(ctx, worstExpansion <= bound, "display contrast exceeded world contrast by " + std::to_string(worstExpansion) +
+                                                " stops, bound " + std::to_string(bound));
+    PT_EXPECT(ctx, worstReversal <= bound, "the transfer reversed by " + std::to_string(worstReversal) + " stops");
+    const double outRange = logs.back().second - logs.front().second;
+    PT_EXPECT(ctx, outRange <= kReferenceDisplayStops + bound,
+              "the output spans " + std::to_string(outRange) + " stops, past the display's " + std::to_string(kReferenceDisplayStops));
+}
+
+// The cumulative is normalised to end at exactly one, so the brightest foveal level maps onto itself and the darkest D stops below it.
+PT_CHECK(histogram_adjustment_spans_exactly_the_display_range, Fast, Exact) {
+    ctx.plan(2);
+    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    constexpr int kWidth = 256;
+    constexpr int kHeight = 192;
+    const std::vector<float> plane = blockLevels(kWidth, kHeight, 14.0F);
+    const HdrImage image = greyImage(kWidth, kHeight, plane);
+    const HdrImage out = pathtracer::debug::histogramAdjustmentAov(image, kEightPixelsPerDegree, pool);
+    const auto extremes = std::minmax_element(plane.begin(), plane.end());
+    const auto brightest = static_cast<std::size_t>(extremes.second - plane.begin());
+    const auto darkest = static_cast<std::size_t>(extremes.first - plane.begin());
+    // Budget: the exponent argument's rounding over the ~22 stops it carries, then five float roundings, in stops.
+    const double bound = ((14.0 + kReferenceDisplayStops) * static_cast<double>(kFloatEpsilon)) +
+                         (5.0 * static_cast<double>(kFloatEpsilon) / std::numbers::ln2);
+    const double top = std::fabs(std::log2(static_cast<double>(out.rgba[brightest * 4]) / static_cast<double>(*extremes.second)));
+    PT_EXPECT(ctx, top <= bound, "the brightest foveal level moved by " + std::to_string(top) + " stops");
+    const double floorStops = std::log2(static_cast<double>(out.rgba[brightest * 4]) / static_cast<double>(out.rgba[darkest * 4]));
+    PT_EXPECT(ctx, std::fabs(floorStops - kReferenceDisplayStops) <= 2.0 * bound,
+              "darkest to brightest spans " + std::to_string(floorStops) + " stops, not the display's " +
+                  std::to_string(kReferenceDisplayStops));
+}
+
+// Every sample, bin and knot is a difference of log radiances, so a power-of-two gain moves only the output exponent.
+PT_CHECK(histogram_adjustment_is_homogeneous_of_degree_one, Fast, Exact) {
+    ctx.plan(2);
+    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    constexpr int kWidth = 192;
+    constexpr int kHeight = 128;
+    const std::vector<float> plane = blockLevels(kWidth, kHeight, 12.0F);
+    std::vector<float> gainedPlane = plane;
     std::transform(gainedPlane.begin(), gainedPlane.end(), gainedPlane.begin(), [](float v) { return v * 64.0F; });
-    const HdrImage base = pathtracer::debug::claheAov(image, static_cast<float>(kHeight) / glm::radians(30.0F), pool);
-    const HdrImage gained = pathtracer::debug::claheAov(greyImage(kWidth, kHeight, gainedPlane), static_cast<float>(kHeight) / glm::radians(30.0F), pool);
+    const HdrImage image = greyImage(kWidth, kHeight, plane);
+    const HdrImage base = pathtracer::debug::histogramAdjustmentAov(image, kEightPixelsPerDegree, pool);
+    const HdrImage gained = pathtracer::debug::histogramAdjustmentAov(greyImage(kWidth, kHeight, gainedPlane), kEightPixelsPerDegree, pool);
     float worst = 0.0F;
     // Colour only: alpha is a coverage flag, not a radiance, so it is the one channel a gain must leave alone rather than scale.
     for (std::size_t pixel = 0; pixel < base.rgba.size() / 4; ++pixel) {
@@ -735,129 +838,36 @@ PT_CHECK(clahe_is_homogeneous_of_degree_one, Fast, Exact) {
             worst = std::max(worst, std::fabs((base.rgba[index] * 64.0F) - gained.rgba[index]));
         }
     }
-    PT_EXPECT(ctx, worst == 0.0F, "a 64x gain did not scale the CLAHE response exactly, worst " + std::to_string(worst));
+    PT_EXPECT(ctx, worst == 0.0F, "a 64x gain did not scale the response exactly, worst " + std::to_string(worst));
     // Homogeneity is trivial for the identity, so the same configuration must be shown to move the frame at all.
-    PT_EXPECT(ctx, base.rgba != image.rgba, "CLAHE left this frame untouched, so the homogeneity above proves nothing");
-}
-
-// A cumulative histogram is non-decreasing and spans its whole range, so with one tile the operator is a monotone onto map in luminance.
-PT_CHECK(clahe_transfer_is_monotone_and_range_preserving, Fast, Exact) {
-    ctx.plan(3);
-    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    // One degree of visual angle per tile, so a one-degree field is a single tile and the bilinear blend cannot mask a transfer defect.
-    constexpr int kWidth = 96;
-    constexpr int kHeight = 96;
-    const float oneTileFov = glm::radians(1.0F);
-    std::vector<float> plane(static_cast<std::size_t>(kWidth) * kHeight);
-    for (std::size_t pixel = 0; pixel < plane.size(); ++pixel) {
-        // Radiances spread over eight stops in a scrambled order, so monotonicity cannot come from the scan order.
-        plane[pixel] = std::exp2(-4.0F + (8.0F * static_cast<float>((pixel * 2654435761U) % 4096U) / 4095.0F));
-    }
-    const HdrImage image = greyImage(kWidth, kHeight, plane);
-    const HdrImage clahe = pathtracer::debug::claheAov(image, static_cast<float>(kHeight) / oneTileFov, pool);
-
-    std::vector<std::pair<float, float>> pairs(plane.size());
-    for (std::size_t pixel = 0; pixel < plane.size(); ++pixel) {
-        pairs[pixel] = {image.rgba[pixel * 4], clahe.rgba[pixel * 4]};
-    }
-    std::sort(pairs.begin(), pairs.end());
-    bool monotone = true;
-    for (std::size_t index = 1; index < pairs.size(); ++index) {
-        monotone = monotone && pairs[index].second >= pairs[index - 1].second;
-    }
-    PT_EXPECT(ctx, monotone, "the single-tile transfer is not non-decreasing in input radiance");
-    // The cumulative runs from zero to one over the occupied range, so its endpoints land back on the extremes they came from.
-    PT_EXPECT(ctx, pairs.front().second == pairs.front().first,
-                  "the darkest texel moved from " + std::to_string(pairs.front().first) + " to " +
-                      std::to_string(pairs.front().second));
-    const double topError = std::fabs(static_cast<double>(pairs.back().second - pairs.back().first));
-    // The cumulative reaches one only up to the rounding of its own bin sum, which the exponential then carries at ln2 per unit.
-    const double bound = static_cast<double>(pairs.back().first) * std::numbers::ln2 *
-                         static_cast<double>(kFloatEpsilon) * 64.0;
-    PT_EXPECT(ctx, topError <= bound,
-                  "the brightest texel moved by " + std::to_string(topError) + ", bound " + std::to_string(bound));
-}
-
-// Zuiderveld's four tile weights are written as nested lerps, so they sum to exactly one and equal inputs cannot map to unequal outputs.
-PT_CHECK(clahe_blend_is_a_partition_of_unity, Fast, Exact) {
-    ctx.plan(1);
-    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    // Tiles of exactly eight pixels, carrying a period-eight pattern, so every tile holds the same histogram and the same transfer.
-    constexpr int kWidth = 256;
-    constexpr int kHeight = 256;
-    constexpr int kPeriod = 8;
-    const float fov = glm::radians(static_cast<float>(kHeight) / static_cast<float>(kPeriod));
-    std::vector<float> plane(static_cast<std::size_t>(kWidth) * kHeight);
-    for (int y = 0; y < kHeight; ++y) {
-        for (int x = 0; x < kWidth; ++x) {
-            plane[(static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x)] =
-                std::exp2(static_cast<float>(((y % kPeriod) * kPeriod) + (x % kPeriod)) * 0.125F);
-        }
-    }
-    const HdrImage clahe = pathtracer::debug::claheAov(greyImage(kWidth, kHeight, plane), static_cast<float>(kHeight) / fov, pool);
-    std::vector<float> firstSeen(static_cast<std::size_t>(kPeriod) * kPeriod, -1.0F);
-    float worst = 0.0F;
-    for (int y = 0; y < kHeight; ++y) {
-        for (int x = 0; x < kWidth; ++x) {
-            const auto key = static_cast<std::size_t>(((y % kPeriod) * kPeriod) + (x % kPeriod));
-            const float value = texelAt(clahe, x, y, 0);
-            worst = firstSeen[key] < 0.0F ? worst : std::max(worst, std::fabs(value - firstSeen[key]));
-            firstSeen[key] = value;
-        }
-    }
-    PT_EXPECT(ctx, worst == 0.0F, "identical tiles mapped equal radiances differently, by " + std::to_string(worst));
-}
-
-// A degree-wide tile cannot be finer than the sampling, so below one pixel per degree the grid caps and each tile holds one sample.
-PT_CHECK(clahe_is_the_identity_below_one_tile_per_pixel, Fast, Exact) {
-    ctx.plan(1);
-    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    // 36 rows across 90 degrees: every pixel spans more than a degree, so there is no sub-pixel adaptation left to model.
-    constexpr int kWidth = 48;
-    constexpr int kHeight = 36;
-    std::vector<float> plane(static_cast<std::size_t>(kWidth) * kHeight);
-    for (std::size_t pixel = 0; pixel < plane.size(); ++pixel) {
-        plane[pixel] = std::exp2(-3.0F + (6.0F * static_cast<float>((pixel * 2654435761U) % 997U) / 996.0F));
-    }
-    const HdrImage image = greyImage(kWidth, kHeight, plane);
-    const HdrImage clahe = pathtracer::debug::claheAov(image, static_cast<float>(kHeight) / glm::radians(90.0F), pool);
-    const auto extremes = std::minmax_element(plane.begin(), plane.end());
-    const double range = std::log2(static_cast<double>(*extremes.second) / static_cast<double>(*extremes.first));
-    double worst = 0.0;
-    for (std::size_t pixel = 0; pixel < plane.size(); ++pixel) {
-        worst = std::max(worst, std::fabs(static_cast<double>(clahe.rgba[pixel * 4] - image.rgba[pixel * 4]) /
-                                          static_cast<double>(image.rgba[pixel * 4])));
-    }
-    // One bin makes the cumulative the linear transfer, so only the log round trip is left: two roundings of the exponent, at ln2 a stop.
-    const double bound = 2.0 * std::numbers::ln2 * range * static_cast<double>(kFloatEpsilon);
-    PT_EXPECT(ctx, worst <= bound, "a sub-pixel tile pitch moved the frame by a relative " + std::to_string(worst) +
-                                       ", bound " + std::to_string(bound));
+    PT_EXPECT(ctx, base.rgba != image.rgba, "the operator left this frame untouched, so the homogeneity above proves nothing");
 }
 
 // Only luminance is remapped, so every texel keeps its chromaticity: the output is its input times one positive scalar, to a rounding.
-PT_CHECK(clahe_preserves_chromaticity, Fast, Exact) {
-    ctx.plan(1);
+PT_CHECK(histogram_adjustment_preserves_chromaticity, Fast, Exact) {
+    ctx.plan(2);
     ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
     constexpr int kWidth = 160;
     constexpr int kHeight = 128;
+    const std::vector<float> plane = blockLevels(kWidth, kHeight, 12.0F);
     HdrImage image{kWidth, kHeight, std::vector<float>(static_cast<std::size_t>(kWidth) * kHeight * 4, 0.0F)};
-    for (std::size_t pixel = 0; pixel < static_cast<std::size_t>(kWidth) * kHeight; ++pixel) {
-        const float base = std::exp2(-3.0F + (6.0F * static_cast<float>(pixel % 251U) / 250.0F));
-        image.rgba[pixel * 4] = base;
-        image.rgba[(pixel * 4) + 1] = base * 0.375F;
-        image.rgba[(pixel * 4) + 2] = base * 2.25F;
+    for (std::size_t pixel = 0; pixel < plane.size(); ++pixel) {
+        image.rgba[pixel * 4] = plane[pixel];
+        image.rgba[(pixel * 4) + 1] = plane[pixel] * 0.375F;
+        image.rgba[(pixel * 4) + 2] = plane[pixel] * 2.25F;
         image.rgba[(pixel * 4) + 3] = 1.0F;
     }
-    const HdrImage clahe = pathtracer::debug::claheAov(image, static_cast<float>(kHeight) / glm::radians(30.0F), pool);
+    const HdrImage out = pathtracer::debug::histogramAdjustmentAov(image, kEightPixelsPerDegree, pool);
+    PT_EXPECT(ctx, out.rgba != image.rgba, "the operator left this frame untouched, so the check below proves nothing");
     double worst = 0.0;
-    for (std::size_t pixel = 0; pixel < static_cast<std::size_t>(kWidth) * kHeight; ++pixel) {
-        const double red = clahe.rgba[pixel * 4] / static_cast<double>(image.rgba[pixel * 4]);
-        const double blue = clahe.rgba[(pixel * 4) + 2] / static_cast<double>(image.rgba[(pixel * 4) + 2]);
+    for (std::size_t pixel = 0; pixel < plane.size(); ++pixel) {
+        const double red = out.rgba[pixel * 4] / static_cast<double>(image.rgba[pixel * 4]);
+        const double blue = out.rgba[(pixel * 4) + 2] / static_cast<double>(image.rgba[(pixel * 4) + 2]);
         worst = std::max(worst, std::fabs(red - blue) / red);
     }
     // One rounding of the scale into each of the two products, so the two recovered ratios may differ by two ulps and no more.
     PT_EXPECT(ctx, worst <= 2.0 * static_cast<double>(kFloatEpsilon),
-                  "per-channel scale factors differ by a relative " + std::to_string(worst));
+              "per-channel scale factors differ by a relative " + std::to_string(worst));
 }
 
 // x_i = mu +/- delta over an even count gives M2 = n delta^2 exactly, so the reported ratio has a closed form and no tolerance.

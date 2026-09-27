@@ -27,7 +27,7 @@ enum class AovId : int {
     // Perceptual: observer models over Beauty, as against the Utility block's image-space derivative operators.
     ColourOpponent,
     Retinex,
-    CLAHE,
+    HistogramAdjustment,
     // Material.
     Normal,
     GeomNormal,
@@ -58,7 +58,7 @@ inline constexpr const char* kAovNames[] = {
     "Lookahead",    "HSV",            "Luminance",       "Sobel",
     "Gabor",        "DoG",            "LoG",             "WorldPos",
     "UV",
-    "Colour Opponent", "Retinex",   "CLAHE",
+    "Colour Opponent", "Retinex",   "Histogram Adjustment",
     "Normal",       "GeomNormal",     "Albedo",          "Metallic",
     "Roughness",    "Tangent",        "ObjectID",        "AO",
     "Fresnel",      "IOR",            "Bounce Count",    "SNR",
