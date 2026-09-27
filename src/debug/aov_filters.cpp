@@ -243,6 +243,30 @@ struct WardTransfer {
     return surround;
 }
 
+// Gamma-normalised Laplacian of one rung on the base grid: own-grid stencil times own-grid variance, the two decimations cancelling.
+[[nodiscard]] std::vector<float> normalisedLaplacian(const ScaleSpaceLevel& level, int baseWidth, int baseHeight,
+                                                     ThreadPool& threadPool) {
+    std::vector<float> response(level.plane.size());
+    laplacian5(level.plane, level.width, level.height, response, threadPool);
+    const auto decimation = static_cast<float>(level.decimation);
+    std::vector<float> expanded(static_cast<std::size_t>(baseWidth) * static_cast<std::size_t>(baseHeight), 0.0F);
+    // Negated once here: a bright blob has a negative Laplacian, and DoG's fine-minus-coarse reads positive on one.
+    addExpanded(ScaleSpaceLevel{std::move(response), level.width, level.height, level.decimation, level.baseVariance},
+                -level.baseVariance / (decimation * decimation), expanded, baseWidth, baseHeight, threadPool);
+    return expanded;
+}
+
+// Vertex of the parabola through three rungs equally spaced in log t (Lowe 2004 section 4), in the extremum's own sign.
+[[nodiscard]] float scalePeak(float previous, float current, float next) {
+    const float sign = std::copysign(1.0F, current);
+    const float below = sign * previous;
+    const float centre = sign * current;
+    const float above = sign * next;
+    const float curvature = below - (2.0F * centre) + above;
+    // At a final argmax both neighbours are at most the centre, so curvature is negative unless all three are equal.
+    return curvature < 0.0F ? sign * (centre - (((below - above) * (below - above)) / (8.0F * curvature))) : current;
+}
+
 }  // namespace
 
 HdrImage luminanceAov(const HdrImage& beauty, ThreadPool& threadPool) {
@@ -449,29 +473,31 @@ HdrImage logAov(const HdrImage& beauty, ThreadPool& threadPool) {
     const std::vector<ScaleSpaceLevel> pyramid = buildOctavePyramid(plane, beauty.width, beauty.height, threadPool);
     HdrImage out = makeBroadcastImage(beauty.width, beauty.height);
     const auto pixels = static_cast<std::size_t>(beauty.width) * static_cast<std::size_t>(beauty.height);
-    std::vector<float> extremum(pixels, 0.0F);
 
-    for (const ScaleSpaceLevel& level : pyramid) {
-        std::vector<float> response(level.plane.size());
-        laplacian5(level.plane, level.width, level.height, response, threadPool);
-        // Own-grid Laplacian times own-grid variance is exactly the base-grid gamma-normalised response, the two decimations cancelling.
-        const auto decimation = static_cast<float>(level.decimation);
-        const float ownVariance = level.baseVariance / (decimation * decimation);
-        const std::vector<float> expanded =
-            expandToBase(ScaleSpaceLevel{std::move(response), level.width, level.height, level.decimation,
-                                         level.baseVariance},
-                         beauty.width, beauty.height, threadPool);
+    // The largest-magnitude rung so far per texel, and its value refined across scale: a sliding window of three rungs suffices.
+    std::vector<float> rungPeak(pixels, 0.0F);
+    std::vector<float> extremum(pixels, 0.0F);
+    std::vector<float> previous;
+    std::vector<float> current =
+        pyramid.empty() ? std::vector<float>{} : normalisedLaplacian(pyramid.front(), beauty.width, beauty.height, threadPool);
+    for (std::size_t rung = 0; rung < pyramid.size(); ++rung) {
+        std::vector<float> next = rung + 1 < pyramid.size()
+                                      ? normalisedLaplacian(pyramid[rung + 1], beauty.width, beauty.height, threadPool)
+                                      : std::vector<float>{};
+        const bool interior = !previous.empty() && !next.empty();
         threadPool.parallelFor(beauty.height, [&](int y) {
             const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(beauty.width);
             for (int x = 0; x < beauty.width; ++x) {
                 const std::size_t pixel = row + static_cast<std::size_t>(x);
-                // Sign negated once here: a bright blob has a negative Laplacian, and DoG's fine-minus-coarse reads positive on one.
-                const float normalised = -ownVariance * expanded[pixel];
-                if (std::fabs(normalised) > std::fabs(extremum[pixel])) {
-                    extremum[pixel] = normalised;
+                if (!(std::fabs(current[pixel]) > std::fabs(rungPeak[pixel]))) {
+                    continue;
                 }
+                rungPeak[pixel] = current[pixel];
+                extremum[pixel] = interior ? scalePeak(previous[pixel], current[pixel], next[pixel]) : current[pixel];
             }
         });
+        previous = std::move(current);
+        current = std::move(next);
     }
 
     threadPool.parallelFor(beauty.height, [&](int y) {

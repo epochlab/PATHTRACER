@@ -503,6 +503,49 @@ PT_CHECK(log_is_homogeneous_of_degree_one, Fast, Exact) {
     PT_EXPECT(ctx, worst == 0.0F, "worst gain mismatch " + std::to_string(worst) + " against peak " + std::to_string(peak));
 }
 
+// A blob midway in log t between two rungs: the scale parabola must lift the rung maximum toward the true peak and never past it.
+PT_CHECK(log_interpolates_the_scale_peak_between_rungs, Fast, Exact) {
+    ctx.plan(2);
+    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    constexpr int kWidth = 256;
+    constexpr int kHeight = 256;
+    const auto pixels = static_cast<std::size_t>(kWidth) * kHeight;
+    const std::size_t centre = (static_cast<std::size_t>(kHeight / 2) * kWidth) + static_cast<std::size_t>(kWidth / 2);
+    // Rungs sit at inner*4^k and the normalised response peaks at t = t0, so t0 = 8*inner lies exactly between rungs 1 and 2.
+    const double inner = static_cast<double>(pathtracer::debug::innerScaleVariance());
+    const double blobVariance = 8.0 * inner;
+    std::vector<float> blob(pixels, 0.0F);
+    blob[centre] = 1.0F;
+    pathtracer::debug::diffuse(blob, kWidth, kHeight, static_cast<float>(blobVariance), pool);
+    const HdrImage log = pathtracer::debug::logAov(greyImage(kWidth, kHeight, blob), pool);
+    const double measured = static_cast<double>(texelAt(log, kWidth / 2, kHeight / 2, 0)) /
+                            static_cast<double>(greyLuminanceGain());
+
+    // Exact discrete centre response -t*laplacian5(T(.;t0+t)) = -4t T(0)(T(1) - T(0)), from the kernel's own taps.
+    const auto exact = [&](double t) {
+        const std::vector<float> kernel = pathtracer::debug::discreteGaussianKernel(static_cast<float>(blobVariance + t));
+        return -4.0 * t * static_cast<double>(kernel[0]) * (static_cast<double>(kernel[1]) - static_cast<double>(kernel[0]));
+    };
+    const std::vector<ScaleSpaceLevel> pyramid = pathtracer::debug::buildOctavePyramid(blob, kWidth, kHeight, pool);
+    double rungMax = 0.0;
+    for (const ScaleSpaceLevel& level : pyramid) {
+        rungMax = std::max(rungMax, exact(static_cast<double>(level.baseVariance)));
+    }
+    // The true discrete peak by a 64-per-octave sweep over the ladder's span, far finer than the effect under test.
+    double peak = 0.0;
+    for (double t = inner; t <= static_cast<double>(pyramid.back().baseVariance); t *= std::exp2(1.0 / 64.0)) {
+        peak = std::max(peak, exact(t));
+    }
+    // Float budget: one rounding per tap of the widest kernel involved, relative to the response, as the blob-scale check derives.
+    const int radius = static_cast<int>(pathtracer::debug::discreteGaussianKernel(
+                           static_cast<float>(blobVariance) + pyramid.back().baseVariance).size()) - 1;
+    const double budget = 2.0 * static_cast<double>((2 * radius) + 1) * static_cast<double>(kFloatEpsilon) * peak;
+    PT_EXPECT(ctx, measured > rungMax + budget, "the interpolated peak " + std::to_string(measured) +
+                                                    " does not improve on the best rung " + std::to_string(rungMax));
+    PT_EXPECT(ctx, measured <= peak + budget,
+              "the interpolated peak " + std::to_string(measured) + " overshoots the true peak " + std::to_string(peak));
+}
+
 // The two AOVs are not redundant: DoG sees one fixed band next to pixel Nyquist, LoG the whole ladder, so a coarse blob separates them.
 PT_CHECK(log_responds_where_dog_cannot, Fast, Exact) {
     ctx.plan(4);
