@@ -50,8 +50,11 @@ public:
     // Paraxial vertical FOV from focal length and film-back height, which viewBasis's half-extents are; a fisheye frame's is below.
     [[nodiscard]] float verticalFovRadians() const;
 
-    // Angle the frame's vertical extent subtends under the active projection, saturating at the image circle: what CLAHE's scale needs.
+    // Angle the frame's vertical extent subtends under the active projection, saturating at the image circle: the HUD's FOV readout.
     [[nodiscard]] float verticalAngularExtentRadians() const;
+
+    // Film pixels per radian on the optical axis, f*H/h: exact for both projections, since tan'(0) = theta_d'(0) = 1 there.
+    [[nodiscard]] float pixelsPerRadian(int heightPixels) const;
 
     // Orthonormal basis and view-plane half-extents, all primaryRay() needs bar the ndc weight, so a projector can share it.
     struct ViewBasis {

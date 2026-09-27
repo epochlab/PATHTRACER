@@ -453,7 +453,7 @@ HdrImage retinexAov(const HdrImage& beauty, ThreadPool& threadPool) {
     return out;
 }
 
-HdrImage claheAov(const HdrImage& beauty, float verticalFovRadians, ThreadPool& threadPool) {
+HdrImage claheAov(const HdrImage& beauty, float pixelsPerRadian, ThreadPool& threadPool) {
     const int width = beauty.width;
     const int height = beauty.height;
     const auto pixels = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
@@ -480,7 +480,7 @@ HdrImage claheAov(const HdrImage& beauty, float verticalFovRadians, ThreadPool& 
     }
 
     // One degree of visual angle, the extent retinal light adaptation pools over (Ward Larson et al. 1997), so the grid is FOV-anchored.
-    const float pixelsPerDegree = static_cast<float>(height) / glm::degrees(verticalFovRadians);
+    const float pixelsPerDegree = glm::radians(pixelsPerRadian);
     // Capped at one tile per pixel: below that the adaptation extent is finer than the sampling, and a tile row could hold no rows at all.
     const int tilesX = std::clamp(static_cast<int>(std::lround(static_cast<float>(width) / pixelsPerDegree)), 1, width);
     const int tilesY = std::clamp(static_cast<int>(std::lround(static_cast<float>(height) / pixelsPerDegree)), 1, height);
@@ -626,7 +626,7 @@ HdrImage evaluateFilterAov(AovId aov, const FilterInput& input, ThreadPool& thre
         case AovId::LoG:       return logAov(input.beauty, threadPool);
         case AovId::ColourOpponent:  return colourOpponentAov(input.beauty, threadPool);
         case AovId::Retinex:   return retinexAov(input.beauty, threadPool);
-        case AovId::CLAHE:     return claheAov(input.beauty, input.verticalFovRadians, threadPool);
+        case AovId::CLAHE:     return claheAov(input.beauty, input.pixelsPerRadian, threadPool);
         case AovId::SNR:       return snrAov(input.beauty, input.beautyLuminanceM2, input.samples, threadPool);
 
         // The lanes their own producers write. No default arm: -Werror then makes an unrouted new filter a compile error.

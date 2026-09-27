@@ -176,7 +176,7 @@ PT_CHECK(bipolar_aovs_produce_both_signs, Fast, Exact) {
 
     for (const AovId aov : bipolar) {
         const HdrImage out = pathtracer::debug::evaluateFilterAov(
-            aov, pathtracer::debug::FilterInput{pattern, glm::radians(30.0F), nullptr, 0}, pool);
+            aov, pathtracer::debug::FilterInput{pattern, static_cast<float>(pattern.height) / glm::radians(30.0F), nullptr, 0}, pool);
         const int channels = pathtracer::debug::aovChannels(aov);
         float lowest = 0.0F;
         float highest = 0.0F;
@@ -714,7 +714,7 @@ PT_CHECK(aov_filter_dispatch_is_total, Fast, Exact) {
     outputs.reserve(filters.size());
     for (const AovId aov : filters) {
         outputs.push_back(pathtracer::debug::evaluateFilterAov(
-            aov, pathtracer::debug::FilterInput{source, 0.5F}, pool));
+            aov, pathtracer::debug::FilterInput{source, static_cast<float>(kHeight) / 0.5F}, pool));
         const HdrImage& out = outputs.back();
         PT_EXPECT(ctx, out.width == kWidth && out.height == kHeight &&
                           out.rgba.size() == source.rgba.size(),

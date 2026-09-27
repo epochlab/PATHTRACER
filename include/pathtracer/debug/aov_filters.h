@@ -57,7 +57,7 @@ inline constexpr float kMorletOctaves = 1.0F;
                                                 pathtracer::scene::ThreadPool& threadPool);
 
 // Contrast-limited adaptive histogram equalisation (Zuiderveld 1994) on log2 luminance under Ward Larson 1997's linear contrast ceiling.
-[[nodiscard]] pathtracer::gfx::HdrImage claheAov(const pathtracer::gfx::HdrImage& beauty, float verticalFovRadians,
+[[nodiscard]] pathtracer::gfx::HdrImage claheAov(const pathtracer::gfx::HdrImage& beauty, float pixelsPerRadian,
                                               pathtracer::scene::ThreadPool& threadPool);
 
 // Signal-to-noise ratio of each texel's published radiance: its Rec.709 luminance over the standard error of that mean.
@@ -68,7 +68,7 @@ inline constexpr float kMorletOctaves = 1.0F;
 // Everything a BeautyFilter AOV reads, as explicit fields rather than a PathTraceResult, so a validator can build one with no renderer.
 struct FilterInput {
     const pathtracer::gfx::HdrImage& beauty;  // published mean radiance, linear Rec.709, scene-referred and unbounded
-    float verticalFovRadians;                 // the rendering camera's, the sole anchor turning pixels into cycles per degree
+    float pixelsPerRadian;                    // Camera::pixelsPerRadian at beauty's height: the one anchor from pixels to visual angle
     // Welford second moment of the per-pass luminance and the passes averaged in; a variance is undefined below two of them.
     const float* beautyLuminanceM2 = nullptr;
     int samples = 0;

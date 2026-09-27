@@ -669,7 +669,7 @@ const pathtracer::gfx::HdrImage* ensureFilterImage(
     const pathtracer::debug::ScopedCpuTimer filterTimer(app.stages.filterMs);
     cache.image = pathtracer::debug::evaluateFilterAov(
         aov,
-        pathtracer::debug::FilterInput{snapshot->beauty, camera.verticalAngularExtentRadians(),
+        pathtracer::debug::FilterInput{snapshot->beauty, camera.pixelsPerRadian(snapshot->beauty.height),
                                         snapshot->beautyLuminanceM2.data(), snapshot->samples},
         *app.rasterThreadPool);
     cache.aov = aov;

@@ -341,7 +341,7 @@ PT_CHECK(fisheye_image_circle_bounds_the_frame, Fast, Exact) {
               std::to_string(nonMonotoneAzimuths) + " imaged samples followed an unimaged one across a row");
 }
 
-// What CLAHE's per-degree scale reads: the angle at the top of the gate, saturating at thetaMax once the circle falls inside it.
+// The HUD's FOV readout: the angle at the top of the gate, saturating at thetaMax once the circle falls inside it.
 PT_CHECK(fisheye_vertical_extent_saturates_at_the_image_circle, Fast, Exact) {
     ctx.plan(3);
     constexpr float kFovDegrees = 180.0F;
@@ -363,10 +363,33 @@ PT_CHECK(fisheye_vertical_extent_saturates_at_the_image_circle, Fast, Exact) {
                        2.0F * thetaTolerance(lens.radialCoefficients, 0.5F * expected, thetaMax),
               "a circle beyond the gate must give the angle imaged at the top edge, below the full field of view");
 
-    // The CLAHE regression: under Spherical the extent is the pinhole vfov to the bit, so switching projections cannot move a filter.
+    // Under Spherical the extent is the pinhole vfov to the bit, so the readout agrees with the paraxial model it replaces.
     const Camera spherical = makeCamera(0.5F * edgeFocalMm, Lens{});
     PT_EXPECT(ctx, spherical.verticalAngularExtentRadians() == spherical.verticalFovRadians(),
               "Spherical must report the pinhole vertical field of view bitwise");
+}
+
+// One pixel off axis subtends 1/pixelsPerRadian under either projection, the paraxial slope both share, up to their cubic terms.
+PT_CHECK(pixels_per_radian_is_the_axis_pitch_of_both_projections, Fast, Exact) {
+    constexpr float kFocalMm = 35.0F;
+    constexpr int kHeightPixels = 1080;
+    const std::array<Lens, 3> lenses{Lens{}, fisheye(kEquisolidTaylor, 180.0F), fisheye(kStereographicTaylor, 180.0F)};
+    ctx.plan(static_cast<int>(lenses.size()) + 1);
+    const float pitch = makeCamera(kFocalMm, Lens{}).pixelsPerRadian(kHeightPixels);
+    PT_EXPECT(ctx, pitch == kFocalMm * static_cast<float>(kHeightPixels) / kFullFrame.heightMm,
+              "pixelsPerRadian must be f*H/h, the axis pitch the gate and focal length fix");
+    for (const Lens& lens : lenses) {
+        const Camera camera = makeCamera(kFocalMm, lens);
+        // One pixel up from the optical centre: ndc spans 2 over the height, so a pixel is 2/H of it.
+        const std::optional<Ray> ray = camera.primaryRay(0.0F, 2.0F / static_cast<float>(kHeightPixels), kAspect);
+        const float theta = ray.has_value() ? angleBetween(camera.forward(), ray->dir) : 0.0F;
+        // Cubic term: tan gives theta^2/3, Kannala-Brandt |k1| theta^2; the float budget covers the ray build and the atan2.
+        const float cubic = std::max(1.0F / 3.0F, std::abs(lens.radialCoefficients[0])) * theta * theta;
+        const float relative = std::abs((theta * camera.pixelsPerRadian(kHeightPixels)) - 1.0F);
+        PT_EXPECT(ctx, camera.pixelsPerRadian(kHeightPixels) == pitch && relative <= cubic + (kClosedFormUlps * kEps),
+                  std::string(pathtracer::scene::kLensProjectionNames[static_cast<int>(lens.projection)]) +
+                      " one-pixel angle times pixelsPerRadian is off unity by " + std::to_string(relative));
+    }
 }
 
 // The Jacobian no per-ray check can see: uniform sensor area maps to theta with CDF (theta_d(theta)/theta_d(thetaMax))^2.

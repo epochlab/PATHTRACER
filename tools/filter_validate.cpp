@@ -712,7 +712,7 @@ PT_CHECK(clahe_passes_a_uniform_field_through_unchanged, Fast, Exact) {
     constexpr int kWidth = 128;
     constexpr int kHeight = 96;
     const HdrImage flat = greyImage(kWidth, kHeight, std::vector<float>(static_cast<std::size_t>(kWidth) * kHeight, 0.375F));
-    const HdrImage clahe = pathtracer::debug::claheAov(flat, glm::radians(30.0F), pool);
+    const HdrImage clahe = pathtracer::debug::claheAov(flat, static_cast<float>(kHeight) / glm::radians(30.0F), pool);
     PT_EXPECT(ctx, clahe.rgba == flat.rgba, "a uniform field was not passed through unchanged");
 }
 
@@ -725,8 +725,8 @@ PT_CHECK(clahe_is_homogeneous_of_degree_one, Fast, Exact) {
     const HdrImage image = greyImage(kWidth, kHeight, affinePlane(kWidth, kHeight));
     std::vector<float> gainedPlane = affinePlane(kWidth, kHeight);
     std::transform(gainedPlane.begin(), gainedPlane.end(), gainedPlane.begin(), [](float v) { return v * 64.0F; });
-    const HdrImage base = pathtracer::debug::claheAov(image, glm::radians(30.0F), pool);
-    const HdrImage gained = pathtracer::debug::claheAov(greyImage(kWidth, kHeight, gainedPlane), glm::radians(30.0F), pool);
+    const HdrImage base = pathtracer::debug::claheAov(image, static_cast<float>(kHeight) / glm::radians(30.0F), pool);
+    const HdrImage gained = pathtracer::debug::claheAov(greyImage(kWidth, kHeight, gainedPlane), static_cast<float>(kHeight) / glm::radians(30.0F), pool);
     float worst = 0.0F;
     // Colour only: alpha is a coverage flag, not a radiance, so it is the one channel a gain must leave alone rather than scale.
     for (std::size_t pixel = 0; pixel < base.rgba.size() / 4; ++pixel) {
@@ -754,7 +754,7 @@ PT_CHECK(clahe_transfer_is_monotone_and_range_preserving, Fast, Exact) {
         plane[pixel] = std::exp2(-4.0F + (8.0F * static_cast<float>((pixel * 2654435761U) % 4096U) / 4095.0F));
     }
     const HdrImage image = greyImage(kWidth, kHeight, plane);
-    const HdrImage clahe = pathtracer::debug::claheAov(image, oneTileFov, pool);
+    const HdrImage clahe = pathtracer::debug::claheAov(image, static_cast<float>(kHeight) / oneTileFov, pool);
 
     std::vector<std::pair<float, float>> pairs(plane.size());
     for (std::size_t pixel = 0; pixel < plane.size(); ++pixel) {
@@ -794,7 +794,7 @@ PT_CHECK(clahe_blend_is_a_partition_of_unity, Fast, Exact) {
                 std::exp2(static_cast<float>(((y % kPeriod) * kPeriod) + (x % kPeriod)) * 0.125F);
         }
     }
-    const HdrImage clahe = pathtracer::debug::claheAov(greyImage(kWidth, kHeight, plane), fov, pool);
+    const HdrImage clahe = pathtracer::debug::claheAov(greyImage(kWidth, kHeight, plane), static_cast<float>(kHeight) / fov, pool);
     std::vector<float> firstSeen(static_cast<std::size_t>(kPeriod) * kPeriod, -1.0F);
     float worst = 0.0F;
     for (int y = 0; y < kHeight; ++y) {
@@ -820,7 +820,7 @@ PT_CHECK(clahe_is_the_identity_below_one_tile_per_pixel, Fast, Exact) {
         plane[pixel] = std::exp2(-3.0F + (6.0F * static_cast<float>((pixel * 2654435761U) % 997U) / 996.0F));
     }
     const HdrImage image = greyImage(kWidth, kHeight, plane);
-    const HdrImage clahe = pathtracer::debug::claheAov(image, glm::radians(90.0F), pool);
+    const HdrImage clahe = pathtracer::debug::claheAov(image, static_cast<float>(kHeight) / glm::radians(90.0F), pool);
     const auto extremes = std::minmax_element(plane.begin(), plane.end());
     const double range = std::log2(static_cast<double>(*extremes.second) / static_cast<double>(*extremes.first));
     double worst = 0.0;
@@ -848,7 +848,7 @@ PT_CHECK(clahe_preserves_chromaticity, Fast, Exact) {
         image.rgba[(pixel * 4) + 2] = base * 2.25F;
         image.rgba[(pixel * 4) + 3] = 1.0F;
     }
-    const HdrImage clahe = pathtracer::debug::claheAov(image, glm::radians(30.0F), pool);
+    const HdrImage clahe = pathtracer::debug::claheAov(image, static_cast<float>(kHeight) / glm::radians(30.0F), pool);
     double worst = 0.0;
     for (std::size_t pixel = 0; pixel < static_cast<std::size_t>(kWidth) * kHeight; ++pixel) {
         const double red = clahe.rgba[pixel * 4] / static_cast<double>(image.rgba[pixel * 4]);

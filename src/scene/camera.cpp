@@ -70,7 +70,11 @@ float Camera::verticalAngularExtentRadians() const {
     // The angle imaged at the top of the gate, or the circle's edge where the circle falls inside it: the frame's real vertical extent.
     const float thetaMax = maxThetaRadians(lens_);
     const float halfHeightRadii = (0.5F * filmBack_.heightMm) / focalLengthMm_;
-    return 2.0F * std::min(kannalaBrandtTheta(lens_.radialCoefficients, halfHeightRadii, thetaMax), thetaMax);
+    return 2.0F * kannalaBrandtTheta(lens_.radialCoefficients, halfHeightRadii, thetaMax);
+}
+
+float Camera::pixelsPerRadian(int heightPixels) const {
+    return focalLengthMm_ * static_cast<float>(heightPixels) / filmBack_.heightMm;
 }
 
 Camera::ViewBasis Camera::viewBasis(float aspect) const {
