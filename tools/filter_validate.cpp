@@ -816,34 +816,34 @@ const double kReferenceDisplayStops = std::log2(80.0 / 0.2);
 }
 
 // No dynamic range is no histogram to adjust, and the operator is then exactly the identity rather than approximately one.
-PT_CHECK(histogram_adjustment_passes_a_uniform_field_through_unchanged, Fast, Exact) {
+PT_CHECK(clahe_passes_a_uniform_field_through_unchanged, Fast, Exact) {
     ctx.plan(1);
     ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
     constexpr int kWidth = 128;
     constexpr int kHeight = 96;
     const HdrImage flat = greyImage(kWidth, kHeight, std::vector<float>(static_cast<std::size_t>(kWidth) * kHeight, 0.375F));
-    const HdrImage out = pathtracer::debug::histogramAdjustmentAov(flat, kEightPixelsPerDegree, pool);
+    const HdrImage out = pathtracer::debug::claheAov(flat, kEightPixelsPerDegree, pool);
     PT_EXPECT(ctx, out.rgba == flat.rgba, "a uniform field was not passed through unchanged");
 }
 
 // Ward Larson's linear case: a world range the display already spans is shown as it is, bit for bit.
-PT_CHECK(histogram_adjustment_is_the_identity_within_the_display_range, Fast, Exact) {
+PT_CHECK(clahe_is_the_identity_within_the_display_range, Fast, Exact) {
     ctx.plan(2);
     ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
     constexpr int kWidth = 192;
     constexpr int kHeight = 128;
     const float inside = static_cast<float>(kReferenceDisplayStops) - 0.5F;
     const HdrImage image = greyImage(kWidth, kHeight, blockLevels(kWidth, kHeight, inside));
-    PT_EXPECT(ctx, pathtracer::debug::histogramAdjustmentAov(image, kEightPixelsPerDegree, pool).rgba == image.rgba,
+    PT_EXPECT(ctx, pathtracer::debug::claheAov(image, kEightPixelsPerDegree, pool).rgba == image.rgba,
               "a frame inside the display range was changed");
     // The same structure half a stop past the display range must move, so the identity above is the criterion, not a dead operator.
     const HdrImage beyond = greyImage(kWidth, kHeight, blockLevels(kWidth, kHeight, inside + 1.0F));
-    PT_EXPECT(ctx, pathtracer::debug::histogramAdjustmentAov(beyond, kEightPixelsPerDegree, pool).rgba != beyond.rgba,
+    PT_EXPECT(ctx, pathtracer::debug::claheAov(beyond, kEightPixelsPerDegree, pool).rgba != beyond.rgba,
               "a frame beyond the display range was left untouched");
 }
 
 // The linear ceiling caps every bin's display share at its world share, so sorted by input, output never rises faster than input.
-PT_CHECK(histogram_adjustment_is_monotone_and_never_expands_contrast, Fast, Exact) {
+PT_CHECK(clahe_is_monotone_and_never_expands_contrast, Fast, Exact) {
     ctx.plan(3);
     ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
     constexpr int kWidth = 256;
@@ -858,7 +858,7 @@ PT_CHECK(histogram_adjustment_is_monotone_and_never_expands_contrast, Fast, Exac
         }
     }
     const HdrImage image = greyImage(kWidth, kHeight, plane);
-    const HdrImage out = pathtracer::debug::histogramAdjustmentAov(image, kEightPixelsPerDegree, pool);
+    const HdrImage out = pathtracer::debug::claheAov(image, kEightPixelsPerDegree, pool);
     std::vector<std::pair<double, double>> logs(plane.size());
     for (std::size_t pixel = 0; pixel < plane.size(); ++pixel) {
         logs[pixel] = {std::log2(static_cast<double>(image.rgba[pixel * 4])), std::log2(static_cast<double>(out.rgba[pixel * 4]))};
@@ -884,14 +884,14 @@ PT_CHECK(histogram_adjustment_is_monotone_and_never_expands_contrast, Fast, Exac
 }
 
 // The cumulative is normalised to end at exactly one, so the brightest foveal level maps onto itself and the darkest D stops below it.
-PT_CHECK(histogram_adjustment_spans_exactly_the_display_range, Fast, Exact) {
+PT_CHECK(clahe_spans_exactly_the_display_range, Fast, Exact) {
     ctx.plan(2);
     ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
     constexpr int kWidth = 256;
     constexpr int kHeight = 192;
     const std::vector<float> plane = blockLevels(kWidth, kHeight, 14.0F);
     const HdrImage image = greyImage(kWidth, kHeight, plane);
-    const HdrImage out = pathtracer::debug::histogramAdjustmentAov(image, kEightPixelsPerDegree, pool);
+    const HdrImage out = pathtracer::debug::claheAov(image, kEightPixelsPerDegree, pool);
     const auto extremes = std::minmax_element(plane.begin(), plane.end());
     const auto brightest = static_cast<std::size_t>(extremes.second - plane.begin());
     const auto darkest = static_cast<std::size_t>(extremes.first - plane.begin());
@@ -907,7 +907,7 @@ PT_CHECK(histogram_adjustment_spans_exactly_the_display_range, Fast, Exact) {
 }
 
 // Every sample, bin and knot is a difference of log radiances, so a power-of-two gain moves only the output exponent.
-PT_CHECK(histogram_adjustment_is_homogeneous_of_degree_one, Fast, Exact) {
+PT_CHECK(clahe_is_homogeneous_of_degree_one, Fast, Exact) {
     ctx.plan(2);
     ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
     constexpr int kWidth = 192;
@@ -916,8 +916,8 @@ PT_CHECK(histogram_adjustment_is_homogeneous_of_degree_one, Fast, Exact) {
     std::vector<float> gainedPlane = plane;
     std::transform(gainedPlane.begin(), gainedPlane.end(), gainedPlane.begin(), [](float v) { return v * 64.0F; });
     const HdrImage image = greyImage(kWidth, kHeight, plane);
-    const HdrImage base = pathtracer::debug::histogramAdjustmentAov(image, kEightPixelsPerDegree, pool);
-    const HdrImage gained = pathtracer::debug::histogramAdjustmentAov(greyImage(kWidth, kHeight, gainedPlane), kEightPixelsPerDegree, pool);
+    const HdrImage base = pathtracer::debug::claheAov(image, kEightPixelsPerDegree, pool);
+    const HdrImage gained = pathtracer::debug::claheAov(greyImage(kWidth, kHeight, gainedPlane), kEightPixelsPerDegree, pool);
     float worst = 0.0F;
     // Colour only: alpha is a coverage flag, not a radiance, so it is the one channel a gain must leave alone rather than scale.
     for (std::size_t pixel = 0; pixel < base.rgba.size() / 4; ++pixel) {
@@ -932,7 +932,7 @@ PT_CHECK(histogram_adjustment_is_homogeneous_of_degree_one, Fast, Exact) {
 }
 
 // Only luminance is remapped, so every texel keeps its chromaticity: the output is its input times one positive scalar, to a rounding.
-PT_CHECK(histogram_adjustment_preserves_chromaticity, Fast, Exact) {
+PT_CHECK(clahe_preserves_chromaticity, Fast, Exact) {
     ctx.plan(2);
     ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
     constexpr int kWidth = 160;
@@ -945,7 +945,7 @@ PT_CHECK(histogram_adjustment_preserves_chromaticity, Fast, Exact) {
         image.rgba[(pixel * 4) + 2] = plane[pixel] * 2.25F;
         image.rgba[(pixel * 4) + 3] = 1.0F;
     }
-    const HdrImage out = pathtracer::debug::histogramAdjustmentAov(image, kEightPixelsPerDegree, pool);
+    const HdrImage out = pathtracer::debug::claheAov(image, kEightPixelsPerDegree, pool);
     PT_EXPECT(ctx, out.rgba != image.rgba, "the operator left this frame untouched, so the check below proves nothing");
     double worst = 0.0;
     for (std::size_t pixel = 0; pixel < plane.size(); ++pixel) {

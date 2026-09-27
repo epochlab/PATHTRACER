@@ -3,20 +3,19 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
-## Review of the perceptual AOVs and the fisheye: Ward Larson, Land's surround, scale interpolation, Rectilinear
+## Review of the perceptual AOVs and the fisheye: Ward Larson CLAHE, Land's surround, scale interpolation, Rectilinear
 
 A code review of the scale-space AOV and fisheye waves against the literature they cite. Five operators or bounds did not
 match their references, and the fixes change pixels. Every change carries a validator and a paired measurement.
 
-- fix: **CLAHE could expand contrast without limit and is replaced.** Its ceiling, `1/K` over the `K` bins a tile occupied,
-  capped a tile's slope at `B/K`: a flat tile inside a high-range frame stretched a tenth of a stop of noise across the whole
-  range. Ward Larson 1997 measures the ceiling against the *display* range, which a range-preserving operator lacks. The AOV is
-  now `Histogram Adjustment` (`AovId::HistogramAdjustment`) -- a name-level break: `pt_aov_id`, Python and `--aov` callers
-  asking for `"CLAHE"` now get an unknown-AOV error. It is Ward Larson's 1-degree foveal means, Freedman-Diaconis bins, the
-  linear ceiling `f_b <= T·Δb/D` solved at its fixed point in closed form, mapped onto `D = log2(80/0.2)` stops (IEC 61966-2-1
-  sRGB reference medium, verified against the ICC registry). It is the identity where the occupied world range fits, as on the
-  shipped 70 mm Cornell frame, and compresses under a fisheye (relMSE 0.92 against Beauty). 7.6x faster than the CLAHE (7.3 vs
-  55 ms at 2048x1152)
+- fix: **CLAHE could expand contrast without limit; the AOV keeps its name, the operator is replaced.** Its ceiling, `1/K`
+  over the `K` bins a tile occupied, capped a tile's slope at `B/K`: a flat tile inside a high-range frame stretched a tenth of
+  a stop of noise across the whole range. Ward Larson 1997 measures the ceiling against the *display* range, which a
+  range-preserving operator lacks. `CLAHE` (`AovId::CLAHE`, the same name for `pt_aov_id`, Python and `--aov`) is now Ward
+  Larson's 1-degree foveal means, Freedman-Diaconis bins, the linear ceiling `f_b <= T·Δb/D` solved at its fixed point in
+  closed form, mapped onto `D = log2(80/0.2)` stops (IEC 61966-2-1 sRGB reference medium, verified against the ICC registry).
+  It is the identity where the occupied world range fits, as on the shipped 70 mm Cornell frame, and compresses under a
+  fisheye (relMSE 0.92 against Beauty). 7.6x faster than the tiled CLAHE (7.3 vs 55 ms at 2048x1152)
 - fix: the visual-angle anchor is `Camera::pixelsPerRadian = f·H/h`, the pitch on the optical axis, exact for both projections
   since `tan'(0) = theta_d'(0) = 1`. `height / verticalAngularExtentRadians()` counted the black rows outside a fisheye's image
   circle and gave the mean rather than the fixation pitch under the pinhole. The extent stays, as the HUD's FOV readout

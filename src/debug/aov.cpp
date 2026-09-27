@@ -36,7 +36,7 @@ AovSource aovSource(AovId aov) {
         case AovId::LoG:
         case AovId::ColourOpponent:
         case AovId::Retinex:
-        case AovId::HistogramAdjustment:
+        case AovId::CLAHE:
         case AovId::SNR:
             return AovSource::BeautyFilter;
 
@@ -96,7 +96,7 @@ int aovChannels(AovId aov) {
         case AovId::Tangent:
         case AovId::ObjectID:
         case AovId::Retinex:
-        case AovId::HistogramAdjustment:
+        case AovId::CLAHE:
         case AovId::Wireframe:
         case AovId::Fresnel:
         case AovId::DirectDiffuse:
@@ -124,7 +124,7 @@ bool aovCarriesRadiance(AovId aov) {
         case AovId::Gabor:
         case AovId::DoG:
         case AovId::LoG:
-        case AovId::HistogramAdjustment:
+        case AovId::CLAHE:
             return true;
 
         // Ratios, reflectances, counts, lengths, directions and frequencies: scaling any of them by an exposure means nothing.
@@ -177,7 +177,7 @@ bool aovIsBipolar(AovId aov) {
         case AovId::WorldPos:
         case AovId::UV:
         case AovId::Retinex:
-        case AovId::HistogramAdjustment:
+        case AovId::CLAHE:
         case AovId::Normal:
         case AovId::GeomNormal:
         case AovId::Albedo:

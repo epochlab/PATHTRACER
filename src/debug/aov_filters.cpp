@@ -575,7 +575,7 @@ HdrImage retinexAov(const HdrImage& beauty, ThreadPool& threadPool) {
     return out;
 }
 
-HdrImage histogramAdjustmentAov(const HdrImage& beauty, float pixelsPerRadian, ThreadPool& threadPool) {
+HdrImage claheAov(const HdrImage& beauty, float pixelsPerRadian, ThreadPool& threadPool) {
     const std::vector<float> luminance = luminancePlane(beauty, threadPool);
     // Unlit texels pass through untouched, so the copy is both the identity fallback and the carrier of the preserved chromaticity.
     HdrImage out = beauty;
@@ -669,7 +669,7 @@ HdrImage evaluateFilterAov(AovId aov, const FilterInput& input, ThreadPool& thre
         case AovId::LoG:       return logAov(input.beauty, threadPool);
         case AovId::ColourOpponent:  return colourOpponentAov(input.beauty, threadPool);
         case AovId::Retinex:   return retinexAov(input.beauty, threadPool);
-        case AovId::HistogramAdjustment: return histogramAdjustmentAov(input.beauty, input.pixelsPerRadian, threadPool);
+        case AovId::CLAHE:     return claheAov(input.beauty, input.pixelsPerRadian, threadPool);
         case AovId::SNR:       return snrAov(input.beauty, input.beautyLuminanceM2, input.samples, threadPool);
 
         // The lanes their own producers write. No default arm: -Werror then makes an unrouted new filter a compile error.
