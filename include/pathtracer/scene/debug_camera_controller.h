@@ -54,7 +54,6 @@ public:
     void setIso(float iso) { iso_ = iso; }
     // Projection only: the polynomial and its field of view are measured calibration data, authored in profile.json and immutable here.
     void setLensProjection(LensProjection projection) { lens_.projection = projection; }
-    void setLensFit(LensFit fit) { lens_.fit = fit; }
 
     // EV100 delta against profile.json defaults, applied at the display stage as pow(2,ev): the scene is not photometrically calibrated.
     [[nodiscard]] float relativeExposureEv() const {

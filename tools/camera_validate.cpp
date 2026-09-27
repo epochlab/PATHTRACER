@@ -27,9 +27,8 @@ using pathtracer::scene::kannalaBrandtRadius;
 using pathtracer::scene::kannalaBrandtRadiusSlope;
 using pathtracer::scene::kannalaBrandtTheta;
 using pathtracer::scene::Lens;
-using pathtracer::scene::kLensFitNames;
-using pathtracer::scene::LensFit;
 using pathtracer::scene::LensProjection;
+using pathtracer::scene::maxThetaRadians;
 using pathtracer::scene::Ray;
 
 constexpr float kEps = std::numeric_limits<float>::epsilon();
@@ -62,11 +61,7 @@ Camera makeCamera(float focalLengthMm, Lens lens) {
 }
 
 Lens fisheye(const std::array<float, 4>& coefficients, float fieldOfViewDegrees) {
-    return Lens{LensProjection::FisheyePolynomial, coefficients, fieldOfViewDegrees, LensFit::Native};
-}
-
-Lens fitted(const std::array<float, 4>& coefficients, float fieldOfViewDegrees, LensFit fit) {
-    return Lens{LensProjection::FisheyePolynomial, coefficients, fieldOfViewDegrees, fit};
+    return Lens{LensProjection::FisheyePolynomial, coefficients, fieldOfViewDegrees};
 }
 
 // Forward-error budget on the inverse: the bracket it stops at, plus theta_d's own evaluation error divided through by the local slope.
@@ -346,6 +341,34 @@ PT_CHECK(fisheye_image_circle_bounds_the_frame, Fast, Exact) {
               std::to_string(nonMonotoneAzimuths) + " imaged samples followed an unimaged one across a row");
 }
 
+// What CLAHE's per-degree scale reads: the angle at the top of the gate, saturating at thetaMax once the circle falls inside it.
+PT_CHECK(fisheye_vertical_extent_saturates_at_the_image_circle, Fast, Exact) {
+    ctx.plan(3);
+    constexpr float kFovDegrees = 180.0F;
+    const Lens lens = fisheye(kEquisolidTaylor, kFovDegrees);
+    const float thetaMax = maxThetaRadians(lens);
+    const float halfHeightMm = 0.5F * kFullFrame.heightMm;
+    // Focal length putting the circle exactly on the gate's top edge, so half of it leaves the circle inside and twice it outside.
+    const float edgeFocalMm = halfHeightMm / kannalaBrandtRadius(lens.radialCoefficients, thetaMax);
+
+    const Camera inside = makeCamera(0.5F * edgeFocalMm, lens);
+    PT_EXPECT(ctx, inside.verticalAngularExtentRadians() == 2.0F * thetaMax,
+              "a circle inside the gate must saturate the extent at the full field of view");
+
+    // Outside, the gate cuts the circle at half its radius, so the extent is that radius' angle, by independent bisection.
+    const Camera outside = makeCamera(2.0F * edgeFocalMm, lens);
+    const float cutRadius = 0.5F * kannalaBrandtRadius(lens.radialCoefficients, thetaMax);
+    const float expected = 2.0F * bisectTheta(lens.radialCoefficients, cutRadius, thetaMax);
+    PT_EXPECT(ctx, std::abs(outside.verticalAngularExtentRadians() - expected) <=
+                       2.0F * thetaTolerance(lens.radialCoefficients, 0.5F * expected, thetaMax),
+              "a circle beyond the gate must give the angle imaged at the top edge, below the full field of view");
+
+    // The CLAHE regression: under Spherical the extent is the pinhole vfov to the bit, so switching projections cannot move a filter.
+    const Camera spherical = makeCamera(0.5F * edgeFocalMm, Lens{});
+    PT_EXPECT(ctx, spherical.verticalAngularExtentRadians() == spherical.verticalFovRadians(),
+              "Spherical must report the pinhole vertical field of view bitwise");
+}
+
 // The Jacobian no per-ray check can see: uniform sensor area maps to theta with CDF (theta_d(theta)/theta_d(thetaMax))^2.
 PT_CHECK(fisheye_theta_distribution_matches_the_area_jacobian, Slow, Statistical) {
     ctx.plan(2);
@@ -400,118 +423,6 @@ PT_CHECK(fisheye_theta_distribution_matches_the_area_jacobian, Slow, Statistical
     PT_EXPECT(ctx, pValue > ctx.alpha(),
               "chi-square " + std::to_string(chiSquare) + " on " + std::to_string(kBins - 1) +
                   " degrees of freedom gives p = " + std::to_string(pValue));
-}
-
-// Circular puts the circle on the gate's short axis: the top and bottom edges see exactly thetaMax and the corners see nothing.
-PT_CHECK(fisheye_circular_fit_inscribes_the_gate, Fast, Exact) {
-    ctx.plan(7);
-    constexpr float kFovDegrees = 180.0F;
-    const Lens lens = fitted(kEquisolidTaylor, kFovDegrees, LensFit::Circular);
-    const float thetaMax = 0.5F * glm::radians(kFovDegrees);
-    // Authored focal length is deliberately absurd for the framing: the fit must override it entirely.
-    const Camera camera = makeCamera(300.0F, lens);
-    const Camera::ViewBasis basis = camera.viewBasis(kAspect);
-
-    // Two roundings separate them -- the fit divides by theta_d(thetaMax), the basis multiplies it back -- so this is the exact budget.
-    PT_EXPECT(ctx, std::abs(basis.maxRadiusMm - basis.halfHeightMm) <= 2.0F * kEps * basis.halfHeightMm,
-              "the circle must meet the gate's half-height to the two roundings that derive it");
-
-    // Portrait: the shorter axis is the width, so inscribing must follow it rather than the gate height the landscape case uses.
-    const Camera::ViewBasis portrait = camera.viewBasis(1.0F / kAspect);
-    PT_EXPECT(ctx, std::abs(portrait.maxRadiusMm - portrait.halfWidthMm) <= 2.0F * kEps * portrait.halfWidthMm,
-              "a portrait frame must inscribe the circle in its width, not its height");
-    int portraitCornerRays = 0;
-    for (const glm::vec2& corner : std::array<glm::vec2, 4>{{{1.0F, 1.0F}, {-1.0F, 1.0F}, {1.0F, -1.0F}, {-1.0F, -1.0F}}}) {
-        portraitCornerRays += camera.primaryRay(portrait, corner.x, corner.y).has_value() ? 1 : 0;
-    }
-    PT_EXPECT(ctx, portraitCornerRays == 0, "a portrait frame's corners must be unimaged too");
-    const std::optional<Ray> centre = camera.primaryRay(basis, 0.0F, 0.0F);
-    PT_EXPECT(ctx, centre.has_value() && centre->dir == basis.forward, "the optical axis must image along forward");
-
-    int cornerRays = 0;
-    const std::array<glm::vec2, 4> corners{{{1.0F, 1.0F}, {-1.0F, 1.0F}, {1.0F, -1.0F}, {-1.0F, -1.0F}}};
-    for (const glm::vec2& corner : corners) {
-        cornerRays += camera.primaryRay(basis, corner.x, corner.y).has_value() ? 1 : 0;
-    }
-    PT_EXPECT(ctx, cornerRays == 0, "an inscribed circle must leave all four corners unimaged");
-
-    int edgeErrors = 0;
-    for (const float ndcY : {1.0F, -1.0F}) {
-        const std::optional<Ray> edge = camera.primaryRay(basis, 0.0F, ndcY);
-        if (!edge.has_value() ||
-            std::abs(angleBetween(edge->dir, basis.forward) - thetaMax) >
-                thetaTolerance(kEquisolidTaylor, thetaMax, thetaMax)) {
-            ++edgeErrors;
-        }
-    }
-    PT_EXPECT(ctx, edgeErrors == 0, "the vertical edge midpoints must image at exactly thetaMax");
-    // The frame's vertical extent is then the full field of view by construction, which is what CLAHE's per-degree scale reads.
-    PT_EXPECT(ctx, std::abs(camera.verticalAngularExtentRadians(kAspect) - (2.0F * thetaMax)) <=
-                       kClosedFormUlps * kEps * thetaMax,
-              "verticalAngularExtentRadians must be the full field of view under a circular fit");
-}
-
-// Full Frame puts the circle on the gate's corner: every pixel images and the corners are the ones at thetaMax.
-PT_CHECK(fisheye_full_frame_fit_circumscribes_the_gate, Fast, Exact) {
-    ctx.plan(4);
-    constexpr float kFovDegrees = 180.0F;
-    const Lens lens = fitted(kEquisolidTaylor, kFovDegrees, LensFit::FullFrame);
-    const float thetaMax = 0.5F * glm::radians(kFovDegrees);
-    const Camera camera = makeCamera(300.0F, lens);
-    const Camera::ViewBasis basis = camera.viewBasis(kAspect);
-    const float cornerMm = std::hypot(basis.halfWidthMm, basis.halfHeightMm);
-
-    PT_EXPECT(ctx, std::abs(basis.maxRadiusMm - cornerMm) <= kClosedFormUlps * kEps * cornerMm,
-              "the circle must meet the gate's corner radius");
-    int cornerErrors = 0;
-    const std::array<glm::vec2, 4> corners{{{1.0F, 1.0F}, {-1.0F, 1.0F}, {1.0F, -1.0F}, {-1.0F, -1.0F}}};
-    for (const glm::vec2& corner : corners) {
-        const std::optional<Ray> ray = camera.primaryRay(basis, corner.x, corner.y);
-        if (!ray.has_value() || std::abs(angleBetween(ray->dir, basis.forward) - thetaMax) >
-                                    thetaTolerance(kEquisolidTaylor, thetaMax, thetaMax)) {
-            ++cornerErrors;
-        }
-    }
-    PT_EXPECT(ctx, cornerErrors == 0, "a circumscribed circle must image all four corners at exactly thetaMax");
-
-    const std::optional<Ray> edge = camera.primaryRay(basis, 0.0F, 1.0F);
-    PT_EXPECT(ctx, edge.has_value() && angleBetween(edge->dir, basis.forward) < thetaMax,
-              "the edge midpoint is nearer the axis than the corner, so it must sit inside thetaMax");
-    // The gate is shorter than the circle vertically, so the frame's vertical extent is less than the full field of view.
-    PT_EXPECT(ctx, camera.verticalAngularExtentRadians(kAspect) < 2.0F * thetaMax,
-              "a circumscribed circle must give a vertical extent below the full field of view");
-}
-
-// The fit derives the focal length, so two cameras differing only in the authored one must be indistinguishable ray for ray.
-PT_CHECK(fisheye_fit_overrides_the_authored_focal_length, Fast, Exact) {
-    ctx.plan(3);
-    constexpr float kFovDegrees = 180.0F;
-    const std::array<LensFit, 2> fits{LensFit::Circular, LensFit::FullFrame};
-    const std::array<glm::vec2, 5> samples{{{0.0F, 0.0F}, {0.5F, 0.25F}, {-0.75F, 0.5F}, {0.25F, -0.9F}, {0.9F, 0.9F}}};
-    for (const LensFit fit : fits) {
-        const Camera shortLens = makeCamera(8.0F, fitted(kEquisolidTaylor, kFovDegrees, fit));
-        const Camera longLens = makeCamera(240.0F, fitted(kEquisolidTaylor, kFovDegrees, fit));
-        const Camera::ViewBasis shortBasis = shortLens.viewBasis(kAspect);
-        const Camera::ViewBasis longBasis = longLens.viewBasis(kAspect);
-        int differences = 0;
-        for (const glm::vec2& ndc : samples) {
-            const std::optional<Ray> a = shortLens.primaryRay(shortBasis, ndc.x, ndc.y);
-            const std::optional<Ray> b = longLens.primaryRay(longBasis, ndc.x, ndc.y);
-            if (a.has_value() != b.has_value() || (a.has_value() && a->dir != b->dir)) {
-                ++differences;
-            }
-        }
-        PT_EXPECT(ctx, differences == 0,
-                  std::string(kLensFitNames[static_cast<int>(fit)]) + ": " + std::to_string(differences) +
-                      " rays differed between two authored focal lengths");
-    }
-    // Native is the control: without a fit the authored focal length is the framing, so the same pair must disagree.
-    const Camera shortNative = makeCamera(8.0F, fisheye(kEquisolidTaylor, kFovDegrees));
-    const Camera longNative = makeCamera(240.0F, fisheye(kEquisolidTaylor, kFovDegrees));
-    const std::optional<Ray> a = shortNative.primaryRay(0.5F, 0.25F, kAspect);
-    const std::optional<Ray> b = longNative.primaryRay(0.5F, 0.25F, kAspect);
-    PT_EXPECT(ctx, a.has_value() && b.has_value() && a->dir != b->dir,
-              "Native must let the authored focal length change the framing");
 }
 
 PT_CHECK_MAIN("camera_validate")

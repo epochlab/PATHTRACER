@@ -24,11 +24,6 @@ PT_ABI_VERSION = 2
 PT_LENS_SPHERICAL = 0
 PT_LENS_FISHEYE_POLYNOMIAL = 1
 
-# PtCamera.lens_fit, PT_FIT_* in pathtracer_c.h. Index-parallel with LENS_FITS in __init__.py.
-PT_FIT_NATIVE = 0
-PT_FIT_CIRCULAR = 1
-PT_FIT_FULL_FRAME = 2
-
 
 class PtCamera(ctypes.Structure):
     """Mirrors ``PtCamera`` in include/pathtracer/api/pathtracer_c.h, field for field and in order."""
@@ -47,7 +42,6 @@ class PtCamera(ctypes.Structure):
         ("lens_projection", ctypes.c_int),
         ("fisheye_coefficients", ctypes.c_float * 4),
         ("fisheye_field_of_view_degrees", ctypes.c_float),
-        ("lens_fit", ctypes.c_int),
     ]
 
 

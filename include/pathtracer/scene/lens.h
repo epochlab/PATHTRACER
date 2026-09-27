@@ -14,14 +14,6 @@ static_assert(sizeof(kLensProjectionNames) / sizeof(kLensProjectionNames[0]) ==
                   static_cast<int>(LensProjection::Count),
               "kLensProjectionNames must stay index-parallel with LensProjection");
 
-// Where the image circle lands on the sensor: Native is the authored focal length, the other two derive one from the gate.
-enum class LensFit { Native, Circular, FullFrame, Count };
-
-// Index-parallel with LensFit, the same one-table rule kLensProjectionNames follows.
-inline constexpr const char* kLensFitNames[] = {"Native", "Circular", "Full Frame"};
-static_assert(sizeof(kLensFitNames) / sizeof(kLensFitNames[0]) == static_cast<int>(LensFit::Count),
-              "kLensFitNames must stay index-parallel with LensFit");
-
 // r(theta) = focalLengthMm * theta_d(theta), theta_d = theta + k1*theta^3 + k2*theta^5 + k3*theta^7 + k4*theta^9.
 struct Lens {
     LensProjection projection = LensProjection::Spherical;
@@ -29,8 +21,6 @@ struct Lens {
     std::array<float, 4> radialCoefficients{};
     // Full angle across the image circle, so a 180-degree fisheye authors 180 and thetaMax is half it. Authored either projection.
     float maxFieldOfViewDegrees = 180.0F;
-    // Ignored under Spherical, whose framing is the authored focal length and the gate alone.
-    LensFit fit = LensFit::Circular;
 };
 
 // Half the authored field of view, which is theta_d's domain: the one place the lens turns degrees into radians.
@@ -49,9 +39,5 @@ struct Lens {
 
 // True only where theta_d' > 0 is proven on [0, thetaMax] by Bernstein subdivision: conservative, so an unprovable lens is rejected.
 [[nodiscard]] bool kannalaBrandtIsInvertible(const std::array<float, 4>& k, float thetaMax);
-
-// f = extent / theta_d(thetaMax): Circular's extent is the frame's shorter half-axis, FullFrame's its half-diagonal, Native's authored.
-[[nodiscard]] float fitFocalLengthMm(const Lens& lens, float authoredFocalLengthMm, float filmBackHeightMm,
-                                      float aspect);
 
 }  // namespace pathtracer::scene

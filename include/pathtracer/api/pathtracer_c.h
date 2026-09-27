@@ -17,10 +17,6 @@ typedef struct PtRenderer PtRenderer;
 /* Lens projections, PtCamera.lens_projection: spherical is the rectilinear pinhole, fisheye is Kannala & Brandt's polynomial. */
 #define PT_LENS_SPHERICAL 0
 #define PT_LENS_FISHEYE_POLYNOMIAL 1
-/* Where the image circle lands, PtCamera.lens_fit: native keeps focal_length_mm, the other two derive one from the film back. */
-#define PT_FIT_NATIVE 0
-#define PT_FIT_CIRCULAR 1
-#define PT_FIT_FULL_FRAME 2
 /* Tri-state sentinel for the optional request fields: defer to the default rather than forcing on or off. Any other value is rejected. */
 #define PT_DEFAULT (-1)
 
@@ -59,8 +55,6 @@ typedef struct {
     float fisheye_coefficients[4];
     /* Full angle across the image circle; half it is the polynomial's domain. Must lie in (0, 360] whichever projection is selected. */
     float fisheye_field_of_view_degrees;
-    /* PT_FIT_*. Ignored under PT_LENS_SPHERICAL; circular inscribes the gate's short axis, full frame circumscribes its corner. */
-    int lens_fit;
 } PtCamera;
 
 /* profile.json's authored camera and window size -- the defaults a caller overrides one field at a time. */

@@ -13,8 +13,7 @@
         "lens": {
             "projection": "spherical",
             "maxFieldOfViewDegrees": 180.0,
-            "radialCoefficients": [0.0, 0.0, 0.0, 0.0],
-            "fit": "circular"
+            "radialCoefficients": [0.0, 0.0, 0.0, 0.0]
         }
     },
     "controls": {

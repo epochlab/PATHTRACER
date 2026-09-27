@@ -56,17 +56,6 @@ void writeError(char* err, int errCap, const std::string& message) {
     for (std::size_t i = 0; i < lens.radialCoefficients.size(); ++i) {
         lens.radialCoefficients[i] = camera.fisheye_coefficients[i];
     }
-    if (camera.lens_fit == PT_FIT_NATIVE) {
-        lens.fit = pathtracer::scene::LensFit::Native;
-    } else if (camera.lens_fit == PT_FIT_CIRCULAR) {
-        lens.fit = pathtracer::scene::LensFit::Circular;
-    } else if (camera.lens_fit == PT_FIT_FULL_FRAME) {
-        lens.fit = pathtracer::scene::LensFit::FullFrame;
-    } else {
-        error = "lens_fit must be PT_FIT_NATIVE, PT_FIT_CIRCULAR or PT_FIT_FULL_FRAME, got " +
-                std::to_string(camera.lens_fit);
-        return std::nullopt;
-    }
     lens.maxFieldOfViewDegrees = camera.fisheye_field_of_view_degrees;
     if (lens.maxFieldOfViewDegrees <= 0.0F || lens.maxFieldOfViewDegrees > 360.0F) {
         error = "fisheye_field_of_view_degrees must lie in (0, 360], got " +
@@ -173,16 +162,11 @@ void pt_renderer_default_camera(const PtRenderer* renderer, PtCamera* out) {
     static_assert(static_cast<int>(pathtracer::scene::LensProjection::Spherical) == PT_LENS_SPHERICAL &&
                       static_cast<int>(pathtracer::scene::LensProjection::FisheyePolynomial) == PT_LENS_FISHEYE_POLYNOMIAL,
                   "PT_LENS_* must stay index-parallel with LensProjection");
-    static_assert(static_cast<int>(pathtracer::scene::LensFit::Native) == PT_FIT_NATIVE &&
-                      static_cast<int>(pathtracer::scene::LensFit::Circular) == PT_FIT_CIRCULAR &&
-                      static_cast<int>(pathtracer::scene::LensFit::FullFrame) == PT_FIT_FULL_FRAME,
-                  "PT_FIT_* must stay index-parallel with LensFit");
     out->lens_projection = static_cast<int>(lens.projection);
     for (std::size_t i = 0; i < lens.radialCoefficients.size(); ++i) {
         out->fisheye_coefficients[i] = lens.radialCoefficients[i];
     }
     out->fisheye_field_of_view_degrees = lens.maxFieldOfViewDegrees;
-    out->lens_fit = static_cast<int>(lens.fit);
 }
 
 int pt_abi_version(void) {

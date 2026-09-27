@@ -745,8 +745,7 @@ PT_CHECK(gbuffer_aov_with_a_fisheye_lens_is_rejected, Fast, Exact) {
     constexpr int kHeight = 12;
     const pathtracer::scene::Camera& spherical = renderer->defaultCamera();
     // Equidistant, so the lens is admissible on every axis but the one under test: the rejection can only be the projection.
-    const pathtracer::scene::Lens fisheyeLens{pathtracer::scene::LensProjection::FisheyePolynomial, {}, 180.0F,
-                                              pathtracer::scene::LensFit::Circular};
+    const pathtracer::scene::Lens fisheyeLens{pathtracer::scene::LensProjection::FisheyePolynomial, {}, 180.0F};
     const pathtracer::scene::Camera fisheye{spherical.position(),
                                             spherical.yawDegrees(),
                                             spherical.pitchDegrees(),

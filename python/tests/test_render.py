@@ -147,8 +147,8 @@ def test_camera_override_changes_the_image(renderer: Renderer) -> None:
 
 def test_fisheye_lens_changes_the_image(renderer: Renderer) -> None:
     default = renderer.default_camera
-    # The circular fit derives the focal length from the gate, so the projection alone reframes and no focal length is guessed.
-    fisheye = dataclasses.replace(default, lens="fisheye_polynomial", fit="circular")
+    # Short focal length, or the 180-degree image circle dwarfs the gate and the frame is the central few degrees of the fisheye.
+    fisheye = dataclasses.replace(default, lens="fisheye_polynomial", focal_length_mm=10.0)
     size = {"width": 32, "height": 32, "samples": 2, "seed": 5}
     assert not np.array_equal(
         renderer.render(aovs=("beauty",), **size)["beauty"],
@@ -157,7 +157,7 @@ def test_fisheye_lens_changes_the_image(renderer: Renderer) -> None:
 
 
 def test_fisheye_lens_rejects_a_gbuffer_aov(renderer: Renderer) -> None:
-    fisheye = dataclasses.replace(renderer.default_camera, lens="fisheye_polynomial")
+    fisheye = dataclasses.replace(renderer.default_camera, lens="fisheye_polynomial", focal_length_mm=10.0)
     with pytest.raises(RuntimeError, match="fisheye"):
         renderer.render(aovs=("depth",), camera=fisheye, width=16, height=16, samples=1)
 
@@ -168,31 +168,9 @@ def test_unknown_lens_is_rejected_before_the_abi(renderer: Renderer) -> None:
                         width=8, height=8, samples=1)
 
 
-def test_fit_frames_independently_of_focal_length(renderer: Renderer) -> None:
-    base = dataclasses.replace(renderer.default_camera, lens="fisheye_polynomial", fit="circular")
-    size = {"aovs": ("beauty",), "width": 32, "height": 32, "samples": 2, "seed": 5}
-    # The fit derives the focal length, so authoring a wildly different one must not move a single ray.
-    assert np.array_equal(
-        renderer.render(camera=dataclasses.replace(base, focal_length_mm=8.0), **size)["beauty"],
-        renderer.render(camera=dataclasses.replace(base, focal_length_mm=240.0), **size)["beauty"],
-    )
-    native = dataclasses.replace(base, fit="native")
-    assert not np.array_equal(
-        renderer.render(camera=dataclasses.replace(native, focal_length_mm=8.0), **size)["beauty"],
-        renderer.render(camera=dataclasses.replace(native, focal_length_mm=240.0), **size)["beauty"],
-    )
-
-
-def test_unknown_fit_is_rejected_before_the_abi(renderer: Renderer) -> None:
-    with pytest.raises(ValueError, match="inscribed"):
-        renderer.render(aovs=("beauty",), camera=dataclasses.replace(renderer.default_camera, fit="inscribed"),
-                        width=8, height=8, samples=1)
-
-
 def test_default_camera_reports_the_profile_lens(renderer: Renderer) -> None:
     camera = renderer.default_camera
     assert camera.lens == "spherical"
-    assert camera.fit == "circular"
     assert len(camera.fisheye_coefficients) == 4
     assert 0.0 < camera.fisheye_field_of_view_degrees <= 360.0
 

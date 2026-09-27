@@ -354,7 +354,7 @@ void drawAovSection(int& aov, bool gbufferAvailable) {
 void drawCameraSection(const HudFrameData& frame, float& focalLengthMm, float& aperture,
                         float& shutterSeconds, float& iso, int& filmBackPresetIndex,
                         const std::vector<const char*>& filmBackPresetNames, int& lensProjection,
-                        int& lensFit, float& aberrationStrength) {
+                        float& aberrationStrength) {
     ImGui::TextColored(kCyan, "Camera");
     const glm::vec3 camPos = frame.camera.position();
     ImGui::Text("pos  x %.2f  y %.2f  z %.2f", camPos.x, camPos.y, camPos.z);
@@ -364,18 +364,8 @@ void drawCameraSection(const HudFrameData& frame, float& focalLengthMm, float& a
     ImGui::Text("Filmback  %.2f x %.2f mm  (%.2f:1)", filmBack.widthMm, filmBack.heightMm,
                 filmBack.widthMm / filmBack.heightMm);
     ImGui::Text("Near  %.2f  Far  %.1f", frame.camera.nearClip(), frame.camera.farClip());
-    const pathtracer::scene::Lens lens = frame.camera.lens();
-    // Read-only: k1..k4 and the field of view are measured calibration data, authored in profile.json, and only the projection switches.
-    ImGui::Text("Circle  %.0f deg  k %.4f %.4f %.4f %.4f", lens.maxFieldOfViewDegrees,
-                lens.radialCoefficients[0], lens.radialCoefficients[1], lens.radialCoefficients[2],
-                lens.radialCoefficients[3]);
-    // The basis the tracer itself builds, so the readout cannot drift from the circle the rays are actually cast against.
-    const float aspect = static_cast<float>(frame.sceneStats.imageWidth) / static_cast<float>(frame.sceneStats.imageHeight);
-    const pathtracer::scene::Camera::ViewBasis basis = frame.camera.viewBasis(aspect);
-    const float cornerMm = std::hypot(basis.halfWidthMm, basis.halfHeightMm);
-    // The answer to "why is nothing black": a circle past the corner fills the frame, one inside it leaves the corners unimaged.
-    ImGui::Text("Image  %.2f mm vs corner %.2f mm  %s  f %.2f mm", basis.maxRadiusMm, cornerMm,
-                basis.maxRadiusMm < cornerMm ? "circular" : "full-frame", basis.focalLengthMm);
+    // The active projection's vertical extent, the same value the filters read, so the readout cannot disagree with the render.
+    ImGui::Text("FOV  %.1f deg", glm::degrees(frame.camera.verticalAngularExtentRadians()));
     if (frame.cameraOrbiting) {
         ImGui::TextColored(kCyan, "orbiting");
     }
@@ -385,14 +375,8 @@ void drawCameraSection(const HudFrameData& frame, float& focalLengthMm, float& a
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
     ImGui::Combo("##lensProjection", &lensProjection, pathtracer::scene::kLensProjectionNames,
                  IM_ARRAYSIZE(pathtracer::scene::kLensProjectionNames));
-    // Framing is the authored focal length under Spherical, so the fit would claim an authority it does not have there.
-    ImGui::BeginDisabled(lensProjection == static_cast<int>(pathtracer::scene::LensProjection::Spherical));
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-    ImGui::Combo("##lensFit", &lensFit, pathtracer::scene::kLensFitNames,
-                 IM_ARRAYSIZE(pathtracer::scene::kLensFitNames));
-    ImGui::EndDisabled();
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-    // Floors at a real circular-fisheye focal length (Nikon 6mm f/2.8): 10mm was a spherical assumption that boxed Native out.
+    // Floors at a real circular-fisheye focal length (Nikon 6mm f/2.8): 10mm was a spherical assumption a fisheye cannot live with.
     ImGui::SliderFloat("##focalLength", &focalLengthMm, 6.0F, 300.0F, "Focal Length  %.0f mm");
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
     ImGui::SliderFloat("##aperture", &aperture, 1.0F, 22.0F, "Aperture  f/%.1f");
@@ -527,7 +511,7 @@ void HudOverlay::beginFrame() const {
 
 void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm, float& aperture,
                        float& shutterSeconds, float& iso, int& filmBackPresetIndex,
-                       const std::vector<const char*>& filmBackPresetNames, int& lensProjection, int& lensFit, bool& showSky,
+                       const std::vector<const char*>& filmBackPresetNames, int& lensProjection, bool& showSky,
                        bool& envLightEnabled, int& envRotationDegrees, float& envExposureStops,
                        float& aberrationStrength, const FramingOverlayState& framing,
                        const PixelProbeSample& pixelProbe) const {
@@ -551,7 +535,7 @@ void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm,
 
     drawAovSection(aov, lensProjection == static_cast<int>(pathtracer::scene::LensProjection::Spherical));
     drawCameraSection(frame, focalLengthMm, aperture, shutterSeconds, iso, filmBackPresetIndex,
-                       filmBackPresetNames, lensProjection, lensFit, aberrationStrength);
+                       filmBackPresetNames, lensProjection, aberrationStrength);
     drawHdriSection(showSky, envLightEnabled, envRotationDegrees, envExposureStops);
 
     ImGui::End();

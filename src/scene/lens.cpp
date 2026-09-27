@@ -134,18 +134,6 @@ float kannalaBrandtTheta(const std::array<float, 4>& k, float radius, float thet
     return theta;
 }
 
-float fitFocalLengthMm(const Lens& lens, float authoredFocalLengthMm, float filmBackHeightMm, float aspect) {
-    if (lens.fit == LensFit::Native) {
-        return authoredFocalLengthMm;
-    }
-    const float halfHeightMm = 0.5F * filmBackHeightMm;
-    const float halfWidthMm = halfHeightMm * aspect;
-    // Circular inscribes the frame's shorter axis, which is the width below aspect 1; FullFrame circumscribes its corner.
-    const float extentMm = lens.fit == LensFit::Circular ? std::min(halfWidthMm, halfHeightMm)
-                                                         : std::hypot(halfWidthMm, halfHeightMm);
-    return extentMm / kannalaBrandtRadius(lens.radialCoefficients, maxThetaRadians(lens));
-}
-
 bool kannalaBrandtIsInvertible(const std::array<float, 4>& k, float thetaMax) {
     if (!std::isfinite(thetaMax) || thetaMax <= 0.0F) {
         return false;

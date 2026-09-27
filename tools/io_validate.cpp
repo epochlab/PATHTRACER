@@ -364,12 +364,10 @@ PT_CHECK(profile_config_camera_lens, Fast, Exact) {
     // theta_d' = 1 + 3*k1*theta^2 with k1 = -1/3 vanishes at theta = 1 rad, so a 180-degree circle (thetaMax = pi/2) crosses it.
     const nlohmann::json nonMonotone = {{"projection", "fisheyePolynomial"},
                                         {"maxFieldOfViewDegrees", 180.0},
-                                        {"radialCoefficients", {-1.0 / 3.0, 0.0, 0.0, 0.0}},
-                                        {"fit", "circular"}};
+                                        {"radialCoefficients", {-1.0 / 3.0, 0.0, 0.0, 0.0}}};
     const nlohmann::json spherical = {{"projection", "spherical"},
                                       {"maxFieldOfViewDegrees", 180.0},
-                                      {"radialCoefficients", {0.0, 0.0, 0.0, 0.0}},
-                                      {"fit", "circular"}};
+                                      {"radialCoefficients", {0.0, 0.0, 0.0, 0.0}}};
     nlohmann::json fisheye = spherical;
     fisheye["projection"] = "fisheyePolynomial";
     nlohmann::json threeCoefficients = spherical;
@@ -382,14 +380,6 @@ PT_CHECK(profile_config_camera_lens, Fast, Exact) {
     unknownProjection["projection"] = "pinhole";
     nlohmann::json missingProjection = spherical;
     missingProjection.erase("projection");
-    nlohmann::json nativeFit = spherical;
-    nativeFit["fit"] = "native";
-    nlohmann::json fullFrameFit = spherical;
-    fullFrameFit["fit"] = "fullFrame";
-    nlohmann::json unknownFit = spherical;
-    unknownFit["fit"] = "inscribed";
-    nlohmann::json missingFit = spherical;
-    missingFit.erase("fit");
 
     const std::vector<Case> cases = {
         {"spherical with a zero polynomial", spherical, true},
@@ -401,10 +391,6 @@ PT_CHECK(profile_config_camera_lens, Fast, Exact) {
         {"a field of view past 360 degrees", overFov, false},
         // Rejected under a spherical projection too: the HUD can switch to the fisheye at runtime, so the polynomial must hold either way.
         {"a non-monotone polynomial", nonMonotone, false},
-        {"the native fit", nativeFit, true},
-        {"the fullFrame fit", fullFrameFit, true},
-        {"an unknown fit name", unknownFit, false},
-        {"no fit at all", missingFit, false},
     };
 
     const std::filesystem::path shippedPath = std::filesystem::path(ASSET_ROOT_DIR) / "config" / "profile.json";

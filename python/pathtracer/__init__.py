@@ -95,9 +95,6 @@ def display_encode(
 # Index-parallel with PT_LENS_* in _ffi.py and LensProjection in scene/lens.h: the projection names Camera.lens accepts.
 LENS_PROJECTIONS = ("spherical", "fisheye_polynomial")
 
-# Index-parallel with PT_FIT_* in _ffi.py and LensFit in scene/lens.h: where the image circle lands on the film back.
-LENS_FITS = ("native", "circular", "full_frame")
-
 
 @dataclass(frozen=True)
 class Camera:
@@ -112,9 +109,9 @@ class Camera:
     radial geometry transfers: one focal length means ``fx == fy``, and the principal point is the sensor centre, so a
     calibrated camera's pixel grid is not reproduced. ``fisheye_field_of_view_degrees`` is the full angle across the
     image circle; samples outside the circle are black, and an ``r(theta)`` that is not provably monotone over it is
-    rejected. ``fit`` decides where that circle lands on the film back: ``"native"`` keeps ``focal_length_mm`` as authored,
-    ``"circular"`` inscribes it in the gate's short axis (black corners) and ``"full_frame"`` circumscribes its corner, both
-    deriving the focal length as ``extent / theta_d(theta_max)`` so framing does not depend on guessing a focal length. A fisheye lens has no rasterizer projection, so requesting a G-buffer AOV with one raises ``RuntimeError``.
+    rejected. The image circle's radius is ``focal_length_mm * theta_d(theta_max)``, so short focal lengths are what make the
+    projection visible and a circle inside the gate leaves the corners black. A fisheye lens has no rasterizer projection, so
+    requesting a G-buffer AOV with one raises ``RuntimeError``.
 
     Immutable, so an override is a ``dataclasses.replace`` of ``Renderer.default_camera`` rather than a mutation
     that could leak between renders.
@@ -133,7 +130,6 @@ class Camera:
     lens: str = "spherical"
     fisheye_coefficients: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
     fisheye_field_of_view_degrees: float = 180.0
-    fit: str = "circular"
 
     @classmethod
     def _from_struct(cls, struct: _ffi.PtCamera) -> Camera:
@@ -151,7 +147,6 @@ class Camera:
             lens=LENS_PROJECTIONS[struct.lens_projection],
             fisheye_coefficients=tuple(struct.fisheye_coefficients),
             fisheye_field_of_view_degrees=struct.fisheye_field_of_view_degrees,
-            fit=LENS_FITS[struct.lens_fit],
         )
 
     def _to_struct(self) -> _ffi.PtCamera:
@@ -172,9 +167,6 @@ class Camera:
         struct.lens_projection = LENS_PROJECTIONS.index(self.lens)
         struct.fisheye_coefficients = (ctypes.c_float * 4)(*self.fisheye_coefficients)
         struct.fisheye_field_of_view_degrees = self.fisheye_field_of_view_degrees
-        if self.fit not in LENS_FITS:
-            raise ValueError(f"fit must be one of {LENS_FITS}, got {self.fit!r}")
-        struct.lens_fit = LENS_FITS.index(self.fit)
         return struct
 
 
