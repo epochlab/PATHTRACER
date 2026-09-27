@@ -261,7 +261,8 @@ void addExpanded(const ScaleSpaceLevel& level, float weight, std::span<float> ba
         for (int x = 0; x < baseWidth; ++x) {
             const float u = static_cast<float>(x) * inverseDecimation;
             const int x0 = std::min(static_cast<int>(u), level.width - 1);
-            const int x1 = mirror(x0 + 1, level.width);
+            // The fold's modulo only past the last sample: interior columns take the next sample directly, off the per-texel path.
+            const int x1 = x0 + 1 < level.width ? x0 + 1 : mirror(x0 + 1, level.width);
             const float fractionX = u - static_cast<float>(x0);
             const float top = upper[x0] + ((upper[x1] - upper[x0]) * fractionX);
             const float bottom = lower[x0] + ((lower[x1] - lower[x0]) * fractionX);
