@@ -29,19 +29,34 @@ and a **Fisheye Polynomial**.
   accumulates -- it belongs to the film sample's position, which exists whether or not the lens formed a ray -- so the pixel
   average stays a true average, `invWeight` cannot go infinite, and the circle's edge antialiases for free. A circular fisheye's
   corners are black in every lane, which is what the lens does
-- feat: the HUD's Camera section gains the projection dropdown and prints the field of view and `k1..k4` read-only; the
-  polynomial is measured data, not slider material. `ViewInputState` tracks the projection, so switching retraces
+- feat: `lens.fit` decides where the image circle lands, because `r_max = f·theta_d(thetaMax)` leaves framing implicit in the
+  focal length: at the shipped 70 mm a 180-degree lens puts a 110 mm circle behind a 13.4 mm gate, so the frame is the central
+  11 degrees and the fisheye is **visually indistinguishable** from the pinhole (relMSE 3.1%, corner ray 1.3% apart). `Native`
+  keeps the authored focal length, `Circular` inscribes the circle in the frame's shorter half-axis -- the width below aspect
+  1, not the gate height -- and `FullFrame` circumscribes its corner, both deriving `f = extent / theta_d(thetaMax)` inside
+  `viewBasis(aspect)`, where the gate and the render aspect are both known. A fisheye is specified by its field of view rather than its focal length, as Arnold's and RenderMan's fisheye
+  cameras are. Nothing is mutated: under a fit the framing is independent of the authored focal length, and switching back to
+  Spherical restores it exactly
+- feat: the HUD's Camera section gains the projection and fit dropdowns and prints the field of view, `k1..k4`, and the image
+  circle against the frame corner with the effective focal length -- the answer to "why is nothing black". The polynomial is
+  measured data, not slider material. `ViewInputState` tracks both, so switching retraces. The focal-length slider's floor
+  drops 10 mm -> 6 mm: 10 mm was a spherical assumption sitting above the 8.68 mm circular threshold on the shipped gate, so
+  `Native` could not reach a circular fisheye from the HUD at any position. 6 mm is a real circular-fisheye focal length
+  (Nikon 6 mm f/2.8) and clears the threshold on 12 of the 15 shipped presets; the three small formats need 2.6-4.8 mm, which
+  is the case the fits exist for
+- refactor: `maxThetaRadians(lens)` replaces four hand-written copies of `0.5F * glm::radians(maxFieldOfViewDegrees)` across
+  the camera, the config parser and the C ABI, so the lens turns degrees into radians in exactly one place
 - fix: the rasterizer's `projectToScreen` is a perspective divide with no fisheye equivalent, so the 14 scan-converted G-buffer
   AOVs are **rejected, never approximated**: `HeadlessRenderer::render` fails before it allocates, the GUI greys those entries
   out and falls back to Beauty, and startup refuses a profile whose `defaultAOV` or `-bench-aovs` schedule would park the
   driver on a G-buffer generation that can never arrive. `claheAov`'s `pixelsPerDegree` is the one filter that reads an angle,
   and `verticalFovRadians` (`2·atan(h/2f)`) is not a fisheye frame's extent: it keeps its exact body for `viewBasis`, and the
   new `verticalAngularExtentRadians()` -- the same expression under Spherical, so CLAHE is bit-identical -- feeds the filters
-- feat: `PtCamera` gains `lens_projection`, `fisheye_coefficients[4]` and `fisheye_field_of_view_degrees`. It crosses by value,
+- feat: `PtCamera` gains `lens_projection`, `fisheye_coefficients[4]`, `fisheye_field_of_view_degrees` and `lens_fit`. It crosses by value,
   so this is a **breaking ABI layout change**: `PT_ABI_VERSION` (2; 1 is the pre-lens layout) and `pt_abi_version()` land with
   it, and the Python binding checks them at load, before any struct is passed. `toCamera` became validating, since an unknown
   projection or an unprovable polynomial has no defensible coercion
-- test: `camera_validate`, 7 checks and the first suite the camera has had. The strongest is
+- test: `camera_validate`, 10 checks and the first suite the camera has had. The strongest is
   `fisheye_direction_inverts_the_forward_model`: the test projects a known direction *forward* through the model and requires
   `primaryRay` to return it, so the forward map lives in the test and the inverse in the library. The inverse is asserted
   against an independent bisection on the forward polynomial over the degree-9 Taylor coefficients of the equisolid,
@@ -50,7 +65,10 @@ and a **Fisheye Polynomial**.
   whose root is known exactly by construction (`k1 = -1/(3u0)` gives `r' = 1 - u/u0`), plus one-sided soundness over 2048 random
   coefficient sets. `fisheye_theta_distribution_matches_the_area_jacobian` catches what no per-ray check can: uniform sensor
   area must land on `theta` with CDF `(r(theta)/r(thetaMax))²`, by chi-square at the family-wise alpha. `io_validate` and
-  `api_validate` cover the config boundary and the G-buffer rejection; `ctest` 187/187
+  `api_validate` cover the config boundary and the G-buffer rejection. The three fit checks are analytic landmarks: under
+  `Circular` the gate's vertical edges image at exactly `thetaMax` and all four corners image nothing, under `FullFrame` the
+  corners do and at exactly `thetaMax`, and under either, two cameras differing only in authored focal length produce
+  **bitwise identical** rays while `Native` does not. `ctest` 193/193
 - perf: not measurable on the spherical path, which is the same expression text behind one branch on a per-pass constant, and
   whose Beauty EXR is byte-identical to a binary built from the previous commit. The fisheye's cost is three Horner pairs on
   primary rays only, 3-4 iterations from the first-order seed

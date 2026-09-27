@@ -378,7 +378,8 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
     if (wantsFilter) {
         const auto filterStart = std::chrono::steady_clock::now();
         const pathtracer::gfx::HdrImage& beauty = lastImage(AovId::Beauty);
-        const pathtracer::debug::FilterInput filterInput{beauty, request.camera.verticalAngularExtentRadians(),
+        const float aspect = static_cast<float>(request.width) / static_cast<float>(request.height);
+        const pathtracer::debug::FilterInput filterInput{beauty, request.camera.verticalAngularExtentRadians(aspect),
                                                           beautyLuminanceM2_.data(), request.samples};
         for (const AovId aov : request.aovs) {
             if (pathtracer::debug::aovSource(aov) != AovSource::BeautyFilter ||

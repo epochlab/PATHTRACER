@@ -71,17 +71,27 @@ Session settings live in `assets/config/profile.json`.
 
 The window is an independent viewport. It opens 1:1 in points — a 1024x576 image is a 512x288-point window on a 2x display — and resizes freely without changing what is traced or restarting an accumulation: the image is letterboxed to preserve aspect and magnified with `GL_NEAREST`, so one traced pixel reads as one block rather than an interpolated value that was never rendered, and a 320x180 render can be inspected full-screen. The pixel probe reads nothing over a bar; the histogram bins the image rect alone.
 
-`camera.lens` selects the projection and always carries the polynomial, so the HUD dropdown (`Spherical` / `Fisheye Polynomial`) can switch either way without reloading. `projection` is `"spherical"` (the rectilinear pinhole) or `"fisheyePolynomial"`; `radialCoefficients` are `k1..k4` of `r(theta) = focalLengthMm·(theta + k1·theta³ + k2·theta⁵ + k3·theta⁷ + k4·theta⁹)`, dimensionless and identical to what OpenCV's `fisheye` module or COLMAP's `OPENCV_FISHEYE` reports; `maxFieldOfViewDegrees` is the full angle across the image circle. Loading rejects a field of view outside `(0, 360]` and any coefficient set whose `r(theta)` is not *provably* monotone over it, because a non-monotone radius has no unique inverse for `primaryRay` to recover.
+`camera.lens` selects the projection and always carries the polynomial, so the HUD dropdown (`Spherical` / `Fisheye Polynomial`) can switch either way without reloading. `projection` is `"spherical"` (the rectilinear pinhole) or `"fisheyePolynomial"`; `radialCoefficients` are `k1..k4` of `r(theta) = f·(theta + k1·theta³ + k2·theta⁵ + k3·theta⁷ + k4·theta⁹)`, dimensionless and identical to what OpenCV's `fisheye` module or COLMAP's `OPENCV_FISHEYE` reports; `maxFieldOfViewDegrees` is the full angle across the image circle. Loading rejects a field of view outside `(0, 360]` and any coefficient set whose `r(theta)` is not *provably* monotone over it, because a non-monotone radius has no unique inverse for `primaryRay` to recover.
+
+`lens.fit` decides where that image circle lands on the film back, because `r_max = f·theta_d(theta_max)` makes framing implicit in the focal length and a fisheye is specified by its field of view, not its focal length:
+
+| `fit` | extent the circle meets | result |
+|---|---|---|
+| `"native"` | — | `focalLengthMm` as authored. A 180-degree lens at 70 mm puts a 110 mm circle behind a 13.4 mm gate, so the frame is the central 11 degrees and reads as a long lens with faint barrel distortion — physically correct and visually indistinguishable from the spherical projection (measured relMSE 3.1% on a Cornell box) |
+| `"circular"` | `min(halfWidth, halfHeight)` | Circle inscribed in the **frame's** shorter half-axis, which is the width below aspect 1: black corners, the classic circular fisheye |
+| `"fullFrame"` | `hypot(halfWidth, halfHeight)` | Circle circumscribing the frame's corner: every pixel images |
+
+Both fits derive `f = extent / theta_d(theta_max)` from `halfHeight = 0.5·filmBack.heightMm` and `halfWidth = halfHeight·aspect`, resolved in `viewBasis(aspect)` where the gate and the render aspect are both known. The authored focal length is never mutated, so switching back to `Spherical` restores the original framing exactly, and under a fit the framing is independent of it — the same reason Arnold's and RenderMan's fisheye cameras take a field of view rather than a focal length.
 
 Only the radial geometry of a calibration transfers: one focal length means `fx == fy`, and the image circle is centred on the sensor, so a calibrated camera's principal point and pixel aspect are not reproduced. A worked equisolid-angle authoring, whose coefficients are the degree-9 Taylor expansion of `2f·sin(theta/2)`:
 
 ```json
-"focalLengthMm": 10.0,
 "lens": { "projection": "fisheyePolynomial", "maxFieldOfViewDegrees": 180.0,
-          "radialCoefficients": [-0.0416667, 0.000520833, -3.100198e-06, 1.0764e-08] }
+          "radialCoefficients": [-0.0416667, 0.000520833, -3.100198e-06, 1.0764e-08],
+          "fit": "circular" }
 ```
 
-The focal length matters more than it looks: `r_max = f·theta_d(theta_max)`, so a 180-degree lens at the shipped 70 mm puts a 110 mm image circle behind a 12.5 mm gate and the frame shows the central ~13 degrees — physically correct, and indistinguishable from a long lens with faint barrel distortion. Short focal lengths are what make the projection visible. Where the circle falls inside the gate the corners are unimaged and render black in every AOV; the samples still carry their reconstruction-filter weight, so the circle edge antialiases. A fisheye has no rasterizer projection, so the 14 scan-converted G-buffer AOVs are refused rather than approximated: the headless request fails, and the HUD greys those entries out and falls back to Beauty.
+Where the circle falls inside the gate the corners are unimaged and render black in every AOV; the samples still carry their reconstruction-filter weight, so the circle edge antialiases. A fisheye has no rasterizer projection, so the 14 scan-converted G-buffer AOVs are refused rather than approximated: the headless request fails, and the HUD greys those entries out and falls back to Beauty.
 
 `render.vsync` caps the frame rate to the display's vblank (`true`) or runs uncapped (`false`). Uncapped, the render thread competes with the trace workers for cores: `pass_ms` **1.58x** on cornell, **1.47x** on a 4K-textured asset, 8 cores.
 

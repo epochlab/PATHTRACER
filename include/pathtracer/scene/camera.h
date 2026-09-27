@@ -51,7 +51,10 @@ public:
     [[nodiscard]] float verticalFovRadians() const;
 
     // Angle the frame's vertical extent subtends under the active projection, saturating at the image circle: what CLAHE's scale needs.
-    [[nodiscard]] float verticalAngularExtentRadians() const;
+    [[nodiscard]] float verticalAngularExtentRadians(float aspect) const;
+
+    // Focal length the render actually uses: the authored one, or the fit's derived one under a fisheye. The HUD reads it to report.
+    [[nodiscard]] float effectiveFocalLengthMm(float aspect) const;
 
     // Orthonormal basis and view-plane half-extents, all primaryRay() needs bar the ndc weight, so a projector can share it.
     struct ViewBasis {

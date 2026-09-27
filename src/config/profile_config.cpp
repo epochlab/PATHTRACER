@@ -44,6 +44,18 @@ std::optional<pathtracer::scene::Lens> parseLens(const nlohmann::json& lens, con
                   << ", expected spherical or fisheyePolynomial\n";
         return std::nullopt;
     }
+    const std::string fit = lens.at("fit").get<std::string>();
+    if (fit == "native") {
+        parsed.fit = pathtracer::scene::LensFit::Native;
+    } else if (fit == "circular") {
+        parsed.fit = pathtracer::scene::LensFit::Circular;
+    } else if (fit == "fullFrame") {
+        parsed.fit = pathtracer::scene::LensFit::FullFrame;
+    } else {
+        std::cerr << "loadProfileConfig: " << path << " has lens.fit " << fit
+                  << ", expected native, circular or fullFrame\n";
+        return std::nullopt;
+    }
     const nlohmann::json& coefficients = lens.at("radialCoefficients");
     if (!coefficients.is_array() || coefficients.size() != parsed.radialCoefficients.size()) {
         std::cerr << "loadProfileConfig: " << path << " has lens.radialCoefficients " << coefficients.dump()
@@ -60,8 +72,7 @@ std::optional<pathtracer::scene::Lens> parseLens(const nlohmann::json& lens, con
         return std::nullopt;
     }
     // A non-monotone r(theta) has no unique inverse, so primaryRay could not recover the angle a sensor radius came from.
-    const float thetaMax = 0.5F * glm::radians(parsed.maxFieldOfViewDegrees);
-    if (!pathtracer::scene::kannalaBrandtIsInvertible(parsed.radialCoefficients, thetaMax)) {
+    if (!pathtracer::scene::kannalaBrandtIsInvertible(parsed.radialCoefficients, maxThetaRadians(parsed))) {
         std::cerr << "loadProfileConfig: " << path
                   << " has lens.radialCoefficients whose r(theta) is not provably monotone over the field of view\n";
         return std::nullopt;

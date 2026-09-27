@@ -63,13 +63,19 @@ float Camera::verticalFovRadians() const {
     return 2.0F * std::atan(filmBack_.heightMm / (2.0F * focalLengthMm_));
 }
 
-float Camera::verticalAngularExtentRadians() const {
+float Camera::effectiveFocalLengthMm(float aspect) const {
+    return lens_.projection == LensProjection::Spherical
+               ? focalLengthMm_
+               : fitFocalLengthMm(lens_, focalLengthMm_, filmBack_.heightMm, aspect);
+}
+
+float Camera::verticalAngularExtentRadians(float aspect) const {
     if (lens_.projection == LensProjection::Spherical) {
         return verticalFovRadians();
     }
     // The angle imaged at the top of the gate, or the circle's edge where the circle falls inside it: the frame's real vertical extent.
-    const float thetaMax = 0.5F * glm::radians(lens_.maxFieldOfViewDegrees);
-    const float halfHeightRadii = (0.5F * filmBack_.heightMm) / focalLengthMm_;
+    const float thetaMax = maxThetaRadians(lens_);
+    const float halfHeightRadii = (0.5F * filmBack_.heightMm) / effectiveFocalLengthMm(aspect);
     return 2.0F * std::min(kannalaBrandtTheta(lens_.radialCoefficients, halfHeightRadii, thetaMax), thetaMax);
 }
 
@@ -82,10 +88,12 @@ Camera::ViewBasis Camera::viewBasis(float aspect) const {
     // Sensor width from the gate height and the render aspect, as the pinhole vfov is: widthMm stays display-only, so pixels stay square.
     const float halfHeightMm = 0.5F * filmBack_.heightMm;
     const float halfWidthMm = halfHeightMm * aspect;
-    const float maxTheta = 0.5F * glm::radians(lens_.maxFieldOfViewDegrees);
-    const float maxRadiusMm = focalLengthMm_ * kannalaBrandtRadius(lens_.radialCoefficients, maxTheta);
+    const float maxTheta = maxThetaRadians(lens_);
+    // A fit derives the focal length from the gate, so the image circle lands where the fit says whatever focal length was authored.
+    const float focalMm = effectiveFocalLengthMm(aspect);
+    const float maxRadiusMm = focalMm * kannalaBrandtRadius(lens_.radialCoefficients, maxTheta);
     return ViewBasis{fwd, right, up, halfWidth, halfHeight, halfWidthMm, halfHeightMm, maxTheta,
-                     maxRadiusMm, focalLengthMm_, lens_};
+                     maxRadiusMm, focalMm, lens_};
 }
 
 std::optional<Ray> Camera::primaryRay(float ndcX, float ndcY, float aspect) const {
