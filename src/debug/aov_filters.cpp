@@ -228,14 +228,19 @@ struct WardTransfer {
     return transfer;
 }
 
-// The coarsest scale the frame supports, as a base-grid plane: the pyramid's endpoint, so no surround extent has to be chosen.
-[[nodiscard]] std::vector<float> coarsestSurround(const std::vector<float>& plane, int width, int height,
-                                                  ThreadPool& threadPool) {
+// Land 1986's inverse-square surround, equal weight per octave over every level the frame supports: integral of G_t dt/t = 1/(pi r^2).
+[[nodiscard]] std::vector<float> landSurround(const std::vector<float>& plane, int width, int height, ThreadPool& threadPool) {
     const std::vector<ScaleSpaceLevel> pyramid = buildOctavePyramid(plane, width, height, threadPool);
     if (pyramid.empty()) {
         return plane;
     }
-    return expandToBase(pyramid.back(), width, height, threadPool);
+    std::vector<float> surround(plane.size(), 0.0F);
+    // Octave rungs are uniform in log t, so dt/t is the same at every rung and the Riemann sum over them is a plain mean.
+    const float weight = 1.0F / static_cast<float>(pyramid.size());
+    for (const ScaleSpaceLevel& level : pyramid) {
+        addExpanded(level, weight, surround, width, height, threadPool);
+    }
+    return surround;
 }
 
 }  // namespace
@@ -527,9 +532,9 @@ HdrImage retinexAov(const HdrImage& beauty, ThreadPool& threadPool) {
         // The reference cancels between the log and its own surround, so retinex reads the same reflectance whatever the frame's gain.
         const std::vector<float> logRadiance = relativeLog2(radiance, width, height, threadPool).plane;
         const bool everywhereValid = std::find(mask.begin(), mask.end(), 0.0F) == mask.end();
-        const std::vector<float> surround = coarsestSurround(logRadiance, width, height, threadPool);
+        const std::vector<float> surround = landSurround(logRadiance, width, height, threadPool);
         if (!everywhereValid && mask != cachedMask) {
-            cachedMaskSurround = coarsestSurround(mask, width, height, threadPool);
+            cachedMaskSurround = landSurround(mask, width, height, threadPool);
             cachedMask = mask;
         }
         threadPool.parallelFor(height, [&](int y) {

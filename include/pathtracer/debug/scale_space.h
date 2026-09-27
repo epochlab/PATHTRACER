@@ -41,6 +41,10 @@ void diffuse(std::span<float> plane, int width, int height, float t, pathtracer:
 [[nodiscard]] std::vector<float> expandToBase(const ScaleSpaceLevel& level, int baseWidth, int baseHeight,
                                               pathtracer::scene::ThreadPool& threadPool);
 
+// base += weight * expandToBase(level), fused so a sum over levels streams the base plane once per level instead of three times.
+void addExpanded(const ScaleSpaceLevel& level, float weight, std::span<float> base, int baseWidth, int baseHeight,
+                 pathtracer::scene::ThreadPool& threadPool);
+
 // The 5-point Laplacian under the same mirror, so it is zero-flux there; weights sum to zero, so constants map to exactly zero.
 void laplacian5(std::span<const float> plane, int width, int height, std::span<float> out,
                 pathtracer::scene::ThreadPool& threadPool);

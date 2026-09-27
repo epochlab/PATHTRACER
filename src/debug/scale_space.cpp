@@ -236,7 +236,14 @@ std::vector<ScaleSpaceLevel> buildOctavePyramid(std::span<const float> plane, in
 
 std::vector<float> expandToBase(const ScaleSpaceLevel& level, int baseWidth, int baseHeight,
                                 ThreadPool& threadPool) {
-    std::vector<float> out(static_cast<std::size_t>(baseWidth) * static_cast<std::size_t>(baseHeight));
+    std::vector<float> out(static_cast<std::size_t>(baseWidth) * static_cast<std::size_t>(baseHeight), 0.0F);
+    // Unit weight onto zero is the resample itself, exact but for a -0 sample, which becomes +0.
+    addExpanded(level, 1.0F, out, baseWidth, baseHeight, threadPool);
+    return out;
+}
+
+void addExpanded(const ScaleSpaceLevel& level, float weight, std::span<float> base, int baseWidth, int baseHeight,
+                 ThreadPool& threadPool) {
     const float inverseDecimation = 1.0F / static_cast<float>(level.decimation);
     threadPool.parallelFor(baseHeight, [&](int y) {
         // Level sample j sits on base pixel j*decimation, so the base grid maps back by a plain scale with no half-pixel offset.
@@ -246,7 +253,7 @@ std::vector<float> expandToBase(const ScaleSpaceLevel& level, int baseWidth, int
         const float fractionY = v - static_cast<float>(y0);
         const float* upper = level.plane.data() + (static_cast<std::size_t>(y0) * static_cast<std::size_t>(level.width));
         const float* lower = level.plane.data() + (static_cast<std::size_t>(y1) * static_cast<std::size_t>(level.width));
-        float* row = out.data() + (static_cast<std::size_t>(y) * static_cast<std::size_t>(baseWidth));
+        float* row = base.data() + (static_cast<std::size_t>(y) * static_cast<std::size_t>(baseWidth));
         for (int x = 0; x < baseWidth; ++x) {
             const float u = static_cast<float>(x) * inverseDecimation;
             const int x0 = std::min(static_cast<int>(u), level.width - 1);
@@ -254,10 +261,9 @@ std::vector<float> expandToBase(const ScaleSpaceLevel& level, int baseWidth, int
             const float fractionX = u - static_cast<float>(x0);
             const float top = upper[x0] + ((upper[x1] - upper[x0]) * fractionX);
             const float bottom = lower[x0] + ((lower[x1] - lower[x0]) * fractionX);
-            row[x] = top + ((bottom - top) * fractionY);
+            row[x] += weight * (top + ((bottom - top) * fractionY));
         }
     });
-    return out;
 }
 
 void laplacian5(std::span<const float> plane, int width, int height, std::span<float> out,

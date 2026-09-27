@@ -52,7 +52,7 @@ inline constexpr float kMorletOctaves = 1.0F;
 [[nodiscard]] pathtracer::gfx::HdrImage colourOpponentAov(const pathtracer::gfx::HdrImage& beauty,
                                                           pathtracer::scene::ThreadPool& threadPool);
 
-// Per-channel Gaussian-surround retinex (Land 1986; Stockham 1972) at the pyramid's coarsest scale: a dimensionless reflectance estimate.
+// Per-channel retinex in log radiance (Stockham 1972) under Land 1986's inverse-square surround: a dimensionless reflectance estimate.
 [[nodiscard]] pathtracer::gfx::HdrImage retinexAov(const pathtracer::gfx::HdrImage& beauty,
                                                 pathtracer::scene::ThreadPool& threadPool);
 

@@ -666,12 +666,21 @@ PT_CHECK(retinex_normalises_the_surround_by_the_validity_mask, Fast, Exact) {
         }
     }
 
-    // The same two cascades the filter runs, spelled out against the public facility: the value over the mask, both at the coarsest scale.
-    const std::vector<float> value =
-        pathtracer::debug::expandToBase(pathtracer::debug::buildOctavePyramid(logRadiance, kWidth, kHeight, pool).back(),
-                                        kWidth, kHeight, pool);
-    const std::vector<float> weight = pathtracer::debug::expandToBase(
-        pathtracer::debug::buildOctavePyramid(mask, kWidth, kHeight, pool).back(), kWidth, kHeight, pool);
+    // Land's surround spelled out against the public facility: the equal-weight mean over every octave, value then mask, same order.
+    const auto landSurround = [&](const std::vector<float>& field) {
+        const std::vector<ScaleSpaceLevel> pyramid = pathtracer::debug::buildOctavePyramid(field, kWidth, kHeight, pool);
+        std::vector<float> surround(field.size(), 0.0F);
+        const float share = 1.0F / static_cast<float>(pyramid.size());
+        for (const ScaleSpaceLevel& level : pyramid) {
+            const std::vector<float> expanded = pathtracer::debug::expandToBase(level, kWidth, kHeight, pool);
+            for (std::size_t pixel = 0; pixel < surround.size(); ++pixel) {
+                surround[pixel] += share * expanded[pixel];
+            }
+        }
+        return surround;
+    };
+    const std::vector<float> value = landSurround(logRadiance);
+    const std::vector<float> weight = landSurround(mask);
 
     const HdrImage retinex = pathtracer::debug::retinexAov(greyImage(kWidth, kHeight, plane), pool);
     float worst = 0.0F;
