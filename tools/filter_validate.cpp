@@ -231,6 +231,37 @@ PT_CHECK(laplacian5_annihilates_affine_fields, Fast, Exact) {
     PT_EXPECT(ctx, worst == 0.0F, "peak interior Laplacian of an affine field " + std::to_string(worst));
 }
 
+// Bilinear on nested 2x lattices restricts exactly, so the coarse-to-fine collapse is the per-level expansion up to its roundings.
+PT_CHECK(octave_mean_matches_per_level_expansion, Fast, Exact) {
+    ctx.plan(1);
+    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    constexpr int kWidth = 512;
+    constexpr int kHeight = 384;
+    std::vector<float> source(static_cast<std::size_t>(kWidth) * kHeight);
+    for (std::size_t pixel = 0; pixel < source.size(); ++pixel) {
+        source[pixel] = static_cast<float>((pixel * 2654435761U) % 1024U) / 1023.0F;
+    }
+    const std::vector<ScaleSpaceLevel> pyramid = pathtracer::debug::buildOctavePyramid(source, kWidth, kHeight, pool);
+    const std::vector<float> collapsed = pathtracer::debug::octaveMean(pyramid, pool);
+    std::vector<float> direct(source.size(), 0.0F);
+    for (const ScaleSpaceLevel& level : pyramid) {
+        pathtracer::debug::addExpanded(level, 1.0F / static_cast<float>(pyramid.size()), direct, kWidth, kHeight, pool);
+    }
+    // Past a level's last sample each grid mirrors about its own edge, so the comparison stops one coarsest pitch short of the edge.
+    const int edge = pyramid.back().decimation;
+    // Collapse resamples up to L times, each a 3-rounding convex blend plus a weight and a sum; convex steps add error, never amplify it.
+    const double bound = 5.0 * static_cast<double>(pyramid.size()) * static_cast<double>(kFloatEpsilon);
+    double worst = 0.0;
+    for (int y = 0; y < kHeight - edge; ++y) {
+        for (int x = 0; x < kWidth - edge; ++x) {
+            const auto pixel = (static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x);
+            worst = std::max(worst, std::fabs(static_cast<double>(collapsed[pixel]) - static_cast<double>(direct[pixel])));
+        }
+    }
+    PT_EXPECT(ctx, worst <= bound, "collapse departs from per-level expansion by " + std::to_string(worst) + ", bound " +
+                                       std::to_string(bound));
+}
+
 // maxLevels only stops the cascade: the levels it does return are the full cascade's, bit for bit, and there are exactly that many.
 PT_CHECK(pyramid_truncation_keeps_the_leading_levels, Fast, Exact) {
     ctx.plan(2);
@@ -723,18 +754,9 @@ PT_CHECK(retinex_normalises_the_surround_by_the_validity_mask, Fast, Exact) {
         }
     }
 
-    // Land's surround spelled out against the public facility: the equal-weight mean over every octave, value then mask, same order.
+    // Land's surround spelled out against the public facility: the equal-weight octave mean, value then mask.
     const auto landSurround = [&](const std::vector<float>& field) {
-        const std::vector<ScaleSpaceLevel> pyramid = pathtracer::debug::buildOctavePyramid(field, kWidth, kHeight, pool);
-        std::vector<float> surround(field.size(), 0.0F);
-        const float share = 1.0F / static_cast<float>(pyramid.size());
-        for (const ScaleSpaceLevel& level : pyramid) {
-            const std::vector<float> expanded = pathtracer::debug::expandToBase(level, kWidth, kHeight, pool);
-            for (std::size_t pixel = 0; pixel < surround.size(); ++pixel) {
-                surround[pixel] += share * expanded[pixel];
-            }
-        }
-        return surround;
+        return pathtracer::debug::octaveMean(pathtracer::debug::buildOctavePyramid(field, kWidth, kHeight, pool), pool);
     };
     const std::vector<float> value = landSurround(logRadiance);
     const std::vector<float> weight = landSurround(mask);

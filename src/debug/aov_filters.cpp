@@ -234,13 +234,8 @@ struct WardTransfer {
     if (pyramid.empty()) {
         return plane;
     }
-    std::vector<float> surround(plane.size(), 0.0F);
     // Octave rungs are uniform in log t, so dt/t is the same at every rung and the Riemann sum over them is a plain mean.
-    const float weight = 1.0F / static_cast<float>(pyramid.size());
-    for (const ScaleSpaceLevel& level : pyramid) {
-        addExpanded(level, weight, surround, width, height, threadPool);
-    }
-    return surround;
+    return octaveMean(pyramid, threadPool);
 }
 
 // Gamma-normalised Laplacian of one rung on the base grid: own-grid stencil times own-grid variance, the two decimations cancelling.

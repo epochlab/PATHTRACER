@@ -245,11 +245,12 @@ std::vector<float> expandToBase(const ScaleSpaceLevel& level, int baseWidth, int
     return out;
 }
 
-void addExpanded(const ScaleSpaceLevel& level, float weight, std::span<float> base, int baseWidth, int baseHeight,
-                 ThreadPool& threadPool) {
-    const float inverseDecimation = 1.0F / static_cast<float>(level.decimation);
-    threadPool.parallelFor(baseHeight, [&](int y) {
-        // Level sample j sits on base pixel j*decimation, so the base grid maps back by a plain scale with no half-pixel offset.
+void addExpanded(const ScaleSpaceLevel& level, float weight, std::span<float> target, int targetWidth, int targetHeight,
+                 ThreadPool& threadPool, int targetDecimation) {
+    // A ratio of powers of two, so exact: target sample i sits on level coordinate i*targetDecimation/decimation.
+    const float inverseDecimation = static_cast<float>(targetDecimation) / static_cast<float>(level.decimation);
+    threadPool.parallelFor(targetHeight, [&](int y) {
+        // Level sample j sits on target sample j*decimation/targetDecimation: a plain scale with no half-pixel offset.
         const float v = static_cast<float>(y) * inverseDecimation;
         const int y0 = std::min(static_cast<int>(v), level.height - 1);
         // Past the last level sample the level's own mirror applies, as its diffusion did, rather than a zeroth-order hold.
@@ -257,8 +258,8 @@ void addExpanded(const ScaleSpaceLevel& level, float weight, std::span<float> ba
         const float fractionY = v - static_cast<float>(y0);
         const float* upper = level.plane.data() + (static_cast<std::size_t>(y0) * static_cast<std::size_t>(level.width));
         const float* lower = level.plane.data() + (static_cast<std::size_t>(y1) * static_cast<std::size_t>(level.width));
-        float* row = base.data() + (static_cast<std::size_t>(y) * static_cast<std::size_t>(baseWidth));
-        for (int x = 0; x < baseWidth; ++x) {
+        float* row = target.data() + (static_cast<std::size_t>(y) * static_cast<std::size_t>(targetWidth));
+        for (int x = 0; x < targetWidth; ++x) {
             const float u = static_cast<float>(x) * inverseDecimation;
             const int x0 = std::min(static_cast<int>(u), level.width - 1);
             // The fold's modulo only past the last sample: interior columns take the next sample directly, off the per-texel path.
@@ -269,6 +270,25 @@ void addExpanded(const ScaleSpaceLevel& level, float weight, std::span<float> ba
             row[x] += weight * (top + ((bottom - top) * fractionY));
         }
     });
+}
+
+std::vector<float> octaveMean(const std::vector<ScaleSpaceLevel>& pyramid, ThreadPool& threadPool) {
+    const float weight = 1.0F / static_cast<float>(pyramid.size());
+    const auto scaled = [&](const ScaleSpaceLevel& level) {
+        std::vector<float> plane(level.plane.size());
+        std::transform(level.plane.begin(), level.plane.end(), plane.begin(), [weight](float value) { return weight * value; });
+        return plane;
+    };
+    // The running sum lives on each level's own grid and moves one octave finer per step: about 4/3 of one base pass in all.
+    ScaleSpaceLevel sum{scaled(pyramid.back()), pyramid.back().width, pyramid.back().height, pyramid.back().decimation, 0.0F};
+    for (std::size_t k = pyramid.size() - 1; k-- > 0;) {
+        const ScaleSpaceLevel& level = pyramid[k];
+        std::vector<float> finer = scaled(level);
+        addExpanded(sum, 1.0F, finer, level.width, level.height, threadPool, level.decimation);
+        sum = ScaleSpaceLevel{std::move(finer), level.width, level.height, level.decimation, 0.0F};
+    }
+    // The finest level is on the base grid by construction, so the collapsed sum is the base plane.
+    return std::move(sum.plane);
 }
 
 void laplacian5(std::span<const float> plane, int width, int height, std::span<float> out,
