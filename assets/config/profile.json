@@ -11,7 +11,7 @@
         "shutterSeconds": 0.008,
         "iso": 400.0,
         "lens": {
-            "projection": "spherical",
+            "projection": "rectilinear",
             "maxFieldOfViewDegrees": 180.0,
             "radialCoefficients": [0.0, 0.0, 0.0, 0.0]
         }
@@ -35,7 +35,7 @@
         "samplesPerPixel": 1,
         "maxBounces": 8,
         "russianRouletteStartBounce": 3,
-        "maxSamples": 128,
+        "maxSamples": 64,
         "aoMaxDistance": 1.0,
         "lookaheadDistance": 10.0
     }

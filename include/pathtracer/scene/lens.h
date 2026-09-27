@@ -5,18 +5,18 @@
 
 namespace pathtracer::scene {
 
-// Which projection primaryRay builds: Spherical is the rectilinear pinhole, FisheyePolynomial is Kannala & Brandt 2006.
-enum class LensProjection { Spherical, FisheyePolynomial, Count };
+// Which projection primaryRay builds: Rectilinear is the straight-line-preserving pinhole, FisheyePolynomial is Kannala & Brandt 2006.
+enum class LensProjection { Rectilinear, FisheyePolynomial, Count };
 
 // Index-parallel with LensProjection, so the HUD dropdown and the config error paths name a projection from one table.
-inline constexpr const char* kLensProjectionNames[] = {"Spherical", "Fisheye Polynomial"};
+inline constexpr const char* kLensProjectionNames[] = {"Rectilinear", "Fisheye Polynomial"};
 static_assert(sizeof(kLensProjectionNames) / sizeof(kLensProjectionNames[0]) ==
                   static_cast<int>(LensProjection::Count),
               "kLensProjectionNames must stay index-parallel with LensProjection");
 
 // r(theta) = focalLengthMm * theta_d(theta), theta_d = theta + k1*theta^3 + k2*theta^5 + k3*theta^7 + k4*theta^9.
 struct Lens {
-    LensProjection projection = LensProjection::Spherical;
+    LensProjection projection = LensProjection::Rectilinear;
     // k1..k4 exactly as an OpenCV `fisheye` / COLMAP OPENCV_FISHEYE calibration reports them: dimensionless, theta in radians.
     std::array<float, 4> radialCoefficients{};
     // Full angle across the image circle, so a 180-degree fisheye authors 180 and thetaMax is half it. Authored either projection.

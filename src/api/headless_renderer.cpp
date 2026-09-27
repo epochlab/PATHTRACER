@@ -258,8 +258,8 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
         return pathtracer::debug::aovSource(aov) == AovSource::GBuffer;
     });
     // Scan conversion is a perspective divide, which a fisheye has no equivalent of: rejected rather than silently approximated.
-    if (wantsGBuffer && request.camera.lens().projection != pathtracer::scene::LensProjection::Spherical) {
-        error = "G-buffer AOVs require a spherical lens: a fisheye has no rasterizer projection";
+    if (wantsGBuffer && request.camera.lens().projection != pathtracer::scene::LensProjection::Rectilinear) {
+        error = "G-buffer AOVs require a rectilinear lens: a fisheye has no rasterizer projection";
         return false;
     }
     resizeBuffers(request.width, request.height);
@@ -378,7 +378,7 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
     if (wantsFilter) {
         const auto filterStart = std::chrono::steady_clock::now();
         const pathtracer::gfx::HdrImage& beauty = lastImage(AovId::Beauty);
-        const pathtracer::debug::FilterInput filterInput{beauty, request.camera.verticalAngularExtentRadians(),
+        const pathtracer::debug::FilterInput filterInput{beauty, request.camera.pixelsPerRadian(beauty.height),
                                                           beautyLuminanceM2_.data(), request.samples};
         for (const AovId aov : request.aovs) {
             if (pathtracer::debug::aovSource(aov) != AovSource::BeautyFilter ||

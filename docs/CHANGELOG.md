@@ -3,6 +3,47 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Review of the perceptual AOVs and the fisheye: Ward Larson CLAHE, Land's surround, scale interpolation, Rectilinear
+
+A code review of the scale-space AOV and fisheye waves against the literature they cite. Five operators or bounds did not
+match their references, and the fixes change pixels. Every change carries a validator and a paired measurement.
+
+- fix: **CLAHE could expand contrast without limit; the AOV keeps its name, the operator is replaced.** Its ceiling, `1/K`
+  over the `K` bins a tile occupied, capped a tile's slope at `B/K`: a flat tile inside a high-range frame stretched a tenth of
+  a stop of noise across the whole range. Ward Larson 1997 measures the ceiling against the *display* range, which a
+  range-preserving operator lacks. `CLAHE` (`AovId::CLAHE`, the same name for `pt_aov_id`, Python and `--aov`) is now Ward
+  Larson's 1-degree foveal means, Freedman-Diaconis bins, the linear ceiling `f_b <= T·Δb/D` solved at its fixed point in
+  closed form, mapped onto `D = log2(80/0.2)` stops (IEC 61966-2-1 sRGB reference medium, verified against the ICC registry).
+  It is the identity where the occupied world range fits, as on the shipped 70 mm Cornell frame, and compresses under a
+  fisheye (relMSE 0.92 against Beauty). 7.6x faster than the tiled CLAHE (7.3 vs 55 ms at 2048x1152)
+- fix: the visual-angle anchor is `Camera::pixelsPerRadian = f·H/h`, the pitch on the optical axis, exact for both projections
+  since `tan'(0) = theta_d'(0) = 1`. `height / verticalAngularExtentRadians()` counted the black rows outside a fisheye's image
+  circle and gave the mean rather than the fixation pitch under the pinhole. The extent stays, as the HUD's FOV readout
+- fix: **Retinex's surround is Land 1986's inverse square**, not the single Gaussian at the pyramid's coarsest level that was
+  cited to him. `∫ G_t dt/t = 1/(π r²)` and the rungs are uniform in `ln t`, so the surround is the plain mean of every level.
+  The old scale doubled whenever the render height crossed `2^k·(2r+1)`, so the interactive render scale previewed a different
+  operator. `octaveMean` collapses the mean coarse to fine, exact because bilinear restricts to a nested 2x lattice, at ~4/3 of
+  one base pass: Retinex costs 1.10x the old single-level surround [0.98, 1.17], unresolved
+- feat: LoG refines its extremum with the parabola through the argmax rung and its neighbours in `log t` (Lowe 2004 §4). A
+  blob midway between octave rungs read up to 11.1% low on the continuous Gaussian-blob model, `t·t0/(t+t0)²`, and now up to
+  4.9%. It is never above the true peak (`log_interpolates_the_scale_peak_between_rungs`, against the exact discrete peak).
+  Cost 1.11x [1.08, 1.17]
+- refactor: `LensProjection::Spherical` is **`Rectilinear`**, in the enum, the HUD, `profile.json` (`"rectilinear"`),
+  `PT_LENS_RECTILINEAR` and Python. Arnold's and RenderMan's spherical camera is lat-long, and the name would collide with a
+  real one. The enum values are unchanged, so `PT_ABI_VERSION` stays 2. The JSON key and the macro name are a source-level break
+- fix: `kannalaBrandtTheta`'s 30-iteration cap cited an all-bisection bound that was wrong twice (`ulp(pi)` is `2^-22`, and a
+  relative stop has no fixed bisection count). The stop is now `4·eps·thetaMax`, so 21 halvings, and a Newton step that fails
+  to halve the bracket forces a bisection next, so `2·21` iterations bound any lens. The fisheye ray drops a redundant normalize
+- perf/refactor: DoG builds only the two rungs it reads (`buildOctavePyramid(..., maxLevels)`), 0.83x [0.82, 0.87]. The
+  expansion mirrors past a level's last sample instead of clamping, folding only at that edge. `laplacian5` folds only at its
+  edge columns. `bipolarDisplay` ranges a scalar AOV once. DoG is re-cited to Burt & Adelson's first Laplacian-pyramid band.
+  The cone-space and discrete-Gaussian comments are corrected where they overclaimed (S per unit L+M, not luminance; affine
+  exactness only for representable fields)
+- test: `render_beauty` records `filter_ms` and takes `--fisheye FOCAL_MM`. New checks for the Ward Larson ceiling, identity
+  and display span, the axis pitch, octave-mean exactness, pyramid truncation and LoG scale interpolation; `ctest` 195/195.
+  Rectilinear Beauty, DoG and Colour Opponent are byte-identical to before. Fisheye Beauty moves by relMSE 1.4e-13 (4 mm) to
+  1.4e-12 (8 mm) from the new stop rule
+
 ## A polynomial fisheye lens, and a projection the camera selects
 
 The camera had exactly one projection and no lens model at all: `primaryRay` built `forward + ndc·halfExtent·basis`, and

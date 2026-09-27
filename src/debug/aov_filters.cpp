@@ -3,9 +3,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <numbers>
 #include <numeric>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -91,56 +93,173 @@ struct RelativeLog {
     return out;
 }
 
-// One tile's transfer function, sampled at bin boundaries: the clipped cumulative histogram Zuiderveld 1994 equalises with.
-void clippedTransfer(const float* counts, int bins, int samples, float* knots) {
-    int occupied = 0;
-    for (int bin = 0; bin < bins; ++bin) {
-        occupied += counts[bin] > 0.0F ? 1 : 0;
-    }
-    if (occupied == 0) {
-        // No samples is no evidence, and the uniform density a contrast-preserving map would give is the linear transfer itself.
-        for (int bin = 0; bin <= bins; ++bin) {
-            knots[bin] = static_cast<float>(bin) / static_cast<float>(bins);
-        }
-        return;
-    }
-    // Ward Larson 1997's contrast ceiling read adaptively: uniform over the support this tile occupies, the only non-vacuous reference.
-    const float ceiling = 1.0F / static_cast<float>(occupied);
-    const float inverseSamples = 1.0F / static_cast<float>(samples);
-    std::vector<float> descending(static_cast<std::size_t>(bins));
-    for (int bin = 0; bin < bins; ++bin) {
-        descending[static_cast<std::size_t>(bin)] = counts[bin] * inverseSamples;
-    }
-    std::sort(descending.begin(), descending.end(), std::greater<>{});
+// IEC 61966-2-1 reference medium of kOcioSrgbDisplay, the encode every CPU capture uses: white 80 cd/m^2 over black 0.2 cd/m^2.
+constexpr double kSrgbReferenceWhite = 80.0;
+constexpr double kSrgbReferenceBlack = 0.2;
 
-    // Clipping every bin totals bins/occupied >= 1, so the sweep below always has this level as its last admissible one.
-    float redistribution = ceiling;
-    double clipped = 0.0;
-    for (int k = 0; k < bins; ++k) {
-        // The fixed point of Ward Larson's truncate-and-redistribute: p = min(phat + delta, ceiling) with delta set by the total being 1.
-        const auto candidate =
-            static_cast<float>((clipped - (static_cast<double>(k) * ceiling)) / static_cast<double>(bins - k));
-        const bool aboveLower = k == 0 || descending[static_cast<std::size_t>(k) - 1] + candidate >= ceiling;
-        if (candidate >= 0.0F && aboveLower && descending[static_cast<std::size_t>(k)] + candidate <= ceiling) {
-            redistribution = candidate;
-            break;
+// Ward Larson 1997 section 5 ceiling at its fixed point T = sum min(f, cT); empty iff K occupied bins fit (K*c <= 1, g concave).
+[[nodiscard]] std::vector<double> truncatedHistogram(const std::vector<double>& counts, double ceilingPerCount) {
+    std::vector<double> sorted;
+    for (const double count : counts) {
+        if (count > 0.0) {
+            sorted.push_back(count);
         }
-        clipped += static_cast<double>(descending[static_cast<std::size_t>(k)]);
     }
-    knots[0] = 0.0F;
-    for (int bin = 0; bin < bins; ++bin) {
-        knots[bin + 1] = knots[bin] + std::min((counts[bin] * inverseSamples) + redistribution, ceiling);
+    if (static_cast<double>(sorted.size()) * ceilingPerCount <= 1.0) {
+        return {};
     }
+    std::sort(sorted.begin(), sorted.end(), std::greater<>{});
+    std::vector<double> suffix(sorted.size() + 1, 0.0);
+    for (std::size_t j = sorted.size(); j-- > 0;) {
+        suffix[j] = suffix[j + 1] + sorted[j];
+    }
+    // First breakpoint T = f_j/c, downward, with g >= 0 brackets the root; integer counts make tied breakpoints evaluate identically.
+    const auto g = [&](std::size_t j) {
+        return (static_cast<double>(j) * sorted[j]) + suffix[j] - (sorted[j] / ceilingPerCount);
+    };
+    // Terminates by the last breakpoint: all K clipped there gives g = f(K - 1/c) > 0, since K*c > 1.
+    std::size_t clipped = 0;
+    while (g(clipped) < 0.0) {
+        ++clipped;
+    }
+    const double retained = suffix[clipped] / (1.0 - (static_cast<double>(clipped) * ceilingPerCount));
+    std::vector<double> truncated(counts.size());
+    for (std::size_t bin = 0; bin < counts.size(); ++bin) {
+        truncated[bin] = std::min(counts[bin], ceilingPerCount * retained);
+    }
+    return truncated;
 }
 
-// The coarsest scale the frame supports, as a base-grid plane: the pyramid's endpoint, so no surround extent has to be chosen.
-[[nodiscard]] std::vector<float> coarsestSurround(const std::vector<float>& plane, int width, int height,
-                                                  ThreadPool& threadPool) {
+// log2(value / reference) as an exact exponent difference plus a mantissa term, so a power-of-two gain on both cancels bitwise.
+class LogReference {
+public:
+    explicit LogReference(double reference) : mantissaLog_(std::log2(std::frexp(reference, &exponent_))) {}
+
+    [[nodiscard]] double operator()(double value) const {
+        int exponent = 0;
+        const double mantissa = std::frexp(value, &exponent);
+        return static_cast<double>(exponent - exponent_) + (std::log2(mantissa) - mantissaLog_);
+    }
+
+private:
+    int exponent_ = 0;
+    double mantissaLog_;
+};
+
+// Ward Larson 1997's foveal image: mean luminance over 1-degree blocks, an exact partition of the frame, at most one block per pixel.
+[[nodiscard]] std::vector<double> fovealMeans(const std::vector<float>& luminance, int width, int height, float pixelsPerRadian,
+                                              ThreadPool& threadPool) {
+    const float pixelsPerDegree = glm::radians(pixelsPerRadian);
+    const int blocksX = std::clamp(static_cast<int>(std::lround(static_cast<float>(width) / pixelsPerDegree)), 1, width);
+    const int blocksY = std::clamp(static_cast<int>(std::lround(static_cast<float>(height) / pixelsPerDegree)), 1, height);
+    std::vector<double> means(static_cast<std::size_t>(blocksX) * static_cast<std::size_t>(blocksY), 0.0);
+    // Row y is in block row y*blocksY/height, so each task owns whole block rows and the double sums need no atomics.
+    threadPool.parallelFor(blocksY, [&](int by) {
+        const auto rowBegin = static_cast<int>(((static_cast<std::int64_t>(by) * height) + blocksY - 1) / blocksY);
+        const auto rowEnd = static_cast<int>(((static_cast<std::int64_t>(by + 1) * height) + blocksY - 1) / blocksY);
+        std::vector<int> counts(static_cast<std::size_t>(blocksX), 0);
+        double* sums = means.data() + (static_cast<std::size_t>(by) * static_cast<std::size_t>(blocksX));
+        for (int y = rowBegin; y < rowEnd; ++y) {
+            const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
+            for (int x = 0; x < width; ++x) {
+                const auto bx = static_cast<std::size_t>((static_cast<std::int64_t>(x) * blocksX) / width);
+                sums[bx] += static_cast<double>(luminance[row + static_cast<std::size_t>(x)]);
+                ++counts[bx];
+            }
+        }
+        for (std::size_t bx = 0; bx < counts.size(); ++bx) {
+            sums[bx] /= static_cast<double>(counts[bx]);
+        }
+    });
+    return means;
+}
+
+// The adjusted cumulative over [0, range] of relative log2 luminance, sampled at bin boundaries, top knot exactly 1.
+struct WardTransfer {
+    std::vector<float> knots;
+    double range = 0.0;
+};
+
+// Histogram of the foveal log samples under the linear ceiling onto `displayStops`; nullopt where the occupied range already fits.
+[[nodiscard]] std::optional<WardTransfer> wardTransfer(std::vector<double>& samples, double displayStops) {
+    const double range = *std::max_element(samples.begin(), samples.end());
+    // Necessary for any adjustment, the occupied bins spanning at most the range; truncatedHistogram decides exactly.
+    if (!(range > displayStops)) {
+        return std::nullopt;
+    }
+    // Freedman & Diaconis 1981, the L2-optimal width for the foveal sample, with the interquartile range as the robust scale.
+    const auto sampleCount = static_cast<double>(samples.size());
+    const auto quantile = [&samples](double fraction) {
+        const auto index = static_cast<std::size_t>(fraction * static_cast<double>(samples.size() - 1));
+        std::nth_element(samples.begin(), samples.begin() + static_cast<std::ptrdiff_t>(index), samples.end());
+        return samples[index];
+    };
+    double binWidth = 2.0 * (quantile(0.75) - quantile(0.25)) / std::cbrt(sampleCount);
+    if (!(binWidth > 0.0)) {
+        // Scott 1979 where the quartiles coincide: (24 sqrt(pi))^(1/3) sigma n^(-1/3), the same optimum under a Gaussian reference.
+        const double mean = std::accumulate(samples.begin(), samples.end(), 0.0) / sampleCount;
+        double variance = 0.0;
+        for (const double sample : samples) {
+            variance += (sample - mean) * (sample - mean);
+        }
+        binWidth = std::cbrt(24.0 * std::sqrt(std::numbers::pi)) * std::sqrt(variance / sampleCount) / std::cbrt(sampleCount);
+    }
+    // A histogram cannot occupy more bins than it has samples, so the asymptotic rules are capped where the expected count reaches one.
+    const int bins = static_cast<int>(std::clamp(std::ceil(range / binWidth), 1.0, sampleCount));
+    const double binStops = range / static_cast<double>(bins);
+    std::vector<double> counts(static_cast<std::size_t>(bins), 0.0);
+    for (const double sample : samples) {
+        counts[static_cast<std::size_t>(std::min(bins - 1, static_cast<int>(sample / binStops)))] += 1.0;
+    }
+    // Display contrast may never exceed the world's: a bin's share of the display stops is at most its own share of world stops.
+    const std::vector<double> truncated = truncatedHistogram(counts, binStops / displayStops);
+    if (truncated.empty()) {
+        return std::nullopt;
+    }
+    // Normalised by the cumulative's own total, so the top knot is exactly one and the brightest foveal level maps onto itself.
+    WardTransfer transfer{std::vector<float>(static_cast<std::size_t>(bins) + 1, 0.0F), range};
+    const double total = std::accumulate(truncated.begin(), truncated.end(), 0.0);
+    double cumulative = 0.0;
+    for (std::size_t bin = 0; bin < truncated.size(); ++bin) {
+        cumulative += truncated[bin];
+        transfer.knots[bin + 1] = static_cast<float>(cumulative / total);
+    }
+    transfer.knots.back() = 1.0F;
+    return transfer;
+}
+
+// Land 1986's inverse-square surround, equal weight per octave over every level the frame supports: integral of G_t dt/t = 1/(pi r^2).
+[[nodiscard]] std::vector<float> landSurround(const std::vector<float>& plane, int width, int height, ThreadPool& threadPool) {
     const std::vector<ScaleSpaceLevel> pyramid = buildOctavePyramid(plane, width, height, threadPool);
     if (pyramid.empty()) {
         return plane;
     }
-    return expandToBase(pyramid.back(), width, height, threadPool);
+    // Octave rungs are uniform in log t, so dt/t is the same at every rung and the Riemann sum over them is a plain mean.
+    return octaveMean(pyramid, threadPool);
+}
+
+// Gamma-normalised Laplacian of one rung on the base grid: own-grid stencil times own-grid variance, the two decimations cancelling.
+[[nodiscard]] std::vector<float> normalisedLaplacian(const ScaleSpaceLevel& level, int baseWidth, int baseHeight,
+                                                     ThreadPool& threadPool) {
+    std::vector<float> response(level.plane.size());
+    laplacian5(level.plane, level.width, level.height, response, threadPool);
+    const auto decimation = static_cast<float>(level.decimation);
+    std::vector<float> expanded(static_cast<std::size_t>(baseWidth) * static_cast<std::size_t>(baseHeight), 0.0F);
+    // Negated once here: a bright blob has a negative Laplacian, and DoG's fine-minus-coarse reads positive on one.
+    addExpanded(ScaleSpaceLevel{std::move(response), level.width, level.height, level.decimation, level.baseVariance},
+                -level.baseVariance / (decimation * decimation), expanded, baseWidth, baseHeight, threadPool);
+    return expanded;
+}
+
+// Vertex of the parabola through three rungs equally spaced in log t (Lowe 2004 section 4), in the extremum's own sign.
+[[nodiscard]] float scalePeak(float previous, float current, float next) {
+    const float sign = std::copysign(1.0F, current);
+    const float below = sign * previous;
+    const float centre = sign * current;
+    const float above = sign * next;
+    const float curvature = below - (2.0F * centre) + above;
+    // At a final argmax both neighbours are at most the centre, so curvature is negative unless all three are equal.
+    return curvature < 0.0F ? sign * (centre - (((below - above) * (below - above)) / (8.0F * curvature))) : current;
 }
 
 }  // namespace
@@ -324,9 +443,10 @@ HdrImage hsvAov(const HdrImage& beauty, ThreadPool& threadPool) {
 
 HdrImage dogAov(const HdrImage& beauty, ThreadPool& threadPool) {
     const std::vector<float> plane = luminancePlane(beauty, threadPool);
-    const std::vector<ScaleSpaceLevel> pyramid = buildOctavePyramid(plane, beauty.width, beauty.height, threadPool);
+    // Only the two finest rungs are read, so the cascade stops there rather than building and copying the coarser octaves.
+    const std::vector<ScaleSpaceLevel> pyramid = buildOctavePyramid(plane, beauty.width, beauty.height, threadPool, 2);
     HdrImage out = makeBroadcastImage(beauty.width, beauty.height);
-    // Below roughly six pixels the inner scale already fills the frame, so there are not two octaves to difference and the band is empty.
+    // A frame narrower than the second rung's kernel support holds fewer than two octaves, so the band is empty there.
     if (pyramid.size() < 2) {
         return out;
     }
@@ -349,29 +469,31 @@ HdrImage logAov(const HdrImage& beauty, ThreadPool& threadPool) {
     const std::vector<ScaleSpaceLevel> pyramid = buildOctavePyramid(plane, beauty.width, beauty.height, threadPool);
     HdrImage out = makeBroadcastImage(beauty.width, beauty.height);
     const auto pixels = static_cast<std::size_t>(beauty.width) * static_cast<std::size_t>(beauty.height);
-    std::vector<float> extremum(pixels, 0.0F);
 
-    for (const ScaleSpaceLevel& level : pyramid) {
-        std::vector<float> response(level.plane.size());
-        laplacian5(level.plane, level.width, level.height, response, threadPool);
-        // Own-grid Laplacian times own-grid variance is exactly the base-grid gamma-normalised response, the two decimations cancelling.
-        const auto decimation = static_cast<float>(level.decimation);
-        const float ownVariance = level.baseVariance / (decimation * decimation);
-        const std::vector<float> expanded =
-            expandToBase(ScaleSpaceLevel{std::move(response), level.width, level.height, level.decimation,
-                                         level.baseVariance},
-                         beauty.width, beauty.height, threadPool);
+    // The largest-magnitude rung so far per texel, and its value refined across scale: a sliding window of three rungs suffices.
+    std::vector<float> rungPeak(pixels, 0.0F);
+    std::vector<float> extremum(pixels, 0.0F);
+    std::vector<float> previous;
+    std::vector<float> current =
+        pyramid.empty() ? std::vector<float>{} : normalisedLaplacian(pyramid.front(), beauty.width, beauty.height, threadPool);
+    for (std::size_t rung = 0; rung < pyramid.size(); ++rung) {
+        std::vector<float> next = rung + 1 < pyramid.size()
+                                      ? normalisedLaplacian(pyramid[rung + 1], beauty.width, beauty.height, threadPool)
+                                      : std::vector<float>{};
+        const bool interior = !previous.empty() && !next.empty();
         threadPool.parallelFor(beauty.height, [&](int y) {
             const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(beauty.width);
             for (int x = 0; x < beauty.width; ++x) {
                 const std::size_t pixel = row + static_cast<std::size_t>(x);
-                // Sign negated once here: a bright blob has a negative Laplacian, and DoG's fine-minus-coarse reads positive on one.
-                const float normalised = -ownVariance * expanded[pixel];
-                if (std::fabs(normalised) > std::fabs(extremum[pixel])) {
-                    extremum[pixel] = normalised;
+                if (!(std::fabs(current[pixel]) > std::fabs(rungPeak[pixel]))) {
+                    continue;
                 }
+                rungPeak[pixel] = current[pixel];
+                extremum[pixel] = interior ? scalePeak(previous[pixel], current[pixel], next[pixel]) : current[pixel];
             }
         });
+        previous = std::move(current);
+        current = std::move(next);
     }
 
     threadPool.parallelFor(beauty.height, [&](int y) {
@@ -432,9 +554,9 @@ HdrImage retinexAov(const HdrImage& beauty, ThreadPool& threadPool) {
         // The reference cancels between the log and its own surround, so retinex reads the same reflectance whatever the frame's gain.
         const std::vector<float> logRadiance = relativeLog2(radiance, width, height, threadPool).plane;
         const bool everywhereValid = std::find(mask.begin(), mask.end(), 0.0F) == mask.end();
-        const std::vector<float> surround = coarsestSurround(logRadiance, width, height, threadPool);
+        const std::vector<float> surround = landSurround(logRadiance, width, height, threadPool);
         if (!everywhereValid && mask != cachedMask) {
-            cachedMaskSurround = coarsestSurround(mask, width, height, threadPool);
+            cachedMaskSurround = landSurround(mask, width, height, threadPool);
             cachedMask = mask;
         }
         threadPool.parallelFor(height, [&](int y) {
@@ -453,135 +575,56 @@ HdrImage retinexAov(const HdrImage& beauty, ThreadPool& threadPool) {
     return out;
 }
 
-HdrImage claheAov(const HdrImage& beauty, float verticalFovRadians, ThreadPool& threadPool) {
-    const int width = beauty.width;
-    const int height = beauty.height;
-    const auto pixels = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+HdrImage claheAov(const HdrImage& beauty, float pixelsPerRadian, ThreadPool& threadPool) {
     const std::vector<float> luminance = luminancePlane(beauty, threadPool);
     // Unlit texels pass through untouched, so the copy is both the identity fallback and the carrier of the preserved chromaticity.
     HdrImage out = beauty;
+    const std::vector<double> foveal = fovealMeans(luminance, beauty.width, beauty.height, pixelsPerRadian, threadPool);
 
-    // Equalisation's uniform-output criterion is only meaningful on a perceptually uniform axis; luminance response is log (Weber-Fechner).
-    const RelativeLog logLuminance = relativeLog2(luminance, width, height, threadPool);
-    if (logLuminance.reference == 0.0F) {
+    // The darkest lit foveal sample is the log reference, so every sample is non-negative and the top one is the world range.
+    double reference = 0.0;
+    for (const double mean : foveal) {
+        reference = mean > 0.0 && (reference == 0.0 || mean < reference) ? mean : reference;
+    }
+    if (reference == 0.0) {
         return out;
     }
-    std::vector<float> samples;
-    samples.reserve(pixels);
-    for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
-        if (luminance[pixel] > 0.0F) {
-            samples.push_back(logLuminance.plane[pixel]);
+    const LogReference relativeLog(reference);
+    std::vector<double> samples;
+    samples.reserve(foveal.size());
+    for (const double mean : foveal) {
+        if (mean > 0.0) {
+            samples.push_back(relativeLog(mean));
         }
     }
-    const float range = *std::max_element(samples.begin(), samples.end());
-    // A frame with no dynamic range has no histogram to equalise, and the operator is exactly the identity there.
-    if (!(range > 0.0F)) {
+    const double displayStops = std::log2(kSrgbReferenceWhite / kSrgbReferenceBlack);
+    const std::optional<WardTransfer> transfer = wardTransfer(samples, displayStops);
+    // No transfer: the occupied world range fits the display, Ward Larson's linear case, which at unit gain is the identity.
+    if (!transfer.has_value()) {
         return out;
     }
 
-    // One degree of visual angle, the extent retinal light adaptation pools over (Ward Larson et al. 1997), so the grid is FOV-anchored.
-    const float pixelsPerDegree = static_cast<float>(height) / glm::degrees(verticalFovRadians);
-    // Capped at one tile per pixel: below that the adaptation extent is finer than the sampling, and a tile row could hold no rows at all.
-    const int tilesX = std::clamp(static_cast<int>(std::lround(static_cast<float>(width) / pixelsPerDegree)), 1, width);
-    const int tilesY = std::clamp(static_cast<int>(std::lround(static_cast<float>(height) / pixelsPerDegree)), 1, height);
-    const int tileCount = tilesX * tilesY;
-    const float pitchX = static_cast<float>(width) / static_cast<float>(tilesX);
-    const float pitchY = static_cast<float>(height) / static_cast<float>(tilesY);
-    const double samplesPerTile = static_cast<double>(samples.size()) / static_cast<double>(tileCount);
-
-    // Freedman & Diaconis 1981, the L2-optimal width for the sample one tile holds, with the interquartile range as the robust scale.
-    const auto quantile = [&samples](double fraction) {
-        const auto index = static_cast<std::size_t>(fraction * static_cast<double>(samples.size() - 1));
-        std::nth_element(samples.begin(), samples.begin() + static_cast<std::ptrdiff_t>(index), samples.end());
-        return static_cast<double>(samples[index]);
-    };
-    double binWidth = 2.0 * (quantile(0.75) - quantile(0.25)) / std::cbrt(samplesPerTile);
-    if (!(binWidth > 0.0)) {
-        // Scott 1979 where the quartiles coincide: the same asymptotic optimum under a Gaussian reference, on the only scale left.
-        const double mean = std::accumulate(samples.begin(), samples.end(), 0.0) / static_cast<double>(samples.size());
-        double variance = 0.0;
-        for (const float sample : samples) {
-            variance += (static_cast<double>(sample) - mean) * (static_cast<double>(sample) - mean);
-        }
-        binWidth = 3.49 * std::sqrt(variance / static_cast<double>(samples.size())) / std::cbrt(samplesPerTile);
-    }
-    // A histogram cannot occupy more bins than it has samples, so the asymptotic rules are capped where the expected count reaches one.
-    const int bins = std::clamp(static_cast<int>(std::ceil(static_cast<double>(range) / binWidth)), 1,
-                                std::max(1, static_cast<int>(samplesPerTile)));
-    const float binStops = range / static_cast<float>(bins);
-
-    // Shared by the scatter and the blend, so a texel's histogram and its transfer functions cannot disagree about which tile it is in.
-    const auto tileIndexX = [&](int x) {
-        return std::min(tilesX - 1, static_cast<int>((static_cast<float>(x) + 0.5F) / pitchX));
-    };
-    // Descending, so the last write to each entry is that tile row's first image row; entry tilesY stays the sentinel end.
-    std::vector<int> bandBegin(static_cast<std::size_t>(tilesY) + 1, height);
-    for (int y = height - 1; y >= 0; --y) {
-        bandBegin[static_cast<std::size_t>(std::min(tilesY - 1, static_cast<int>((static_cast<float>(y) + 0.5F) / pitchY)))] = y;
-    }
-
-    std::vector<float> counts(static_cast<std::size_t>(tileCount) * static_cast<std::size_t>(bins), 0.0F);
-    std::vector<int> tileSamples(static_cast<std::size_t>(tileCount), 0);
-    // Parallel over tile rows, not pixels: each task owns one row of tiles outright, so the scatter needs no atomics.
-    threadPool.parallelFor(tilesY, [&](int ty) {
-        for (int y = bandBegin[static_cast<std::size_t>(ty)]; y < bandBegin[static_cast<std::size_t>(ty) + 1]; ++y) {
-            const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
-            for (int x = 0; x < width; ++x) {
-                const std::size_t pixel = row + static_cast<std::size_t>(x);
-                if (luminance[pixel] <= 0.0F) {
-                    continue;
-                }
-                const int tile = (ty * tilesX) + tileIndexX(x);
-                const int bin = std::min(bins - 1, static_cast<int>(logLuminance.plane[pixel] / binStops));
-                counts[(static_cast<std::size_t>(tile) * static_cast<std::size_t>(bins)) + static_cast<std::size_t>(bin)] += 1.0F;
-                ++tileSamples[static_cast<std::size_t>(tile)];
-            }
-        }
-    });
-
-    // One cumulative transfer function per tile, sampled at bin boundaries, so evaluating it is a lerp between two adjacent knots.
-    std::vector<float> transfer(static_cast<std::size_t>(tileCount) * static_cast<std::size_t>(bins + 1));
-    threadPool.parallelFor(tileCount, [&](int tile) {
-        clippedTransfer(counts.data() + (static_cast<std::size_t>(tile) * static_cast<std::size_t>(bins)), bins,
-                        tileSamples[static_cast<std::size_t>(tile)],
-                        transfer.data() + (static_cast<std::size_t>(tile) * static_cast<std::size_t>(bins + 1)));
-    });
-
-    threadPool.parallelFor(height, [&](int y) {
-        // Zuiderveld 1994's bilinear blend of the four surrounding tiles, written as nested lerps so the four weights sum to exactly one.
-        const float gridY = ((static_cast<float>(y) + 0.5F) / pitchY) - 0.5F;
-        const auto floorY = static_cast<int>(std::floor(gridY));
-        const float fractionY = gridY - static_cast<float>(floorY);
-        const int rowA = std::clamp(floorY, 0, tilesY - 1) * tilesX;
-        const int rowB = std::clamp(floorY + 1, 0, tilesY - 1) * tilesX;
-        const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
-        for (int x = 0; x < width; ++x) {
+    const int bins = static_cast<int>(transfer->knots.size()) - 1;
+    const auto brightest = static_cast<float>(transfer->range);
+    const auto stops = static_cast<float>(displayStops);
+    const auto inverseBinStops = static_cast<float>(static_cast<double>(bins) / transfer->range);
+    const auto referenceFloat = static_cast<float>(reference);
+    threadPool.parallelFor(beauty.height, [&](int y) {
+        const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(beauty.width);
+        for (int x = 0; x < beauty.width; ++x) {
             const std::size_t pixel = row + static_cast<std::size_t>(x);
             out.rgba[(pixel * 4) + 3] = 1.0F;
             if (luminance[pixel] <= 0.0F) {
                 continue;
             }
-            const float position = logLuminance.plane[pixel] / binStops;
-            const int bin = std::clamp(static_cast<int>(position), 0, bins - 1);
-            const float fractionBin = position - static_cast<float>(bin);
-            const float gridX = ((static_cast<float>(x) + 0.5F) / pitchX) - 0.5F;
-            const auto floorX = static_cast<int>(std::floor(gridX));
-            const float fractionX = gridX - static_cast<float>(floorX);
-            const int columnA = std::clamp(floorX, 0, tilesX - 1);
-            const int columnB = std::clamp(floorX + 1, 0, tilesX - 1);
-            const auto evaluate = [&](int tile) {
-                const float* knots = transfer.data() + (static_cast<std::size_t>(tile) * static_cast<std::size_t>(bins + 1));
-                return knots[bin] + ((knots[bin + 1] - knots[bin]) * fractionBin);
-            };
-            const float upper = evaluate(rowA + columnA);
-            const float lower = evaluate(rowB + columnA);
-            const float upperRight = evaluate(rowA + columnB);
-            const float lowerRight = evaluate(rowB + columnB);
-            const float top = upper + ((upperRight - upper) * fractionX);
-            const float bottom = lower + ((lowerRight - lower) * fractionX);
-            const float equalised = top + ((bottom - top) * fractionY);
-            // Chromaticity preserved: only the luminance is remapped, and the texel keeps its ratio to the new value exactly.
-            const float scale = (logLuminance.reference * std::exp2(equalised * range)) / luminance[pixel];
+            // Past the foveal extremes the cumulative is flat, 0 or 1: the display floor and white Ward Larson clamps to.
+            const float position = std::clamp(static_cast<float>(relativeLog(luminance[pixel])) * inverseBinStops, 0.0F,
+                                              static_cast<float>(bins));
+            const int bin = std::min(static_cast<int>(position), bins - 1);
+            const float* knot = transfer->knots.data() + bin;
+            const float cdf = knot[0] + ((knot[1] - knot[0]) * (position - static_cast<float>(bin)));
+            // log L_d = log L_dmax - D (1 - P), anchored at the brightest foveal level so the operator stays degree one in radiance.
+            const float scale = (referenceFloat * std::exp2(brightest - (stops * (1.0F - cdf)))) / luminance[pixel];
             out.rgba[pixel * 4] *= scale;
             out.rgba[(pixel * 4) + 1] *= scale;
             out.rgba[(pixel * 4) + 2] *= scale;
@@ -626,7 +669,7 @@ HdrImage evaluateFilterAov(AovId aov, const FilterInput& input, ThreadPool& thre
         case AovId::LoG:       return logAov(input.beauty, threadPool);
         case AovId::ColourOpponent:  return colourOpponentAov(input.beauty, threadPool);
         case AovId::Retinex:   return retinexAov(input.beauty, threadPool);
-        case AovId::CLAHE:     return claheAov(input.beauty, input.verticalFovRadians, threadPool);
+        case AovId::CLAHE:     return claheAov(input.beauty, input.pixelsPerRadian, threadPool);
         case AovId::SNR:       return snrAov(input.beauty, input.beautyLuminanceM2, input.samples, threadPool);
 
         // The lanes their own producers write. No default arm: -Werror then makes an unrouted new filter a compile error.

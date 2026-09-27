@@ -23,7 +23,7 @@ OpponentBasis deriveOpponentBasis() {
     const double whiteSum = sumRow.x + sumRow.y + sumRow.z;
     const double whiteLong = (longRow.x + longRow.y + longRow.z) / whiteSum;
     const double whiteShort = shortRow.x + shortRow.y + shortRow.z;
-    // l - l_white and s - s_white over the common denominator L+M; whiteSum scales S so that s is S per unit luminance at white.
+    // l - l_white and s - s_white over the common denominator L+M; whiteSum rescales s to one unit per S excitation at white's L+M.
     return OpponentBasis{differenceCoefficients(longRow - (whiteLong * sumRow)),
                          differenceCoefficients((shortRow * whiteSum) - (whiteShort * sumRow)), glm::vec3(sumRow)};
 }

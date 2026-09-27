@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstddef>
+#include <limits>
 #include <span>
 #include <vector>
 
@@ -33,13 +35,21 @@ struct ScaleSpaceLevel {
 // Adds variance t in place by two separable passes, mirroring about the edge sample so every tap lands on real data. No-op at t <= 0.
 void diffuse(std::span<float> plane, int width, int height, float t, pathtracer::scene::ThreadPool& threadPool);
 
-// Octave cascade (Burt & Adelson 1983 structure, Lindeberg kernels): level k carries innerScaleVariance()*4^k, while it fits.
+// Octave cascade (Burt & Adelson 1983, Lindeberg kernels): level k carries innerScaleVariance()*4^k while it fits, maxLevels at most.
 [[nodiscard]] std::vector<ScaleSpaceLevel> buildOctavePyramid(std::span<const float> plane, int width, int height,
-                                                              pathtracer::scene::ThreadPool& threadPool);
+                                                              pathtracer::scene::ThreadPool& threadPool,
+                                                              std::size_t maxLevels = std::numeric_limits<std::size_t>::max());
 
 // Bilinear resample of a level onto the base grid, exact at co-located samples: a coarse level holds nothing between its own samples.
 [[nodiscard]] std::vector<float> expandToBase(const ScaleSpaceLevel& level, int baseWidth, int baseHeight,
                                               pathtracer::scene::ThreadPool& threadPool);
+
+// target += weight * the level resampled onto a finer grid of `targetDecimation` base pixels per sample, the base grid by default.
+void addExpanded(const ScaleSpaceLevel& level, float weight, std::span<float> target, int targetWidth, int targetHeight,
+                 pathtracer::scene::ThreadPool& threadPool, int targetDecimation = 1);
+
+// Equal-weight mean of a non-empty pyramid on the base grid, collapsed coarse to fine: bilinear restricts exactly to a nested lattice.
+[[nodiscard]] std::vector<float> octaveMean(const std::vector<ScaleSpaceLevel>& pyramid, pathtracer::scene::ThreadPool& threadPool);
 
 // The 5-point Laplacian under the same mirror, so it is zero-flux there; weights sum to zero, so constants map to exactly zero.
 void laplacian5(std::span<const float> plane, int width, int height, std::span<float> out,

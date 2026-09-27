@@ -63,6 +63,8 @@ struct Options {
     pathtracer::debug::AovId aov = pathtracer::debug::AovId::Beauty;
     // Appends the timing run to this JSON Lines benchmark log (bench_log.h); empty = no log.
     std::string benchLogPath;
+    // Positive: profile.json's polynomial fisheye at this focal length, so a capture can place the image circle inside the gate.
+    float fisheyeFocalLengthMm = 0.0F;
 };
 
 // All AOVs are reachable now HeadlessRenderer drives the rasterizer and filters; names come from pathtracer/debug/aov.h, not restated here.
@@ -259,10 +261,10 @@ void reportErrorSpectrum(const pathtracer::gfx::HdrImage& image, const pathtrace
 // Everything the timed loop's cost depends on goes in config; output paths and exposure do not, so they never split two comparable runs.
 bool appendTimingRecord(const Options& options, int argc, char** argv, int width, int height,
                         const std::string& aovName, const pathtracer::scene::PathTraceSettings& settings,
-                        bool envLightEnabled, double rasterMs,
+                        bool envLightEnabled, double rasterMs, double filterMs,
                         pathtracer::gfx::ScalarType textureType, const std::vector<double>& milliseconds, const pathtracer::debug::RayCounts& rays,
                         const pathtracer::gfx::HdrImage& accumulated) {
-    const pathtracer::debug::BenchRecord record{
+    pathtracer::debug::BenchRecord record{
         .tool = "render_beauty",
         .argv = std::vector<std::string>(argv, argv + argc),
         .config = {{"scene", options.scenePath},
@@ -276,12 +278,17 @@ bool appendTimingRecord(const Options& options, int argc, char** argv, int width
                    {"max_bounces", settings.maxBounces},
                    {"rr_start_bounce", settings.russianRouletteStartBounce},
                    {"ao_max_distance", settings.aoMaxDistance},
-                   {"texture_type", pathtracer::gfx::scalarTypeName(textureType)}},
+                   {"texture_type", pathtracer::gfx::scalarTypeName(textureType)},
+                   {"fisheye_focal_length_mm", options.fisheyeFocalLengthMm}},
         .samples = {milliseconds.empty() ? std::pair<std::string, std::vector<double>>{"raster_ms", {rasterMs}}
                                           : std::pair<std::string, std::vector<double>>{"pass_ms", milliseconds}},
         .work = {{"rays", {{"primary", rays.primary}, {"bounce", rays.bounce}, {"ao", rays.ao}, {"shadow", rays.shadow}}},
                  {"crc32", pathtracer::debug::floatCrc32(accumulated.rgba)}},
     };
+    // A Beauty filter runs once after the passes, so its wall clock is its own column rather than a pass sample.
+    if (filterMs > 0.0) {
+        record.samples["filter_ms"] = std::vector<double>{filterMs};
+    }
     return pathtracer::debug::appendBenchRecord(options.benchLogPath, record);
 }
 
@@ -336,6 +343,13 @@ bool parseArgs(int argc, char** argv, Options& options) {
         } else if (std::strcmp(argv[i], "--bench-log") == 0) {
             if (!needsValue("--bench-log")) { return false; }
             options.benchLogPath = argv[++i];
+        } else if (std::strcmp(argv[i], "--fisheye") == 0) {
+            if (!needsValue("--fisheye")) { return false; }
+            options.fisheyeFocalLengthMm = static_cast<float>(std::atof(argv[++i]));
+            if (!(options.fisheyeFocalLengthMm > 0.0F)) {
+                std::cerr << "render_beauty: --fisheye expects a positive focal length in mm\n";
+                return false;
+            }
         } else if (std::strcmp(argv[i], "--env-light") == 0) {
             if (!needsValue("--env-light")) { return false; }
             options.envLight = std::atoi(argv[++i]) != 0 ? 1 : 0;
@@ -343,7 +357,7 @@ bool parseArgs(int argc, char** argv, Options& options) {
             std::cerr << "render_beauty: unknown argument '" << argv[i]
                       << "'\nusage: render_beauty [--scene scenes/x.json] --out out.png [--out-exr out.exr] [--compare-exr ref.exr] "
                          "[--compare ref.png] [--error-spectrum] [--seed N] [--passes N] [--width W] [--height H] "
-                         "[--exposure EV] [--aov name] [--env-light 0|1] [--bench-log log.jsonl] [--assert-deterministic] [--assert-converged]\n";
+                         "[--exposure EV] [--aov name] [--fisheye FOCAL_MM] [--env-light 0|1] [--bench-log log.jsonl] [--assert-deterministic] [--assert-converged]\n";
             return false;
         }
     }
@@ -385,7 +399,16 @@ int main(int argc, char** argv) {
     }
 
     // Fixed camera from profile.json, no controller: what makes two runs comparable is that neither can have been nudged.
-    const pathtracer::scene::Camera camera = renderer->defaultCamera();
+    const pathtracer::scene::Camera camera = options.fisheyeFocalLengthMm > 0.0F ? [&] {
+        // Rebuilt only here: the degrees accessors round-trip the pose, which is not bit-exact, so the default path keeps the original.
+        const pathtracer::scene::Camera& authored = renderer->defaultCamera();
+        pathtracer::scene::Lens lens = authored.lens();
+        lens.projection = pathtracer::scene::LensProjection::FisheyePolynomial;
+        return pathtracer::scene::Camera{authored.position(), authored.yawDegrees(), authored.pitchDegrees(),
+                                         authored.filmBack(), options.fisheyeFocalLengthMm, authored.nearClip(),
+                                         authored.farClip(), authored.aperture(), authored.shutterSeconds(),
+                                         authored.iso(), lens};
+    }() : renderer->defaultCamera();
     const int width = options.width > 0 ? options.width : renderer->defaultWidth();
     const int height = options.height > 0 ? options.height : renderer->defaultHeight();
     // --env-light overrides the scene's own authored default (-1 = no override).
@@ -537,7 +560,8 @@ int main(int argc, char** argv) {
     // Before any output encode, so the record's rusage covers load, build and the timed passes but not PNG/EXR writing.
     if (!options.benchLogPath.empty() &&
         !appendTimingRecord(options, argc, argv, width, height, aovName, renderer->baseSettings(),
-                            envLightEnabled, stats.rasterMilliseconds, renderer->textureType(), milliseconds,
+                            envLightEnabled, stats.rasterMilliseconds, stats.filterMilliseconds, renderer->textureType(),
+                            milliseconds,
                             rays, accumulated)) {
         return EXIT_FAILURE;
     }

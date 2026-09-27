@@ -83,7 +83,7 @@ struct ViewInputState {
     // The only FilmBack component feeding the render; widthMm is display-only, so tracking it would retrace for no visible effect.
     float filmBackHeightMm = 0.0F;
     // The HUD switches it, and it changes every primary ray; the polynomial and field of view cannot change, so they are not tracked.
-    pathtracer::scene::LensProjection lensProjection = pathtracer::scene::LensProjection::Spherical;
+    pathtracer::scene::LensProjection lensProjection = pathtracer::scene::LensProjection::Rectilinear;
 
     bool operator==(const ViewInputState&) const = default;
 };
@@ -669,7 +669,7 @@ const pathtracer::gfx::HdrImage* ensureFilterImage(
     const pathtracer::debug::ScopedCpuTimer filterTimer(app.stages.filterMs);
     cache.image = pathtracer::debug::evaluateFilterAov(
         aov,
-        pathtracer::debug::FilterInput{snapshot->beauty, camera.verticalAngularExtentRadians(),
+        pathtracer::debug::FilterInput{snapshot->beauty, camera.pixelsPerRadian(snapshot->beauty.height),
                                         snapshot->beautyLuminanceM2.data(), snapshot->samples},
         *app.rasterThreadPool);
     cache.aov = aov;
@@ -862,7 +862,7 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const pathtracer::scene
     }
 
     const RasterTriggerState raster{view, renderScale};
-    const bool rasterizable = camera.lens().projection == pathtracer::scene::LensProjection::Spherical;
+    const bool rasterizable = camera.lens().projection == pathtracer::scene::LensProjection::Rectilinear;
     if (needsLightTransport || !rasterizable || raster == app.lastRasterTrigger || traceWidth <= 0 ||
         traceHeight <= 0) {
         return;
@@ -961,7 +961,7 @@ void updateHud(AppResources& app, const pathtracer::platform::Window& window,
     app.debugCamera.setIso(iso);
     app.debugCamera.setLensProjection(static_cast<pathtracer::scene::LensProjection>(lensProjection));
     // A rasterizer AOV has no fisheye producer, so switching projection with one selected falls back to the lane that always has one.
-    if (lensProjection != static_cast<int>(pathtracer::scene::LensProjection::Spherical) &&
+    if (lensProjection != static_cast<int>(pathtracer::scene::LensProjection::Rectilinear) &&
         !aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(app.aov))) {
         app.aov = static_cast<int>(pathtracer::debug::AovId::Beauty);
     }
@@ -1402,7 +1402,7 @@ int main(int argc, char** argv) {
         } else if (options->benchLogPath.empty() && !options->benchAovs.empty()) {
             std::cerr << "main: -bench-aovs is the schedule -bench walks; it does nothing on its own\n";
             exitCode = EXIT_FAILURE;
-        } else if (profileConfig->camera.lens.projection != pathtracer::scene::LensProjection::Spherical &&
+        } else if (profileConfig->camera.lens.projection != pathtracer::scene::LensProjection::Rectilinear &&
                    !aovSelectionAvoidsRasterizer(*profileConfig, options->benchAovs)) {
             // The rasterizer has no fisheye projection, so a G-buffer AOV asked for up front would wait on a G-buffer that never arrives.
             std::cerr << "main: a fisheye lens cannot serve the selected rasterizer AOV; choose a path-traced AOV\n";
