@@ -1,10 +1,8 @@
 # PBR Pathtracer
 
-*A CPU, physically-based unidirectional Monte Carlo path tracer with progressive sampling: Embree-accelerated, stochastic BSDF combined with environment-map NEE via MIS, behind a thin OpenGL display/HUD layer.*
+*A physically-based unidirectional Monte Carlo path tracer with progressive sampling: Embree-accelerated, stochastic BSDF combined with environment-map NEE via MIS, behind a thin OpenGL display/HUD layer.*
 
 ![Sample render](sample.png)
-
-[Pipeline](docs/PIPELINE.md) — how a frame is made, every subsystem, the material library and all 34 AOVs. [Roadmap](docs/ROADMAP.md) — what is deliberately not implemented.
 
 ## Build
 
@@ -41,8 +39,6 @@ cmake --build build
 | `Esc` | Quit |
 
 ## Python
-
-Every AOV is reachable headlessly from Python as a numpy array.
 
 ```
 cmake --build build --target pathtracer_c
