@@ -41,7 +41,31 @@ void writeError(char* err, int errCap, const std::string& message) {
     return false;
 }
 
-[[nodiscard]] pathtracer::scene::Camera toCamera(const PtCamera& camera) {
+// Validating because the lens fields are a boundary: an unknown projection or a non-invertible polynomial has no defensible coercion.
+[[nodiscard]] std::optional<pathtracer::scene::Camera> toCamera(const PtCamera& camera, std::string& error) {
+    pathtracer::scene::Lens lens;
+    if (camera.lens_projection == PT_LENS_SPHERICAL) {
+        lens.projection = pathtracer::scene::LensProjection::Spherical;
+    } else if (camera.lens_projection == PT_LENS_FISHEYE_POLYNOMIAL) {
+        lens.projection = pathtracer::scene::LensProjection::FisheyePolynomial;
+    } else {
+        error = "lens_projection must be PT_LENS_SPHERICAL or PT_LENS_FISHEYE_POLYNOMIAL, got " +
+                std::to_string(camera.lens_projection);
+        return std::nullopt;
+    }
+    for (std::size_t i = 0; i < lens.radialCoefficients.size(); ++i) {
+        lens.radialCoefficients[i] = camera.fisheye_coefficients[i];
+    }
+    lens.maxFieldOfViewDegrees = camera.fisheye_field_of_view_degrees;
+    if (lens.maxFieldOfViewDegrees <= 0.0F || lens.maxFieldOfViewDegrees > 360.0F) {
+        error = "fisheye_field_of_view_degrees must lie in (0, 360], got " +
+                std::to_string(lens.maxFieldOfViewDegrees);
+        return std::nullopt;
+    }
+    if (!pathtracer::scene::kannalaBrandtIsInvertible(lens.radialCoefficients, maxThetaRadians(lens))) {
+        error = "fisheye_coefficients give an r(theta) that is not provably monotone over the field of view";
+        return std::nullopt;
+    }
     return pathtracer::scene::Camera{
         glm::vec3(camera.position[0], camera.position[1], camera.position[2]),
         camera.yaw_degrees,
@@ -52,7 +76,8 @@ void writeError(char* err, int errCap, const std::string& message) {
         camera.far_clip,
         camera.aperture,
         camera.shutter_seconds,
-        camera.iso};
+        camera.iso,
+        lens};
 }
 
 }  // namespace
@@ -132,6 +157,20 @@ void pt_renderer_default_camera(const PtRenderer* renderer, PtCamera* out) {
     out->aperture = camera.aperture();
     out->shutter_seconds = camera.shutterSeconds();
     out->iso = camera.iso();
+    const pathtracer::scene::Lens lens = camera.lens();
+    // The outbound write is a cast, so the ABI's constants and the enum are asserted equal rather than re-mapped by hand.
+    static_assert(static_cast<int>(pathtracer::scene::LensProjection::Spherical) == PT_LENS_SPHERICAL &&
+                      static_cast<int>(pathtracer::scene::LensProjection::FisheyePolynomial) == PT_LENS_FISHEYE_POLYNOMIAL,
+                  "PT_LENS_* must stay index-parallel with LensProjection");
+    out->lens_projection = static_cast<int>(lens.projection);
+    for (std::size_t i = 0; i < lens.radialCoefficients.size(); ++i) {
+        out->fisheye_coefficients[i] = lens.radialCoefficients[i];
+    }
+    out->fisheye_field_of_view_degrees = lens.maxFieldOfViewDegrees;
+}
+
+int pt_abi_version(void) {
+    return PT_ABI_VERSION;
 }
 
 int pt_renderer_default_width(const PtRenderer* renderer) {
@@ -170,8 +209,13 @@ int pt_render(PtRenderer* renderer, const PtRenderRequest* request, float* const
             writeError(err, err_cap, decodeError);
             return PT_ERROR;
         }
+        const std::optional<pathtracer::scene::Camera> camera = toCamera(request->camera, decodeError);
+        if (!camera.has_value()) {
+            writeError(err, err_cap, decodeError);
+            return PT_ERROR;
+        }
         const HeadlessRenderer::Request internal{
-            .camera = toCamera(request->camera),
+            .camera = *camera,
             .width = request->width,
             .height = request->height,
             .samples = request->samples,

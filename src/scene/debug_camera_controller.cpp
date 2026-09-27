@@ -19,7 +19,7 @@ constexpr glm::vec3 kWorldUp{0.0F, 1.0F, 0.0F};
 DebugCameraController::DebugCameraController(const glm::vec3& position, float yawDegrees,
                                               float pitchDegrees, Camera::FilmBack filmBack,
                                               float focalLengthMm, float nearClip, float farClip,
-                                              float aperture, float shutterSeconds, float iso,
+                                              float aperture, float shutterSeconds, float iso, Lens lens,
                                               float flySpeedMetersPerSecond,
                                               float orbitSensitivityDegPerPixel)
     : position_(position),
@@ -35,6 +35,7 @@ DebugCameraController::DebugCameraController(const glm::vec3& position, float ya
       aperture_(aperture),
       shutterSeconds_(shutterSeconds),
       iso_(iso),
+      lens_(lens),
       defaultAperture_(aperture),
       defaultShutterSeconds_(shutterSeconds),
       defaultIso_(iso),
@@ -43,7 +44,7 @@ DebugCameraController::DebugCameraController(const glm::vec3& position, float ya
 
 Camera DebugCameraController::snapshot() const {
     return Camera(position_, yawDegrees_, pitchDegrees_, filmBack_, focalLengthMm_, nearClip_,
-                  farClip_, aperture_, shutterSeconds_, iso_);
+                  farClip_, aperture_, shutterSeconds_, iso_, lens_);
 }
 
 void DebugCameraController::applyFlyInput(const pathtracer::platform::Window& window,

@@ -31,6 +31,43 @@ std::optional<pathtracer::gfx::ScalarType> parseBitDepth(const nlohmann::json& b
     return bitDepth.is_number_integer() ? pathtracer::gfx::scalarTypeFromBitDepth(bitDepth.get<int>()) : std::nullopt;
 }
 
+// Camera lens block, its own function because loadProfileConfig already exceeds readability-function-size (docs/ROADMAP.md).
+std::optional<pathtracer::scene::Lens> parseLens(const nlohmann::json& lens, const std::string& path) {
+    const std::string projection = lens.at("projection").get<std::string>();
+    pathtracer::scene::Lens parsed;
+    if (projection == "spherical") {
+        parsed.projection = pathtracer::scene::LensProjection::Spherical;
+    } else if (projection == "fisheyePolynomial") {
+        parsed.projection = pathtracer::scene::LensProjection::FisheyePolynomial;
+    } else {
+        std::cerr << "loadProfileConfig: " << path << " has lens.projection " << projection
+                  << ", expected spherical or fisheyePolynomial\n";
+        return std::nullopt;
+    }
+    const nlohmann::json& coefficients = lens.at("radialCoefficients");
+    if (!coefficients.is_array() || coefficients.size() != parsed.radialCoefficients.size()) {
+        std::cerr << "loadProfileConfig: " << path << " has lens.radialCoefficients " << coefficients.dump()
+                  << ", expected four numbers k1..k4\n";
+        return std::nullopt;
+    }
+    for (std::size_t i = 0; i < parsed.radialCoefficients.size(); ++i) {
+        parsed.radialCoefficients[i] = coefficients[i].get<float>();
+    }
+    parsed.maxFieldOfViewDegrees = lens.at("maxFieldOfViewDegrees").get<float>();
+    // Half of it is thetaMax, the polynomial's domain: at or below zero the lens images nothing, past 360 the circle wraps twice.
+    if (parsed.maxFieldOfViewDegrees <= 0.0F || parsed.maxFieldOfViewDegrees > 360.0F) {
+        std::cerr << "loadProfileConfig: " << path << " has a lens.maxFieldOfViewDegrees outside (0, 360]\n";
+        return std::nullopt;
+    }
+    // A non-monotone r(theta) has no unique inverse, so primaryRay could not recover the angle a sensor radius came from.
+    if (!pathtracer::scene::kannalaBrandtIsInvertible(parsed.radialCoefficients, maxThetaRadians(parsed))) {
+        std::cerr << "loadProfileConfig: " << path
+                  << " has lens.radialCoefficients whose r(theta) is not provably monotone over the field of view\n";
+        return std::nullopt;
+    }
+    return parsed;
+}
+
 // The counts loadProfileConfig otherwise takes on trust. Nothing downstream re-checks them, and each has a concrete failure mode.
 bool validCounts(const RenderConfig& render, const PathTracerConfig& pathTracer, const std::string& path) {
     bool ok = true;
@@ -103,6 +140,10 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
         const float aperture = camera.at("aperture").get<float>();
         const float shutterSeconds = camera.at("shutterSeconds").get<float>();
         const float iso = camera.at("iso").get<float>();
+        const std::optional<pathtracer::scene::Lens> lens = parseLens(camera.at("lens"), path);
+        if (!lens.has_value()) {
+            return std::nullopt;
+        }
         const float flySpeed = controls.at("flySpeedMetersPerSecond").get<float>();
         const float orbitSensitivity = controls.at("orbitSensitivityDegPerPixel").get<float>();
         const float renderScale = render.at("renderScale").get<float>();
@@ -181,6 +222,7 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
                 aperture,
                 shutterSeconds,
                 iso,
+                *lens,
             },
             ControlsConfig{
                 flySpeed,

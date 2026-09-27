@@ -12,6 +12,11 @@ typedef struct PtRenderer PtRenderer;
 
 #define PT_OK 0
 #define PT_ERROR 1
+/* PtCamera is passed by value, so a caller built against a different layout must be caught rather than reading the fields as garbage. */
+#define PT_ABI_VERSION 2
+/* Lens projections, PtCamera.lens_projection: spherical is the rectilinear pinhole, fisheye is Kannala & Brandt's polynomial. */
+#define PT_LENS_SPHERICAL 0
+#define PT_LENS_FISHEYE_POLYNOMIAL 1
 /* Tri-state sentinel for the optional request fields: defer to the default rather than forcing on or off. Any other value is rejected. */
 #define PT_DEFAULT (-1)
 
@@ -29,7 +34,10 @@ int pt_aov_channels(int aov);
 /* Non-zero if this AOV needs light transport, so a caller can tell which requests the `samples` field affects. */
 int pt_aov_needs_samples(int aov);
 
-/* Pose, lens and exposure. aperture/shutter_seconds/iso set exposure value ONLY: the camera is a pinhole, with no depth of field. */
+/* PT_ABI_VERSION this library was built with: a caller compares it to its own header's and refuses to call on a mismatch. */
+int pt_abi_version(void);
+
+/* Pose, lens and exposure. aperture/shutter_seconds/iso set exposure value ONLY: no projection here has depth of field. */
 typedef struct {
     float position[3];
     float yaw_degrees;
@@ -41,6 +49,12 @@ typedef struct {
     float aperture;
     float shutter_seconds;
     float iso;
+    /* PT_LENS_*. Under PT_LENS_FISHEYE_POLYNOMIAL a G-buffer AOV is rejected: the rasterizer has no fisheye projection. */
+    int lens_projection;
+    /* k1..k4 of r(theta) = focal_length_mm * (theta + k1*t^3 + k2*t^5 + k3*t^7 + k4*t^9), as OpenCV `fisheye` reports them. */
+    float fisheye_coefficients[4];
+    /* Full angle across the image circle; half it is the polynomial's domain. Must lie in (0, 360] whichever projection is selected. */
+    float fisheye_field_of_view_degrees;
 } PtCamera;
 
 /* profile.json's authored camera and window size -- the defaults a caller overrides one field at a time. */

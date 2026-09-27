@@ -1,9 +1,11 @@
 #pragma once
 
+#include <optional>
 #include <string>
 
 #include <glm/glm.hpp>
 
+#include "pathtracer/scene/lens.h"
 #include "pathtracer/scene/ray_types.h"
 
 namespace pathtracer::scene {
@@ -26,7 +28,7 @@ public:
     // Authored in degrees, more ergonomic at call sites, stored as radians because every consumer is trigonometric.
     Camera(const glm::vec3& position, float yawDegrees, float pitchDegrees, FilmBack filmBack,
            float focalLengthMm, float nearClip, float farClip, float aperture,
-           float shutterSeconds, float iso);
+           float shutterSeconds, float iso, Lens lens = Lens{});
 
     [[nodiscard]] glm::vec3 position() const { return position_; }
 
@@ -43,25 +45,37 @@ public:
     [[nodiscard]] float aperture() const { return aperture_; }
     [[nodiscard]] float shutterSeconds() const { return shutterSeconds_; }
     [[nodiscard]] float iso() const { return iso_; }
+    [[nodiscard]] Lens lens() const { return lens_; }
 
-    // Vertical FOV from focal length and film-back height, not set directly: what a real lens and sensor determine.
+    // Paraxial vertical FOV from focal length and film-back height, which viewBasis's half-extents are; a fisheye frame's is below.
     [[nodiscard]] float verticalFovRadians() const;
+
+    // Angle the frame's vertical extent subtends under the active projection, saturating at the image circle: what CLAHE's scale needs.
+    [[nodiscard]] float verticalAngularExtentRadians() const;
 
     // Orthonormal basis and view-plane half-extents, all primaryRay() needs bar the ndc weight, so a projector can share it.
     struct ViewBasis {
         glm::vec3 forward;
         glm::vec3 right;
         glm::vec3 up;
+        // View-plane half-extents at unit depth, tangent-valued. The rasterizer reads them as tangents, so a fisheye leaves them unused.
         float halfWidth;
         float halfHeight;
+        // Sensor half-extents in mm, the image circle and the model: everything the fisheye arm needs without reaching back to the Camera.
+        float halfWidthMm;
+        float halfHeightMm;
+        float maxThetaRadians;
+        float maxRadiusMm;
+        float focalLengthMm;
+        Lens lens;
     };
     [[nodiscard]] ViewBasis viewBasis(float aspect) const;
 
-    // Pinhole primary ray for a point in normalized device coordinates (ndcX/ndcY in [-1,1], +Y up). tMin/tMax are nearClip()/farClip().
-    [[nodiscard]] Ray primaryRay(float ndcX, float ndcY, float aspect) const;
+    // Primary ray for a normalized device point (ndc in [-1,1], +Y up), tMin/tMax nearClip()/farClip(); nullopt outside a fisheye's circle.
+    [[nodiscard]] std::optional<Ray> primaryRay(float ndcX, float ndcY, float aspect) const;
 
     // Same ray from a basis the caller already built; the aspect-taking overload rebuilds two sin, two cos, an atan and a tan every call.
-    [[nodiscard]] Ray primaryRay(const ViewBasis& basis, float ndcX, float ndcY) const;
+    [[nodiscard]] std::optional<Ray> primaryRay(const ViewBasis& basis, float ndcX, float ndcY) const;
 
     // Exposure value at ISO 100 (log2): log2(aperture^2 / shutterSeconds * (100/iso)). The static overload is the formula's one definition.
     [[nodiscard]] float ev100() const;
@@ -78,6 +92,7 @@ private:
     float aperture_;
     float shutterSeconds_;
     float iso_;
+    Lens lens_;
 };
 
 }  // namespace pathtracer::scene

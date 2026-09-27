@@ -92,12 +92,26 @@ def display_encode(
     return out
 
 
+# Index-parallel with PT_LENS_* in _ffi.py and LensProjection in scene/lens.h: the projection names Camera.lens accepts.
+LENS_PROJECTIONS = ("spherical", "fisheye_polynomial")
+
+
 @dataclass(frozen=True)
 class Camera:
     """Pose, lens and exposure.
 
-    ``aperture``, ``shutter_seconds`` and ``iso`` set the photographic exposure value only. The camera is a pinhole:
-    none of the three produces depth of field, and ``aperture`` is not a lens radius.
+    ``aperture``, ``shutter_seconds`` and ``iso`` set the photographic exposure value only. Neither projection
+    produces depth of field, and ``aperture`` is not a lens radius.
+
+    ``lens`` selects the projection: ``"spherical"`` is the rectilinear pinhole, ``"fisheye_polynomial"`` is
+    Kannala & Brandt's ``r(theta) = focal_length_mm * (theta + k1*theta**3 + k2*theta**5 + k3*theta**7 + k4*theta**9)``,
+    whose coefficients are an OpenCV ``fisheye`` / COLMAP ``OPENCV_FISHEYE`` calibration's ``k1..k4`` unscaled. Only the
+    radial geometry transfers: one focal length means ``fx == fy``, and the principal point is the sensor centre, so a
+    calibrated camera's pixel grid is not reproduced. ``fisheye_field_of_view_degrees`` is the full angle across the
+    image circle; samples outside the circle are black, and an ``r(theta)`` that is not provably monotone over it is
+    rejected. The image circle's radius is ``focal_length_mm * theta_d(theta_max)``, so short focal lengths are what make the
+    projection visible and a circle inside the gate leaves the corners black. A fisheye lens has no rasterizer projection, so
+    requesting a G-buffer AOV with one raises ``RuntimeError``.
 
     Immutable, so an override is a ``dataclasses.replace`` of ``Renderer.default_camera`` rather than a mutation
     that could leak between renders.
@@ -113,6 +127,9 @@ class Camera:
     aperture: float
     shutter_seconds: float
     iso: float
+    lens: str = "spherical"
+    fisheye_coefficients: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+    fisheye_field_of_view_degrees: float = 180.0
 
     @classmethod
     def _from_struct(cls, struct: _ffi.PtCamera) -> Camera:
@@ -127,6 +144,9 @@ class Camera:
             aperture=struct.aperture,
             shutter_seconds=struct.shutter_seconds,
             iso=struct.iso,
+            lens=LENS_PROJECTIONS[struct.lens_projection],
+            fisheye_coefficients=tuple(struct.fisheye_coefficients),
+            fisheye_field_of_view_degrees=struct.fisheye_field_of_view_degrees,
         )
 
     def _to_struct(self) -> _ffi.PtCamera:
@@ -141,6 +161,12 @@ class Camera:
         struct.aperture = self.aperture
         struct.shutter_seconds = self.shutter_seconds
         struct.iso = self.iso
+        # Raised here rather than at the ABI, so a typo never reaches a by-value struct field that only takes an int.
+        if self.lens not in LENS_PROJECTIONS:
+            raise ValueError(f"lens must be one of {LENS_PROJECTIONS}, got {self.lens!r}")
+        struct.lens_projection = LENS_PROJECTIONS.index(self.lens)
+        struct.fisheye_coefficients = (ctypes.c_float * 4)(*self.fisheye_coefficients)
+        struct.fisheye_field_of_view_degrees = self.fisheye_field_of_view_degrees
         return struct
 
 

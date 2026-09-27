@@ -3,6 +3,75 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## A polynomial fisheye lens, and a projection the camera selects
+
+The camera had exactly one projection and no lens model at all: `primaryRay` built `forward + ndc·halfExtent·basis`, and
+`aperture`/`shutterSeconds`/`iso` reached `ev100()` and nothing else. `profile.json` and the HUD now select between that
+rectilinear pinhole -- named **Spherical** throughout, in JSON, the enum and the dropdown, so there is one vocabulary --
+and a **Fisheye Polynomial**.
+
+- feat: `scene/lens.h` carries Kannala & Brandt 2006's `r(theta) = f·(theta + k1·theta³ + k2·theta⁵ + k3·theta⁷ + k4·theta⁹)`
+  in the parameterisation OpenCV's `fisheye` module and COLMAP's `OPENCV_FISHEYE` report, so a measured lens's `k1..k4` drop
+  in unscaled. `k = 0` *is* the equidistant family exactly. What transfers is the radial geometry alone: one `focalLengthMm`
+  means `fx == fy`, and the image circle is centred on the sensor, so a calibration's principal point and pixel aspect do not
+- feat: the inverse is per ray, not a fitted `theta(r)`: safeguarded Newton (Numerical Recipes §9.4 `rtsafe`) on the bracket
+  `[0, thetaMax]`, seeded at the radius itself -- first-order exact, and bitwise exact for an equidistant lens, which returns
+  on iteration zero. Both constants are derived rather than tuned: the 30-iteration cap is the all-bisection worst case to
+  float resolution on the widest possible bracket (`thetaMax <= pi`, `ulp(pi) = 2^-21`, so `ceil(log2(pi/2^-21)) = 23`), and
+  the stopping rule is a 4-ulp bracket, i.e. float precision with no scene-dependent term. Convergence is unconditional:
+  Newton accelerates, and any step leaving the bracket bisects instead
+- feat: `kannalaBrandtIsInvertible` *proves* `r'(theta) > 0` rather than sampling for it. `r'` in `u = theta²` is a quartic,
+  so its coefficients go to the degree-4 Bernstein basis and the convex-hull property decides the sign, de Casteljau-subdividing
+  only the undecided halves. It is conservative by construction -- a slope that merely grazes zero is rejected at depth 24,
+  which is the right answer, because such a lens has no unique inverse there. Load, the C ABI and Python all refuse a lens it
+  cannot prove, so `primaryRay` never meets a radius it cannot invert
+- feat: samples outside the image circle return `std::nullopt` and splat an all-zero `TraceResult`. The filter weight still
+  accumulates -- it belongs to the film sample's position, which exists whether or not the lens formed a ray -- so the pixel
+  average stays a true average, `invWeight` cannot go infinite, and the circle's edge antialiases for free. A circular fisheye's
+  corners are black in every lane, which is what the lens does
+- feat: framing stays physical: `r_max = f·theta_d(thetaMax)`, the authored focal length against the gate, with **no fit mode**.
+  An intermediate revision derived the focal length from the gate (`Circular`/`FullFrame`, `f = extent / theta_d(thetaMax)`) and
+  was removed before landing: its defining property is that the focal length no longer does anything, and a mode that ignores
+  the control a lens is authored by is a worse interface than none. The consequence to live with is that a long lens hides the
+  projection -- at the shipped 70 mm a 180-degree lens puts a 110 mm circle behind a 13.4 mm gate, so the frame is the central
+  11 degrees and the render is **visually indistinguishable** from the pinhole (relMSE 3.1%, corner ray 1.3% apart) -- so the
+  fisheye is a short-focal-length instrument, as it is on a real camera
+- feat: the HUD's Camera section gains the projection dropdown and prints the active projection's vertical field of view,
+  `verticalAngularExtentRadians()` itself, so the readout cannot disagree with the render; the polynomial stays authored in
+  `profile.json`, being measured data rather than slider material. `ViewInputState` tracks the projection, so switching retraces. The
+  focal-length slider's floor drops 10 mm -> 6 mm: 10 mm was a spherical assumption sitting above the 8.68 mm threshold at
+  which the circle enters the shipped gate, so the fisheye's own regime was unreachable from the HUD at any slider position.
+  6 mm is a real circular-fisheye focal length (Nikon 6 mm f/2.8) and clears that threshold on 12 of the 15 shipped presets
+- refactor: `maxThetaRadians(lens)` replaces four hand-written copies of `0.5F * glm::radians(maxFieldOfViewDegrees)` across
+  the camera, the config parser and the C ABI, so the lens turns degrees into radians in exactly one place
+- fix: the rasterizer's `projectToScreen` is a perspective divide with no fisheye equivalent, so the 14 scan-converted G-buffer
+  AOVs are **rejected, never approximated**: `HeadlessRenderer::render` fails before it allocates, the GUI greys those entries
+  out and falls back to Beauty, and startup refuses a profile whose `defaultAOV` or `-bench-aovs` schedule would park the
+  driver on a G-buffer generation that can never arrive. `claheAov`'s `pixelsPerDegree` is the one filter that reads an angle,
+  and `verticalFovRadians` (`2·atan(h/2f)`) is not a fisheye frame's extent: it keeps its exact body for `viewBasis`, and the
+  new `verticalAngularExtentRadians()` -- the same expression under Spherical, so CLAHE is bit-identical -- feeds the filters
+- feat: `PtCamera` gains `lens_projection`, `fisheye_coefficients[4]` and `fisheye_field_of_view_degrees`. It crosses by value,
+  so this is a **breaking ABI layout change**: `PT_ABI_VERSION` (2; 1 is the pre-lens layout) and `pt_abi_version()` land with
+  it, and the Python binding checks them at load, before any struct is passed. `toCamera` became validating, since an unknown
+  projection or an unprovable polynomial has no defensible coercion
+- test: `camera_validate`, 8 checks and the first suite the camera has had. The strongest is
+  `fisheye_direction_inverts_the_forward_model`: the test projects a known direction *forward* through the model and requires
+  `primaryRay` to return it, so the forward map lives in the test and the inverse in the library. The inverse is asserted
+  against an independent bisection on the forward polynomial over the degree-9 Taylor coefficients of the equisolid,
+  stereographic and orthographic families -- derived, not invented calibrations -- to a forward-error bound computed per case
+  from the stopping bracket and the local slope, never a hand-picked tolerance. The monotonicity gate is tested against a slope
+  whose root is known exactly by construction (`k1 = -1/(3u0)` gives `r' = 1 - u/u0`), plus one-sided soundness over 2048 random
+  coefficient sets. `fisheye_theta_distribution_matches_the_area_jacobian` catches what no per-ray check can: uniform sensor
+  area must land on `theta` with CDF `(r(theta)/r(thetaMax))²`, by chi-square at the family-wise alpha.
+  `fisheye_vertical_extent_saturates_at_the_image_circle` pins what CLAHE reads: the extent saturates at the full field of view
+  once the circle falls inside the gate, is the top edge's angle by independent bisection when it does not, and is bitwise
+  `verticalFovRadians()` under Spherical. `io_validate` and `api_validate` cover the config boundary and the G-buffer
+  rejection; `ctest` 191/191
+- perf: not measurable on the spherical path, which is the same expression text behind one branch on a per-pass constant:
+  `bench_compare` puts the paired `pass_ms` ratio at **1.004 [0.981, 1.022]** over 7 rounds, unresolved at the 95% interval,
+  with identical ray counts every round, and the Beauty EXR is byte-identical to a binary built from `7ea662d` (crc32
+  `fccef5e8`). The fisheye's cost is three Horner pairs on primary rays only, 3-4 iterations from the first-order seed
+
 ## A log display for SNR, and one shared display decision
 
 `SNR` previewed as a solid white frame. `aovCarriesRadiance` correctly reports false for it, which pins the display at unity

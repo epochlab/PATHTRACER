@@ -36,6 +36,7 @@ public:
         int samples = 1;
         // Randomizes the sampler's Owen scramble, fixed across one render's passes. Callers choose the seed, never the per-pass index.
         std::uint32_t scrambleSeed = 1;
+        // A G-buffer AOV requires camera.lens() to be Spherical: render() rejects a fisheye rather than rasterize the wrong projection.
         std::vector<pathtracer::debug::AovId> aovs;
         // nullopt keeps the scene's authored environment.lightEnabled; true/false override it, so one scene.json renders lit and unlit.
         std::optional<bool> envLightEnabled;

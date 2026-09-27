@@ -17,6 +17,13 @@ _ERROR_CAPACITY = 512
 #: Mirrors PT_DEFAULT: the tri-state sentinel asking an optional request field to keep its default.
 PT_DEFAULT = -1
 
+# PT_ABI_VERSION in pathtracer_c.h. PtCamera and PtRenderRequest cross the boundary by value, so a layout drift must fail loudly.
+PT_ABI_VERSION = 2
+
+# PtCamera.lens_projection, PT_LENS_* in pathtracer_c.h. Index-parallel with LENS_PROJECTIONS in __init__.py.
+PT_LENS_SPHERICAL = 0
+PT_LENS_FISHEYE_POLYNOMIAL = 1
+
 
 class PtCamera(ctypes.Structure):
     """Mirrors ``PtCamera`` in include/pathtracer/api/pathtracer_c.h, field for field and in order."""
@@ -32,6 +39,9 @@ class PtCamera(ctypes.Structure):
         ("aperture", ctypes.c_float),
         ("shutter_seconds", ctypes.c_float),
         ("iso", ctypes.c_float),
+        ("lens_projection", ctypes.c_int),
+        ("fisheye_coefficients", ctypes.c_float * 4),
+        ("fisheye_field_of_view_degrees", ctypes.c_float),
     ]
 
 
@@ -125,6 +135,13 @@ def load_library() -> ctypes.CDLL:
         ctypes.c_int,
     ]
     library.pt_display_encode.restype = ctypes.c_int
+
+    library.pt_abi_version.argtypes = []
+    library.pt_abi_version.restype = ctypes.c_int
+    # Checked at load, the only point before a by-value struct is passed: a mismatched layout would otherwise read as garbage floats.
+    actual = library.pt_abi_version()
+    if actual != PT_ABI_VERSION:
+        raise RuntimeError(f"libpathtracer ABI version {actual} does not match this package's {PT_ABI_VERSION}")
     return library
 
 

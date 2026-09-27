@@ -77,7 +77,7 @@ using pathtracer::gfx::HdrImage;
     const pathtracer::config::CameraConfig& camera = profile.camera;
     return pathtracer::scene::Camera(camera.position, camera.yawDegrees, camera.pitchDegrees, preset->filmBack,
                                   camera.focalLengthMm, camera.nearClip, camera.farClip, camera.aperture,
-                                  camera.shutterSeconds, camera.iso);
+                                  camera.shutterSeconds, camera.iso, camera.lens);
 }
 
 // Gathers `channels` of each texel out of HdrImage's fixed RGBA into a packed destination: the one copy the boundary costs.
@@ -251,14 +251,18 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
         error = "no AOVs requested";
         return false;
     }
-    resizeBuffers(request.width, request.height);
-
     const bool wantsFilter = std::any_of(request.aovs.begin(), request.aovs.end(), [](AovId aov) {
         return pathtracer::debug::aovSource(aov) == AovSource::BeautyFilter;
     });
     const bool wantsGBuffer = std::any_of(request.aovs.begin(), request.aovs.end(), [](AovId aov) {
         return pathtracer::debug::aovSource(aov) == AovSource::GBuffer;
     });
+    // Scan conversion is a perspective divide, which a fisheye has no equivalent of: rejected rather than silently approximated.
+    if (wantsGBuffer && request.camera.lens().projection != pathtracer::scene::LensProjection::Spherical) {
+        error = "G-buffer AOVs require a spherical lens: a fisheye has no rasterizer projection";
+        return false;
+    }
+    resizeBuffers(request.width, request.height);
 
     // The path-traced lanes this request needs. Beauty joins whenever a filter is asked for, every filter reading accumulated Beauty.
     accumulatedAovs_.clear();
@@ -374,7 +378,7 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
     if (wantsFilter) {
         const auto filterStart = std::chrono::steady_clock::now();
         const pathtracer::gfx::HdrImage& beauty = lastImage(AovId::Beauty);
-        const pathtracer::debug::FilterInput filterInput{beauty, request.camera.verticalFovRadians(),
+        const pathtracer::debug::FilterInput filterInput{beauty, request.camera.verticalAngularExtentRadians(),
                                                           beautyLuminanceM2_.data(), request.samples};
         for (const AovId aov : request.aovs) {
             if (pathtracer::debug::aovSource(aov) != AovSource::BeautyFilter ||

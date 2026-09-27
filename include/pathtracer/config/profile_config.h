@@ -25,6 +25,8 @@ struct CameraConfig {
     float aperture;
     float shutterSeconds;
     float iso;
+    // Projection selector plus the polynomial, validated whichever projection is active so the HUD dropdown can switch either way.
+    pathtracer::scene::Lens lens;
 };
 
 struct ControlsConfig {
