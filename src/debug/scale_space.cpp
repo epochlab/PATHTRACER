@@ -33,7 +33,7 @@ using pathtracer::scene::ThreadPool;
     double logScale = (static_cast<double>(n) * std::log(halfT)) - std::lgamma(static_cast<double>(n) + 1.0) - t;
     double term = 1.0;
     double sum = 1.0;
-    // The ratio falls under 1/2 once k passes halfT, so the discarded geometric tail is below twice the last term kept.
+    // The term ratio is at most (halfT/k)^2, under 1/2 past sqrt(2)*halfT, so the discarded tail is below the last term kept.
     for (int k = 1; term > sum * 0x1p-53; ++k) {
         term *= (halfT * halfT) / (static_cast<double>(k) * static_cast<double>(n + k));
         sum += term;
@@ -59,7 +59,7 @@ using pathtracer::scene::ThreadPool;
 // Columns carried in registers across the tap loop. Without it each tap restreams the accumulator and the centre, 2.5x the traffic.
 constexpr int kConvolutionBlock = 32;
 
-// One separable pass in the centre-relative form: on an affine field every tap pair cancels exactly, so affine survives bit-identically.
+// One separable pass in the centre-relative form: an exactly representable affine field's tap pairs cancel, so its interior is kept.
 void diffuseRows(const float* __restrict src, float* __restrict dst, const std::vector<float>& kernel, int width,
                  int height, ThreadPool& threadPool) {
     const int radius = static_cast<int>(kernel.size()) - 1;
@@ -188,7 +188,7 @@ void diffuse(std::span<float> plane, int width, int height, float t, ThreadPool&
 }
 
 std::vector<ScaleSpaceLevel> buildOctavePyramid(std::span<const float> plane, int width, int height,
-                                                ThreadPool& threadPool) {
+                                                ThreadPool& threadPool, std::size_t maxLevels) {
     const float decimationAt = decimationVariance();
 
     std::vector<ScaleSpaceLevel> levels;
@@ -209,6 +209,9 @@ std::vector<ScaleSpaceLevel> buildOctavePyramid(std::span<const float> plane, in
         diffuse(current, currentWidth, currentHeight, step, threadPool);
         ownVariance = targetOwn;
         levels.push_back(ScaleSpaceLevel{current, currentWidth, currentHeight, decimation, baseVariance});
+        if (levels.size() == maxLevels) {
+            break;
+        }
 
         // Halving the grid discards nothing once the level is band-limited to the halved Nyquist, which decimationVariance defines.
         if (ownVariance < decimationAt) {
@@ -249,7 +252,8 @@ void addExpanded(const ScaleSpaceLevel& level, float weight, std::span<float> ba
         // Level sample j sits on base pixel j*decimation, so the base grid maps back by a plain scale with no half-pixel offset.
         const float v = static_cast<float>(y) * inverseDecimation;
         const int y0 = std::min(static_cast<int>(v), level.height - 1);
-        const int y1 = std::min(y0 + 1, level.height - 1);
+        // Past the last level sample the level's own mirror applies, as its diffusion did, rather than a zeroth-order hold.
+        const int y1 = mirror(y0 + 1, level.height);
         const float fractionY = v - static_cast<float>(y0);
         const float* upper = level.plane.data() + (static_cast<std::size_t>(y0) * static_cast<std::size_t>(level.width));
         const float* lower = level.plane.data() + (static_cast<std::size_t>(y1) * static_cast<std::size_t>(level.width));
@@ -257,7 +261,7 @@ void addExpanded(const ScaleSpaceLevel& level, float weight, std::span<float> ba
         for (int x = 0; x < baseWidth; ++x) {
             const float u = static_cast<float>(x) * inverseDecimation;
             const int x0 = std::min(static_cast<int>(u), level.width - 1);
-            const int x1 = std::min(x0 + 1, level.width - 1);
+            const int x1 = mirror(x0 + 1, level.width);
             const float fractionX = u - static_cast<float>(x0);
             const float top = upper[x0] + ((upper[x1] - upper[x0]) * fractionX);
             const float bottom = lower[x0] + ((lower[x1] - lower[x0]) * fractionX);
@@ -277,8 +281,9 @@ void laplacian5(std::span<const float> plane, int width, int height, std::span<f
         // Differences taken against the centre before summing, the same cancellation-free form the diffusion passes use.
         for (int x = 0; x < width; ++x) {
             const float value = centre[x];
-            const float left = centre[mirror(x - 1, width)];
-            const float right = centre[mirror(x + 1, width)];
+            // The fold's modulo is paid only at the two edge columns; everywhere else the neighbours index directly.
+            const float left = centre[x > 0 ? x - 1 : mirror(x - 1, width)];
+            const float right = centre[x + 1 < width ? x + 1 : mirror(x + 1, width)];
             destination[x] = ((left - value) + (right - value)) + ((above[x] - value) + (below[x] - value));
         }
     });

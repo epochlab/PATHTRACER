@@ -218,7 +218,7 @@ BipolarDisplay bipolarDisplay(std::span<const float> rgba, int channels) {
         }
         // Zero is the operator's own centre, so the scale is the RMS about zero rather than a sample deviation about an estimated mean.
         const double rms = std::sqrt(sumOfSquares / static_cast<double>(count));
-        // Cramer 1946: the maximum of n standard normals concentrates at sigma*sqrt(2 ln n), so this is where a well-behaved field ends.
+        // Cramer 1946: the max of n iid normals concentrates at sigma*sqrt(2 ln n), Donoho-Johnstone's universal threshold at this RMS.
         const double expectedMaximum = rms * std::sqrt(2.0 * std::log(static_cast<double>(count)));
         // The smaller of the two: a Gaussian field keeps its true peak, and a heavy-tailed one stops a lone outlier crushing the preview.
         return std::min(peak, static_cast<float>(expectedMaximum));
@@ -226,10 +226,11 @@ BipolarDisplay bipolarDisplay(std::span<const float> rgba, int channels) {
 
     // Ranged per lane, because each lane is its own operator in its own unit: sharing one range would crush the narrower axis to nothing.
     BipolarDisplay display{glm::vec3(0.0F), glm::vec3(0.0F)};
-    // writeScalar broadcasts a scalar AOV to all three lanes, so those are replicas to range, not absences to leave at zero gain.
+    // writeScalar broadcasts a scalar AOV to all three lanes: replicas, so lane 0's range is theirs, not absences left at zero gain.
     const int lanes = channels == 1 ? 3 : std::min(channels, 3);
+    const float scalarRange = channels == 1 ? laneRange(0) : 0.0F;
     for (int lane = 0; lane < lanes; ++lane) {
-        const float range = laneRange(lane);
+        const float range = channels == 1 ? scalarRange : laneRange(lane);
         // A lane with no range has no scale to fit, and every finite gain then reads mid-grey, so unity is the choice that assumes least.
         display.gain[lane] = range > 0.0F ? kBipolarDisplayOffset / range : 1.0F;
         display.offset[lane] = kBipolarDisplayOffset;

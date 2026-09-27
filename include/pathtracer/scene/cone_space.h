@@ -18,7 +18,7 @@ namespace pathtracer::scene::cone {
 struct OpponentBasis {
     // A zero-sum row carries no achromatic component, so writing it on differences makes an achromatic texel exactly zero at any intensity.
     glm::vec2 redGreenNumerator;    // l - l_white, positive toward L over M
-    glm::vec2 blueYellowNumerator;  // s - s_white in units of S excitation per unit luminance, MacLeod & Boynton's own axis scale
+    glm::vec2 blueYellowNumerator;  // (s - s_white) * (L+M)_white: S per unit L+M, one unit per S excitation at white's cone sum
     glm::vec3 denominator;          // L + M, the luminance-like cone sum both axes divide by
 };
 [[nodiscard]] const OpponentBasis& opponentBasis();

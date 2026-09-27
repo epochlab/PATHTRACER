@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstddef>
+#include <limits>
 #include <span>
 #include <vector>
 
@@ -33,9 +35,10 @@ struct ScaleSpaceLevel {
 // Adds variance t in place by two separable passes, mirroring about the edge sample so every tap lands on real data. No-op at t <= 0.
 void diffuse(std::span<float> plane, int width, int height, float t, pathtracer::scene::ThreadPool& threadPool);
 
-// Octave cascade (Burt & Adelson 1983 structure, Lindeberg kernels): level k carries innerScaleVariance()*4^k, while it fits.
+// Octave cascade (Burt & Adelson 1983, Lindeberg kernels): level k carries innerScaleVariance()*4^k while it fits, maxLevels at most.
 [[nodiscard]] std::vector<ScaleSpaceLevel> buildOctavePyramid(std::span<const float> plane, int width, int height,
-                                                              pathtracer::scene::ThreadPool& threadPool);
+                                                              pathtracer::scene::ThreadPool& threadPool,
+                                                              std::size_t maxLevels = std::numeric_limits<std::size_t>::max());
 
 // Bilinear resample of a level onto the base grid, exact at co-located samples: a coarse level holds nothing between its own samples.
 [[nodiscard]] std::vector<float> expandToBase(const ScaleSpaceLevel& level, int baseWidth, int baseHeight,

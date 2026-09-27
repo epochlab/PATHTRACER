@@ -448,9 +448,10 @@ HdrImage hsvAov(const HdrImage& beauty, ThreadPool& threadPool) {
 
 HdrImage dogAov(const HdrImage& beauty, ThreadPool& threadPool) {
     const std::vector<float> plane = luminancePlane(beauty, threadPool);
-    const std::vector<ScaleSpaceLevel> pyramid = buildOctavePyramid(plane, beauty.width, beauty.height, threadPool);
+    // Only the two finest rungs are read, so the cascade stops there rather than building and copying the coarser octaves.
+    const std::vector<ScaleSpaceLevel> pyramid = buildOctavePyramid(plane, beauty.width, beauty.height, threadPool, 2);
     HdrImage out = makeBroadcastImage(beauty.width, beauty.height);
-    // Below roughly six pixels the inner scale already fills the frame, so there are not two octaves to difference and the band is empty.
+    // A frame narrower than the second rung's kernel support holds fewer than two octaves, so the band is empty there.
     if (pyramid.size() < 2) {
         return out;
     }

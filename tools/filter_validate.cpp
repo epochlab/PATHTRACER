@@ -231,6 +231,20 @@ PT_CHECK(laplacian5_annihilates_affine_fields, Fast, Exact) {
     PT_EXPECT(ctx, worst == 0.0F, "peak interior Laplacian of an affine field " + std::to_string(worst));
 }
 
+// maxLevels only stops the cascade: the levels it does return are the full cascade's, bit for bit, and there are exactly that many.
+PT_CHECK(pyramid_truncation_keeps_the_leading_levels, Fast, Exact) {
+    ctx.plan(2);
+    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    constexpr int kWidth = 256;
+    constexpr int kHeight = 192;
+    const std::vector<float> source = affinePlane(kWidth, kHeight);
+    const std::vector<ScaleSpaceLevel> full = pathtracer::debug::buildOctavePyramid(source, kWidth, kHeight, pool);
+    const std::vector<ScaleSpaceLevel> two = pathtracer::debug::buildOctavePyramid(source, kWidth, kHeight, pool, 2);
+    PT_EXPECT(ctx, full.size() > 2 && two.size() == 2, "expected a deeper full cascade and exactly two truncated levels");
+    PT_EXPECT(ctx, two.size() == 2 && two[0].plane == full[0].plane && two[1].plane == full[1].plane,
+              "a truncated cascade's levels differ from the full cascade's");
+}
+
 // The whole cascade in one assertion: every level must equal a direct full-variance diffusion of the original at its own samples.
 PT_CHECK(pyramid_matches_direct_diffusion, Fast, Exact) {
     ThreadPool pool(static_cast<unsigned int>(ctx.threads()));

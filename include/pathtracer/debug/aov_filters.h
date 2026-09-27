@@ -40,7 +40,7 @@ inline constexpr float kMorletOctaves = 1.0F;
 [[nodiscard]] pathtracer::gfx::HdrImage hsvAov(const pathtracer::gfx::HdrImage& beauty,
                                             pathtracer::scene::ThreadPool& threadPool);
 
-// Signed difference of the two finest pyramid octaves (Marr & Hildreth 1980), broadcast to RGB. Zero if the frame carries no such band.
+// Signed first band of the Laplacian pyramid (Burt & Adelson 1983), finest octave minus the next, broadcast to RGB. Zero if absent.
 [[nodiscard]] pathtracer::gfx::HdrImage dogAov(const pathtracer::gfx::HdrImage& beauty,
                                             pathtracer::scene::ThreadPool& threadPool);
 
