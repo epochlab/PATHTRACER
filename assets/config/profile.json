@@ -35,7 +35,7 @@
         "samplesPerPixel": 1,
         "maxBounces": 8,
         "russianRouletteStartBounce": 3,
-        "maxSamples": 128,
+        "maxSamples": 64,
         "aoMaxDistance": 1.0,
         "lookaheadDistance": 10.0
     }
