@@ -376,7 +376,7 @@ void drawCameraSection(const HudFrameData& frame, float& focalLengthMm, float& a
     ImGui::Combo("##lensProjection", &lensProjection, pathtracer::scene::kLensProjectionNames,
                  IM_ARRAYSIZE(pathtracer::scene::kLensProjectionNames));
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-    // Floors at a real circular-fisheye focal length (Nikon 6mm f/2.8): 10mm was a spherical assumption a fisheye cannot live with.
+    // Floors at a real circular-fisheye focal length (Nikon 6mm f/2.8): 10mm was a rectilinear assumption a fisheye cannot live with.
     ImGui::SliderFloat("##focalLength", &focalLengthMm, 6.0F, 300.0F, "Focal Length  %.0f mm");
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
     ImGui::SliderFloat("##aperture", &aperture, 1.0F, 22.0F, "Aperture  f/%.1f");
@@ -533,7 +533,7 @@ void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm,
         ImGui::Separator();
     }
 
-    drawAovSection(aov, lensProjection == static_cast<int>(pathtracer::scene::LensProjection::Spherical));
+    drawAovSection(aov, lensProjection == static_cast<int>(pathtracer::scene::LensProjection::Rectilinear));
     drawCameraSection(frame, focalLengthMm, aperture, shutterSeconds, iso, filmBackPresetIndex,
                        filmBackPresetNames, lensProjection, aberrationStrength);
     drawHdriSection(showSky, envLightEnabled, envRotationDegrees, envExposureStops);

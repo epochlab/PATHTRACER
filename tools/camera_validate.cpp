@@ -1,4 +1,4 @@
-// Correctness gate for the camera's projections: the spherical pinhole's closed form and the Kannala-Brandt polynomial fisheye.
+// Correctness gate for the camera's projections: the rectilinear pinhole's closed form and the Kannala-Brandt polynomial fisheye.
 
 #include <algorithm>
 #include <array>
@@ -94,7 +94,7 @@ float bisectTheta(const std::array<float, 4>& k, float radius, float thetaMax) {
 }  // namespace
 
 // The projection's closed form, from a basis built by glm rotations rather than the camera's own Euler formula.
-PT_CHECK(spherical_primary_rays_match_the_closed_form, Fast, Exact) {
+PT_CHECK(rectilinear_primary_rays_match_the_closed_form, Fast, Exact) {
     ctx.plan(5);
     constexpr float kFocalMm = 35.0F;
     const Camera camera = makeCamera(kFocalMm, Lens{});
@@ -363,10 +363,10 @@ PT_CHECK(fisheye_vertical_extent_saturates_at_the_image_circle, Fast, Exact) {
                        2.0F * thetaTolerance(lens.radialCoefficients, 0.5F * expected, thetaMax),
               "a circle beyond the gate must give the angle imaged at the top edge, below the full field of view");
 
-    // Under Spherical the extent is the pinhole vfov to the bit, so the readout agrees with the paraxial model it replaces.
-    const Camera spherical = makeCamera(0.5F * edgeFocalMm, Lens{});
-    PT_EXPECT(ctx, spherical.verticalAngularExtentRadians() == spherical.verticalFovRadians(),
-              "Spherical must report the pinhole vertical field of view bitwise");
+    // Under Rectilinear the extent is the pinhole vfov to the bit, so the readout agrees with the paraxial model it replaces.
+    const Camera rectilinear = makeCamera(0.5F * edgeFocalMm, Lens{});
+    PT_EXPECT(ctx, rectilinear.verticalAngularExtentRadians() == rectilinear.verticalFovRadians(),
+              "Rectilinear must report the pinhole vertical field of view bitwise");
 }
 
 // One pixel off axis subtends 1/pixelsPerRadian under either projection, the paraxial slope both share, up to their cubic terms.

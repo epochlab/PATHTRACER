@@ -170,7 +170,7 @@ def test_unknown_lens_is_rejected_before_the_abi(renderer: Renderer) -> None:
 
 def test_default_camera_reports_the_profile_lens(renderer: Renderer) -> None:
     camera = renderer.default_camera
-    assert camera.lens == "spherical"
+    assert camera.lens == "rectilinear"
     assert len(camera.fisheye_coefficients) == 4
     assert 0.0 < camera.fisheye_field_of_view_degrees <= 360.0
 

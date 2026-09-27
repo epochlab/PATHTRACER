@@ -35,13 +35,13 @@ std::optional<pathtracer::gfx::ScalarType> parseBitDepth(const nlohmann::json& b
 std::optional<pathtracer::scene::Lens> parseLens(const nlohmann::json& lens, const std::string& path) {
     const std::string projection = lens.at("projection").get<std::string>();
     pathtracer::scene::Lens parsed;
-    if (projection == "spherical") {
-        parsed.projection = pathtracer::scene::LensProjection::Spherical;
+    if (projection == "rectilinear") {
+        parsed.projection = pathtracer::scene::LensProjection::Rectilinear;
     } else if (projection == "fisheyePolynomial") {
         parsed.projection = pathtracer::scene::LensProjection::FisheyePolynomial;
     } else {
         std::cerr << "loadProfileConfig: " << path << " has lens.projection " << projection
-                  << ", expected spherical or fisheyePolynomial\n";
+                  << ", expected rectilinear or fisheyePolynomial\n";
         return std::nullopt;
     }
     const nlohmann::json& coefficients = lens.at("radialCoefficients");

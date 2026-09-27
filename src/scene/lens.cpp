@@ -15,11 +15,14 @@ constexpr int kSlopeDegree = 4;
 // Depth at which a slope that only grazes zero is rejected: 2^-24 of the interval is past float's ability to separate it from zero.
 constexpr int kMaxSubdivisionDepth = 24;
 
-// All-bisection worst case to float resolution on the widest bracket: thetaMax <= pi, ulp(pi) = 2^-21, ceil(log2(pi / 2^-21)) = 23.
-constexpr int kMaxNewtonIterations = 30;
-
-// Bracket width that resolves the root: a few ulps of the answer, so the criterion is float precision with no scene-dependent term.
+// Bracket width that resolves the root: 4 ulps of the domain, the angular resolution a unit float direction carries.
 constexpr float kBracketUlps = 4.0F;
+
+// Halvings from thetaMax to kBracketUlps * eps * thetaMax: log2(1 / (4 * 2^-23)) = 21, independent of the lens.
+constexpr int kBracketHalvings = 21;
+
+// A Newton step that fails to halve the bracket forces a bisection next, so every two iterations halve it at worst.
+constexpr int kMaxIterations = 2 * kBracketHalvings;
 
 // Pascal's triangle to degree 4, the power-to-Bernstein basis change's only inputs.
 constexpr std::array<std::array<double, kSlopeDegree + 1>, kSlopeDegree + 1> kBinomial{
@@ -113,23 +116,27 @@ float kannalaBrandtTheta(const std::array<float, 4>& k, float radius, float thet
     float hi = thetaMax;
     // theta_d's leading term is theta itself, so the radius is the first-order root and the exact answer for an equidistant lens.
     float theta = std::clamp(radius, lo, hi);
-    for (int iteration = 0; iteration < kMaxNewtonIterations; ++iteration) {
+    const float tolerance = kBracketUlps * std::numeric_limits<float>::epsilon() * thetaMax;
+    float previousWidth = hi - lo;
+    for (int iteration = 0; iteration < kMaxIterations; ++iteration) {
         const float residual = kannalaBrandtRadius(k, theta) - radius;
         if (residual == 0.0F) {
             return theta;
         }
-        // The bracket only ever narrows, so the worst case is bisection: a radius past theta_d(thetaMax) converges on thetaMax.
+        // The bracket only ever narrows: a radius past theta_d(thetaMax) converges on thetaMax.
         if (residual > 0.0F) {
             hi = theta;
         } else {
             lo = theta;
         }
-        if ((hi - lo) <= (kBracketUlps * std::numeric_limits<float>::epsilon() * hi)) {
+        if ((hi - lo) <= tolerance) {
             break;
         }
+        const bool halved = (hi - lo) <= 0.5F * previousWidth;
+        previousWidth = hi - lo;
         const float next = theta - (residual / kannalaBrandtRadiusSlope(k, theta));
-        // A step outside the bracket, or non-finite from a vanishing slope, bisects instead: Newton can only accelerate, never diverge.
-        theta = (std::isfinite(next) && next > lo && next < hi) ? next : 0.5F * (lo + hi);
+        // Outside the bracket, non-finite from a vanishing slope, or after a step that failed to halve it: bisect; Newton only accelerates.
+        theta = (halved && std::isfinite(next) && next > lo && next < hi) ? next : 0.5F * (lo + hi);
     }
     return theta;
 }

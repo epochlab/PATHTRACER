@@ -93,7 +93,7 @@ def display_encode(
 
 
 # Index-parallel with PT_LENS_* in _ffi.py and LensProjection in scene/lens.h: the projection names Camera.lens accepts.
-LENS_PROJECTIONS = ("spherical", "fisheye_polynomial")
+LENS_PROJECTIONS = ("rectilinear", "fisheye_polynomial")
 
 
 @dataclass(frozen=True)
@@ -103,7 +103,7 @@ class Camera:
     ``aperture``, ``shutter_seconds`` and ``iso`` set the photographic exposure value only. Neither projection
     produces depth of field, and ``aperture`` is not a lens radius.
 
-    ``lens`` selects the projection: ``"spherical"`` is the rectilinear pinhole, ``"fisheye_polynomial"`` is
+    ``lens`` selects the projection: ``"rectilinear"`` is the pinhole, ``"fisheye_polynomial"`` is
     Kannala & Brandt's ``r(theta) = focal_length_mm * (theta + k1*theta**3 + k2*theta**5 + k3*theta**7 + k4*theta**9)``,
     whose coefficients are an OpenCV ``fisheye`` / COLMAP ``OPENCV_FISHEYE`` calibration's ``k1..k4`` unscaled. Only the
     radial geometry transfers: one focal length means ``fx == fy``, and the principal point is the sensor centre, so a
@@ -127,7 +127,7 @@ class Camera:
     aperture: float
     shutter_seconds: float
     iso: float
-    lens: str = "spherical"
+    lens: str = "rectilinear"
     fisheye_coefficients: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
     fisheye_field_of_view_degrees: float = 180.0
 

@@ -365,31 +365,31 @@ PT_CHECK(profile_config_camera_lens, Fast, Exact) {
     const nlohmann::json nonMonotone = {{"projection", "fisheyePolynomial"},
                                         {"maxFieldOfViewDegrees", 180.0},
                                         {"radialCoefficients", {-1.0 / 3.0, 0.0, 0.0, 0.0}}};
-    const nlohmann::json spherical = {{"projection", "spherical"},
+    const nlohmann::json rectilinear = {{"projection", "rectilinear"},
                                       {"maxFieldOfViewDegrees", 180.0},
                                       {"radialCoefficients", {0.0, 0.0, 0.0, 0.0}}};
-    nlohmann::json fisheye = spherical;
+    nlohmann::json fisheye = rectilinear;
     fisheye["projection"] = "fisheyePolynomial";
-    nlohmann::json threeCoefficients = spherical;
+    nlohmann::json threeCoefficients = rectilinear;
     threeCoefficients["radialCoefficients"] = {0.0, 0.0, 0.0};
-    nlohmann::json zeroFov = spherical;
+    nlohmann::json zeroFov = rectilinear;
     zeroFov["maxFieldOfViewDegrees"] = 0.0;
-    nlohmann::json overFov = spherical;
+    nlohmann::json overFov = rectilinear;
     overFov["maxFieldOfViewDegrees"] = 360.5;
-    nlohmann::json unknownProjection = spherical;
+    nlohmann::json unknownProjection = rectilinear;
     unknownProjection["projection"] = "pinhole";
-    nlohmann::json missingProjection = spherical;
+    nlohmann::json missingProjection = rectilinear;
     missingProjection.erase("projection");
 
     const std::vector<Case> cases = {
-        {"spherical with a zero polynomial", spherical, true},
+        {"rectilinear with a zero polynomial", rectilinear, true},
         {"fisheyePolynomial with an equidistant polynomial", fisheye, true},
         {"an unknown projection name", unknownProjection, false},
         {"no projection at all", missingProjection, false},
         {"three coefficients instead of four", threeCoefficients, false},
         {"a zero field of view", zeroFov, false},
         {"a field of view past 360 degrees", overFov, false},
-        // Rejected under a spherical projection too: the HUD can switch to the fisheye at runtime, so the polynomial must hold either way.
+        // Rejected under a rectilinear projection too: the HUD can switch to the fisheye at runtime, so the polynomial must hold anyway.
         {"a non-monotone polynomial", nonMonotone, false},
     };
 

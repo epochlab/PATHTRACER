@@ -34,7 +34,8 @@ std::optional<Ray> fisheyeRay(const Camera::ViewBasis& basis, const glm::vec3& o
                                             basis.maxThetaRadians);
     // The sensor offset normalised is the azimuth, so this is the polar reconstruction of the direction the lens imaged onto that point.
     const glm::vec3 azimuth = ((xMm * basis.right) + (yMm * basis.up)) / radiusMm;
-    const glm::vec3 dir = glm::normalize((std::cos(theta) * basis.forward) + (std::sin(theta) * azimuth));
+    // Unit by construction: forward and the azimuth are orthonormal, and cos^2 + sin^2 = 1 to a rounding.
+    const glm::vec3 dir = (std::cos(theta) * basis.forward) + (std::sin(theta) * azimuth);
     return Ray{origin, dir, nearClip, farClip};
 }
 
@@ -64,7 +65,7 @@ float Camera::verticalFovRadians() const {
 }
 
 float Camera::verticalAngularExtentRadians() const {
-    if (lens_.projection == LensProjection::Spherical) {
+    if (lens_.projection == LensProjection::Rectilinear) {
         return verticalFovRadians();
     }
     // The angle imaged at the top of the gate, or the circle's edge where the circle falls inside it: the frame's real vertical extent.

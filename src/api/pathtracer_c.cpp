@@ -44,12 +44,12 @@ void writeError(char* err, int errCap, const std::string& message) {
 // Validating because the lens fields are a boundary: an unknown projection or a non-invertible polynomial has no defensible coercion.
 [[nodiscard]] std::optional<pathtracer::scene::Camera> toCamera(const PtCamera& camera, std::string& error) {
     pathtracer::scene::Lens lens;
-    if (camera.lens_projection == PT_LENS_SPHERICAL) {
-        lens.projection = pathtracer::scene::LensProjection::Spherical;
+    if (camera.lens_projection == PT_LENS_RECTILINEAR) {
+        lens.projection = pathtracer::scene::LensProjection::Rectilinear;
     } else if (camera.lens_projection == PT_LENS_FISHEYE_POLYNOMIAL) {
         lens.projection = pathtracer::scene::LensProjection::FisheyePolynomial;
     } else {
-        error = "lens_projection must be PT_LENS_SPHERICAL or PT_LENS_FISHEYE_POLYNOMIAL, got " +
+        error = "lens_projection must be PT_LENS_RECTILINEAR or PT_LENS_FISHEYE_POLYNOMIAL, got " +
                 std::to_string(camera.lens_projection);
         return std::nullopt;
     }
@@ -159,7 +159,7 @@ void pt_renderer_default_camera(const PtRenderer* renderer, PtCamera* out) {
     out->iso = camera.iso();
     const pathtracer::scene::Lens lens = camera.lens();
     // The outbound write is a cast, so the ABI's constants and the enum are asserted equal rather than re-mapped by hand.
-    static_assert(static_cast<int>(pathtracer::scene::LensProjection::Spherical) == PT_LENS_SPHERICAL &&
+    static_assert(static_cast<int>(pathtracer::scene::LensProjection::Rectilinear) == PT_LENS_RECTILINEAR &&
                       static_cast<int>(pathtracer::scene::LensProjection::FisheyePolynomial) == PT_LENS_FISHEYE_POLYNOMIAL,
                   "PT_LENS_* must stay index-parallel with LensProjection");
     out->lens_projection = static_cast<int>(lens.projection);
