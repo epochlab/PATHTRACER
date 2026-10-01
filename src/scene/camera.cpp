@@ -74,10 +74,6 @@ float Camera::verticalAngularExtentRadians() const {
     return 2.0F * kannalaBrandtTheta(lens_.radialCoefficients, halfHeightRadii, thetaMax);
 }
 
-float Camera::pixelsPerRadian(int heightPixels) const {
-    return focalLengthMm_ * static_cast<float>(heightPixels) / filmBack_.heightMm;
-}
-
 Camera::ViewBasis Camera::viewBasis(float aspect) const {
     const glm::vec3 fwd = forwardFromEuler(yawRadians_, pitchRadians_);
     const glm::vec3 right = glm::normalize(glm::cross(fwd, kWorldUp));

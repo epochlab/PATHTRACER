@@ -142,14 +142,9 @@ void diffuseColumns(const float* __restrict src, float* __restrict dst, const st
 
 }  // namespace
 
-float decimationVariance() {
-    // exp(-t(1-cos w)) at w = pi/2 gives exp(-t), so the criterion is exp(-t) <= 2^-24, i.e. t = 24 ln2.
-    return static_cast<float>(-std::log(kFloat32Roundoff));
-}
-
 float innerScaleVariance() {
-    // At the full-grid Nyquist w = pi the exponent doubles, (1-cos pi) = 2 (1-cos pi/2), so the same bound halves the variance.
-    return 0.5F * decimationVariance();
+    // exp(-t(1-cos w)) at w = pi gives exp(-2t), so the criterion exp(-2t) <= 2^-24 gives t = 12 ln2.
+    return static_cast<float>(-0.5 * std::log(kFloat32Roundoff));
 }
 
 std::vector<float> discreteGaussianKernel(float t) {
@@ -185,129 +180,6 @@ void diffuse(std::span<float> plane, int width, int height, float t, ThreadPool&
     std::vector<float> scratch(plane.size());
     diffuseRows(plane.data(), scratch.data(), kernel, width, height, threadPool);
     diffuseColumns(scratch.data(), plane.data(), kernel, width, height, threadPool);
-}
-
-std::vector<ScaleSpaceLevel> buildOctavePyramid(std::span<const float> plane, int width, int height,
-                                                ThreadPool& threadPool, std::size_t maxLevels) {
-    const float decimationAt = decimationVariance();
-
-    std::vector<ScaleSpaceLevel> levels;
-    std::vector<float> current(plane.begin(), plane.end());
-    int currentWidth = width;
-    int currentHeight = height;
-    int decimation = 1;
-    float ownVariance = 0.0F;
-
-    for (float baseVariance = innerScaleVariance();; baseVariance *= 4.0F) {
-        const float targetOwn = baseVariance / static_cast<float>(decimation * decimation);
-        const float step = targetOwn - ownVariance;
-        const auto radius = static_cast<int>(discreteGaussianKernel(step).size()) - 1;
-        // Ends where the step's support outgrows its own plane: such a level reports the mirror, not the image, at every sample.
-        if ((2 * radius) + 1 > std::min(currentWidth, currentHeight)) {
-            break;
-        }
-        diffuse(current, currentWidth, currentHeight, step, threadPool);
-        ownVariance = targetOwn;
-        levels.push_back(ScaleSpaceLevel{current, currentWidth, currentHeight, decimation, baseVariance});
-        if (levels.size() == maxLevels) {
-            break;
-        }
-
-        // Halving the grid discards nothing once the level is band-limited to the halved Nyquist, which decimationVariance defines.
-        if (ownVariance < decimationAt) {
-            continue;
-        }
-        const int nextWidth = (currentWidth + 1) / 2;
-        const int nextHeight = (currentHeight + 1) / 2;
-        std::vector<float> next(static_cast<std::size_t>(nextWidth) * static_cast<std::size_t>(nextHeight));
-        // Plain subsampling, not an average: an average would add variance the cascade's own bookkeeping does not account for.
-        threadPool.parallelFor(nextHeight, [&](int y) {
-            const std::size_t source = static_cast<std::size_t>(2 * y) * static_cast<std::size_t>(currentWidth);
-            const std::size_t destination = static_cast<std::size_t>(y) * static_cast<std::size_t>(nextWidth);
-            for (int x = 0; x < nextWidth; ++x) {
-                next[destination + static_cast<std::size_t>(x)] = current[source + static_cast<std::size_t>(2 * x)];
-            }
-        });
-        current = std::move(next);
-        currentWidth = nextWidth;
-        currentHeight = nextHeight;
-        decimation *= 2;
-        ownVariance *= 0.25F;
-    }
-    return levels;
-}
-
-std::vector<float> expandToBase(const ScaleSpaceLevel& level, int baseWidth, int baseHeight,
-                                ThreadPool& threadPool) {
-    std::vector<float> out(static_cast<std::size_t>(baseWidth) * static_cast<std::size_t>(baseHeight), 0.0F);
-    // Unit weight onto zero is the resample itself, exact but for a -0 sample, which becomes +0.
-    addExpanded(level, 1.0F, out, baseWidth, baseHeight, threadPool);
-    return out;
-}
-
-void addExpanded(const ScaleSpaceLevel& level, float weight, std::span<float> target, int targetWidth, int targetHeight,
-                 ThreadPool& threadPool, int targetDecimation) {
-    // A ratio of powers of two, so exact: target sample i sits on level coordinate i*targetDecimation/decimation.
-    const float inverseDecimation = static_cast<float>(targetDecimation) / static_cast<float>(level.decimation);
-    threadPool.parallelFor(targetHeight, [&](int y) {
-        // Level sample j sits on target sample j*decimation/targetDecimation: a plain scale with no half-pixel offset.
-        const float v = static_cast<float>(y) * inverseDecimation;
-        const int y0 = std::min(static_cast<int>(v), level.height - 1);
-        // Past the last level sample the level's own mirror applies, as its diffusion did, rather than a zeroth-order hold.
-        const int y1 = mirror(y0 + 1, level.height);
-        const float fractionY = v - static_cast<float>(y0);
-        const float* upper = level.plane.data() + (static_cast<std::size_t>(y0) * static_cast<std::size_t>(level.width));
-        const float* lower = level.plane.data() + (static_cast<std::size_t>(y1) * static_cast<std::size_t>(level.width));
-        float* row = target.data() + (static_cast<std::size_t>(y) * static_cast<std::size_t>(targetWidth));
-        for (int x = 0; x < targetWidth; ++x) {
-            const float u = static_cast<float>(x) * inverseDecimation;
-            const int x0 = std::min(static_cast<int>(u), level.width - 1);
-            // The fold's modulo only past the last sample: interior columns take the next sample directly, off the per-texel path.
-            const int x1 = x0 + 1 < level.width ? x0 + 1 : mirror(x0 + 1, level.width);
-            const float fractionX = u - static_cast<float>(x0);
-            const float top = upper[x0] + ((upper[x1] - upper[x0]) * fractionX);
-            const float bottom = lower[x0] + ((lower[x1] - lower[x0]) * fractionX);
-            row[x] += weight * (top + ((bottom - top) * fractionY));
-        }
-    });
-}
-
-std::vector<float> octaveMean(const std::vector<ScaleSpaceLevel>& pyramid, ThreadPool& threadPool) {
-    const float weight = 1.0F / static_cast<float>(pyramid.size());
-    const auto scaled = [&](const ScaleSpaceLevel& level) {
-        std::vector<float> plane(level.plane.size());
-        std::transform(level.plane.begin(), level.plane.end(), plane.begin(), [weight](float value) { return weight * value; });
-        return plane;
-    };
-    // The running sum lives on each level's own grid and moves one octave finer per step: about 4/3 of one base pass in all.
-    ScaleSpaceLevel sum{scaled(pyramid.back()), pyramid.back().width, pyramid.back().height, pyramid.back().decimation, 0.0F};
-    for (std::size_t k = pyramid.size() - 1; k-- > 0;) {
-        const ScaleSpaceLevel& level = pyramid[k];
-        std::vector<float> finer = scaled(level);
-        addExpanded(sum, 1.0F, finer, level.width, level.height, threadPool, level.decimation);
-        sum = ScaleSpaceLevel{std::move(finer), level.width, level.height, level.decimation, 0.0F};
-    }
-    // The finest level is on the base grid by construction, so the collapsed sum is the base plane.
-    return std::move(sum.plane);
-}
-
-void laplacian5(std::span<const float> plane, int width, int height, std::span<float> out,
-                ThreadPool& threadPool) {
-    threadPool.parallelFor(height, [&](int y) {
-        const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
-        const float* centre = plane.data() + row;
-        const float* above = plane.data() + (static_cast<std::size_t>(mirror(y - 1, height)) * static_cast<std::size_t>(width));
-        const float* below = plane.data() + (static_cast<std::size_t>(mirror(y + 1, height)) * static_cast<std::size_t>(width));
-        float* destination = out.data() + row;
-        // Differences taken against the centre before summing, the same cancellation-free form the diffusion passes use.
-        for (int x = 0; x < width; ++x) {
-            const float value = centre[x];
-            // The fold's modulo is paid only at the two edge columns; everywhere else the neighbours index directly.
-            const float left = centre[x > 0 ? x - 1 : mirror(x - 1, width)];
-            const float right = centre[x + 1 < width ? x + 1 : mirror(x + 1, width)];
-            destination[x] = ((left - value) + (right - value)) + ((above[x] - value) + (below[x] - value));
-        }
-    });
 }
 
 }  // namespace pathtracer::debug

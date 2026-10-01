@@ -53,9 +53,6 @@ public:
     // Angle the frame's vertical extent subtends under the active projection, saturating at the image circle: the HUD's FOV readout.
     [[nodiscard]] float verticalAngularExtentRadians() const;
 
-    // Film pixels per radian on the optical axis, f*H/h: exact for both projections, since tan'(0) = theta_d'(0) = 1 there.
-    [[nodiscard]] float pixelsPerRadian(int heightPixels) const;
-
     // Orthonormal basis and view-plane half-extents, all primaryRay() needs bar the ndc weight, so a projector can share it.
     struct ViewBasis {
         glm::vec3 forward;
