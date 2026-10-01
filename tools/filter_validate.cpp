@@ -1,4 +1,4 @@
-// Correctness gate for the shared scale space and the AOVs built on it: kernel identities, the octave cascade, then DoG and LoG.
+// Correctness gate for the shared scale space and the Beauty filters: kernel identities, DoG, Colour Opponent, SNR, the Morlet bank.
 
 #include <algorithm>
 #include <array>
@@ -9,8 +9,6 @@
 #include <utility>
 #include <vector>
 
-#include <glm/gtc/constants.hpp>
-
 #include "check.h"
 #include "pathtracer/debug/aov_filters.h"
 #include "pathtracer/debug/scale_space.h"
@@ -19,7 +17,6 @@
 
 namespace {
 
-using pathtracer::debug::ScaleSpaceLevel;
 using pathtracer::gfx::HdrImage;
 using pathtracer::scene::ThreadPool;
 
@@ -72,33 +69,11 @@ constexpr float kFloatEpsilon = 0x1p-23F;  // distance from 1 to the next float,
     return plane;
 }
 
-// Radius in base pixels inside which a DoG or LoG sample sees no mirrored tap: each cascade step's radius on the grid it ran on.
-[[nodiscard]] int scaleSpaceSupportRadius(int width, int height) {
-    const float decimationAt = pathtracer::debug::decimationVariance();
-    int support = 0;
-    int reach = 0;
-    int decimation = 1;
-    int levelWidth = width;
-    int levelHeight = height;
-    float ownVariance = 0.0F;
-    for (float baseVariance = pathtracer::debug::innerScaleVariance();; baseVariance *= 4.0F) {
-        const float target = baseVariance / static_cast<float>(decimation * decimation);
-        const float step = target - ownVariance;
-        const auto radius = static_cast<int>(pathtracer::debug::discreteGaussianKernel(step).size()) - 1;
-        if ((2 * radius) + 1 > std::min(levelWidth, levelHeight)) {
-            return reach;
-        }
-        support += radius * decimation;
-        // The Laplacian stencil and the bilinear expand each reach one level pixel, which is `decimation` base pixels wide.
-        reach = support + (2 * decimation);
-        ownVariance = target;
-        if (ownVariance >= decimationAt) {
-            ownVariance *= 0.25F;
-            decimation *= 2;
-            levelWidth = (levelWidth + 1) / 2;
-            levelHeight = (levelHeight + 1) / 2;
-        }
-    }
+// Radius in base pixels inside which a DoG sample sees no mirrored tap: the fine diffusion's radius plus the coarse step's.
+[[nodiscard]] int dogSupportRadius() {
+    const float fine = pathtracer::debug::innerScaleVariance();
+    const auto radius = [](float t) { return static_cast<int>(pathtracer::debug::discreteGaussianKernel(t).size()) - 1; };
+    return radius(fine) + radius((4.0F * fine) - fine);
 }
 
 [[nodiscard]] float texelAt(const HdrImage& image, int x, int y, int channel) {
@@ -161,7 +136,7 @@ PT_CHECK(discrete_gaussian_variance_is_t, Fast, Exact) {
     }
 }
 
-// T(t1) * T(t2) = T(t1+t2) on the grid; the octave cascade adds variance in steps and is only correct because this composition holds.
+// T(t1) * T(t2) = T(t1+t2) on the grid; DoG reaches its coarse octave by a second step and is only correct because this composition holds.
 PT_CHECK(discrete_gaussian_semigroup_is_exact, Fast, Exact) {
     ctx.plan(1);
     const double first = 8.317766;
@@ -212,120 +187,9 @@ PT_CHECK(diffusion_reproduces_affine_fields, Fast, Exact) {
     PT_EXPECT(ctx, identical, "diffusion must leave an affine field bit-identical in the interior");
 }
 
-// The 5-point stencil's weights sum to zero and its offsets are symmetric, so it kills both the constant and the linear term exactly.
-PT_CHECK(laplacian5_annihilates_affine_fields, Fast, Exact) {
+// A constant field survives the mirror exactly, so DoG must read zero at every pixel, border included.
+PT_CHECK(dog_is_zero_on_a_constant_field, Fast, Exact) {
     ctx.plan(1);
-    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    constexpr int kWidth = 64;
-    constexpr int kHeight = 48;
-    const std::vector<float> plane = affinePlane(kWidth, kHeight);
-    std::vector<float> response(plane.size());
-    pathtracer::debug::laplacian5(plane, kWidth, kHeight, response, pool);
-    float worst = 0.0F;
-    // Interior only: the mirror folds the ramp back on itself at the border, which is a genuinely different field, not rounding.
-    for (int y = 1; y < kHeight - 1; ++y) {
-        for (int x = 1; x < kWidth - 1; ++x) {
-            worst = std::max(worst, std::fabs(response[(static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x)]));
-        }
-    }
-    PT_EXPECT(ctx, worst == 0.0F, "peak interior Laplacian of an affine field " + std::to_string(worst));
-}
-
-// Bilinear on nested 2x lattices restricts exactly, so the coarse-to-fine collapse is the per-level expansion up to its roundings.
-PT_CHECK(octave_mean_matches_per_level_expansion, Fast, Exact) {
-    ctx.plan(1);
-    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    constexpr int kWidth = 512;
-    constexpr int kHeight = 384;
-    std::vector<float> source(static_cast<std::size_t>(kWidth) * kHeight);
-    for (std::size_t pixel = 0; pixel < source.size(); ++pixel) {
-        source[pixel] = static_cast<float>((pixel * 2654435761U) % 1024U) / 1023.0F;
-    }
-    const std::vector<ScaleSpaceLevel> pyramid = pathtracer::debug::buildOctavePyramid(source, kWidth, kHeight, pool);
-    const std::vector<float> collapsed = pathtracer::debug::octaveMean(pyramid, pool);
-    std::vector<float> direct(source.size(), 0.0F);
-    for (const ScaleSpaceLevel& level : pyramid) {
-        pathtracer::debug::addExpanded(level, 1.0F / static_cast<float>(pyramid.size()), direct, kWidth, kHeight, pool);
-    }
-    // Past a level's last sample each grid mirrors about its own edge, so the comparison stops one coarsest pitch short of the edge.
-    const int edge = pyramid.back().decimation;
-    // Collapse resamples up to L times, each a 3-rounding convex blend plus a weight and a sum; convex steps add error, never amplify it.
-    const double bound = 5.0 * static_cast<double>(pyramid.size()) * static_cast<double>(kFloatEpsilon);
-    double worst = 0.0;
-    for (int y = 0; y < kHeight - edge; ++y) {
-        for (int x = 0; x < kWidth - edge; ++x) {
-            const auto pixel = (static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x);
-            worst = std::max(worst, std::fabs(static_cast<double>(collapsed[pixel]) - static_cast<double>(direct[pixel])));
-        }
-    }
-    PT_EXPECT(ctx, worst <= bound, "collapse departs from per-level expansion by " + std::to_string(worst) + ", bound " +
-                                       std::to_string(bound));
-}
-
-// maxLevels only stops the cascade: the levels it does return are the full cascade's, bit for bit, and there are exactly that many.
-PT_CHECK(pyramid_truncation_keeps_the_leading_levels, Fast, Exact) {
-    ctx.plan(2);
-    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    constexpr int kWidth = 256;
-    constexpr int kHeight = 192;
-    const std::vector<float> source = affinePlane(kWidth, kHeight);
-    const std::vector<ScaleSpaceLevel> full = pathtracer::debug::buildOctavePyramid(source, kWidth, kHeight, pool);
-    const std::vector<ScaleSpaceLevel> two = pathtracer::debug::buildOctavePyramid(source, kWidth, kHeight, pool, 2);
-    PT_EXPECT(ctx, full.size() > 2 && two.size() == 2, "expected a deeper full cascade and exactly two truncated levels");
-    PT_EXPECT(ctx, two.size() == 2 && two[0].plane == full[0].plane && two[1].plane == full[1].plane,
-              "a truncated cascade's levels differ from the full cascade's");
-}
-
-// The whole cascade in one assertion: every level must equal a direct full-variance diffusion of the original at its own samples.
-PT_CHECK(pyramid_matches_direct_diffusion, Fast, Exact) {
-    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    constexpr int kWidth = 96;
-    constexpr int kHeight = 64;
-    std::vector<float> source(static_cast<std::size_t>(kWidth) * kHeight);
-    for (int y = 0; y < kHeight; ++y) {
-        for (int x = 0; x < kWidth; ++x) {
-            // Broadband and asymmetric, so a level that silently aliased on decimation cannot match the direct reference by luck.
-            source[(static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x)] =
-                (0.5F * std::sin(0.31F * static_cast<float>(x))) + (0.25F * std::cos(0.73F * static_cast<float>(y))) +
-                ((x + (2 * y)) % 7 == 0 ? 1.0F : 0.0F);
-        }
-    }
-    const std::vector<ScaleSpaceLevel> pyramid =
-        pathtracer::debug::buildOctavePyramid(source, kWidth, kHeight, pool);
-    ctx.plan(static_cast<int>(pyramid.size()) + 1);
-    PT_EXPECT(ctx, pyramid.size() >= 2 && pyramid[0].decimation == 1 && pyramid[1].decimation == 1,
-                  "the two finest octaves must share the base grid, which is what lets DoG difference them directly");
-
-    for (const ScaleSpaceLevel& level : pyramid) {
-        std::vector<float> direct = source;
-        pathtracer::debug::diffuse(direct, kWidth, kHeight, level.baseVariance, pool);
-        const int radius = static_cast<int>(pathtracer::debug::discreteGaussianKernel(level.baseVariance).size()) - 1;
-        float worst = 0.0F;
-        // Co-located samples only, so no interpolation enters, and the interior only, the boundary being a different operator per route.
-        for (int y = 0; y < level.height; ++y) {
-            for (int x = 0; x < level.width; ++x) {
-                const int baseX = x * level.decimation;
-                const int baseY = y * level.decimation;
-                if (baseX < radius || baseX >= kWidth - radius || baseY < radius || baseY >= kHeight - radius) {
-                    continue;
-                }
-                const float cascaded = level.plane[(static_cast<std::size_t>(y) * static_cast<std::size_t>(level.width)) +
-                                                   static_cast<std::size_t>(x)];
-                const float reference = direct[(static_cast<std::size_t>(baseY) * kWidth) + static_cast<std::size_t>(baseX)];
-                worst = std::max(worst, std::fabs(cascaded - reference));
-            }
-        }
-        // Each decimation discards under 2^-24 of the level's energy and each pass rounds, so the budget grows with the level index.
-        const double bound = static_cast<double>(kFloatEpsilon) * 8.0 * (1.0 + std::log2(static_cast<double>(level.decimation)));
-        PT_EXPECT(ctx, static_cast<double>(worst) <= bound,
-                      "level t=" + std::to_string(level.baseVariance) + " deviates by " + std::to_string(worst) +
-                          " bound " + std::to_string(bound));
-    }
-}
-
-// A constant field survives the mirror exactly, so both scale-space AOVs must read zero at every pixel, border included.
-PT_CHECK(scale_space_aovs_are_zero_on_a_constant_field, Fast, Exact) {
-    ctx.plan(2);
     ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
     constexpr int kWidth = 128;
     constexpr int kHeight = 96;
@@ -339,37 +203,24 @@ PT_CHECK(scale_space_aovs_are_zero_on_a_constant_field, Fast, Exact) {
         }
     }
     PT_EXPECT(ctx, worstDog == 0.0F, "peak DoG response " + std::to_string(worstDog));
-
-    const HdrImage log = pathtracer::debug::logAov(flat, pool);
-    float worstLog = 0.0F;
-    for (int y = 0; y < kHeight; ++y) {
-        for (int x = 0; x < kWidth; ++x) {
-            worstLog = std::max(worstLog, std::fabs(texelAt(log, x, y, 0)));
-        }
-    }
-    PT_EXPECT(ctx, worstLog == 0.0F, "peak LoG magnitude " + std::to_string(worstLog));
 }
 
-// Every cascade step reproduces an affine field and the stencil annihilates it, so neither AOV may fire on a smooth gradient.
-PT_CHECK(scale_space_aovs_are_flat_on_an_affine_field, Fast, Exact) {
-    ctx.plan(3);
+// Both diffusions reproduce an affine field, so DoG may not fire on a smooth gradient anywhere its support avoids the mirror.
+PT_CHECK(dog_is_flat_on_an_affine_field, Fast, Exact) {
+    ctx.plan(2);
     ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    // Sized so the ladder stops at the two base-grid octaves, the deepest pyramid whose cascade support still fits inside the frame.
     constexpr int kWidth = 256;
     constexpr int kHeight = 112;
     const HdrImage image = greyImage(kWidth, kHeight, affinePlane(kWidth, kHeight));
-    const int radius = scaleSpaceSupportRadius(kWidth, kHeight);
+    const int radius = dogSupportRadius();
     PT_EXPECT(ctx, (2 * radius) < kHeight,
                   "support radius " + std::to_string(radius) + " leaves no interior in " + std::to_string(kHeight) + " rows");
 
     const HdrImage dog = pathtracer::debug::dogAov(image, pool);
-    const HdrImage log = pathtracer::debug::logAov(image, pool);
     float worstDog = 0.0F;
-    float worstLog = 0.0F;
     for (int y = radius; y < kHeight - radius; ++y) {
         for (int x = radius; x < kWidth - radius; ++x) {
             worstDog = std::max(worstDog, std::fabs(texelAt(dog, x, y, 0)));
-            worstLog = std::max(worstLog, std::fabs(texelAt(log, x, y, 0)));
         }
     }
     // The Rec.709 reduction rounds, so the plane is affine only to an ulp; carried through the widest step that is the bound, not zero.
@@ -379,10 +230,28 @@ PT_CHECK(scale_space_aovs_are_flat_on_an_affine_field, Fast, Exact) {
     const double quantisation = taps * static_cast<double>(peak) * static_cast<double>(kFloatEpsilon);
     PT_EXPECT(ctx, static_cast<double>(worstDog) <= quantisation,
                   "interior DoG " + std::to_string(worstDog) + " exceeds the plane quantisation " + std::to_string(quantisation));
-    // The gamma=1 normalisation multiplies the stencil output by the level's own variance, so the same quantisation scales with it.
-    const double normalised = quantisation * static_cast<double>(4.0F * pathtracer::debug::innerScaleVariance());
-    PT_EXPECT(ctx, static_cast<double>(worstLog) <= normalised,
-                  "interior LoG " + std::to_string(worstLog) + " exceeds the normalised quantisation " + std::to_string(normalised));
+}
+
+// The band exists exactly when the coarse step's kernel fits the frame: one row short is empty, the fitting frame is not.
+PT_CHECK(dog_is_empty_exactly_below_its_coarse_support, Fast, Exact) {
+    ctx.plan(2);
+    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    const float fine = pathtracer::debug::innerScaleVariance();
+    const int support = (2 * (static_cast<int>(pathtracer::debug::discreteGaussianKernel((4.0F * fine) - fine).size()) - 1)) + 1;
+    constexpr int kWidth = 128;
+    const auto peakResponse = [&pool](int height) {
+        std::vector<float> plane(static_cast<std::size_t>(kWidth) * static_cast<std::size_t>(height), 0.0F);
+        // A unit impulse at the centre, which every non-empty DoG answers with a nonzero centre tap.
+        plane[(static_cast<std::size_t>(height / 2) * kWidth) + (kWidth / 2)] = 1.0F;
+        const HdrImage dog = pathtracer::debug::dogAov(greyImage(kWidth, height, plane), pool);
+        float peak = 0.0F;
+        for (std::size_t texel = 0; texel < dog.rgba.size(); texel += 4) {
+            peak = std::max(peak, std::fabs(dog.rgba[texel]));
+        }
+        return peak;
+    };
+    PT_EXPECT(ctx, peakResponse(support - 1) == 0.0F, "a frame one row short of the coarse support must yield an empty band");
+    PT_EXPECT(ctx, peakResponse(support) > 0.0F, "a frame exactly the coarse support must yield a band");
 }
 
 // On a cosine the two octaves are eigenfunctions, so DoG must equal the analytic difference of transfers -- amplitude and sign both.
@@ -421,72 +290,9 @@ PT_CHECK(dog_matches_the_analytic_transfer, Fast, Exact) {
     }
 }
 
-// Lindeberg 1998: the gamma=1 response t*laplacian5 is stationary at t = t0, and on a discrete blob its value is closed-form exact.
-PT_CHECK(log_response_peaks_at_the_blob_scale, Fast, Exact) {
-    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    constexpr int kWidth = 192;
-    constexpr int kHeight = 192;
-    constexpr double kBlobVariance = 16.0;
-    const auto pixels = static_cast<std::size_t>(kWidth) * kHeight;
-    const std::size_t centre = (static_cast<std::size_t>(kHeight / 2) * kWidth) + static_cast<std::size_t>(kWidth / 2);
-    const int blobRadius =
-        static_cast<int>(pathtracer::debug::discreteGaussianKernel(static_cast<float>(kBlobVariance)).size()) - 1;
-
-    std::vector<float> blob(pixels, 0.0F);
-    blob[centre] = 1.0F;
-    pathtracer::debug::diffuse(blob, kWidth, kHeight, static_cast<float>(kBlobVariance), pool);
-
-    // A ladder of the validator's own choosing, four rungs per octave, far finer than the shipped one, so the argmax localises in t.
-    std::vector<double> ladder;
-    for (int step = -6; step <= 6; ++step) {
-        ladder.push_back(kBlobVariance * std::pow(2.0, static_cast<double>(step) / 4.0));
-    }
-    ctx.plan(static_cast<int>(ladder.size()) + 2);
-
-    double bestResponse = 0.0;
-    double bestVariance = 0.0;
-    for (const double t : ladder) {
-        std::vector<float> level = blob;
-        pathtracer::debug::diffuse(level, kWidth, kHeight, static_cast<float>(t), pool);
-        std::vector<float> response(pixels);
-        pathtracer::debug::laplacian5(level, kWidth, kHeight, response, pool);
-        const double measured = t * static_cast<double>(response[centre]);
-
-        // Diffusing an impulse to s gives the separable T(.;s), and dL/dt = laplacian5(L)/2 then makes the centre response exact.
-        const double total = kBlobVariance + t;
-        const std::vector<float> kernel = pathtracer::debug::discreteGaussianKernel(static_cast<float>(total));
-        const auto centreTap = static_cast<double>(kernel[0]);
-        const auto firstTap = static_cast<double>(kernel[1]);
-        const double exact = 4.0 * t * centreTap * (firstTap - centreTap);
-
-        // The plane carries both diffusions' accumulated rounding and the stencil differences it, so the bound scales by centre/response.
-        const int radius =
-            blobRadius + static_cast<int>(pathtracer::debug::discreteGaussianKernel(static_cast<float>(t)).size()) - 1;
-        const double bound = 2.0 * static_cast<double>((2 * radius) + 1) * static_cast<double>(kFloatEpsilon) *
-                             std::abs(t * static_cast<double>(level[centre]));
-        PT_EXPECT(ctx, std::abs(measured - exact) <= bound,
-                      "t=" + std::to_string(t) + " response " + std::to_string(measured) + " exact " +
-                          std::to_string(exact) + " bound " + std::to_string(bound));
-        if (std::abs(measured) > std::abs(bestResponse)) {
-            bestResponse = measured;
-            bestVariance = t;
-        }
-    }
-    PT_EXPECT(ctx, bestVariance == kBlobVariance,
-                  "scale selection peaked at t=" + std::to_string(bestVariance) + ", blob is t=" +
-                      std::to_string(kBlobVariance));
-
-    // Marr & Hildreth's continuous peak is 1/(4 pi t0); the discrete kernel's own central value lifts it by 1/(2s) at s = 2 t0.
-    const double continuousPeak = 1.0 / (4.0 * std::numbers::pi * kBlobVariance);
-    const double ratio = std::abs(bestResponse) / continuousPeak;
-    const double leading = 1.0 / (2.0 * 2.0 * kBlobVariance);
-    PT_EXPECT(ctx, std::abs(ratio - 1.0 - leading) <= 1.0 / (4.0 * kBlobVariance * kBlobVariance),
-                  "peak/continuous-1 = " + std::to_string(ratio - 1.0) + ", derived leading term " + std::to_string(leading));
-}
-
-// One family, one sign convention: both AOVs must read positive on a bright blob, which is why logAov negates the raw Laplacian.
-PT_CHECK(log_and_dog_agree_on_polarity, Fast, Exact) {
-    ctx.plan(4);
+// Fine minus coarse is the centre-surround sign: a bright blob reads positive and a dark one negative, the convention the preview shows.
+PT_CHECK(dog_polarity_follows_the_blob, Fast, Exact) {
+    ctx.plan(2);
     ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
     constexpr int kWidth = 96;
     constexpr int kHeight = 96;
@@ -498,162 +304,14 @@ PT_CHECK(log_and_dog_agree_on_polarity, Fast, Exact) {
     std::vector<float> bright(pixels, 0.25F);
     bright[centre] += 1.0F;
     pathtracer::debug::diffuse(bright, kWidth, kHeight, pathtracer::debug::innerScaleVariance(), pool);
-    const HdrImage brightField = greyImage(kWidth, kHeight, bright);
-    const float brightLog = texelAt(pathtracer::debug::logAov(brightField, pool), centreX, centreY, 0);
-    const float brightDog = texelAt(pathtracer::debug::dogAov(brightField, pool), centreX, centreY, 0);
-    PT_EXPECT(ctx, brightLog > 0.0F, "bright-on-dark LoG read " + std::to_string(brightLog));
+    const float brightDog = texelAt(pathtracer::debug::dogAov(greyImage(kWidth, kHeight, bright), pool), centreX, centreY, 0);
     PT_EXPECT(ctx, brightDog > 0.0F, "bright-on-dark DoG read " + std::to_string(brightDog));
 
     std::vector<float> dark(pixels, 1.25F);
     dark[centre] -= 1.0F;
     pathtracer::debug::diffuse(dark, kWidth, kHeight, pathtracer::debug::innerScaleVariance(), pool);
-    const HdrImage darkField = greyImage(kWidth, kHeight, dark);
-    const float darkLog = texelAt(pathtracer::debug::logAov(darkField, pool), centreX, centreY, 0);
-    const float darkDog = texelAt(pathtracer::debug::dogAov(darkField, pool), centreX, centreY, 0);
-    PT_EXPECT(ctx, darkLog < 0.0F, "dark-on-bright LoG read " + std::to_string(darkLog));
+    const float darkDog = texelAt(pathtracer::debug::dogAov(greyImage(kWidth, kHeight, dark), pool), centreX, centreY, 0);
     PT_EXPECT(ctx, darkDog < 0.0F, "dark-on-bright DoG read " + std::to_string(darkDog));
-}
-
-// Every stage from the luminance dot to the normalised Laplacian is linear, so a power-of-two gain must pass through exactly.
-PT_CHECK(log_is_homogeneous_of_degree_one, Fast, Exact) {
-    ctx.plan(2);
-    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    constexpr int kWidth = 128;
-    constexpr int kHeight = 96;
-    constexpr float kGain = 64.0F;
-    std::vector<float> plane(static_cast<std::size_t>(kWidth) * kHeight);
-    for (int y = 0; y < kHeight; ++y) {
-        for (int x = 0; x < kWidth; ++x) {
-            // A pattern with structure at several octaves, so the argmax lands on different levels across the frame.
-            plane[(static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x)] =
-                0.5F + (0.25F * std::sin(0.4F * static_cast<float>(x))) + (0.25F * std::cos(0.05F * static_cast<float>(y)));
-        }
-    }
-    std::vector<float> scaled = plane;
-    for (float& value : scaled) {
-        value *= kGain;
-    }
-
-    const HdrImage base = pathtracer::debug::logAov(greyImage(kWidth, kHeight, plane), pool);
-    const HdrImage gained = pathtracer::debug::logAov(greyImage(kWidth, kHeight, scaled), pool);
-    float worst = 0.0F;
-    float peak = 0.0F;
-    for (int y = 0; y < kHeight; ++y) {
-        for (int x = 0; x < kWidth; ++x) {
-            peak = std::max(peak, std::fabs(texelAt(base, x, y, 0)));
-            worst = std::max(worst, std::fabs(texelAt(gained, x, y, 0) - (kGain * texelAt(base, x, y, 0))));
-        }
-    }
-    PT_EXPECT(ctx, peak > 0.0F, "the pattern produced no response at all, so the homogeneity check is vacuous");
-    PT_EXPECT(ctx, worst == 0.0F, "worst gain mismatch " + std::to_string(worst) + " against peak " + std::to_string(peak));
-}
-
-// A blob midway in log t between two rungs: the scale parabola must lift the rung maximum toward the true peak and never past it.
-PT_CHECK(log_interpolates_the_scale_peak_between_rungs, Fast, Exact) {
-    ctx.plan(2);
-    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    constexpr int kWidth = 256;
-    constexpr int kHeight = 256;
-    const auto pixels = static_cast<std::size_t>(kWidth) * kHeight;
-    const std::size_t centre = (static_cast<std::size_t>(kHeight / 2) * kWidth) + static_cast<std::size_t>(kWidth / 2);
-    // Rungs sit at inner*4^k and the normalised response peaks at t = t0, so t0 = 8*inner lies exactly between rungs 1 and 2.
-    const double inner = static_cast<double>(pathtracer::debug::innerScaleVariance());
-    const double blobVariance = 8.0 * inner;
-    std::vector<float> blob(pixels, 0.0F);
-    blob[centre] = 1.0F;
-    pathtracer::debug::diffuse(blob, kWidth, kHeight, static_cast<float>(blobVariance), pool);
-    const HdrImage log = pathtracer::debug::logAov(greyImage(kWidth, kHeight, blob), pool);
-    const double measured = static_cast<double>(texelAt(log, kWidth / 2, kHeight / 2, 0)) /
-                            static_cast<double>(greyLuminanceGain());
-
-    // Exact discrete centre response -t*laplacian5(T(.;t0+t)) = -4t T(0)(T(1) - T(0)), from the kernel's own taps.
-    const auto exact = [&](double t) {
-        const std::vector<float> kernel = pathtracer::debug::discreteGaussianKernel(static_cast<float>(blobVariance + t));
-        return -4.0 * t * static_cast<double>(kernel[0]) * (static_cast<double>(kernel[1]) - static_cast<double>(kernel[0]));
-    };
-    const std::vector<ScaleSpaceLevel> pyramid = pathtracer::debug::buildOctavePyramid(blob, kWidth, kHeight, pool);
-    double rungMax = 0.0;
-    for (const ScaleSpaceLevel& level : pyramid) {
-        rungMax = std::max(rungMax, exact(static_cast<double>(level.baseVariance)));
-    }
-    // The true discrete peak by a 64-per-octave sweep over the ladder's span, far finer than the effect under test.
-    double peak = 0.0;
-    for (double t = inner; t <= static_cast<double>(pyramid.back().baseVariance); t *= std::exp2(1.0 / 64.0)) {
-        peak = std::max(peak, exact(t));
-    }
-    // Float budget: one rounding per tap of the widest kernel involved, relative to the response, as the blob-scale check derives.
-    const int radius = static_cast<int>(pathtracer::debug::discreteGaussianKernel(
-                           static_cast<float>(blobVariance) + pyramid.back().baseVariance).size()) - 1;
-    const double budget = 2.0 * static_cast<double>((2 * radius) + 1) * static_cast<double>(kFloatEpsilon) * peak;
-    PT_EXPECT(ctx, measured > rungMax + budget, "the interpolated peak " + std::to_string(measured) +
-                                                    " does not improve on the best rung " + std::to_string(rungMax));
-    PT_EXPECT(ctx, measured <= peak + budget,
-              "the interpolated peak " + std::to_string(measured) + " overshoots the true peak " + std::to_string(peak));
-}
-
-// The two AOVs are not redundant: DoG sees one fixed band next to pixel Nyquist, LoG the whole ladder, so a coarse blob separates them.
-PT_CHECK(log_responds_where_dog_cannot, Fast, Exact) {
-    ctx.plan(4);
-    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    constexpr int kWidth = 256;
-    constexpr int kHeight = 256;
-    // Four octaves above the inner scale, so the blob sits far outside the band DoG differences but well inside the ladder.
-    const float blobVariance = 16.0F * pathtracer::debug::innerScaleVariance();
-    const auto pixels = static_cast<std::size_t>(kWidth) * kHeight;
-    const int centreX = kWidth / 2;
-    const int centreY = kHeight / 2;
-
-    std::vector<float> blob(pixels, 0.0F);
-    blob[(static_cast<std::size_t>(centreY) * kWidth) + static_cast<std::size_t>(centreX)] = 1.0F;
-    pathtracer::debug::diffuse(blob, kWidth, kHeight, blobVariance, pool);
-    const HdrImage field = greyImage(kWidth, kHeight, blob);
-
-    const float log = texelAt(pathtracer::debug::logAov(field, pool), centreX, centreY, 0);
-    const float dog = texelAt(pathtracer::debug::dogAov(field, pool), centreX, centreY, 0);
-    PT_EXPECT(ctx, log > 0.0F, "LoG read " + std::to_string(log) + " on a bright blob");
-
-    // Lindeberg 1998: the gamma=1 response to a blob of scale t0 peaks at t = t0 with magnitude 1/(4 pi t0), here in luminance units.
-    const auto gain = static_cast<double>(greyLuminanceGain());
-    const double peak = gain / (4.0 * std::numbers::pi * static_cast<double>(blobVariance));
-    // The ladder quantises scale to one octave, so the winning rung is at worst t0/2 or 2 t0, where -t/(pi (t0+t)^2) is 8/9 of the peak.
-    const double laddered = peak * 8.0 / 9.0;
-    PT_EXPECT(ctx, static_cast<double>(log) > laddered,
-                  "LoG " + std::to_string(log) + " fell below the octave-laddered Lindeberg peak " + std::to_string(laddered));
-
-    // DoG's own oracle, no threshold: an impulse diffused to variance s has separable centre value T(0;s)^2, and DoG differences two.
-    const std::vector<ScaleSpaceLevel> pyramid =
-        pathtracer::debug::buildOctavePyramid(std::vector<float>(pixels, 0.0F), kWidth, kHeight, pool);
-    const auto centreValue = [&](float levelVariance) {
-        const auto tap = static_cast<double>(
-            pathtracer::debug::discreteGaussianKernel(static_cast<float>(blobVariance) + levelVariance)[0]);
-        return gain * tap * tap;
-    };
-    const double fineCentre = centreValue(pyramid[0].baseVariance);
-    const double dogExact = fineCentre - centreValue(pyramid[1].baseVariance);
-    const auto taps = static_cast<double>((2 * static_cast<int>(pathtracer::debug::discreteGaussianKernel(
-                                               blobVariance + pyramid[1].baseVariance).size())) - 1);
-    const double bound = 2.0 * taps * static_cast<double>(kFloatEpsilon) * fineCentre;
-    PT_EXPECT(ctx, std::abs(static_cast<double>(dog) - dogExact) <= bound,
-                  "DoG " + std::to_string(dog) + " against its oracle " + std::to_string(dogExact) + " bound " +
-                      std::to_string(bound));
-    // The separation is between two closed forms, not against a chosen threshold: the fixed band simply does not reach this scale.
-    PT_EXPECT(ctx, dogExact < laddered,
-                  "DoG's analytic response " + std::to_string(dogExact) + " is not below LoG's " + std::to_string(laddered));
-}
-
-// Justifies the retinex fast path: with every texel valid the normalising mask is a constant field, which the cascade must return intact.
-PT_CHECK(expansion_reproduces_a_constant_level_exactly, Fast, Exact) {
-    ctx.plan(1);
-    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    constexpr int kWidth = 320;
-    constexpr int kHeight = 208;
-    const std::vector<float> ones(static_cast<std::size_t>(kWidth) * kHeight, 1.0F);
-    const std::vector<ScaleSpaceLevel> pyramid = pathtracer::debug::buildOctavePyramid(ones, kWidth, kHeight, pool);
-    const std::vector<float> expanded = pathtracer::debug::expandToBase(pyramid.back(), kWidth, kHeight, pool);
-    const auto extremes = std::minmax_element(expanded.begin(), expanded.end());
-    PT_EXPECT(ctx, *extremes.first == 1.0F && *extremes.second == 1.0F,
-                  "coarsest level expands to [" + std::to_string(*extremes.first) + ", " +
-                      std::to_string(*extremes.second) + "], not exactly one");
 }
 
 // A cone chromaticity is a ratio of two linear forms, and writing the numerators on (R-G, B-G) makes the achromatic axis exactly zero.
@@ -714,248 +372,6 @@ PT_CHECK(colour_opponent_separates_the_rec709_primaries, Fast, Exact) {
     PT_EXPECT(ctx, red > 0.0F, "Rec.709 red reads R-G " + std::to_string(red));
     PT_EXPECT(ctx, green < 0.0F, "Rec.709 green reads R-G " + std::to_string(green));
     PT_EXPECT(ctx, blue > 0.0F, "Rec.709 blue reads B-Y " + std::to_string(blue));
-}
-
-// A field equal to its own surround has unit reflectance by definition, and the cascade returns a constant intact, so this is exact.
-PT_CHECK(retinex_is_exactly_one_on_a_uniform_field, Fast, Exact) {
-    ctx.plan(1);
-    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    constexpr int kWidth = 160;
-    constexpr int kHeight = 112;
-    const HdrImage flat = greyImage(kWidth, kHeight, std::vector<float>(static_cast<std::size_t>(kWidth) * kHeight, 0.375F));
-    const HdrImage retinex = pathtracer::debug::retinexAov(flat, pool);
-    float worst = 0.0F;
-    for (std::size_t pixel = 0; pixel < static_cast<std::size_t>(kWidth) * kHeight; ++pixel) {
-        for (int channel = 0; channel < 3; ++channel) {
-            worst = std::max(worst, std::fabs(retinex.rgba[(pixel * 4) + static_cast<std::size_t>(channel)] - 1.0F));
-        }
-    }
-    PT_EXPECT(ctx, worst == 0.0F, "uniform-field reflectance departs from one by " + std::to_string(worst));
-}
-
-// Normalised convolution (Knutsson & Westin 1993) divides the blurred field by the blurred mask, so a dark hole leaves the surround alone.
-PT_CHECK(retinex_normalises_the_surround_by_the_validity_mask, Fast, Exact) {
-    ctx.plan(2);
-    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    constexpr int kWidth = 160;
-    constexpr int kHeight = 112;
-    constexpr std::size_t kPixels = static_cast<std::size_t>(kWidth) * kHeight;
-    // Powers of two three stops apart, so the relative log is an exact small integer and this reference needs no rounding budget.
-    std::vector<float> plane(kPixels);
-    std::vector<float> logRadiance(kPixels, 0.0F);
-    std::vector<float> mask(kPixels, 1.0F);
-    for (int y = 0; y < kHeight; ++y) {
-        for (int x = 0; x < kWidth; ++x) {
-            const auto pixel = (static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x);
-            const bool hole = y >= 40 && y < 72 && x >= 48 && x < 112;
-            plane[pixel] = hole ? 0.0F : (x < kWidth / 2 ? 0.25F : 2.0F);
-            mask[pixel] = hole ? 0.0F : 1.0F;
-            logRadiance[pixel] = hole ? 0.0F : (x < kWidth / 2 ? 0.0F : 3.0F);
-        }
-    }
-
-    // Land's surround spelled out against the public facility: the equal-weight octave mean, value then mask.
-    const auto landSurround = [&](const std::vector<float>& field) {
-        return pathtracer::debug::octaveMean(pathtracer::debug::buildOctavePyramid(field, kWidth, kHeight, pool), pool);
-    };
-    const std::vector<float> value = landSurround(logRadiance);
-    const std::vector<float> weight = landSurround(mask);
-
-    const HdrImage retinex = pathtracer::debug::retinexAov(greyImage(kWidth, kHeight, plane), pool);
-    float worst = 0.0F;
-    float unmaskedGap = 0.0F;
-    for (int y = 0; y < kHeight; ++y) {
-        for (int x = 0; x < kWidth; ++x) {
-            const auto pixel = (static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x);
-            const float expected =
-                mask[pixel] > 0.0F ? std::exp2(logRadiance[pixel] - (value[pixel] / weight[pixel])) : 0.0F;
-            worst = std::max(worst, std::fabs(texelAt(retinex, x, y, 0) - expected));
-            const float unmasked = mask[pixel] > 0.0F ? std::exp2(logRadiance[pixel] - value[pixel]) : 0.0F;
-            unmaskedGap = std::max(unmaskedGap, std::fabs(unmasked - expected));
-        }
-    }
-    PT_EXPECT(ctx, worst == 0.0F, "retinex departs from normalised convolution by " + std::to_string(worst));
-    // Without the division the hole enters the surround as a zero, so the two must not agree: otherwise the check above proves nothing.
-    PT_EXPECT(ctx, unmaskedGap > 0.0F, "dropping the mask changed nothing, so the normalisation is untested");
-}
-
-// Retinex divides out its own surround, so a frame-wide gain cancels; at a power of two the relative log is untouched, so bitwise.
-PT_CHECK(retinex_is_invariant_to_a_uniform_gain, Fast, Exact) {
-    ctx.plan(1);
-    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    constexpr int kWidth = 128;
-    constexpr int kHeight = 96;
-    const std::vector<float> plane = affinePlane(kWidth, kHeight);
-    std::vector<float> gained(plane.size());
-    std::transform(plane.begin(), plane.end(), gained.begin(), [](float value) { return value * 512.0F; });
-    const HdrImage base = pathtracer::debug::retinexAov(greyImage(kWidth, kHeight, plane), pool);
-    const HdrImage bright = pathtracer::debug::retinexAov(greyImage(kWidth, kHeight, gained), pool);
-    PT_EXPECT(ctx, base.rgba == bright.rgba, "a 512x gain changed the retinex reflectance");
-}
-
-// Eight pixels per degree, so a 1-degree foveal block is eight pixels on a side and a test frame holds a few hundred samples.
-const float kEightPixelsPerDegree = 8.0F * glm::degrees(1.0F);
-
-// Display stops the operator targets: the IEC 61966-2-1 sRGB reference medium, white 80 cd/m^2 over black 0.2 cd/m^2.
-const double kReferenceDisplayStops = std::log2(80.0 / 0.2);
-
-// A frame of constant 8x8 blocks spanning `stops`, levels in a scrambled order, so each foveal sample is one exact level.
-[[nodiscard]] std::vector<float> blockLevels(int width, int height, float stops) {
-    std::vector<float> plane(static_cast<std::size_t>(width) * static_cast<std::size_t>(height));
-    const int blocksX = width / 8;
-    const std::size_t levels = static_cast<std::size_t>(blocksX) * static_cast<std::size_t>(height / 8);
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            const auto block = static_cast<std::size_t>(((y / 8) * blocksX) + (x / 8));
-            const float unit = static_cast<float>((block * 2654435761U) % levels) / static_cast<float>(levels - 1);
-            plane[(static_cast<std::size_t>(y) * static_cast<std::size_t>(width)) + static_cast<std::size_t>(x)] =
-                std::exp2(stops * (unit - 0.5F));
-        }
-    }
-    return plane;
-}
-
-// No dynamic range is no histogram to adjust, and the operator is then exactly the identity rather than approximately one.
-PT_CHECK(clahe_passes_a_uniform_field_through_unchanged, Fast, Exact) {
-    ctx.plan(1);
-    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    constexpr int kWidth = 128;
-    constexpr int kHeight = 96;
-    const HdrImage flat = greyImage(kWidth, kHeight, std::vector<float>(static_cast<std::size_t>(kWidth) * kHeight, 0.375F));
-    const HdrImage out = pathtracer::debug::claheAov(flat, kEightPixelsPerDegree, pool);
-    PT_EXPECT(ctx, out.rgba == flat.rgba, "a uniform field was not passed through unchanged");
-}
-
-// Ward Larson's linear case: a world range the display already spans is shown as it is, bit for bit.
-PT_CHECK(clahe_is_the_identity_within_the_display_range, Fast, Exact) {
-    ctx.plan(2);
-    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    constexpr int kWidth = 192;
-    constexpr int kHeight = 128;
-    const float inside = static_cast<float>(kReferenceDisplayStops) - 0.5F;
-    const HdrImage image = greyImage(kWidth, kHeight, blockLevels(kWidth, kHeight, inside));
-    PT_EXPECT(ctx, pathtracer::debug::claheAov(image, kEightPixelsPerDegree, pool).rgba == image.rgba,
-              "a frame inside the display range was changed");
-    // The same structure half a stop past the display range must move, so the identity above is the criterion, not a dead operator.
-    const HdrImage beyond = greyImage(kWidth, kHeight, blockLevels(kWidth, kHeight, inside + 1.0F));
-    PT_EXPECT(ctx, pathtracer::debug::claheAov(beyond, kEightPixelsPerDegree, pool).rgba != beyond.rgba,
-              "a frame beyond the display range was left untouched");
-}
-
-// The linear ceiling caps every bin's display share at its world share, so sorted by input, output never rises faster than input.
-PT_CHECK(clahe_is_monotone_and_never_expands_contrast, Fast, Exact) {
-    ctx.plan(3);
-    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    constexpr int kWidth = 256;
-    constexpr int kHeight = 192;
-    constexpr float kStops = 16.0F;
-    std::vector<float> plane = blockLevels(kWidth, kHeight, kStops);
-    // A flat patch with a twentieth of a stop of texture: an equaliser without a ceiling would stretch it across the whole range.
-    for (int y = 64; y < 128; ++y) {
-        for (int x = 64; x < 192; ++x) {
-            const auto pixel = (static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x);
-            plane[pixel] = std::exp2(0.05F * static_cast<float>((pixel * 2654435761U) % 64U) / 63.0F);
-        }
-    }
-    const HdrImage image = greyImage(kWidth, kHeight, plane);
-    const HdrImage out = pathtracer::debug::claheAov(image, kEightPixelsPerDegree, pool);
-    std::vector<std::pair<double, double>> logs(plane.size());
-    for (std::size_t pixel = 0; pixel < plane.size(); ++pixel) {
-        logs[pixel] = {std::log2(static_cast<double>(image.rgba[pixel * 4])), std::log2(static_cast<double>(out.rgba[pixel * 4]))};
-    }
-    std::sort(logs.begin(), logs.end());
-    // Per texel: bin position and exponent in (world + display stops) ulps, six rescale roundings at 1/ln2; a pair carries it twice.
-    const double ulp = static_cast<double>(kFloatEpsilon);
-    const double bound = 2.0 * (((static_cast<double>(kStops) + kReferenceDisplayStops) * ulp) + (6.0 * ulp / std::numbers::ln2));
-    double worstExpansion = 0.0;
-    double worstReversal = 0.0;
-    for (std::size_t index = 1; index < logs.size(); ++index) {
-        const double in = logs[index].first - logs[index - 1].first;
-        const double outStep = logs[index].second - logs[index - 1].second;
-        worstExpansion = std::max(worstExpansion, outStep - in);
-        worstReversal = std::max(worstReversal, -outStep);
-    }
-    PT_EXPECT(ctx, worstExpansion <= bound, "display contrast exceeded world contrast by " + std::to_string(worstExpansion) +
-                                                " stops, bound " + std::to_string(bound));
-    PT_EXPECT(ctx, worstReversal <= bound, "the transfer reversed by " + std::to_string(worstReversal) + " stops");
-    const double outRange = logs.back().second - logs.front().second;
-    PT_EXPECT(ctx, outRange <= kReferenceDisplayStops + bound,
-              "the output spans " + std::to_string(outRange) + " stops, past the display's " + std::to_string(kReferenceDisplayStops));
-}
-
-// The cumulative is normalised to end at exactly one, so the brightest foveal level maps onto itself and the darkest D stops below it.
-PT_CHECK(clahe_spans_exactly_the_display_range, Fast, Exact) {
-    ctx.plan(2);
-    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    constexpr int kWidth = 256;
-    constexpr int kHeight = 192;
-    const std::vector<float> plane = blockLevels(kWidth, kHeight, 14.0F);
-    const HdrImage image = greyImage(kWidth, kHeight, plane);
-    const HdrImage out = pathtracer::debug::claheAov(image, kEightPixelsPerDegree, pool);
-    const auto extremes = std::minmax_element(plane.begin(), plane.end());
-    const auto brightest = static_cast<std::size_t>(extremes.second - plane.begin());
-    const auto darkest = static_cast<std::size_t>(extremes.first - plane.begin());
-    // Budget: the exponent argument's rounding over the ~22 stops it carries, then five float roundings, in stops.
-    const double bound = ((14.0 + kReferenceDisplayStops) * static_cast<double>(kFloatEpsilon)) +
-                         (5.0 * static_cast<double>(kFloatEpsilon) / std::numbers::ln2);
-    const double top = std::fabs(std::log2(static_cast<double>(out.rgba[brightest * 4]) / static_cast<double>(*extremes.second)));
-    PT_EXPECT(ctx, top <= bound, "the brightest foveal level moved by " + std::to_string(top) + " stops");
-    const double floorStops = std::log2(static_cast<double>(out.rgba[brightest * 4]) / static_cast<double>(out.rgba[darkest * 4]));
-    PT_EXPECT(ctx, std::fabs(floorStops - kReferenceDisplayStops) <= 2.0 * bound,
-              "darkest to brightest spans " + std::to_string(floorStops) + " stops, not the display's " +
-                  std::to_string(kReferenceDisplayStops));
-}
-
-// Every sample, bin and knot is a difference of log radiances, so a power-of-two gain moves only the output exponent.
-PT_CHECK(clahe_is_homogeneous_of_degree_one, Fast, Exact) {
-    ctx.plan(2);
-    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    constexpr int kWidth = 192;
-    constexpr int kHeight = 128;
-    const std::vector<float> plane = blockLevels(kWidth, kHeight, 12.0F);
-    std::vector<float> gainedPlane = plane;
-    std::transform(gainedPlane.begin(), gainedPlane.end(), gainedPlane.begin(), [](float v) { return v * 64.0F; });
-    const HdrImage image = greyImage(kWidth, kHeight, plane);
-    const HdrImage base = pathtracer::debug::claheAov(image, kEightPixelsPerDegree, pool);
-    const HdrImage gained = pathtracer::debug::claheAov(greyImage(kWidth, kHeight, gainedPlane), kEightPixelsPerDegree, pool);
-    float worst = 0.0F;
-    // Colour only: alpha is a coverage flag, not a radiance, so it is the one channel a gain must leave alone rather than scale.
-    for (std::size_t pixel = 0; pixel < base.rgba.size() / 4; ++pixel) {
-        for (int channel = 0; channel < 3; ++channel) {
-            const std::size_t index = (pixel * 4) + static_cast<std::size_t>(channel);
-            worst = std::max(worst, std::fabs((base.rgba[index] * 64.0F) - gained.rgba[index]));
-        }
-    }
-    PT_EXPECT(ctx, worst == 0.0F, "a 64x gain did not scale the response exactly, worst " + std::to_string(worst));
-    // Homogeneity is trivial for the identity, so the same configuration must be shown to move the frame at all.
-    PT_EXPECT(ctx, base.rgba != image.rgba, "the operator left this frame untouched, so the homogeneity above proves nothing");
-}
-
-// Only luminance is remapped, so every texel keeps its chromaticity: the output is its input times one positive scalar, to a rounding.
-PT_CHECK(clahe_preserves_chromaticity, Fast, Exact) {
-    ctx.plan(2);
-    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    constexpr int kWidth = 160;
-    constexpr int kHeight = 128;
-    const std::vector<float> plane = blockLevels(kWidth, kHeight, 12.0F);
-    HdrImage image{kWidth, kHeight, std::vector<float>(static_cast<std::size_t>(kWidth) * kHeight * 4, 0.0F)};
-    for (std::size_t pixel = 0; pixel < plane.size(); ++pixel) {
-        image.rgba[pixel * 4] = plane[pixel];
-        image.rgba[(pixel * 4) + 1] = plane[pixel] * 0.375F;
-        image.rgba[(pixel * 4) + 2] = plane[pixel] * 2.25F;
-        image.rgba[(pixel * 4) + 3] = 1.0F;
-    }
-    const HdrImage out = pathtracer::debug::claheAov(image, kEightPixelsPerDegree, pool);
-    PT_EXPECT(ctx, out.rgba != image.rgba, "the operator left this frame untouched, so the check below proves nothing");
-    double worst = 0.0;
-    for (std::size_t pixel = 0; pixel < plane.size(); ++pixel) {
-        const double red = out.rgba[pixel * 4] / static_cast<double>(image.rgba[pixel * 4]);
-        const double blue = out.rgba[(pixel * 4) + 2] / static_cast<double>(image.rgba[(pixel * 4) + 2]);
-        worst = std::max(worst, std::fabs(red - blue) / red);
-    }
-    // One rounding of the scale into each of the two products, so the two recovered ratios may differ by two ulps and no more.
-    PT_EXPECT(ctx, worst <= 2.0 * static_cast<double>(kFloatEpsilon),
-              "per-channel scale factors differ by a relative " + std::to_string(worst));
 }
 
 // x_i = mu +/- delta over an even count gives M2 = n delta^2 exactly, so the reported ratio has a closed form and no tolerance.

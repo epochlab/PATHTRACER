@@ -150,7 +150,7 @@ PT_CHECK(filters_are_zero_on_a_constant_field, Fast, Exact) {
 // A bipolar AOV claims both signs are meaningful, so each must actually produce both on a pattern with structure at several scales.
 PT_CHECK(bipolar_aovs_produce_both_signs, Fast, Exact) {
     pathtracer::scene::ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    // Large enough for the octave ladder to reach two levels: below that DoG has no band to difference and correctly reads zero.
+    // Wider than DoG's coarse support: below that DoG has no band to difference and correctly reads zero.
     constexpr int kWidth = 256;
     constexpr int kHeight = 192;
     HdrImage pattern = makeImage(kWidth, kHeight, 0.0F);
@@ -176,7 +176,7 @@ PT_CHECK(bipolar_aovs_produce_both_signs, Fast, Exact) {
 
     for (const AovId aov : bipolar) {
         const HdrImage out = pathtracer::debug::evaluateFilterAov(
-            aov, pathtracer::debug::FilterInput{pattern, static_cast<float>(pattern.height) / glm::radians(30.0F), nullptr, 0}, pool);
+            aov, pathtracer::debug::FilterInput{pattern}, pool);
         const int channels = pathtracer::debug::aovChannels(aov);
         float lowest = 0.0F;
         float highest = 0.0F;
@@ -689,7 +689,7 @@ PT_CHECK(show_sky_changes_only_the_background, Slow, Exact) {
 // A new filter AOV reaching the dispatch's default arm is exactly the class of bug this catches: identical output for two distinct AOVs.
 PT_CHECK(aov_filter_dispatch_is_total, Fast, Exact) {
     pathtracer::scene::ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    // Large enough for two pyramid octaves, so the scale-space AOVs are not legitimately empty, and chromatic so none of the six agree.
+    // Wider than DoG's coarse support, so its band is not legitimately empty, and chromatic so no two of the seven filters agree.
     constexpr int kWidth = 96;
     constexpr int kHeight = 64;
     HdrImage source = makeImage(kWidth, kHeight, 0.0F);
@@ -714,7 +714,7 @@ PT_CHECK(aov_filter_dispatch_is_total, Fast, Exact) {
     outputs.reserve(filters.size());
     for (const AovId aov : filters) {
         outputs.push_back(pathtracer::debug::evaluateFilterAov(
-            aov, pathtracer::debug::FilterInput{source, static_cast<float>(kHeight) / 0.5F}, pool));
+            aov, pathtracer::debug::FilterInput{source}, pool));
         const HdrImage& out = outputs.back();
         PT_EXPECT(ctx, out.width == kWidth && out.height == kHeight &&
                           out.rgba.size() == source.rgba.size(),

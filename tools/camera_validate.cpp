@@ -369,29 +369,6 @@ PT_CHECK(fisheye_vertical_extent_saturates_at_the_image_circle, Fast, Exact) {
               "Rectilinear must report the pinhole vertical field of view bitwise");
 }
 
-// One pixel off axis subtends 1/pixelsPerRadian under either projection, the paraxial slope both share, up to their cubic terms.
-PT_CHECK(pixels_per_radian_is_the_axis_pitch_of_both_projections, Fast, Exact) {
-    constexpr float kFocalMm = 35.0F;
-    constexpr int kHeightPixels = 1080;
-    const std::array<Lens, 3> lenses{Lens{}, fisheye(kEquisolidTaylor, 180.0F), fisheye(kStereographicTaylor, 180.0F)};
-    ctx.plan(static_cast<int>(lenses.size()) + 1);
-    const float pitch = makeCamera(kFocalMm, Lens{}).pixelsPerRadian(kHeightPixels);
-    PT_EXPECT(ctx, pitch == kFocalMm * static_cast<float>(kHeightPixels) / kFullFrame.heightMm,
-              "pixelsPerRadian must be f*H/h, the axis pitch the gate and focal length fix");
-    for (const Lens& lens : lenses) {
-        const Camera camera = makeCamera(kFocalMm, lens);
-        // One pixel up from the optical centre: ndc spans 2 over the height, so a pixel is 2/H of it.
-        const std::optional<Ray> ray = camera.primaryRay(0.0F, 2.0F / static_cast<float>(kHeightPixels), kAspect);
-        const float theta = ray.has_value() ? angleBetween(camera.forward(), ray->dir) : 0.0F;
-        // Cubic term: tan gives theta^2/3, Kannala-Brandt |k1| theta^2; the float budget covers the ray build and the atan2.
-        const float cubic = std::max(1.0F / 3.0F, std::abs(lens.radialCoefficients[0])) * theta * theta;
-        const float relative = std::abs((theta * camera.pixelsPerRadian(kHeightPixels)) - 1.0F);
-        PT_EXPECT(ctx, camera.pixelsPerRadian(kHeightPixels) == pitch && relative <= cubic + (kClosedFormUlps * kEps),
-                  std::string(pathtracer::scene::kLensProjectionNames[static_cast<int>(lens.projection)]) +
-                      " one-pixel angle times pixelsPerRadian is off unity by " + std::to_string(relative));
-    }
-}
-
 // The Jacobian no per-ray check can see: uniform sensor area maps to theta with CDF (theta_d(theta)/theta_d(thetaMax))^2.
 PT_CHECK(fisheye_theta_distribution_matches_the_area_jacobian, Slow, Statistical) {
     ctx.plan(2);

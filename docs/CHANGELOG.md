@@ -3,6 +3,26 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## LoG, Retinex and CLAHE removed, and the octave pyramid with them
+
+The three AOVs went beyond what the project needs. With them gone, DoG was the octave pyramid's only consumer and read just its
+two base-grid levels, so the pyramid goes too. 31 AOVs remain; 7 are Beauty filters.
+
+- refactor: `AovId::LoG`, `AovId::Retinex` and `AovId::CLAHE` are removed from the enum, the HUD, `pt_aov_id`, Python and
+  `--aov`. Every later id shifts down. `pathtracer_c.h` documents ids as discovered at runtime, so callers that resolve by
+  name are unaffected and `PT_ABI_VERSION` stays 2, as it did when LoG was added
+- refactor: `scale_space.h` keeps `innerScaleVariance`, `discreteGaussianKernel` and `diffuse`. `buildOctavePyramid`,
+  `ScaleSpaceLevel`, `expandToBase`, `addExpanded`, `octaveMean`, `laplacian5` and `decimationVariance` are gone. DoG is now
+  two diffusions, `t0` and then `3·t0`, which by the semi-group is exactly the cascade's second level, empty where that
+  step's kernel does not fit the frame. `Camera::pixelsPerRadian` and `FilterInput::pixelsPerRadian` existed only for CLAHE
+  and are removed, along with the `Camera` argument that `presentFrame`, `samplePixelProbe`, `resolveAovImage` and
+  `ensureFilterImage` only forwarded
+- perf: DoG `filter_ms` is 0.930x [0.919, 0.947] at 2048x1152, from no longer copying two pyramid levels. Beauty `pass_ms` is
+  0.993x [0.981, 1.002], not resolved
+- test: every remaining filter AOV and Beauty is byte-identical to before (linear RMSE 0, identical PNGs, cornell 640x360,
+  32 passes). The checks for the removed operators and the pyramid are gone; the DoG checks stand alone, and
+  `dog_is_empty_exactly_below_its_coarse_support` pins the empty-band boundary. `ctest` 177/177
+
 ## Review of the perceptual AOVs and the fisheye: Ward Larson CLAHE, Land's surround, scale interpolation, Rectilinear
 
 A code review of the scale-space AOV and fisheye waves against the literature they cite. Five operators or bounds did not

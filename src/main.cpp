@@ -657,7 +657,7 @@ struct DisplayedAovSource {
 // Re-runs the selected image-space filter only when the pass it reads, or the AOV itself, changed. Filters cost tens of milliseconds.
 const pathtracer::gfx::HdrImage* ensureFilterImage(
     AppResources& app, const std::shared_ptr<const pathtracer::scene::PathTraceResult>& snapshot,
-    pathtracer::debug::AovId aov, const pathtracer::scene::Camera& camera) {
+    pathtracer::debug::AovId aov) {
     if (!snapshot) {
         return nullptr;
     }
@@ -669,8 +669,7 @@ const pathtracer::gfx::HdrImage* ensureFilterImage(
     const pathtracer::debug::ScopedCpuTimer filterTimer(app.stages.filterMs);
     cache.image = pathtracer::debug::evaluateFilterAov(
         aov,
-        pathtracer::debug::FilterInput{snapshot->beauty, camera.pixelsPerRadian(snapshot->beauty.height),
-                                        snapshot->beautyLuminanceM2.data(), snapshot->samples},
+        pathtracer::debug::FilterInput{snapshot->beauty, snapshot->beautyLuminanceM2.data(), snapshot->samples},
         *app.rasterThreadPool);
     cache.aov = aov;
     cache.owner = snapshot;
@@ -683,7 +682,7 @@ const pathtracer::gfx::HdrImage* ensureFilterImage(
 // Null image if the AOV's producer has not published, so callers show black. The one place an AovId becomes an HdrImage.
 DisplayedAovSource resolveAovImage(AppResources& app,
                                    const std::shared_ptr<const pathtracer::scene::PathTraceResult>& snapshot,
-                                   pathtracer::debug::AovId aov, const pathtracer::scene::Camera& camera) {
+                                   pathtracer::debug::AovId aov) {
     if (const pathtracer::debug::GBufferLane lane = pathtracer::debug::gbufferLane(aov)) {
         // The buffer is allocated for the process's life now, so a null check no longer distinguishes "no render yet" -- generation 0 does.
         return app.rasterGBuffer->generation == 0
@@ -693,7 +692,7 @@ DisplayedAovSource resolveAovImage(AppResources& app,
     if (const pathtracer::debug::PathTracedLane lane = pathtracer::debug::pathTracedLane(aov)) {
         return snapshot ? DisplayedAovSource{&(*snapshot.*lane), snapshot} : DisplayedAovSource{};
     }
-    const pathtracer::gfx::HdrImage* filtered = ensureFilterImage(app, snapshot, aov, camera);
+    const pathtracer::gfx::HdrImage* filtered = ensureFilterImage(app, snapshot, aov);
     return filtered != nullptr ? DisplayedAovSource{filtered, snapshot, app.filterCache.revision}
                                : DisplayedAovSource{};
 }
@@ -723,8 +722,7 @@ std::optional<std::pair<int, int>> cursorInImageRect(const pathtracer::platform:
 pathtracer::debug::PixelProbeSample samplePixelProbe(
     const pathtracer::platform::Window& window,
     const std::shared_ptr<const pathtracer::scene::PathTraceResult>& pathTraceSnapshot, AppResources& app,
-    const pathtracer::scene::Camera& camera, pathtracer::debug::AovId aovId,
-    pathtracer::gfx::ViewportRect imageRect, float& probeMs) {
+    pathtracer::debug::AovId aovId, pathtracer::gfx::ViewportRect imageRect, float& probeMs) {
     // Timed here so updateHud stays one screen. A filter AOV hits the cache presentFrame filled, so this stays a single texel fetch.
     const pathtracer::debug::ScopedCpuTimer probeTimer(probeMs);
     const std::optional<std::pair<int, int>> cursor = cursorInImageRect(window, imageRect);
@@ -732,7 +730,7 @@ pathtracer::debug::PixelProbeSample samplePixelProbe(
         return {};
     }
     const auto [rectX, rectY] = *cursor;
-    const DisplayedAovSource source = resolveAovImage(app, pathTraceSnapshot, aovId, camera);
+    const DisplayedAovSource source = resolveAovImage(app, pathTraceSnapshot, aovId);
     if (source.image == nullptr) {
         return {};
     }
@@ -788,13 +786,12 @@ void clearToBlack(int viewportWidth, int viewportHeight) {
 // Blits the selected AOV through the shared OCIO path. Beauty uses the user's LUT; everything else forces Raw, not being radiance.
 void presentFrame(AppResources& app,
                    const std::shared_ptr<const pathtracer::scene::PathTraceResult>& pathTraceSnapshot,
-                   const pathtracer::scene::Camera& camera, int viewportWidth, int viewportHeight,
-                   pathtracer::gfx::ViewportRect imageRect) {
+                   int viewportWidth, int viewportHeight, pathtracer::gfx::ViewportRect imageRect) {
     const auto aovId = static_cast<pathtracer::debug::AovId>(app.aov);
     // Unconditional: the draw covers only imageRect, so the bars need clearing whether or not there is an image to draw into it.
     clearToBlack(viewportWidth, viewportHeight);
 
-    const DisplayedAovSource source = resolveAovImage(app, pathTraceSnapshot, aovId, camera);
+    const DisplayedAovSource source = resolveAovImage(app, pathTraceSnapshot, aovId);
     if (source.image == nullptr) {
         return;
     }
@@ -945,8 +942,8 @@ void updateHud(AppResources& app, const pathtracer::platform::Window& window,
     int lensProjection = static_cast<int>(app.debugCamera.lens().projection);
     // Only the HUD reads it, so with the HUD hidden the fetch is skipped outright rather than computed and thrown away.
     const pathtracer::debug::PixelProbeSample pixelProbe =
-        app.showHud ? samplePixelProbe(window, pathTraceSnapshot, app, camera,
-                                        static_cast<pathtracer::debug::AovId>(app.aov), imageRect, app.stages.probeMs)
+        app.showHud ? samplePixelProbe(window, pathTraceSnapshot, app, static_cast<pathtracer::debug::AovId>(app.aov),
+                                       imageRect, app.stages.probeMs)
                      : pathtracer::debug::PixelProbeSample{};
     const pathtracer::debug::ScopedCpuTimer hudTimer(app.stages.hudMs);
     if (app.showHud) {
@@ -1276,7 +1273,7 @@ void renderFrame(pathtracer::platform::Window& window, pathtracer::platform::Dis
     {
         // Inclusive of the display-texture upload inside it; the blit's own cost is the difference, which the dashboard subtracts.
         const pathtracer::debug::ScopedCpuTimer presentTimer(app.stages.presentMs);
-        presentFrame(app, pathTraceSnapshot, camera, viewportWidth, viewportHeight, imageRect);
+        presentFrame(app, pathTraceSnapshot, viewportWidth, viewportHeight, imageRect);
     }
     app.postTimer.end();
 
