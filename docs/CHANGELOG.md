@@ -3,6 +3,42 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Texture pipeline: geometry-only glTF, per-slot channel count, shared decodes
+
+The scene JSON is now the only texture source, each map stores only the channels its reader takes, and one decode serves every
+binding. Measured against `main` (3b960ee) with `bench_compare run`, 11 interleaved rounds, `results/texture_pipeline`.
+
+- refactor: `Material::aoTexture` removed: AO is ray-traced, and the map was loaded, stored and read by nothing
+- refactor: `loadGltf` reads geometry only. The core and `extras` texture slots, the hand-parsed `extras` JSON scan,
+  `textureDir` and `model.texturePath` are gone; every instance starts at `makeDefaultMaterial()`.
+  `textureOverrides`/`applyTextureOverrides` become `textures`/`bindSceneTextures`, since nothing is overridden any more
+- fix: `loadSceneConfig` rejects unknown top-level, `model` and `environment` keys. A retired `textureOverrides` or
+  `texturePath` used to load as its default, rendering the scene untextured with no diagnostic
+- feat: `stump.json` restores the 4K stump (rotation and material from the retired `tree.json`) through `textures`; its AO map
+  has no slot and is not bound. Through the new binding it renders byte-identical to the old glTF-bound path at both depths
+- perf: `ImageTexture::channels` (`kScalarChannels` 1, `kRgbChannels` 3), fixed per slot by `makeDefaultMaterial()`: R for
+  roughness and bump, RGB for colour, normal, specular and the environment, never alpha, which nothing read. `texel()` and
+  `sampleBilinear` return `vec3` and dispatch on type and count, so the stride is compile-time and a scalar map filters one lane
+- fix: `readExrChannels` rejects a file lacking a channel its slot reads. OpenEXR zero-fills an absent slice, so an RGB slot
+  bound to an R- or Y-only EXR rendered black silently; `loadExr` now also requires R, G and B
+- fix: `bindSceneTextures` copied each decode into every slot binding it while its cache was alive, holding every bound map twice
+  at peak and once per primitive on a multi-primitive node. Slots are `TextureHandle` (`shared_ptr<const ImageTexture>`), one
+  decode per (file, channel count); sampling dereferences the handle, never copies it
+- measured: stump peak RSS **1366 -> 923 MB** at `textureBitDepth 16` (0.676x [0.674, 0.678]) and **2186 -> 1303 MB** at 32
+  (0.596x [0.596, 0.597]); analytic map savings 436 and 872 MB. Before the shared-decode fix the 16-bit cut was only 73 MB
+  (0.947x), which is how the copy was found. `pass_ms` 0.979x [0.944, 0.992] at 32, unresolved at 16 (0.992x [0.875, 1.036]).
+  cornell and macbeth: `pass_ms` unresolved (0.995x, 1.000x), output CRC identical, RSS -4.2 MB (the HDRI's dropped alpha)
+- image: cornell and macbeth byte-identical in Beauty, Albedo, Normal and Roughness at both depths; stump Albedo byte-identical.
+  Stump scalar lookups round once where the vec4 path rounded twice: clang fuses the one-lane lerp under `-ffp-contract=on`
+  and not glm's vector `mix`, shown by an unfused scalar lerp restoring byte-identity. Roughness within 1 ulp (rel 1.4e-7),
+  Normal within 2.4e-7, Beauty RMSE 7.7e-7 (PSNR 113 dB) with mean signed difference -1.5e-9, path decorrelation without bias
+- test: `image_texture_channel_selection` (R alone at one float per texel, exact RGB at three, an R-only file accepted by a
+  scalar slot and rejected by an RGB slot and by `loadExr`); `image_texture_bilinear_half_bound` at both channel counts;
+  `texture_binding_resolution` gains a file shared by an RGB and a scalar slot and one decode shared by two primitives;
+  `scene_config_accepts_the_shipped_scenes` covers all three scenes, `scene_config_rejects_malformed_input` the retired keys and
+  an environment typo. Mutation-checked: dropping the missing-channel rejection or keying the cache by path alone each fails its
+  check. `ctest` 184/184
+
 ## Constant shading model and a spectral ColorChecker for pixel measurement
 
 A surface that returns its authored value untouched, and a chart whose authored values are the measured ones, so rendered pixels can be
