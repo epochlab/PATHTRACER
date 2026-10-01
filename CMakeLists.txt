@@ -223,6 +223,20 @@ add_executable(bluenoise_mask tools/bluenoise_mask.cpp)
 pathtracer_target_defaults(bluenoise_mask NATIVE IPO)
 target_link_libraries(bluenoise_mask PRIVATE pathtracer_core)
 
+# ColorChecker spectral data to linear Rec.709, shared by its texture generator and colour_validate's colour-science oracle.
+add_library(colorchecker_core OBJECT tools/colorchecker.cpp)
+target_include_directories(colorchecker_core PUBLIC include tools)
+pathtracer_target_defaults(colorchecker_core)
+target_link_libraries(colorchecker_core PRIVATE glm::glm)
+
+# Offline generator for assets/textures/macbeth.exr, a regenerable (gitignored) asset, so it stays out of ctest.
+add_executable(colorchecker_texture tools/colorchecker_texture.cpp $<TARGET_OBJECTS:colorchecker_core>)
+target_compile_definitions(colorchecker_texture PRIVATE
+    ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets"
+    TOOLS_DATA_DIR="${CMAKE_SOURCE_DIR}/tools/data")
+pathtracer_target_defaults(colorchecker_texture)
+target_link_libraries(colorchecker_texture PRIVATE pathtracer_core)
+
 # Offline generator for albedo_table.inc. Built without -march=native or IPO: its output is committed source and must reproduce exactly.
 add_executable(albedo_table tools/albedo_table.cpp)
 target_include_directories(albedo_table PRIVATE include)
@@ -268,7 +282,7 @@ target_compile_definitions(io_validate PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DI
 
 # CIE 1931 module and the measured-metal fit, checked end to end against the Fresnel the renderer shades chrome.json with.
 add_executable(colour_validate tools/colour_validate.cpp
-               $<TARGET_OBJECTS:metal_fit_core> $<TARGET_OBJECTS:pathtracer_check>)
+               $<TARGET_OBJECTS:metal_fit_core> $<TARGET_OBJECTS:colorchecker_core> $<TARGET_OBJECTS:pathtracer_check>)
 target_include_directories(colour_validate PRIVATE tools)
 target_compile_definitions(colour_validate PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets"
                            TOOLS_DATA_DIR="${CMAKE_SOURCE_DIR}/tools/data")

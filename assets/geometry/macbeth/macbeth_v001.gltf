@@ -1,0 +1,193 @@
+{
+  "accessors": [
+    {
+      "bufferView": 0,
+      "componentType": 5126,
+      "count": 4,
+      "max": [
+        -0.049999997,
+        0.150000006,
+        0
+      ],
+      "min": [
+        -0.449999988,
+        -0.150000006,
+        0
+      ],
+      "type": "VEC3"
+    },
+    {
+      "bufferView": 1,
+      "componentType": 5126,
+      "count": 4,
+      "type": "VEC2"
+    },
+    {
+      "bufferView": 2,
+      "componentType": 5126,
+      "count": 4,
+      "type": "VEC3"
+    },
+    {
+      "bufferView": 3,
+      "componentType": 5126,
+      "count": 4,
+      "type": "VEC2"
+    },
+    {
+      "bufferView": 4,
+      "componentType": 5126,
+      "count": 4,
+      "type": "VEC3"
+    },
+    {
+      "bufferView": 5,
+      "componentType": 5126,
+      "count": 4,
+      "max": [
+        0.449999988,
+        0.150000006,
+        0
+      ],
+      "min": [
+        0.049999997,
+        -0.150000006,
+        0
+      ],
+      "type": "VEC3"
+    },
+    {
+      "bufferView": 6,
+      "componentType": 5125,
+      "count": 6,
+      "type": "SCALAR"
+    },
+    {
+      "bufferView": 7,
+      "componentType": 5125,
+      "count": 6,
+      "type": "SCALAR"
+    },
+    {
+      "bufferView": 8,
+      "componentType": 5126,
+      "count": 4,
+      "type": "VEC4"
+    },
+    {
+      "bufferView": 9,
+      "componentType": 5126,
+      "count": 4,
+      "type": "VEC4"
+    }
+  ],
+  "asset": {
+    "generator": "SideFX Houdini",
+    "version": "2.0"
+  },
+  "bufferViews": [
+    {
+      "buffer": 0,
+      "byteLength": 48
+    },
+    {
+      "buffer": 0,
+      "byteLength": 48,
+      "byteOffset": 48
+    },
+    {
+      "buffer": 0,
+      "byteLength": 48,
+      "byteOffset": 96
+    },
+    {
+      "buffer": 0,
+      "byteLength": 48,
+      "byteOffset": 144
+    },
+    {
+      "buffer": 0,
+      "byteLength": 48,
+      "byteOffset": 192
+    },
+    {
+      "buffer": 0,
+      "byteLength": 48,
+      "byteOffset": 240
+    },
+    {
+      "buffer": 0,
+      "byteLength": 24,
+      "byteOffset": 288
+    },
+    {
+      "buffer": 0,
+      "byteLength": 24,
+      "byteOffset": 312
+    },
+    {
+      "buffer": 0,
+      "byteLength": 64,
+      "byteOffset": 336
+    },
+    {
+      "buffer": 0,
+      "byteLength": 64,
+      "byteOffset": 400
+    }
+  ],
+  "buffers": [
+    {
+      "byteLength": 464,
+      "uri": "macbeth_v001_data.bin"
+    }
+  ],
+  "meshes": [
+    {
+      "primitives": [
+        {
+          "attributes": {
+            "NORMAL": 4,
+            "POSITION": 0,
+            "TANGENT": 8,
+            "TEXCOORD_0": 3
+          },
+          "indices": 7
+        }
+      ]
+    },
+    {
+      "primitives": [
+        {
+          "attributes": {
+            "NORMAL": 2,
+            "POSITION": 5,
+            "TANGENT": 9,
+            "TEXCOORD_0": 1
+          },
+          "indices": 6
+        }
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "mesh": 0,
+      "name": "grid00"
+    },
+    {
+      "mesh": 1,
+      "name": "grid01"
+    }
+  ],
+  "scene": 0,
+  "scenes": [
+    {
+      "name": "cornell",
+      "nodes": [
+        0,
+        1
+      ]
+    }
+  ]
+}

@@ -162,6 +162,9 @@ PT_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
         {"quad light with non-perpendicular edges", "engine_io_scene_skewlight.json",
          scene(",\"lights\":[{\"type\":\"quad\",\"origin\":[0,0,0],\"edge0\":[1,0,0],\"edge1\":[1,1,0],"
                "\"color\":[1,1,1],\"intensity\":5.0,\"twoSided\":false}]")},
+        // Each node maps slot names to paths; a bare path string would leave the slot unstated.
+        {"textureOverrides entry that is not a slot object", "engine_io_scene_textureflat.json",
+         scene(",\"textureOverrides\":{\"sphere01\":\"textures/macbeth.exr\"}")},
         {"negative light colour", "engine_io_scene_negcolor.json",
          scene(",\"lights\":[{\"type\":\"quad\",\"origin\":[0,0,0],\"edge0\":[1,0,0],\"edge1\":[0,0,1],"
                "\"color\":[1,-1,1],\"intensity\":5.0,\"twoSided\":false}]")},
@@ -187,7 +190,7 @@ PT_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
 
 // Anti-vacuity for the rejection rows below: every material the repo ships must still load once loadMaterialConfig validates.
 PT_CHECK(material_config_accepts_the_shipped_materials, Fast, Exact) {
-    const std::vector<const char*> shipped = {"chrome.json", "clay.json", "glass.json", "principled.json"};
+    const std::vector<const char*> shipped = {"chrome.json", "clay.json", "constant.json", "glass.json", "principled.json"};
     ctx.plan(static_cast<int>(shipped.size()));
     for (const char* name : shipped) {
         const std::filesystem::path path = std::filesystem::path(ASSET_ROOT_DIR) / "materials" / name;
@@ -231,6 +234,14 @@ PT_CHECK(material_config_rejects_malformed_input, Fast, Exact) {
         {"diffuseColour above 1", "engine_io_material_colour.json",
          "{\"diffuseColour\":[1,2,1],\"roughnessFactor\":0.5,\"roughnessMin\":0.045,\"roughnessMax\":1.0,\"bumpStrength\":0.0}"},
         {"negative transmissionDepth", "engine_io_material_negdepth.json", material(",\"transmissionDepth\":-1.0")},
+        // A misspelt model must not load as the standard BSDF, silently shading what the author meant to be unlit.
+        {"unknown shadingModel", "engine_io_material_unknownmodel.json", material(",\"shadingModel\":\"unlit\"")},
+        // A constant surface scatters nothing, so a BSDF key in its file is dead input the author believes is live.
+        {"BSDF key on a constant material", "engine_io_material_constantbsdf.json",
+         "{\"shadingModel\":\"constant\",\"roughnessFactor\":0.5}"},
+        // The constant path bypasses the standard parse, so its one live field must still pass the same reflectance bound.
+        {"constant diffuseColour above 1", "engine_io_material_constantcolour.json",
+         "{\"shadingModel\":\"constant\",\"diffuseColour\":[1,2,1]}"},
     };
 
     const std::filesystem::path basePath = writeJson("engine_io_material_base.json", material(""));

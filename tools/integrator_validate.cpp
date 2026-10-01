@@ -7,8 +7,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <numbers>
 #include <optional>
 #include <random>
@@ -701,6 +703,116 @@ PT_CHECK(per_instance_materials, Slow, Statistical) {
     return;
 }
 
+// A constant surface returns texel x diffuseColour to a camera ray whatever lights the scene: the measured value is the authored one.
+PT_CHECK(constant_surface_returns_texel, Fast, Exact) {
+    constexpr int kTexelSamples = 16;
+    constexpr int kEnvWidth = 64;
+    constexpr int kEnvHeight = 32;
+    const glm::vec3 texel(0.2F, 0.5F, 0.8F);
+    const glm::vec3 tint(0.5F, 0.25F, 1.0F);
+    const glm::vec3 expected = texel * tint;
+
+    TestScene scene = makeTwoInstanceScene(1.0F, glm::vec3(0.04F));
+    scene.instances[0].material.baseColorTexture = makeConstantTexture(texel);
+    std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+    if (!accel.has_value()) {
+        finish(ctx, false, "failed to build the Embree two-instance scene");
+        return;
+    }
+    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    PathTraceSettings base = makeSettings(1, 999, /*metallic=*/0.0F);
+    base.samplesPerPixel = kTexelSamples;
+    std::vector<PathTraceSettings> perInstance(2, base);
+    perInstance[0].shadingModel = pathtracer::scene::ShadingModel::Constant;
+    perInstance[0].diffuseColour = tint;
+
+    const EnvironmentMap black(tools::fixtures::makeImageTexture(
+        kEnvWidth, kEnvHeight, std::vector<float>(static_cast<std::size_t>(kEnvWidth) * kEnvHeight * 4, 0.0F),
+        pathtracer::gfx::ScalarType::Float32));
+    const EnvironmentMap uniform = makeUniformEnvironment();
+    // Identical samples average to themselves up to one rounding per accumulation: kTexelSamples per pixel, then the 16-pixel block.
+    const float tolerance = static_cast<float>(kTexelSamples + 16) * std::numeric_limits<float>::epsilon() *
+                            std::max({expected.x, expected.y, expected.z});
+
+    ctx.plan(2);
+    for (const auto& [name, env] : {std::pair{"black", &black}, std::pair{"uniform L0=1", &uniform}}) {
+        const glm::vec3 mean =
+            regionMean(renderPassPerInstance(scene, *env, base, perInstance, *accel, pool, true).beauty, 2, 6, 6, 10);
+        const float maxError = std::max({std::fabs(mean.x - expected.x), std::fabs(mean.y - expected.y),
+                                         std::fabs(mean.z - expected.z)});
+        char detail[288];
+        std::snprintf(detail, sizeof(detail),
+                      "%s environment: constant surface read (%.7f, %.7f, %.7f), expected texel x tint (%.7f, %.7f, %.7f), "
+                      "max error %.3e vs %.3e -- lighting reached an unlit surface",
+                      name, mean.x, mean.y, mean.z, expected.x, expected.y, expected.z, maxError, tolerance);
+        std::cout << "  " << detail << '\n';
+        PT_EXPECT(ctx, maxError <= tolerance, detail);
+    }
+}
+
+// Furnace equivalence: a floor under a constant ceiling of value L0 and a uniform-L0 sky sees L0 everywhere, as under the sky alone.
+PT_CHECK(constant_surface_emits_indirect, Slow, Statistical) {
+    // Above the camera's z=5, so primary rays reach the floor; the floor then sees the ceiling over all but its grazing horizon.
+    constexpr float kCeilingHeight = 10.0F;
+    TestScene enclosed = makeQuadScene(1.0F, glm::vec3(0.04F));
+    const glm::vec3 down(0.0F, 0.0F, -1.0F);
+    const glm::vec4 tangent(1.0F, 0.0F, 0.0F, 1.0F);
+    const auto vertex = [&](float x, float y) {
+        return ShadingVertex{glm::vec3(x, y, kCeilingHeight), down, glm::vec2(0.5F, 0.5F), tangent};
+    };
+    // Wound clockwise as seen from +Z so geometricNormalOf gives (0,0,-1), facing the floor.
+    const ShadingVertex c0 = vertex(-kQuadExtent, -kQuadExtent);
+    const ShadingVertex c1 = vertex(kQuadExtent, -kQuadExtent);
+    const ShadingVertex c2 = vertex(kQuadExtent, kQuadExtent);
+    const ShadingVertex c3 = vertex(-kQuadExtent, kQuadExtent);
+    enclosed.worldTriangles.push_back(Triangle{c0.position, c3.position, c2.position});
+    enclosed.worldTriangles.push_back(Triangle{c0.position, c2.position, c1.position});
+    enclosed.shadingTriangles.push_back(ShadingTriangle{c0, c3, c2, 1});
+    enclosed.shadingTriangles.push_back(ShadingTriangle{c0, c2, c1, 1});
+    // makeMaterial's white baseColor matches the sky's L0 = 1.
+    enclosed.instances.push_back(MeshInstance{makeMaterial(1.0F, glm::vec3(0.04F)), glm::mat4(1.0F), ""});
+    const TestScene open = makeQuadScene(1.0F, glm::vec3(0.04F));
+
+    std::optional<EmbreeAccel> enclosedAccel = EmbreeAccel::build(enclosed.worldTriangles);
+    std::optional<EmbreeAccel> openAccel = EmbreeAccel::build(open.worldTriangles);
+    if (!enclosedAccel.has_value() || !openAccel.has_value()) {
+        finish(ctx, false, "failed to build the Embree furnace scenes");
+        return;
+    }
+    const EnvironmentMap env = makeUniformEnvironment();
+    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    PathTraceSettings settings = makeSettings(1, 999, /*metallic=*/0.0F);
+    settings.samplesPerPixel = kSamplesPerPixel / tools::stats::kReplicates;
+    std::vector<PathTraceSettings> perInstance(2, settings);
+    perInstance[1].shadingModel = pathtracer::scene::ShadingModel::Constant;
+
+    const std::uint64_t rowSeed = ctx.subSeed("constant ceiling");
+    tools::stats::Welford enclosedMean;
+    tools::stats::Welford openMean;
+    for (int r = 0; r < tools::stats::kReplicates; ++r) {
+        // Disjoint seeds keep the two estimators independent, as Welch's band assumes.
+        const auto seed = static_cast<std::uint32_t>(rowSeed + r);
+        const glm::vec3 a = regionMean(
+            renderPassPerInstance(enclosed, env, settings, perInstance, *enclosedAccel, pool, true, seed).beauty, 0, 0,
+            kImageSize, kImageSize);
+        const glm::vec3 b = regionMean(renderPass(open, env, settings, *openAccel, pool, true,
+                                                  seed + tools::stats::kReplicates).beauty,
+                                       0, 0, kImageSize, kImageSize);
+        enclosedMean.add(std::max({a.x, a.y, a.z}));
+        openMean.add(std::max({b.x, b.y, b.z}));
+    }
+    const double difference = enclosedMean.mean() - openMean.mean();
+    const tools::stats::Band band = tools::stats::differenceBand(enclosedMean, openMean, ctx.alpha());
+    char detail[320];
+    std::snprintf(detail, sizeof(detail),
+                  "constant ceiling %.5f, open sky %.5f, difference %+.3e vs +/-%.3e -- below means indirect rays miss the "
+                  "constant emission, above means NEE double-counts it",
+                  enclosedMean.mean(), openMean.mean(), difference, band.halfWidth());
+    std::cout << "integrator_validate: " << detail << '\n';
+    ctx.plan(1);
+    PT_EXPECT(ctx, band.contains(difference), detail);
+}
+
 // Per-instance material binding, resolution side: resolvePerInstanceSettings maps each materialOverrides glTF node name onto its instance.
 PT_CHECK(material_binding_resolution, Fast, Exact) {
     const std::string assetRoot = ASSET_ROOT_DIR;
@@ -712,7 +824,7 @@ PT_CHECK(material_binding_resolution, Fast, Exact) {
         return;
     }
 
-    // How many of the 13 copied fields match the material file; a count, so a coinciding base setting does not read as a success.
+    // How many of the 14 copied fields match the material file; a count, so a coinciding base setting does not read as a success.
     const auto matchingFields = [](const PathTraceSettings& s,
                                     const pathtracer::config::MaterialConfig& m) {
         return static_cast<int>(s.bumpStrength == m.bumpStrength) +
@@ -727,9 +839,10 @@ PT_CHECK(material_binding_resolution, Fast, Exact) {
                static_cast<int>(s.diffuseRoughness == m.diffuseRoughness) +
                static_cast<int>(s.transmissionColor == m.transmissionColor) +
                static_cast<int>(s.transmissionDepth == m.transmissionDepth) +
-               static_cast<int>(s.edgeTint == m.edgeTint);
+               static_cast<int>(s.edgeTint == m.edgeTint) +
+               static_cast<int>(s.shadingModel == m.shadingModel);
     };
-    constexpr int kMaterialFields = 13;
+    constexpr int kMaterialFields = 14;
 
     const std::vector<MeshInstance> instances = {
         MeshInstance{makeMaterial(1.0F, glm::vec3(0.04F)), glm::mat4(1.0F), "alpha"},
@@ -750,11 +863,13 @@ PT_CHECK(material_binding_resolution, Fast, Exact) {
     base.transmissionDepth = 2.0F;
     // glass.json omits edgeTint, loading as the [1,1,1] default PathTraceSettings also uses: without a sentinel the non-vacuity gate fires.
     base.edgeTint = glm::vec3(0.4F, 0.5F, 0.6F);
+    // glass.json is standard, the PathTraceSettings default: Constant is the only sentinel that makes the model's copy observable.
+    base.shadingModel = pathtracer::scene::ShadingModel::Constant;
 
     bool ok = true;
     std::cout << "integrator_validate: materialOverrides resolution (3 instances, 1 overridden)\n";
 
-    // Non-vacuity: the base must differ from the override in all 12 fields, so each field's copy is independently observable.
+    // Non-vacuity: the base must differ from the override in every field, so each field's copy is independently observable.
     if (matchingFields(base, *glass) != 0) {
         std::cerr << "integrator_validate: FAILED material binding setup -- the base settings already "
                      "agree with glass.json on " << matchingFields(base, *glass)
@@ -816,6 +931,56 @@ PT_CHECK(material_binding_resolution, Fast, Exact) {
     }
     finish(ctx, ok, "material_binding_resolution failed; see the rows above");
     return;
+}
+
+// Texture binding: applyTextureOverrides replaces exactly the named nodes' named slots, atomically, and rejects every bad entry.
+PT_CHECK(texture_binding_resolution, Fast, Exact) {
+    const std::filesystem::path root = std::filesystem::temp_directory_path();
+    const std::string exr = "engine_integrator_texture_override.exr";
+    const glm::vec4 texel(0.25F, 0.5F, 0.75F, 1.0F);
+    const bool written = pathtracer::gfx::writeExr((root / exr).string(), {1, 1, {texel.x, texel.y, texel.z, texel.w}});
+    // "beta" owns two primitives, as a multi-primitive glTF node does: an override must reach both.
+    const auto makeInstances = [] {
+        return std::vector<MeshInstance>{MeshInstance{makeMaterial(1.0F, glm::vec3(0.04F)), glm::mat4(1.0F), "alpha"},
+                                         MeshInstance{makeMaterial(1.0F, glm::vec3(0.04F)), glm::mat4(1.0F), "beta"},
+                                         MeshInstance{makeMaterial(1.0F, glm::vec3(0.04F)), glm::mat4(1.0F), "beta"}};
+    };
+    const auto apply = [&](std::vector<MeshInstance>& instances,
+                           const std::map<std::string, std::map<std::string, std::string>>& overrides) {
+        return pathtracer::scene::applyTextureOverrides(instances, overrides, root.string(),
+                                                     pathtracer::gfx::ScalarType::Float32);
+    };
+    const glm::vec4 white(1.0F);
+    const glm::vec4 flatNormal(0.5F, 0.5F, 1.0F, 1.0F);
+
+    ctx.plan(11);
+    PT_EXPECT(ctx, written, "could not write the override EXR");
+    std::vector<MeshInstance> instances = makeInstances();
+    PT_EXPECT(ctx, apply(instances, {{"beta", {{"baseColorTexture", exr}, {"roughnessTexture", exr}}}}),
+              "a valid override was rejected");
+    PT_EXPECT(ctx, instances[1].material.baseColorTexture.texel(0, 0) == texel &&
+                       instances[2].material.baseColorTexture.texel(0, 0) == texel,
+              "baseColorTexture did not reach both of beta's primitives");
+    PT_EXPECT(ctx, instances[1].material.roughnessTexture.texel(0, 0) == texel &&
+                       instances[2].material.roughnessTexture.texel(0, 0) == texel,
+              "roughnessTexture did not reach both of beta's primitives");
+    PT_EXPECT(ctx, instances[1].material.normalTexture.texel(0, 0) == flatNormal,
+              "an unnamed slot on an overridden node changed");
+    PT_EXPECT(ctx, instances[0].material.baseColorTexture.texel(0, 0) == white,
+              "the override leaked onto alpha, which it does not name");
+
+    std::cout << "  the stderr diagnostics below are expected: they are the function under test refusing a bad scene\n";
+    std::vector<MeshInstance> untouched = makeInstances();
+    PT_EXPECT(ctx, !apply(untouched, {{"delta", {{"baseColorTexture", exr}}}}), "a key naming no node was accepted");
+    PT_EXPECT(ctx, !apply(untouched, {{"beta", {{"aoTexture", exr}}}}), "an unknown slot was accepted");
+    PT_EXPECT(ctx, !apply(untouched, {{"beta", {{"baseColorTexture", "does_not_exist.exr"}}}}),
+              "a missing texture file was accepted");
+    // alpha is valid and sorts first, so a non-atomic implementation would have bound it before beta's missing file failed.
+    PT_EXPECT(ctx, !apply(untouched, {{"alpha", {{"baseColorTexture", exr}}}, {"beta", {{"baseColorTexture", "missing.exr"}}}}),
+              "a scene with one bad entry was accepted");
+    PT_EXPECT(ctx, untouched[0].material.baseColorTexture.texel(0, 0) == white,
+              "a rejected scene still rebound alpha: validation must finish before any instance changes");
+    std::filesystem::remove(root / exr);
 }
 
 // The five transport buckets are a partition of beauty, not related-looking images: their sum must equal Beauty at every pixel.

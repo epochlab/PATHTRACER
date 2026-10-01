@@ -3,9 +3,11 @@ build/
 renders/
 *.gltf
 *.bin
-# cornell is the one checked-in mesh; un-ignore exactly the two files it needs, not the whole directory, which also re-admitted .DS_Store
+# cornell and macbeth are the checked-in meshes; un-ignore exactly their files, not the directories, which also re-admitted .DS_Store
 !**/cornell/*.gltf
 !**/cornell/*.bin
+!**/macbeth/*.gltf
+!**/macbeth/*.bin
 *.exr
 
 # Before/after measurement captures: renders, bench logs and validator output, kept locally for review

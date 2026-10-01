@@ -19,6 +19,10 @@ struct LineProximity {
 };
 [[nodiscard]] LineProximity nearLineSegmentPx(glm::vec2 p, glm::vec2 a, glm::vec2 b, float thicknessPx);
 
+// glTF core order: baseColorFactor * baseColorTexture * COLOR_0 (commutative). vertexColour is white with no COLOR_0 attribute.
+[[nodiscard]] glm::vec3 resolveBaseColor(const Material& material, glm::vec2 uv, const glm::vec3& vertexColour,
+                                          const PathTraceSettings& settings);
+
 // heroChannel: the RGB channel a dispersive path committed to, setting the wavelength ior resolves at; nullopt keeps the d-line ior.
 [[nodiscard]] BsdfParams resolveBsdfParams(const Material& material, glm::vec2 uv,
                                             const glm::vec3& vertexColour,

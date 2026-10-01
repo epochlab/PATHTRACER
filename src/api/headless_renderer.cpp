@@ -52,6 +52,7 @@ using pathtracer::gfx::HdrImage;
         .transmissionColor = material.transmissionColor,
         .transmissionDepth = material.transmissionDepth,
         .edgeTint = material.edgeTint,
+        .shadingModel = material.shadingModel,
     };
 }
 
@@ -132,6 +133,11 @@ std::unique_ptr<HeadlessRenderer> HeadlessRenderer::open(const std::string& asse
         scene->model.texturePath.empty() ? "" : assetRoot + "/" + scene->model.texturePath);
     if (!model) {
         error = "failed to load glTF " + assetRoot + "/" + scene->model.gltfPath;
+        return nullptr;
+    }
+    if (!pathtracer::scene::applyTextureOverrides(model->instances, scene->textureOverrides, assetRoot,
+                                               profile->render.textureType)) {
+        error = "failed to resolve texture overrides";
         return nullptr;
     }
 

@@ -41,6 +41,8 @@ A CPU path tracer. For each pixel it follows light backwards from the camera, bo
 | Stochastic BSDF | Four lobes, stochastically selected, one-sample mixture estimator: EON rough diffuse (Portsmouth/Kutz/Hill 2025), GGX specular sampled by visible normals (Heitz 2018), Walter 2007 rough dielectric transmission with exact Fresnel and total internal reflection, and exact complex-IOR conductor Fresnel via Gulbrandsen 2014's reflectivity/edge-tint parameterisation. Kulla-Conty compensation on both interfaces keeps it energy-conserving at every roughness. Transmission falls back to a Snell delta lobe below the smooth-roughness threshold and at an index-matched interface |
 | Volumetric absorption | Beer-Lambert extinction inside a `transmissionFactor > 0` material (`transmissionColor` over `transmissionDepth`, Arnold/OpenPBR convention), single-level medium stack — tinted glass, thick or thin, with no in-scattering ([roadmap](ROADMAP.md) transport #1) |
 | Per-object materials | `SceneConfig::materialOverrides` maps a glTF node name to a `materials/*.json`, indexed per instance by `ShadingTriangle::instanceIndex` through both lanes — different objects in one scene carry different materials |
+| Per-object textures | `SceneConfig::textureOverrides` maps a glTF node name to `{slot: EXR path}` (`baseColorTexture`, `normalTexture`, `bumpTexture`, `roughnessTexture`, `specularTexture`), replacing what the glTF bound — the scene owns its texture paths, so a DCC re-export that rewrites image URIs cannot break the binding. Validated and loaded before any instance changes; an unknown node, slot or file aborts the scene |
+| Constant shading | `shadingModel: "constant"` (`constant.json`): the hit emits `resolveBaseColor` (texture × `diffuseColour` × COLOR_0) two-sided and terminates, scattering nothing — an unlit, measurable surface. It emits at every bounce, so other surfaces see it as light; it is not in `LightSet`, so its BSDF-sampled hit takes MIS weight 1 and NEE never double-counts it |
 | Area lights | Rectangular emitters (`scene.json`'s `lights`), one-sided by default, geometry in the BVH and solid-angle NEE sampling (Ureña/Fajardo/King 2013), MIS'd like the environment — the emissive-panel Cornell box, and ReSTIR's prerequisite light set ([roadmap](ROADMAP.md) transport #2) |
 | Environment lighting | Equirect HDR map: BSDF-sampled misses plus luminance-importance-sampled NEE, MIS-combined — image-based lighting, one member of `LightSet`. No punctual or directional lights, which have no hittable geometry |
 | Environment-light toggle | HUD "Environment Light" (`environment.lightEnabled`, `--env-light`) drops the environment from NEE, MIS and every miss including the background — unlike "Show/Hide Background", which only hides the camera-visible sky, so an HDRI scene can be reduced to its area lights alone |
@@ -103,13 +105,14 @@ Every validator runs on a shared harness (`tools/check.h`): each check is regist
 
 # Material Library
 
-Presets live in `assets/materials/*.json`, parsed into `MaterialConfig` (`scene_config.h`). A scene picks a default with `SceneConfig::materialPath` and overrides individual objects with `materialOverrides` — e.g. `cornell.json`'s `{"sphere01": "materials/chrome.json", "sphere02": "materials/glass.json"}` ([per-object materials](#materials--lighting)). Add one by dropping a JSON file in and pointing at it; no code or schema change.
+Presets live in `assets/materials/*.json`, parsed into `MaterialConfig` (`scene_config.h`). A scene picks a default with `SceneConfig::materialPath` and overrides individual objects with `materialOverrides` — e.g. `cornell.json`'s `{"sphere01": "materials/chrome.json", "sphere02": "materials/glass.json"}` ([per-object materials](#materials--lighting)). Add one by dropping a JSON file in and pointing at it; no code or schema change. Textures bind the same way, per node in the scene: `macbeth.json`'s `textureOverrides` gives both grids `textures/macbeth.exr`, so its glTF carries geometry only.
 
 | File | metallic | transmission | roughness (factor / min) | Notes |
 |---|---|---|---|---|
 | `principled.json` | 0.0 | 0.0 | 1.0 / 0.045 | Rough dielectric, the only preset with a bump (`bumpStrength: 1.0`). The reference preset, the only one declaring every field. No shipped scene uses it |
 | `clay.json` | 0.0 | 0.0 | 0.5 / 0.045 | Neutral matte dielectric, no bump |
 | `chrome.json` | 1.0 | 0.0 | 0.05 / 0.045 | Measured chromium (Johnson & Christy 1974), `diffuseColour` and `edgeTint` verbatim `tools/metal_fit` output, so the grazing reflectance dip is the measured one. `colour.chrome_matches_measured_chromium` fails if this file drifts from the fit |
+| `constant.json` | — | — | — | `shadingModel: "constant"`: no lighting, beauty = the base-colour texel; any BSDF key is rejected. `macbeth.json` binds it to `grid01` for the unlit ColorChecker |
 | `glass.json` | 0.0 | 1.0 | 0.02 / 0.01 | Schott N-BK7, `ior: 1.5168` at the d line with `abbe: 64.17` for dispersion, tinted by `transmissionColor` over `transmissionDepth: 0.4` world units |
 
 ## `MaterialConfig`
@@ -125,6 +128,7 @@ Presets live in `assets/materials/*.json`, parsed into `MaterialConfig` (`scene_
 | `diffuseRoughness` | EON rough-diffuse parameter r ∈ [0,1]; 0 = Lambertian, and the roughness at which `diffuseColour` and EON's ρ coincide |
 | `bumpStrength` | Scales the bump texture's per-texel height difference |
 | `transmissionColor` / `transmissionDepth` | The **only** tint on transmitted light (Arnold/OpenPBR convention). `transmissionDepth > 0` gives interior Beer-Lambert absorption, `sigmaA = -log(transmissionColor)/transmissionDepth`; `transmissionDepth 0` applies the tint once per surface crossing, so a closed solid reads its square. Default `[1,1,1]`/`0.0` is a no-op either way |
+| `shadingModel` | `"standard"` (default) is the BSDF above; `"constant"` admits only `diffuseColour` and leaves every BSDF field at its identity, which the G-buffer AOVs still read |
 | `edgeTint` | Gulbrandsen 2014 edge tint, `metallicFactor > 0` only. Default `[1,1,1]`: white is the no-dip edge Schlick always produced |
 
 # AOV
@@ -295,6 +299,8 @@ Observer models over Beauty, as against the Utility block's image-space derivati
 - Burley, B. (2020). Practical Hash-based Owen Scrambling. JCGT 9(4): the scramble, set-index shuffling and padding in `Sampler`, using Vegdahl's constants as shipped by Cycles.
 - Cranley, R., Patterson, T.N.L. (1976). Randomization of number theoretic methods: the per-pixel toroidal shift blue-noise dithering drives.
 - Georgiev, I., Fajardo, M. (2016). Blue-noise Dithered Sampling. SIGGRAPH Talks: the tiled blue-noise shift, adopted at d = 1; the annealed d-dimensional matrix is open in the [roadmap](ROADMAP.md).
+- Pascale, D. (2006). RGB coordinates of the Macbeth ColorChecker, BabelColor; spectra from BabelColor (2012) ColorChecker_RGB_and_spectra: the 30-chart average `tools/colorchecker_texture` integrates into `macbeth.exr`.
+- CIE 167:2005. Recommended Practice for Tabulating Spectral Data for Use in Colour Computations: the Sprague (1880) interpolant and boundary coefficients `resampleSprague` implements.
 - Ulichney, R.A. (1993). The void-and-cluster method for dither array generation. SPIE 1913: the mask's construction, re-runnable in `tools/bluenoise_mask.cpp` rather than a lifted tile.
 - Dupuy, J., Jakob, W. (2018). An Adaptive Parameterization for Efficient Material Acquisition and Rendering. ACM ToG 37(6): one interpolant for value and density, the construction both transmissive multiple-scattering shares use.
 - Zwicker, M. et al. (2015). Adaptive Sampling and Reconstruction for Monte Carlo Rendering. CGF STAR: denoising survey — [roadmap](ROADMAP.md) transport #6, not implemented.

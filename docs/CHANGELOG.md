@@ -3,6 +3,36 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Constant shading model and a spectral ColorChecker for pixel measurement
+
+A surface that returns its authored value untouched, and a chart whose authored values are the measured ones, so rendered pixels can be
+checked against a reference. `macbeth.json` places a clay ColorChecker (`grid00`) beside a constant one (`grid01`).
+
+- feat: `shadingModel` (`"standard"` default, `"constant"`) in material JSON, carried by `MaterialConfig` and `PathTraceSettings`.
+  A constant hit emits `resolveBaseColor` (texture × `diffuseColour` × COLOR_0) two-sided and ends the path, before the depth cap
+  like an emitter. It is not in `LightSet`, so the BSDF-sampled hit takes MIS weight 1 and NEE never double-counts it.
+  `constant.json` admits only `diffuseColour` and rejects any BSDF key; an unknown model is rejected
+- feat: `tools/colorchecker_texture` writes `assets/textures/macbeth.exr` (6x4, linear Rec.709) from BabelColor's 30-chart
+  average reflectances (`tools/data/colorchecker_babelcolor_average.csv`). Each spectrum is resampled to the CIE 1 nm grid with
+  the CIE 167:2005 Sprague interpolant, extended by nearest value beyond 380-730 nm, and integrated with `cie::reflectanceToRec709`
+  under D65, so no chromatic adaptation is involved. Cyan lies outside Rec.709 and keeps its negative red (-0.0286). Against
+  BabelColor's published D50 chromaticities, Bradford-adapted to D65, the neutrals agree within ΔE2000 0.35 and every patch
+  within 1.38
+- feat: `textureOverrides` in the scene JSON binds EXRs to a glTF node's `Material` slots (`applyTextureOverrides`), replacing
+  the glTF's own, so Houdini's export-specific image paths never reach the binding. `macbeth.json` binds the chart that way and
+  its glTF is geometry only (tangents from `gltf_tangent`, UVs on [0,1]). Rendering is identical to the glTF-bound chart (RMSE 0)
+- test: `constant_surface_returns_texel` (texel × tint exact under black and bright skies), `constant_surface_emits_indirect`
+  (furnace: a floor under a constant ceiling matches the open sky; it fails when indirect constant hits are dropped),
+  `material_binding_resolution` at 14 fields, `texture_binding_resolution` (slots, multi-primitive nodes, atomic rejection), three
+  `io_validate` material rows and one scene row, and in `colour_validate`
+  `sprague_reproduces_quartics`, `colorchecker_table_rejects_invalid_input`, and `colorchecker_matches_colour_science`, which
+  agrees within 1e-12 with colour-science 0.4.6 fed the same CIE CSVs. `ctest` 182/182
+- measured: on `grid01`, beauty equals the binary16-stored texel within 3.2e-10 at every patch centre, and the Albedo AOV within
+  3.1e-9. At `textureBitDepth: 16` the remaining gap to the float reference is texture storage alone, at most 2.3e-4. cornell's
+  Beauty is byte-identical to before (linear RMSE 0, 64 passes)
+- perf: cornell `pass_ms` B/A is 0.992 [0.919, 1.331] over 11 paired rounds, not resolved: the constant branch costs one
+  settings load per hit
+
 ## LoG, Retinex and CLAHE removed, and the octave pyramid with them
 
 The three AOVs went beyond what the project needs. With them gone, DoG was the octave pyramid's only consumer and read just its

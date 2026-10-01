@@ -226,15 +226,25 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             break;
         }
 
-        // Depth cap. The extra iteration exists only so the final BSDF ray can collect its MIS-weighted miss or emitter hit.
-        if (bounce > settings.maxBounces) {
-            break;
-        }
-
         const Material& material =
             instances[static_cast<std::size_t>(triangle.instanceIndex)].material;
         const PathTraceSettings& instanceSettings =
             perInstanceSettings[static_cast<std::size_t>(triangle.instanceIndex)];
+
+        // A constant surface emits its base colour two-sided and scatters nothing; absent from LightSet, so the hit takes MIS weight 1.
+        if (instanceSettings.shadingModel == ShadingModel::Constant) {
+            const ShadingVertex shading = interpolateShading(triangle, hit->u, hit->v);
+            const glm::vec3 hitRadiance =
+                throughput * resolveBaseColor(material, shading.uv, shading.colour, instanceSettings);
+            radiance += hitRadiance;
+            addToBucket(hitRadiance, /*isDirect=*/bounce == 1);
+            break;
+        }
+
+        // Depth cap. The extra iteration exists only so the final BSDF ray can collect its MIS-weighted miss or emitter hit.
+        if (bounce > settings.maxBounces) {
+            break;
+        }
 
         // Commit to one RGB channel at the first dispersive interface; sum == 0 is reachable, rrMinProb keeps zero-throughput paths alive.
         if (!heroChannel.has_value() && instanceSettings.abbe > 0.0F &&
