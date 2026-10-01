@@ -5,14 +5,13 @@
 
 namespace pathtracer::scene {
 
-namespace {
-
-// glTF core order: baseColorFactor * baseColorTexture * COLOR_0 (commutative). vertexColour is white with no COLOR_0 attribute.
 glm::vec3 resolveBaseColor(const Material& material, glm::vec2 uv, const glm::vec3& vertexColour,
                             const PathTraceSettings& settings) {
     const glm::vec4 sample = pathtracer::gfx::sampleBilinear(material.baseColorTexture, uv);
     return glm::vec3(sample) * settings.diffuseColour * vertexColour;
 }
+
+namespace {
 
 float resolveRoughness(const Material& material, glm::vec2 uv, const PathTraceSettings& settings) {
     const float sample = pathtracer::gfx::sampleBilinear(material.roughnessTexture, uv).r;

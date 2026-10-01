@@ -7,6 +7,8 @@
 
 #include <glm/glm.hpp>
 
+#include "pathtracer/scene/material.h"
+
 namespace pathtracer::config {
 
 // What to load and where to place it. gltfPath/texturePath are relative to ASSET_ROOT_DIR, as every asset path is.
@@ -58,6 +60,8 @@ struct MaterialConfig {
     float transmissionDepth = 0.0F;
     // Gulbrandsen 2014 edgetint for the conductor lobe. Optional, default [1,1,1]: the no-dip edge Schlick always produced.
     glm::vec3 edgeTint = glm::vec3(1.0F);
+    // Optional "shadingModel" key, default "standard"; "constant" admits only diffuseColour and leaves every BSDF field at identity.
+    pathtracer::scene::ShadingModel shadingModel = pathtracer::scene::ShadingModel::Standard;
 };
 
 // The asset to load and how to shade and light it: what is specific to this scene, as against ProfileConfig's session-wide defaults.
@@ -68,6 +72,8 @@ struct SceneConfig {
     std::string materialPath;
     // glTF node name -> material JSON path, overriding materialPath for that instance. Optional; absent means every instance uses it.
     std::map<std::string, std::string> materialOverrides;
+    // glTF node name -> {Material slot name -> EXR path relative to ASSET_ROOT_DIR}, replacing that slot's glTF texture. Optional.
+    std::map<std::string, std::map<std::string, std::string>> textureOverrides;
     // Rectangular area lights, in the glTF's own vertex space (ModelConfig position/rotation applies too). Optional; absent means none.
     std::vector<QuadLightConfig> lights;
 };

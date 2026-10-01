@@ -118,6 +118,29 @@ bool validMaterialConfig(const MaterialConfig& m, const std::string& path) {
     return ok;
 }
 
+// A constant material scatters nothing, so any BSDF key would be silently dead: rejected rather than ignored.
+std::optional<MaterialConfig> parseConstantMaterial(const nlohmann::json& j, const std::string& path) {
+    for (const auto& item : j.items()) {
+        if (item.key() != "shadingModel" && item.key() != "diffuseColour") {
+            std::cerr << "loadMaterialConfig: " << path << ": '" << item.key() << "' has no effect on a constant material\n";
+            return std::nullopt;
+        }
+    }
+    // BSDF fields at identity: the rasterizer still resolves them for G-buffer AOVs, and resolveRoughness clamps by min <= max.
+    MaterialConfig material{
+        .bumpStrength = 0.0F,
+        .roughnessMin = 0.0F,
+        .roughnessMax = 1.0F,
+        .diffuseColour = j.value("diffuseColour", glm::vec3(1.0F)),
+        .roughnessFactor = 1.0F,
+        .shadingModel = pathtracer::scene::ShadingModel::Constant,
+    };
+    if (!validMaterialConfig(material, path)) {
+        return std::nullopt;
+    }
+    return material;
+}
+
 }  // namespace
 
 std::optional<SceneConfig> loadSceneConfig(const std::string& path) {
@@ -138,6 +161,10 @@ std::optional<SceneConfig> loadSceneConfig(const std::string& path) {
         if (const auto it = j.find("materialOverrides"); it != j.end()) {
             materialOverrides = it->get<std::map<std::string, std::string>>();
         }
+        std::map<std::string, std::map<std::string, std::string>> textureOverrides;
+        if (const auto it = j.find("textureOverrides"); it != j.end()) {
+            textureOverrides = it->get<std::map<std::string, std::map<std::string, std::string>>>();
+        }
 
         std::optional<std::vector<QuadLightConfig>> lights = parseQuadLights(j, path);
         if (!lights) {
@@ -157,6 +184,7 @@ std::optional<SceneConfig> loadSceneConfig(const std::string& path) {
             },
             j.at("materialPath").get<std::string>(),
             std::move(materialOverrides),
+            std::move(textureOverrides),
             std::move(*lights),
         };
     } catch (const nlohmann::json::exception& e) {
@@ -175,6 +203,16 @@ std::optional<MaterialConfig> loadMaterialConfig(const std::string& path) {
     try {
         nlohmann::json j;
         file >> j;
+
+        const auto shadingModel = j.value("shadingModel", std::string("standard"));
+        if (shadingModel == "constant") {
+            return parseConstantMaterial(j, path);
+        }
+        if (shadingModel != "standard") {
+            std::cerr << "loadMaterialConfig: " << path << ": unknown shadingModel '" << shadingModel
+                      << "', expected 'standard' or 'constant'\n";
+            return std::nullopt;
+        }
 
         const MaterialConfig material{
             j.at("bumpStrength").get<float>(),

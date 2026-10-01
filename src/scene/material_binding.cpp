@@ -1,25 +1,81 @@
 #include "pathtracer/scene/material_binding.h"
 
 #include <iostream>
+#include <map>
 #include <set>
 #include <string_view>
 #include <utility>
 
 namespace pathtracer::scene {
 
-std::optional<std::vector<PathTraceSettings>> resolvePerInstanceSettings(
-    const PathTraceSettings& base, const std::vector<MeshInstance>& instances,
-    const std::map<std::string, std::string>& materialOverrides, const std::string& assetRoot) {
+namespace {
+
+// A key naming no instance is a typo: rejected, so a scene never renders silently with the wrong material or texture.
+template <typename Overrides>
+bool everyKeyNamesAnInstance(const Overrides& overrides, const std::vector<MeshInstance>& instances, const char* caller,
+                             const char* field) {
     std::set<std::string_view> instanceNames;
     for (const MeshInstance& instance : instances) {
         instanceNames.insert(instance.name);
     }
-    for (const auto& [nodeName, path] : materialOverrides) {
-        if (!instanceNames.contains(nodeName)) {
-            std::cerr << "resolvePerInstanceSettings: materialOverrides key '" << nodeName
-                      << "' matches no glTF node\n";
-            return std::nullopt;
+    for (const auto& entry : overrides) {
+        if (!instanceNames.contains(entry.first)) {
+            std::cerr << caller << ": " << field << " key '" << entry.first << "' matches no glTF node\n";
+            return false;
         }
+    }
+    return true;
+}
+
+}  // namespace
+
+bool applyTextureOverrides(std::vector<MeshInstance>& instances,
+                           const std::map<std::string, std::map<std::string, std::string>>& textureOverrides,
+                           const std::string& assetRoot, pathtracer::gfx::ScalarType textureType) {
+    if (!everyKeyNamesAnInstance(textureOverrides, instances, "applyTextureOverrides", "textureOverrides")) {
+        return false;
+    }
+    // aoTexture is absent: nothing reads it, so a binding there would be dead input.
+    static const std::map<std::string_view, pathtracer::gfx::ImageTexture Material::*> kSlots = {
+        {"baseColorTexture", &Material::baseColorTexture}, {"normalTexture", &Material::normalTexture},
+        {"bumpTexture", &Material::bumpTexture},           {"roughnessTexture", &Material::roughnessTexture},
+        {"specularTexture", &Material::specularTexture},
+    };
+    // Everything validated and loaded before any instance changes, each distinct file once however many slots share it.
+    std::map<std::string, pathtracer::gfx::ImageTexture> loaded;
+    for (const auto& [nodeName, slots] : textureOverrides) {
+        for (const auto& [slot, path] : slots) {
+            if (!kSlots.contains(slot)) {
+                std::cerr << "applyTextureOverrides: '" << nodeName << "' names unknown slot '" << slot << "'\n";
+                return false;
+            }
+            if (loaded.contains(path)) {
+                continue;
+            }
+            std::optional<pathtracer::gfx::ImageTexture> texture =
+                pathtracer::gfx::loadImageTexture(assetRoot + "/" + path, textureType);
+            if (!texture) {
+                std::cerr << "applyTextureOverrides: '" << nodeName << "' texture '" << path << "' failed to load\n";
+                return false;
+            }
+            loaded.emplace(path, std::move(*texture));
+        }
+    }
+    for (MeshInstance& instance : instances) {
+        if (const auto it = textureOverrides.find(instance.name); it != textureOverrides.end()) {
+            for (const auto& [slot, path] : it->second) {
+                instance.material.*kSlots.at(slot) = loaded.at(path);
+            }
+        }
+    }
+    return true;
+}
+
+std::optional<std::vector<PathTraceSettings>> resolvePerInstanceSettings(
+    const PathTraceSettings& base, const std::vector<MeshInstance>& instances,
+    const std::map<std::string, std::string>& materialOverrides, const std::string& assetRoot) {
+    if (!everyKeyNamesAnInstance(materialOverrides, instances, "resolvePerInstanceSettings", "materialOverrides")) {
+        return std::nullopt;
     }
 
     std::map<std::string, pathtracer::config::MaterialConfig> overrideMaterialsByPath;
@@ -58,6 +114,7 @@ std::optional<std::vector<PathTraceSettings>> resolvePerInstanceSettings(
             settings.transmissionColor = overrideMaterial.transmissionColor;
             settings.transmissionDepth = overrideMaterial.transmissionDepth;
             settings.edgeTint = overrideMaterial.edgeTint;
+            settings.shadingModel = overrideMaterial.shadingModel;
         }
         perInstanceSettings.push_back(settings);
     }

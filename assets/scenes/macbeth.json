@@ -1,0 +1,19 @@
+{
+    "model": {
+        "gltfPath": "geometry/macbeth/macbeth_v001.gltf",
+        "texturePath": "",
+        "position": [0.0, 0.0, 0.0],
+        "rotation": [0.0, 0.0, 0.0]
+    },
+    "environment": {
+        "hdriPath": "textures/republiqueHDR_2k.exr"
+    },
+    "materialPath": "materials/clay.json",
+    "materialOverrides": {
+        "grid01": "materials/constant.json"
+    },
+    "textureOverrides": {
+        "grid00": { "baseColorTexture": "textures/macbeth.exr" },
+        "grid01": { "baseColorTexture": "textures/macbeth.exr" }
+    }
+}

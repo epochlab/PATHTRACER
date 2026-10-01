@@ -325,6 +325,11 @@ std::optional<AppResources> initializeApp(const pathtracer::config::SceneConfig&
     std::optional<pathtracer::scene::LoadedModel> stumpModel = pathtracer::scene::loadGltf(
         std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.model.gltfPath, profileConfig.render.textureType, sceneTransform,
         std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.model.texturePath);
+    // Scene-JSON textures replace the glTF's before anything reads a material; applyTextureOverrides logs the reason it fails.
+    if (stumpModel && !pathtracer::scene::applyTextureOverrides(stumpModel->instances, sceneConfig.textureOverrides,
+                                                                ASSET_ROOT_DIR, profileConfig.render.textureType)) {
+        stumpModel.reset();
+    }
     const double loadMs =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - loadStart)
             .count();
@@ -394,6 +399,7 @@ std::optional<AppResources> initializeApp(const pathtracer::config::SceneConfig&
         .transmissionColor = materialConfig->transmissionColor,
         .transmissionDepth = materialConfig->transmissionDepth,
         .edgeTint = materialConfig->edgeTint,
+        .shadingModel = materialConfig->shadingModel,
     };
 
     std::optional<std::vector<pathtracer::scene::PathTraceSettings>> perInstanceSettings =

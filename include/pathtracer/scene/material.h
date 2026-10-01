@@ -4,6 +4,9 @@
 
 namespace pathtracer::scene {
 
+// Standard: the metallic-roughness BSDF. Constant: emits its resolved base colour and scatters nothing, an unlit flat surface.
+enum class ShadingModel { Standard, Constant };
+
 // Metallic-roughness material extended with Specular and AO: the raw texture set this project's assets ship.
 struct Material {
     pathtracer::gfx::ImageTexture baseColorTexture;

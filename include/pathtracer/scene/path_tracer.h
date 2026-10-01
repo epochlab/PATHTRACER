@@ -16,6 +16,7 @@
 #include "pathtracer/scene/embree_accel.h"
 #include "pathtracer/scene/gltf_loader.h"
 #include "pathtracer/scene/light.h"
+#include "pathtracer/scene/material.h"
 #include "pathtracer/scene/thread_pool.h"
 
 namespace pathtracer::scene {
@@ -59,6 +60,8 @@ struct PathTraceSettings {
     float transmissionDepth = 0.0F;
     // Gulbrandsen 2014 edgetint for the conductor lobe; 1 = white edge, see bsdf.h's BsdfParams.
     glm::vec3 edgeTint = glm::vec3(1.0F);
+    // Constant short-circuits tracePath to emit resolveBaseColor and terminate; see material.h's ShadingModel.
+    ShadingModel shadingModel = ShadingModel::Standard;
 };
 
 // Stops either side of unity the readout is exact over: the next binade above the +/-13.95 EV the exposure controls reach.
