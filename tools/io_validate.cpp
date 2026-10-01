@@ -118,14 +118,20 @@ std::filesystem::path writeJson(const char* name, const std::string& text) {
     return path;
 }
 
-// The shipped scene must load: without this row, every rejection row below could pass by rejecting everything.
-PT_CHECK(scene_config_accepts_the_shipped_scene, Fast, Exact) {
-    ctx.plan(1);
-    const std::filesystem::path scene = std::filesystem::path(ASSET_ROOT_DIR) / "scenes" / "cornell.json";
-    const std::optional<pathtracer::config::SceneConfig> loaded = pathtracer::config::loadSceneConfig(scene.string());
-    char detail[256];
-    std::snprintf(detail, sizeof(detail), "loadSceneConfig rejected the shipped scene at %s", scene.string().c_str());
-    PT_EXPECT(ctx, loaded.has_value(), detail);
+// Every shipped scene must load under the closed key sets: without this, each rejection row below could pass by rejecting everything.
+PT_CHECK(scene_config_accepts_the_shipped_scenes, Fast, Exact) {
+    const std::vector<const char*> shipped = {"cornell.json", "macbeth.json", "stump.json"};
+    ctx.plan(static_cast<int>(shipped.size()) + 1);
+    for (const char* name : shipped) {
+        const std::filesystem::path scene = std::filesystem::path(ASSET_ROOT_DIR) / "scenes" / name;
+        char detail[256];
+        std::snprintf(detail, sizeof(detail), "loadSceneConfig rejected the shipped scene at %s", scene.string().c_str());
+        PT_EXPECT(ctx, pathtracer::config::loadSceneConfig(scene.string()).has_value(), detail);
+    }
+    // Anti-vacuity for the textures key itself: macbeth binds its chart only through it, so an unparsed key would leave it empty.
+    const std::optional<pathtracer::config::SceneConfig> macbeth =
+        pathtracer::config::loadSceneConfig((std::filesystem::path(ASSET_ROOT_DIR) / "scenes" / "macbeth.json").string());
+    PT_EXPECT(ctx, macbeth && macbeth->textures.size() == 2, "macbeth.json's textures did not parse to its two grids");
 }
 
 // The rejection half of the contract: each row is a malformation a real authoring mistake produces, and each must be reported.
@@ -138,7 +144,7 @@ PT_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
     // Built by mutating a base that loads, so each row fails for the reason it names rather than passing vacuously on an earlier error.
     const auto scene = [](const std::string& lights) {
         return std::string(
-                   "{\"model\":{\"gltfPath\":\"geometry/cornell/cornell_v001.gltf\",\"texturePath\":\"\","
+                   "{\"model\":{\"gltfPath\":\"geometry/cornell/cornell_v001.gltf\","
                    "\"position\":[0,0,0],\"rotation\":[0,0,0]},"
                    "\"environment\":{\"hdriPath\":\"textures/republiqueHDR_2k.exr\"},"
                    "\"materialPath\":\"materials/clay.json\"") +
@@ -163,8 +169,19 @@ PT_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
          scene(",\"lights\":[{\"type\":\"quad\",\"origin\":[0,0,0],\"edge0\":[1,0,0],\"edge1\":[1,1,0],"
                "\"color\":[1,1,1],\"intensity\":5.0,\"twoSided\":false}]")},
         // Each node maps slot names to paths; a bare path string would leave the slot unstated.
-        {"textureOverrides entry that is not a slot object", "engine_io_scene_textureflat.json",
-         scene(",\"textureOverrides\":{\"sphere01\":\"textures/macbeth.exr\"}")},
+        {"textures entry that is not a slot object", "engine_io_scene_textureflat.json",
+         scene(",\"textures\":{\"sphere01\":\"textures/macbeth.exr\"}")},
+        // Retired keys, well-formed otherwise: an ignored textureOverrides would render the scene untextured with no diagnostic.
+        {"the retired textureOverrides key", "engine_io_scene_textureoverrides.json",
+         scene(",\"textureOverrides\":{\"sphere01\":{\"baseColorTexture\":\"textures/macbeth.exr\"}}")},
+        {"the retired model.texturePath key", "engine_io_scene_texturepath.json",
+         "{\"model\":{\"gltfPath\":\"geometry/cornell/cornell_v001.gltf\",\"texturePath\":\"\","
+         "\"position\":[0,0,0],\"rotation\":[0,0,0]},\"environment\":{\"hdriPath\":\"textures/republiqueHDR_2k.exr\"},"
+         "\"materialPath\":\"materials/clay.json\"}"},
+        {"a misspelt environment key", "engine_io_scene_envtypo.json",
+         "{\"model\":{\"gltfPath\":\"geometry/cornell/cornell_v001.gltf\",\"position\":[0,0,0],\"rotation\":[0,0,0]},"
+         "\"environment\":{\"hdriPath\":\"textures/republiqueHDR_2k.exr\",\"lightEnable\":false},"
+         "\"materialPath\":\"materials/clay.json\"}"},
         {"negative light colour", "engine_io_scene_negcolor.json",
          scene(",\"lights\":[{\"type\":\"quad\",\"origin\":[0,0,0],\"edge0\":[1,0,0],\"edge1\":[0,0,1],"
                "\"color\":[1,-1,1],\"intensity\":5.0,\"twoSided\":false}]")},

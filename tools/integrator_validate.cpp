@@ -933,10 +933,10 @@ PT_CHECK(material_binding_resolution, Fast, Exact) {
     return;
 }
 
-// Texture binding: applyTextureOverrides replaces exactly the named nodes' named slots, atomically, and rejects every bad entry.
+// Texture binding: bindSceneTextures fills exactly the named nodes' named slots, atomically, and rejects every bad entry.
 PT_CHECK(texture_binding_resolution, Fast, Exact) {
     const std::filesystem::path root = std::filesystem::temp_directory_path();
-    const std::string exr = "engine_integrator_texture_override.exr";
+    const std::string exr = "engine_integrator_scene_texture.exr";
     const glm::vec4 texel(0.25F, 0.5F, 0.75F, 1.0F);
     const bool written = pathtracer::gfx::writeExr((root / exr).string(), {1, 1, {texel.x, texel.y, texel.z, texel.w}});
     // "beta" owns two primitives, as a multi-primitive glTF node does: an override must reach both.
@@ -946,8 +946,8 @@ PT_CHECK(texture_binding_resolution, Fast, Exact) {
                                          MeshInstance{makeMaterial(1.0F, glm::vec3(0.04F)), glm::mat4(1.0F), "beta"}};
     };
     const auto apply = [&](std::vector<MeshInstance>& instances,
-                           const std::map<std::string, std::map<std::string, std::string>>& overrides) {
-        return pathtracer::scene::applyTextureOverrides(instances, overrides, root.string(),
+                           const std::map<std::string, std::map<std::string, std::string>>& textures) {
+        return pathtracer::scene::bindSceneTextures(instances, textures, root.string(),
                                                      pathtracer::gfx::ScalarType::Float32);
     };
     const glm::vec4 white(1.0F);
@@ -972,7 +972,8 @@ PT_CHECK(texture_binding_resolution, Fast, Exact) {
     std::cout << "  the stderr diagnostics below are expected: they are the function under test refusing a bad scene\n";
     std::vector<MeshInstance> untouched = makeInstances();
     PT_EXPECT(ctx, !apply(untouched, {{"delta", {{"baseColorTexture", exr}}}}), "a key naming no node was accepted");
-    PT_EXPECT(ctx, !apply(untouched, {{"beta", {{"aoTexture", exr}}}}), "an unknown slot was accepted");
+    // aoTexture is the retired baked-AO slot: AO is ray-traced, so binding it must fail rather than load a map nothing reads.
+    PT_EXPECT(ctx, !apply(untouched, {{"beta", {{"aoTexture", exr}}}}), "the retired aoTexture slot was accepted");
     PT_EXPECT(ctx, !apply(untouched, {{"beta", {{"baseColorTexture", "does_not_exist.exr"}}}}),
               "a missing texture file was accepted");
     // alpha is valid and sorts first, so a non-atomic implementation would have bound it before beta's missing file failed.

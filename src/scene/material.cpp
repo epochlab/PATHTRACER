@@ -12,7 +12,6 @@ Material makeDefaultMaterial() {
         {1, 1, std::vector<float>{0.5F, 0.5F, 0.5F, 1.0F}},  // bumpTexture: any constant -> zero finite-difference
         {1, 1, std::vector<float>{1.0F, 1.0F, 1.0F, 1.0F}},  // roughnessTexture: roughnessFactor/min/max fully control the result
         {1, 1, std::vector<float>{0.04F, 0.04F, 0.04F, 1.0F}},  // specularTexture: standard dielectric f0, inert whenever metallicFactor=0
-        {1, 1, std::vector<float>{1.0F, 1.0F, 1.0F, 1.0F}},  // aoTexture: fully unoccluded
     };
 }
 

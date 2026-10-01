@@ -1,9 +1,12 @@
 #include "pathtracer/config/scene_config.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <fstream>
+#include <initializer_list>
 #include <iostream>
+#include <string_view>
 
 #include <nlohmann/json.hpp>
 
@@ -12,6 +15,18 @@
 namespace pathtracer::config {
 
 namespace {
+
+// Closed key set: a misspelt or retired key (textureOverrides, texturePath) would otherwise load as its default, silently.
+bool onlyKnownKeys(const nlohmann::json& object, std::initializer_list<std::string_view> known, const std::string& path,
+                   const char* where) {
+    for (const auto& item : object.items()) {
+        if (std::find(known.begin(), known.end(), item.key()) == known.end()) {
+            std::cerr << "loadSceneConfig: " << path << ": unknown " << where << " key '" << item.key() << "'\n";
+            return false;
+        }
+    }
+    return true;
+}
 
 // Parses and validates the optional "lights" array. Separate so each stays one screen, and every check is an authoring boundary.
 std::optional<std::vector<QuadLightConfig>> parseQuadLights(const nlohmann::json& j, const std::string& path) {
@@ -156,14 +171,20 @@ std::optional<SceneConfig> loadSceneConfig(const std::string& path) {
 
         const nlohmann::json& model = j.at("model");
         const nlohmann::json& environment = j.at("environment");
+        if (!onlyKnownKeys(j, {"model", "environment", "materialPath", "materialOverrides", "textures", "lights"}, path,
+                           "top-level") ||
+            !onlyKnownKeys(model, {"gltfPath", "position", "rotation"}, path, "model") ||
+            !onlyKnownKeys(environment, {"hdriPath", "lightEnabled"}, path, "environment")) {
+            return std::nullopt;
+        }
 
         std::map<std::string, std::string> materialOverrides;
         if (const auto it = j.find("materialOverrides"); it != j.end()) {
             materialOverrides = it->get<std::map<std::string, std::string>>();
         }
-        std::map<std::string, std::map<std::string, std::string>> textureOverrides;
-        if (const auto it = j.find("textureOverrides"); it != j.end()) {
-            textureOverrides = it->get<std::map<std::string, std::map<std::string, std::string>>>();
+        std::map<std::string, std::map<std::string, std::string>> textures;
+        if (const auto it = j.find("textures"); it != j.end()) {
+            textures = it->get<std::map<std::string, std::map<std::string, std::string>>>();
         }
 
         std::optional<std::vector<QuadLightConfig>> lights = parseQuadLights(j, path);
@@ -174,7 +195,6 @@ std::optional<SceneConfig> loadSceneConfig(const std::string& path) {
         return SceneConfig{
             ModelConfig{
                 model.at("gltfPath").get<std::string>(),
-                model.at("texturePath").get<std::string>(),
                 model.at("position").get<glm::vec3>(),
                 model.at("rotation").get<glm::vec3>(),
             },
@@ -184,7 +204,7 @@ std::optional<SceneConfig> loadSceneConfig(const std::string& path) {
             },
             j.at("materialPath").get<std::string>(),
             std::move(materialOverrides),
-            std::move(textureOverrides),
+            std::move(textures),
             std::move(*lights),
         };
     } catch (const nlohmann::json::exception& e) {

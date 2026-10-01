@@ -102,16 +102,12 @@ inline pathtracer::gfx::ImageTexture makeConstantTexture(glm::vec3 rgb) {
     return makeImageTexture(1, 1, {rgb.x, rgb.y, rgb.z, 1.0F}, pathtracer::gfx::ScalarType::Float32);
 }
 
-// 1x1 textures carrying the neutral values resolveBsdfParams expects: flat tangent normal, roughness in .r, f0 in the specular slot.
+// The neutral default (white baseColor, flat normal, constant bump) with roughness in .r and f0 in the specular slot.
 inline pathtracer::scene::Material makeMaterial(float roughness, glm::vec3 f0) {
-    return pathtracer::scene::Material{
-        makeConstantTexture(glm::vec3(1.0F)),              // baseColor -- white, worst case
-        makeConstantTexture(glm::vec3(0.5F, 0.5F, 1.0F)),  // normal -- flat
-        makeConstantTexture(glm::vec3(0.5F)),              // bump -- unused, bumpStrength 0
-        makeConstantTexture(glm::vec3(roughness)),         // roughness
-        makeConstantTexture(f0),                           // specular -> f0
-        makeConstantTexture(glm::vec3(1.0F)),              // AO -- unoccluded
-    };
+    pathtracer::scene::Material material = pathtracer::scene::makeDefaultMaterial();
+    material.roughnessTexture = makeConstantTexture(glm::vec3(roughness));
+    material.specularTexture = makeConstantTexture(f0);
+    return material;
 }
 
 }  // namespace tools::fixtures

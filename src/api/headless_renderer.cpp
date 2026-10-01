@@ -128,16 +128,15 @@ std::unique_ptr<HeadlessRenderer> HeadlessRenderer::open(const std::string& asse
     }
 
     const glm::mat4 rootTransform = rootTransformOf(*scene);
-    std::optional<pathtracer::scene::LoadedModel> model = pathtracer::scene::loadGltf(
-        assetRoot + "/" + scene->model.gltfPath, profile->render.textureType, rootTransform,
-        scene->model.texturePath.empty() ? "" : assetRoot + "/" + scene->model.texturePath);
+    std::optional<pathtracer::scene::LoadedModel> model =
+        pathtracer::scene::loadGltf(assetRoot + "/" + scene->model.gltfPath, rootTransform);
     if (!model) {
         error = "failed to load glTF " + assetRoot + "/" + scene->model.gltfPath;
         return nullptr;
     }
-    if (!pathtracer::scene::applyTextureOverrides(model->instances, scene->textureOverrides, assetRoot,
-                                               profile->render.textureType)) {
-        error = "failed to resolve texture overrides";
+    if (!pathtracer::scene::bindSceneTextures(model->instances, scene->textures, assetRoot,
+                                              profile->render.textureType)) {
+        error = "failed to bind scene textures";
         return nullptr;
     }
 

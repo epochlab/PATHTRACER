@@ -29,13 +29,12 @@ bool everyKeyNamesAnInstance(const Overrides& overrides, const std::vector<MeshI
 
 }  // namespace
 
-bool applyTextureOverrides(std::vector<MeshInstance>& instances,
-                           const std::map<std::string, std::map<std::string, std::string>>& textureOverrides,
-                           const std::string& assetRoot, pathtracer::gfx::ScalarType textureType) {
-    if (!everyKeyNamesAnInstance(textureOverrides, instances, "applyTextureOverrides", "textureOverrides")) {
+bool bindSceneTextures(std::vector<MeshInstance>& instances,
+                       const std::map<std::string, std::map<std::string, std::string>>& textures,
+                       const std::string& assetRoot, pathtracer::gfx::ScalarType textureType) {
+    if (!everyKeyNamesAnInstance(textures, instances, "bindSceneTextures", "textures")) {
         return false;
     }
-    // aoTexture is absent: nothing reads it, so a binding there would be dead input.
     static const std::map<std::string_view, pathtracer::gfx::ImageTexture Material::*> kSlots = {
         {"baseColorTexture", &Material::baseColorTexture}, {"normalTexture", &Material::normalTexture},
         {"bumpTexture", &Material::bumpTexture},           {"roughnessTexture", &Material::roughnessTexture},
@@ -43,10 +42,10 @@ bool applyTextureOverrides(std::vector<MeshInstance>& instances,
     };
     // Everything validated and loaded before any instance changes, each distinct file once however many slots share it.
     std::map<std::string, pathtracer::gfx::ImageTexture> loaded;
-    for (const auto& [nodeName, slots] : textureOverrides) {
+    for (const auto& [nodeName, slots] : textures) {
         for (const auto& [slot, path] : slots) {
             if (!kSlots.contains(slot)) {
-                std::cerr << "applyTextureOverrides: '" << nodeName << "' names unknown slot '" << slot << "'\n";
+                std::cerr << "bindSceneTextures: '" << nodeName << "' names unknown slot '" << slot << "'\n";
                 return false;
             }
             if (loaded.contains(path)) {
@@ -55,14 +54,14 @@ bool applyTextureOverrides(std::vector<MeshInstance>& instances,
             std::optional<pathtracer::gfx::ImageTexture> texture =
                 pathtracer::gfx::loadImageTexture(assetRoot + "/" + path, textureType);
             if (!texture) {
-                std::cerr << "applyTextureOverrides: '" << nodeName << "' texture '" << path << "' failed to load\n";
+                std::cerr << "bindSceneTextures: '" << nodeName << "' texture '" << path << "' failed to load\n";
                 return false;
             }
             loaded.emplace(path, std::move(*texture));
         }
     }
     for (MeshInstance& instance : instances) {
-        if (const auto it = textureOverrides.find(instance.name); it != textureOverrides.end()) {
+        if (const auto it = textures.find(instance.name); it != textures.end()) {
             for (const auto& [slot, path] : it->second) {
                 instance.material.*kSlots.at(slot) = loaded.at(path);
             }
