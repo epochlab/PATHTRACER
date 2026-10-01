@@ -51,16 +51,17 @@ BsdfParams makeParams(float roughness, float metallic) {
 EnvironmentMap makeStructuredEnvironment(pathtracer::gfx::ScalarType type) {
     constexpr int kWidth = 64;
     constexpr int kHeight = 32;
-    std::vector<float> rgba(static_cast<std::size_t>(kWidth) * kHeight * 4, 0.05F);
+    constexpr int kChannels = pathtracer::gfx::kRgbChannels;
+    std::vector<float> rgb(static_cast<std::size_t>(kWidth) * kHeight * kChannels, 0.05F);
     for (int y = 8; y < 12; ++y) {
         for (int x = 20; x < 26; ++x) {
-            const std::size_t idx = ((static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x)) * 4;
-            rgba[idx + 0] = 400.0F;
-            rgba[idx + 1] = 380.0F;
-            rgba[idx + 2] = 300.0F;
+            const std::size_t idx = ((static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x)) * kChannels;
+            rgb[idx + 0] = 400.0F;
+            rgb[idx + 1] = 380.0F;
+            rgb[idx + 2] = 300.0F;
         }
     }
-    return EnvironmentMap(tools::fixtures::makeImageTexture(kWidth, kHeight, rgba, type));
+    return EnvironmentMap(tools::fixtures::makeImageTexture(kWidth, kHeight, kChannels, rgb, type));
 }
 
 // sample returns a density, pdf() recovers it from a direction; MIS uses both, so disagreement corrupts every MIS weight in the renderer.
@@ -105,11 +106,12 @@ PT_CHECK(environment_pdf_tracks_stored_luminance, Fast, Exact) {
     constexpr int kPatchY = 16;
     constexpr int kBackgroundX = 40;
     const float midpoint = 1.0F + pathtracer::gfx::kHalfUnitRoundoff;
-    std::vector<float> rgba(static_cast<std::size_t>(kWidth) * kHeight * 4, 1.0F);
-    const std::size_t patch = ((static_cast<std::size_t>(kPatchY) * kWidth) + kPatchX) * 4;
-    rgba[patch + 0] = midpoint;
-    rgba[patch + 1] = midpoint;
-    rgba[patch + 2] = midpoint;
+    constexpr int kChannels = pathtracer::gfx::kRgbChannels;
+    std::vector<float> rgb(static_cast<std::size_t>(kWidth) * kHeight * kChannels, 1.0F);
+    const std::size_t patch = ((static_cast<std::size_t>(kPatchY) * kWidth) + kPatchX) * kChannels;
+    rgb[patch + 0] = midpoint;
+    rgb[patch + 1] = midpoint;
+    rgb[patch + 2] = midpoint;
 
     // Direction through a texel's centre, inverting equirectTexelOf's (u, v) = (phi / 2pi + 1/2, theta / pi).
     const auto centre = [](int x, int y) {
@@ -119,7 +121,7 @@ PT_CHECK(environment_pdf_tracks_stored_luminance, Fast, Exact) {
     };
     ctx.plan(2);
     for (const pathtracer::gfx::ScalarType type : {pathtracer::gfx::ScalarType::Float16, pathtracer::gfx::ScalarType::Float32}) {
-        const pathtracer::gfx::ImageTexture image = tools::fixtures::makeImageTexture(kWidth, kHeight, rgba, type);
+        const pathtracer::gfx::ImageTexture image = tools::fixtures::makeImageTexture(kWidth, kHeight, kChannels, rgb, type);
         const float storedRatio = image.texel(kPatchX, kPatchY).g / image.texel(kBackgroundX, kPatchY).g;
         const float sourceRatio = midpoint;
         const EnvironmentMap env(image);
@@ -177,20 +179,20 @@ PT_CHECK(environment_poles_do_not_blend_opposite_rows, Fast, Exact) {
     constexpr int kHeight = 8;
     const glm::vec3 north(1.0F, 0.0F, 0.0F);
     const glm::vec3 south(0.0F, 0.0F, 1.0F);
-    std::vector<float> rgba(static_cast<std::size_t>(kWidth) * kHeight * 4, 0.0F);
+    constexpr int kChannels = pathtracer::gfx::kRgbChannels;
+    std::vector<float> rgb(static_cast<std::size_t>(kWidth) * kHeight * kChannels, 0.0F);
     for (int y = 0; y < kHeight; ++y) {
         // Row 0 is theta = 0 (the zenith) and the last row theta = pi; the band between them is mid grey, so a blend is unmistakable.
         const glm::vec3 row = y == 0 ? north : (y == kHeight - 1 ? south : glm::vec3(0.5F));
         for (int x = 0; x < kWidth; ++x) {
-            const std::size_t idx = ((static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x)) * 4;
-            rgba[idx + 0] = row.x;
-            rgba[idx + 1] = row.y;
-            rgba[idx + 2] = row.z;
-            rgba[idx + 3] = 1.0F;
+            const std::size_t idx = ((static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x)) * kChannels;
+            rgb[idx + 0] = row.x;
+            rgb[idx + 1] = row.y;
+            rgb[idx + 2] = row.z;
         }
     }
     const EnvironmentMap env(
-        tools::fixtures::makeImageTexture(kWidth, kHeight, rgba, pathtracer::gfx::ScalarType::Float32));
+        tools::fixtures::makeImageTexture(kWidth, kHeight, kChannels, rgb, pathtracer::gfx::ScalarType::Float32));
 
     const glm::vec3 zenith = env.sampleDirection(glm::vec3(0.0F, 1.0F, 0.0F));
     const glm::vec3 nadir = env.sampleDirection(glm::vec3(0.0F, -1.0F, 0.0F));

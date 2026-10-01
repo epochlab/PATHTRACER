@@ -1,7 +1,6 @@
 {
     "model": {
         "gltfPath": "geometry/cornell/cornell_v001.gltf",
-        "texturePath": "",
         "position": [0.0, 0.0, 0.0],
         "rotation": [0.0, 0.0, 0.0]
     },

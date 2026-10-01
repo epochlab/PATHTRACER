@@ -11,6 +11,7 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <memory>
 #include <numbers>
 #include <optional>
 #include <random>
@@ -713,7 +714,8 @@ PT_CHECK(constant_surface_returns_texel, Fast, Exact) {
     const glm::vec3 expected = texel * tint;
 
     TestScene scene = makeTwoInstanceScene(1.0F, glm::vec3(0.04F));
-    scene.instances[0].material.baseColorTexture = makeConstantTexture(texel);
+    scene.instances[0].material.baseColorTexture =
+        std::make_shared<const pathtracer::gfx::ImageTexture>(makeConstantTexture(texel));
     std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
     if (!accel.has_value()) {
         finish(ctx, false, "failed to build the Embree two-instance scene");
@@ -727,7 +729,8 @@ PT_CHECK(constant_surface_returns_texel, Fast, Exact) {
     perInstance[0].diffuseColour = tint;
 
     const EnvironmentMap black(tools::fixtures::makeImageTexture(
-        kEnvWidth, kEnvHeight, std::vector<float>(static_cast<std::size_t>(kEnvWidth) * kEnvHeight * 4, 0.0F),
+        kEnvWidth, kEnvHeight, pathtracer::gfx::kRgbChannels,
+        std::vector<float>(static_cast<std::size_t>(kEnvWidth) * kEnvHeight * pathtracer::gfx::kRgbChannels, 0.0F),
         pathtracer::gfx::ScalarType::Float32));
     const EnvironmentMap uniform = makeUniformEnvironment();
     // Identical samples average to themselves up to one rounding per accumulation: kTexelSamples per pixel, then the 16-pixel block.
@@ -933,10 +936,10 @@ PT_CHECK(material_binding_resolution, Fast, Exact) {
     return;
 }
 
-// Texture binding: applyTextureOverrides replaces exactly the named nodes' named slots, atomically, and rejects every bad entry.
+// Texture binding: bindSceneTextures fills exactly the named nodes' named slots, atomically, and rejects every bad entry.
 PT_CHECK(texture_binding_resolution, Fast, Exact) {
     const std::filesystem::path root = std::filesystem::temp_directory_path();
-    const std::string exr = "engine_integrator_texture_override.exr";
+    const std::string exr = "engine_integrator_scene_texture.exr";
     const glm::vec4 texel(0.25F, 0.5F, 0.75F, 1.0F);
     const bool written = pathtracer::gfx::writeExr((root / exr).string(), {1, 1, {texel.x, texel.y, texel.z, texel.w}});
     // "beta" owns two primitives, as a multi-primitive glTF node does: an override must reach both.
@@ -946,39 +949,51 @@ PT_CHECK(texture_binding_resolution, Fast, Exact) {
                                          MeshInstance{makeMaterial(1.0F, glm::vec3(0.04F)), glm::mat4(1.0F), "beta"}};
     };
     const auto apply = [&](std::vector<MeshInstance>& instances,
-                           const std::map<std::string, std::map<std::string, std::string>>& overrides) {
-        return pathtracer::scene::applyTextureOverrides(instances, overrides, root.string(),
+                           const std::map<std::string, std::map<std::string, std::string>>& textures) {
+        return pathtracer::scene::bindSceneTextures(instances, textures, root.string(),
                                                      pathtracer::gfx::ScalarType::Float32);
     };
-    const glm::vec4 white(1.0F);
-    const glm::vec4 flatNormal(0.5F, 0.5F, 1.0F, 1.0F);
+    const glm::vec3 rgb(texel);
+    // The scalar slot holds R alone: had the cache handed it the RGB decode, its texel would read (0.25, 0.5, 0.75).
+    const glm::vec3 red(texel.r, 0.0F, 0.0F);
+    const glm::vec3 white(1.0F);
+    const glm::vec3 flatNormal(0.5F, 0.5F, 1.0F);
 
-    ctx.plan(11);
+    ctx.plan(13);
     PT_EXPECT(ctx, written, "could not write the override EXR");
     std::vector<MeshInstance> instances = makeInstances();
     PT_EXPECT(ctx, apply(instances, {{"beta", {{"baseColorTexture", exr}, {"roughnessTexture", exr}}}}),
               "a valid override was rejected");
-    PT_EXPECT(ctx, instances[1].material.baseColorTexture.texel(0, 0) == texel &&
-                       instances[2].material.baseColorTexture.texel(0, 0) == texel,
+    PT_EXPECT(ctx, instances[1].material.baseColorTexture->texel(0, 0) == rgb &&
+                       instances[2].material.baseColorTexture->texel(0, 0) == rgb,
               "baseColorTexture did not reach both of beta's primitives");
-    PT_EXPECT(ctx, instances[1].material.roughnessTexture.texel(0, 0) == texel &&
-                       instances[2].material.roughnessTexture.texel(0, 0) == texel,
-              "roughnessTexture did not reach both of beta's primitives");
-    PT_EXPECT(ctx, instances[1].material.normalTexture.texel(0, 0) == flatNormal,
+    PT_EXPECT(ctx, instances[1].material.roughnessTexture->texel(0, 0) == red &&
+                       instances[2].material.roughnessTexture->texel(0, 0) == red,
+              "roughnessTexture did not reach both of beta's primitives as R alone");
+    // One file in an RGB and a scalar slot: each must hold its own channel count, not whichever decode the cache kept first.
+    PT_EXPECT(ctx, instances[1].material.baseColorTexture->channels == pathtracer::gfx::kRgbChannels &&
+                       instances[1].material.roughnessTexture->channels == pathtracer::gfx::kScalarChannels,
+              "a file shared by an RGB and a scalar slot was stored at one channel count for both");
+    // One decode per (file, channel count): beta's two primitives must hold the same image, not a 4K copy each.
+    PT_EXPECT(ctx, instances[1].material.baseColorTexture == instances[2].material.baseColorTexture &&
+                       instances[1].material.roughnessTexture == instances[2].material.roughnessTexture,
+              "beta's primitives hold separate copies of one decoded texture");
+    PT_EXPECT(ctx, instances[1].material.normalTexture->texel(0, 0) == flatNormal,
               "an unnamed slot on an overridden node changed");
-    PT_EXPECT(ctx, instances[0].material.baseColorTexture.texel(0, 0) == white,
+    PT_EXPECT(ctx, instances[0].material.baseColorTexture->texel(0, 0) == white,
               "the override leaked onto alpha, which it does not name");
 
     std::cout << "  the stderr diagnostics below are expected: they are the function under test refusing a bad scene\n";
     std::vector<MeshInstance> untouched = makeInstances();
     PT_EXPECT(ctx, !apply(untouched, {{"delta", {{"baseColorTexture", exr}}}}), "a key naming no node was accepted");
-    PT_EXPECT(ctx, !apply(untouched, {{"beta", {{"aoTexture", exr}}}}), "an unknown slot was accepted");
+    // aoTexture is the retired baked-AO slot: AO is ray-traced, so binding it must fail rather than load a map nothing reads.
+    PT_EXPECT(ctx, !apply(untouched, {{"beta", {{"aoTexture", exr}}}}), "the retired aoTexture slot was accepted");
     PT_EXPECT(ctx, !apply(untouched, {{"beta", {{"baseColorTexture", "does_not_exist.exr"}}}}),
               "a missing texture file was accepted");
     // alpha is valid and sorts first, so a non-atomic implementation would have bound it before beta's missing file failed.
     PT_EXPECT(ctx, !apply(untouched, {{"alpha", {{"baseColorTexture", exr}}}, {"beta", {{"baseColorTexture", "missing.exr"}}}}),
               "a scene with one bad entry was accepted");
-    PT_EXPECT(ctx, untouched[0].material.baseColorTexture.texel(0, 0) == white,
+    PT_EXPECT(ctx, untouched[0].material.baseColorTexture->texel(0, 0) == white,
               "a rejected scene still rebound alpha: validation must finish before any instance changes");
     std::filesystem::remove(root / exr);
 }

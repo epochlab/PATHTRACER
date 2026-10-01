@@ -6,7 +6,6 @@
 
 #include <glm/glm.hpp>
 
-#include "pathtracer/gfx/scalar_type.h"
 #include "pathtracer/scene/light.h"
 #include "pathtracer/scene/material.h"
 #include "pathtracer/scene/ray_types.h"
@@ -18,7 +17,7 @@ namespace pathtracer::scene {
 struct MeshInstance {
     Material material;
     glm::mat4 transform;
-    std::string name;  // owning glTF node's name, empty if the node has none; keys SceneConfig::materialOverrides/textureOverrides
+    std::string name;  // owning glTF node's name, empty if the node has none; keys SceneConfig::materialOverrides/textures
 };
 
 struct LoadedModel {
@@ -29,10 +28,8 @@ struct LoadedModel {
     std::vector<ShadingTriangle> shadingTriangles;
 };
 
-// Parses path via cgltf, textures via loadImageTexture at textureType. rootTransform seeds the node walk; textureDir overrides the dir.
-std::optional<LoadedModel> loadGltf(const std::string& path, pathtracer::gfx::ScalarType textureType,
-                                     const glm::mat4& rootTransform = glm::mat4(1.0F),
-                                     const std::string& textureDir = "");
+// Parses path's geometry via cgltf, ignoring its materials: each instance gets makeDefaultMaterial(). rootTransform seeds the walk.
+std::optional<LoadedModel> loadGltf(const std::string& path, const glm::mat4& rootTransform = glm::mat4(1.0F));
 
 // Appends each light's emitting geometry to `model`, plus one entry per light to `instanceLightIndex`, pre-sized to instances, all -1.
 void appendQuadLights(LoadedModel& model, const std::vector<QuadLight>& lights,

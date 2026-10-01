@@ -2,6 +2,7 @@
 
 #include <iostream>
 #include <map>
+#include <memory>
 #include <set>
 #include <string_view>
 #include <utility>
@@ -29,42 +30,45 @@ bool everyKeyNamesAnInstance(const Overrides& overrides, const std::vector<MeshI
 
 }  // namespace
 
-bool applyTextureOverrides(std::vector<MeshInstance>& instances,
-                           const std::map<std::string, std::map<std::string, std::string>>& textureOverrides,
-                           const std::string& assetRoot, pathtracer::gfx::ScalarType textureType) {
-    if (!everyKeyNamesAnInstance(textureOverrides, instances, "applyTextureOverrides", "textureOverrides")) {
+bool bindSceneTextures(std::vector<MeshInstance>& instances,
+                       const std::map<std::string, std::map<std::string, std::string>>& textures,
+                       const std::string& assetRoot, pathtracer::gfx::ScalarType textureType) {
+    if (!everyKeyNamesAnInstance(textures, instances, "bindSceneTextures", "textures")) {
         return false;
     }
-    // aoTexture is absent: nothing reads it, so a binding there would be dead input.
-    static const std::map<std::string_view, pathtracer::gfx::ImageTexture Material::*> kSlots = {
+    static const std::map<std::string_view, TextureHandle Material::*> kSlots = {
         {"baseColorTexture", &Material::baseColorTexture}, {"normalTexture", &Material::normalTexture},
         {"bumpTexture", &Material::bumpTexture},           {"roughnessTexture", &Material::roughnessTexture},
         {"specularTexture", &Material::specularTexture},
     };
-    // Everything validated and loaded before any instance changes, each distinct file once however many slots share it.
-    std::map<std::string, pathtracer::gfx::ImageTexture> loaded;
-    for (const auto& [nodeName, slots] : textureOverrides) {
+    // Each slot loads at its default's channel count, so a file shared by an RGB and a scalar slot is decoded once per count.
+    const Material defaults = makeDefaultMaterial();
+    const auto channelsOf = [&](const std::string& slot) { return (defaults.*kSlots.at(slot))->channels; };
+    // Everything validated and loaded before any instance changes, each distinct (file, channel count) once however many slots share it.
+    std::map<std::pair<std::string, int>, TextureHandle> loaded;
+    for (const auto& [nodeName, slots] : textures) {
         for (const auto& [slot, path] : slots) {
             if (!kSlots.contains(slot)) {
-                std::cerr << "applyTextureOverrides: '" << nodeName << "' names unknown slot '" << slot << "'\n";
+                std::cerr << "bindSceneTextures: '" << nodeName << "' names unknown slot '" << slot << "'\n";
                 return false;
             }
-            if (loaded.contains(path)) {
+            std::pair<std::string, int> key{path, channelsOf(slot)};
+            if (loaded.contains(key)) {
                 continue;
             }
             std::optional<pathtracer::gfx::ImageTexture> texture =
-                pathtracer::gfx::loadImageTexture(assetRoot + "/" + path, textureType);
+                pathtracer::gfx::loadImageTexture(assetRoot + "/" + path, textureType, key.second);
             if (!texture) {
-                std::cerr << "applyTextureOverrides: '" << nodeName << "' texture '" << path << "' failed to load\n";
+                std::cerr << "bindSceneTextures: '" << nodeName << "' texture '" << path << "' failed to load\n";
                 return false;
             }
-            loaded.emplace(path, std::move(*texture));
+            loaded.emplace(std::move(key), std::make_shared<const pathtracer::gfx::ImageTexture>(std::move(*texture)));
         }
     }
     for (MeshInstance& instance : instances) {
-        if (const auto it = textureOverrides.find(instance.name); it != textureOverrides.end()) {
+        if (const auto it = textures.find(instance.name); it != textures.end()) {
             for (const auto& [slot, path] : it->second) {
-                instance.material.*kSlots.at(slot) = loaded.at(path);
+                instance.material.*kSlots.at(slot) = loaded.at({path, channelsOf(slot)});
             }
         }
     }

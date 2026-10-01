@@ -8,6 +8,7 @@
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <random>
 #include <string>
@@ -45,18 +46,13 @@ struct Options {
     std::string benchLogPath;  // appends the run to this JSON Lines benchmark log (bench_log.h); empty = no log
 };
 
-pathtracer::gfx::ImageTexture constantTexture(glm::vec4 color) {
-    return {1, 1, std::vector<float>{color.r, color.g, color.b, color.a}};
-}
-
+// The neutral default material, varying only the two slots the G-buffer AOVs under test read.
 Material makeMaterial(glm::vec3 baseColor, float roughness) {
-    Material material;
-    material.baseColorTexture = constantTexture(glm::vec4(baseColor, 1.0F));
-    material.normalTexture = constantTexture(glm::vec4(0.5F, 0.5F, 1.0F, 1.0F));  // tangent-space (0,0,1)
-    material.bumpTexture = constantTexture(glm::vec4(0.5F));
-    material.roughnessTexture = constantTexture(glm::vec4(roughness));
-    material.specularTexture = constantTexture(glm::vec4(0.04F));
-    material.aoTexture = constantTexture(glm::vec4(1.0F));  // unread since AO became path-traced; a valid 1x1 matches makeDefaultMaterial
+    Material material = makeDefaultMaterial();
+    material.baseColorTexture = std::make_shared<const pathtracer::gfx::ImageTexture>(pathtracer::gfx::ImageTexture{
+        1, 1, pathtracer::gfx::kRgbChannels, std::vector<float>{baseColor.r, baseColor.g, baseColor.b}});
+    material.roughnessTexture = std::make_shared<const pathtracer::gfx::ImageTexture>(
+        pathtracer::gfx::ImageTexture{1, 1, pathtracer::gfx::kScalarChannels, std::vector<float>{roughness}});
     return material;
 }
 

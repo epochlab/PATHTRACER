@@ -11,11 +11,9 @@
 
 namespace pathtracer::config {
 
-// What to load and where to place it. gltfPath/texturePath are relative to ASSET_ROOT_DIR, as every asset path is.
+// What geometry to load and where to place it. gltfPath is relative to ASSET_ROOT_DIR, as every asset path is.
 struct ModelConfig {
     std::string gltfPath;
-    // Directory (relative to ASSET_ROOT_DIR) glTF image URIs resolve against, overriding the .gltf's own; lets one config swap tiers.
-    std::string texturePath;
     glm::vec3 position;         // model root, composed on top of the glTF's own node transforms
     glm::vec3 rotation;  // degrees, order X,Y,Z, see main.cpp's loadGltf call
 };
@@ -72,8 +70,8 @@ struct SceneConfig {
     std::string materialPath;
     // glTF node name -> material JSON path, overriding materialPath for that instance. Optional; absent means every instance uses it.
     std::map<std::string, std::string> materialOverrides;
-    // glTF node name -> {Material slot name -> EXR path relative to ASSET_ROOT_DIR}, replacing that slot's glTF texture. Optional.
-    std::map<std::string, std::map<std::string, std::string>> textureOverrides;
+    // glTF node name -> {Material slot name -> EXR path relative to ASSET_ROOT_DIR}; the only texture source. Optional.
+    std::map<std::string, std::map<std::string, std::string>> textures;
     // Rectangular area lights, in the glTF's own vertex space (ModelConfig position/rotation applies too). Optional; absent means none.
     std::vector<QuadLightConfig> lights;
 };

@@ -2,7 +2,6 @@
 
 #include <cgltf.h>
 
-#include <charconv>
 #include <cstddef>
 #include <iostream>
 #include <optional>
@@ -11,8 +10,6 @@
 
 #include <glm/gtc/matrix_inverse.hpp>
 #include <glm/gtc/type_ptr.hpp>
-
-#include "pathtracer/gfx/hdr_image.h"
 
 namespace pathtracer::scene {
 
@@ -26,60 +23,6 @@ struct Vertex {
     glm::vec4 tangent;  // .w = bitangent handedness (glTF convention)
     glm::vec3 colour;   // COLOR_0, multiplies baseColor; white (1,1,1) when the primitive has none
 };
-
-std::string dirOf(const std::string& path) {
-    const std::size_t pos = path.find_last_of('/');
-    return pos == std::string::npos ? "." : path.substr(0, pos);
-}
-
-// This project's glTF material `extras` are hand-authored, so the loader reads them as a texture-slot table beside the core material.
-std::optional<int> extrasTextureIndex(const char* extrasJson, const std::string& key) {
-    if (extrasJson == nullptr) {
-        return std::nullopt;
-    }
-    const std::string text(extrasJson);
-    const std::size_t keyPos = text.find("\"" + key + "\"");
-    if (keyPos == std::string::npos) {
-        return std::nullopt;
-    }
-    const std::size_t indexPos = text.find("\"index\"", keyPos);
-    if (indexPos == std::string::npos) {
-        return std::nullopt;
-    }
-    const std::size_t colonPos = text.find(':', indexPos);
-    if (colonPos == std::string::npos) {
-        return std::nullopt;
-    }
-    std::size_t numPos = colonPos + 1;
-    while (numPos < text.size() && (text[numPos] == ' ' || text[numPos] == '\t')) {
-        ++numPos;
-    }
-    // from_chars, not atoi: atoi can't distinguish "parsed 0" from "failed to parse", and 0 is a valid texture index.
-    int value = 0;
-    const std::from_chars_result result =
-        std::from_chars(text.c_str() + numPos, text.c_str() + text.size(), value);
-    if (result.ec != std::errc{}) {
-        return std::nullopt;
-    }
-    return value;
-}
-
-std::optional<pathtracer::gfx::ImageTexture> loadTexture(const cgltf_texture* texture, const std::string& dir,
-                                                      pathtracer::gfx::ScalarType textureType) {
-    if (texture == nullptr || texture->image == nullptr || texture->image->uri == nullptr) {
-        return std::nullopt;
-    }
-    return pathtracer::gfx::loadImageTexture(dir + "/" + texture->image->uri, textureType);
-}
-
-std::optional<pathtracer::gfx::ImageTexture> loadTextureByIndex(const cgltf_data* data, std::optional<int> index,
-                                                             const std::string& dir, pathtracer::gfx::ScalarType textureType) {
-    if (!index.has_value() || *index < 0 ||
-        static_cast<cgltf_size>(*index) >= data->textures_count) {
-        return std::nullopt;
-    }
-    return loadTexture(&data->textures[static_cast<cgltf_size>(*index)], dir, textureType);
-}
 
 glm::mat4 localNodeTransform(const cgltf_node* node) {
     if (node->has_matrix) {
@@ -205,53 +148,9 @@ std::optional<std::vector<unsigned int>> readIndices(const cgltf_accessor* indic
     return indices;
 }
 
-// A slot referencing no texture substitutes the fallback; one referencing a texture it cannot decode is an error and propagates.
-std::optional<pathtracer::gfx::ImageTexture> resolveTexture(const cgltf_texture* texture, const std::string& dir,
-                                                         pathtracer::gfx::ScalarType textureType, pathtracer::gfx::ImageTexture fallback) {
-    if (texture == nullptr) {
-        return fallback;
-    }
-    return loadTexture(texture, dir, textureType);
-}
-
-std::optional<pathtracer::gfx::ImageTexture> resolveTextureByIndex(const cgltf_data* data, std::optional<int> index,
-                                                                 const std::string& dir, pathtracer::gfx::ScalarType textureType,
-                                                                 pathtracer::gfx::ImageTexture fallback) {
-    if (!index.has_value()) {
-        return fallback;
-    }
-    return loadTextureByIndex(data, index, dir, textureType);
-}
-
-std::optional<Material> loadMaterialTextures(const cgltf_data* data, const cgltf_material& mat,
-                                              const std::string& dir, pathtracer::gfx::ScalarType textureType) {
-    const Material defaults = makeDefaultMaterial();
-    auto baseColor = resolveTexture(mat.pbr_metallic_roughness.base_color_texture.texture, dir, textureType,
-                                     defaults.baseColorTexture);
-    auto normal = resolveTexture(mat.normal_texture.texture, dir, textureType, defaults.normalTexture);
-    auto ao = resolveTexture(mat.occlusion_texture.texture, dir, textureType, defaults.aoTexture);
-    auto roughness = resolveTextureByIndex(
-        data, extrasTextureIndex(mat.extras.data, "roughnessTexture"), dir, textureType, defaults.roughnessTexture);
-    auto specular = resolveTextureByIndex(
-        data, extrasTextureIndex(mat.extras.data, "specularTexture"), dir, textureType, defaults.specularTexture);
-    auto bump = resolveTextureByIndex(data, extrasTextureIndex(mat.extras.data, "bumpTexture"), dir, textureType,
-                                       defaults.bumpTexture);
-    if (!baseColor || !normal || !ao || !roughness || !specular || !bump) {
-        std::cerr << "loadGltf: material '" << (mat.name != nullptr ? mat.name : "<unnamed>")
-                   << "' references a texture that failed to load\n";
-        return std::nullopt;
-    }
-
-    return Material{
-        std::move(*baseColor), std::move(*normal), std::move(*bump),
-        std::move(*roughness), std::move(*specular), std::move(*ao),
-    };
-}
-
 // Builds one MeshInstance from a triangle primitive, failing with nullopt rather than defaulting geometry it cannot read.
-std::optional<MeshInstance> loadPrimitive(const cgltf_data* data, const cgltf_primitive& prim,
-                                           const glm::mat4& transform, const std::string& dir,
-                                           pathtracer::gfx::ScalarType textureType, int instanceIndex, const std::string& name,
+std::optional<MeshInstance> loadPrimitive(const cgltf_primitive& prim, const glm::mat4& transform, int instanceIndex,
+                                           const std::string& name,
                                            std::vector<Triangle>& outWorldTriangles,
                                            std::vector<ShadingTriangle>& outShadingTriangles) {
     if (prim.type != cgltf_primitive_type_triangles) {
@@ -267,20 +166,13 @@ std::optional<MeshInstance> loadPrimitive(const cgltf_data* data, const cgltf_pr
     if (!indices.has_value()) {
         return std::nullopt;
     }
-    // Zero-initialized, matching cgltf's "not in the JSON", which resolveTexture already treats as the neutral default.
-    static const cgltf_material kDefaultMaterial{};
-    std::optional<Material> material =
-        loadMaterialTextures(data, prim.material != nullptr ? *prim.material : kDefaultMaterial, dir, textureType);
-    if (!material.has_value()) {
-        return std::nullopt;
-    }
-
     const std::vector<Vertex> vertices = readVertices(*acc);
     appendWorldTriangles(vertices, *indices, transform, outWorldTriangles);
     appendShadingTriangles(vertices, *indices, transform, instanceIndex, outShadingTriangles);
 
+    // Geometry only: every slot starts at its neutral default, and bindSceneTextures binds the scene JSON's maps by node name.
     return MeshInstance{
-        std::move(*material),
+        makeDefaultMaterial(),
         transform,
         name,
     };
@@ -292,8 +184,7 @@ constexpr int kMaxNodeDepth = 256;
 // A node hierarchy is a tree, so recursion is its structure; the depth cap above is what makes it safe on untrusted input.
 
 // NOLINTNEXTLINE(misc-no-recursion)
-bool walkNodes(const cgltf_data* data, cgltf_node* const* nodes, cgltf_size count,
-               const glm::mat4& parentTransform, const std::string& dir, pathtracer::gfx::ScalarType textureType,
+bool walkNodes(cgltf_node* const* nodes, cgltf_size count, const glm::mat4& parentTransform,
                std::vector<MeshInstance>& instances, std::vector<Triangle>& worldTriangles,
                std::vector<ShadingTriangle>& shadingTriangles, int depth = 0) {
     if (depth >= kMaxNodeDepth) {
@@ -310,8 +201,8 @@ bool walkNodes(const cgltf_data* data, cgltf_node* const* nodes, cgltf_size coun
             for (cgltf_size pi = 0; pi < node->mesh->primitives_count; ++pi) {
                 const int instanceIndex = static_cast<int>(instances.size());  // index this primitive's MeshInstance will get
                 std::optional<MeshInstance> instance =
-                    loadPrimitive(data, node->mesh->primitives[pi], world, dir, textureType, instanceIndex, name,
-                                  worldTriangles, shadingTriangles);
+                    loadPrimitive(node->mesh->primitives[pi], world, instanceIndex, name, worldTriangles,
+                                  shadingTriangles);
                 if (!instance.has_value()) {
                     return false;
                 }
@@ -319,8 +210,8 @@ bool walkNodes(const cgltf_data* data, cgltf_node* const* nodes, cgltf_size coun
             }
         }
 
-        if (!walkNodes(data, node->children, node->children_count, world, dir, textureType, instances,
-                       worldTriangles, shadingTriangles, depth + 1)) {
+        if (!walkNodes(node->children, node->children_count, world, instances, worldTriangles, shadingTriangles,
+                       depth + 1)) {
             return false;
         }
     }
@@ -329,8 +220,7 @@ bool walkNodes(const cgltf_data* data, cgltf_node* const* nodes, cgltf_size coun
 
 }  // namespace
 
-std::optional<LoadedModel> loadGltf(const std::string& path, pathtracer::gfx::ScalarType textureType,
-                                     const glm::mat4& rootTransform, const std::string& textureDir) {
+std::optional<LoadedModel> loadGltf(const std::string& path, const glm::mat4& rootTransform) {
     const cgltf_options options{};
     cgltf_data* data = nullptr;
 
@@ -350,10 +240,9 @@ std::optional<LoadedModel> loadGltf(const std::string& path, pathtracer::gfx::Sc
     }
 
     LoadedModel model;
-    const std::string dir = textureDir.empty() ? dirOf(path) : textureDir;
     const bool ok = data->scene != nullptr &&
-                    walkNodes(data, data->scene->nodes, data->scene->nodes_count, rootTransform,
-                              dir, textureType, model.instances, model.worldTriangles, model.shadingTriangles);
+                    walkNodes(data->scene->nodes, data->scene->nodes_count, rootTransform, model.instances,
+                              model.worldTriangles, model.shadingTriangles);
 
     cgltf_free(data);
 

@@ -322,12 +322,11 @@ std::optional<AppResources> initializeApp(const pathtracer::config::SceneConfig&
         glm::rotate(glm::mat4(1.0F), glm::radians(sceneConfig.model.rotation.x), glm::vec3(1.0F, 0.0F, 0.0F));
 
     const auto loadStart = std::chrono::steady_clock::now();
-    std::optional<pathtracer::scene::LoadedModel> stumpModel = pathtracer::scene::loadGltf(
-        std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.model.gltfPath, profileConfig.render.textureType, sceneTransform,
-        std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.model.texturePath);
-    // Scene-JSON textures replace the glTF's before anything reads a material; applyTextureOverrides logs the reason it fails.
-    if (stumpModel && !pathtracer::scene::applyTextureOverrides(stumpModel->instances, sceneConfig.textureOverrides,
-                                                                ASSET_ROOT_DIR, profileConfig.render.textureType)) {
+    std::optional<pathtracer::scene::LoadedModel> stumpModel =
+        pathtracer::scene::loadGltf(std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.model.gltfPath, sceneTransform);
+    // Scene-JSON textures bind before anything reads a material; bindSceneTextures logs the reason it fails.
+    if (stumpModel && !pathtracer::scene::bindSceneTextures(stumpModel->instances, sceneConfig.textures, ASSET_ROOT_DIR,
+                                                            profileConfig.render.textureType)) {
         stumpModel.reset();
     }
     const double loadMs =
@@ -350,7 +349,8 @@ std::optional<AppResources> initializeApp(const pathtracer::config::SceneConfig&
         pathtracer::gfx::OcioDisplayTransform::create();
     // Decoded once here, not through a texture-upload helper: the path tracer samples this CPU ImageTexture directly, with no GPU upload.
     std::optional<pathtracer::gfx::ImageTexture> environmentImage = pathtracer::gfx::loadImageTexture(
-        std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.environment.hdriPath, profileConfig.render.textureType);
+        std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.environment.hdriPath, profileConfig.render.textureType,
+        pathtracer::gfx::kRgbChannels);
     std::optional<pathtracer::config::MaterialConfig> materialConfig = pathtracer::config::loadMaterialConfig(
         std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.materialPath);
 
