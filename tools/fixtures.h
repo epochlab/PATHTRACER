@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <memory>
 #include <optional>
 #include <random>
 #include <vector>
@@ -106,9 +107,9 @@ inline pathtracer::gfx::ImageTexture makeConstantTexture(glm::vec3 rgb) {
 // The neutral default (white baseColor, flat normal, constant bump) with roughness in .r and f0 in the specular slot.
 inline pathtracer::scene::Material makeMaterial(float roughness, glm::vec3 f0) {
     pathtracer::scene::Material material = pathtracer::scene::makeDefaultMaterial();
-    material.roughnessTexture =
-        makeImageTexture(1, 1, pathtracer::gfx::kScalarChannels, {roughness}, pathtracer::gfx::ScalarType::Float32);
-    material.specularTexture = makeConstantTexture(f0);
+    material.roughnessTexture = std::make_shared<const pathtracer::gfx::ImageTexture>(
+        makeImageTexture(1, 1, pathtracer::gfx::kScalarChannels, {roughness}, pathtracer::gfx::ScalarType::Float32));
+    material.specularTexture = std::make_shared<const pathtracer::gfx::ImageTexture>(makeConstantTexture(f0));
     return material;
 }
 

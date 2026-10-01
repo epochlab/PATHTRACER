@@ -2,6 +2,7 @@
 
 #include <iostream>
 #include <map>
+#include <memory>
 #include <set>
 #include <string_view>
 #include <utility>
@@ -35,16 +36,16 @@ bool bindSceneTextures(std::vector<MeshInstance>& instances,
     if (!everyKeyNamesAnInstance(textures, instances, "bindSceneTextures", "textures")) {
         return false;
     }
-    static const std::map<std::string_view, pathtracer::gfx::ImageTexture Material::*> kSlots = {
+    static const std::map<std::string_view, TextureHandle Material::*> kSlots = {
         {"baseColorTexture", &Material::baseColorTexture}, {"normalTexture", &Material::normalTexture},
         {"bumpTexture", &Material::bumpTexture},           {"roughnessTexture", &Material::roughnessTexture},
         {"specularTexture", &Material::specularTexture},
     };
     // Each slot loads at its default's channel count, so a file shared by an RGB and a scalar slot is decoded once per count.
     const Material defaults = makeDefaultMaterial();
-    const auto channelsOf = [&](const std::string& slot) { return (defaults.*kSlots.at(slot)).channels; };
+    const auto channelsOf = [&](const std::string& slot) { return (defaults.*kSlots.at(slot))->channels; };
     // Everything validated and loaded before any instance changes, each distinct (file, channel count) once however many slots share it.
-    std::map<std::pair<std::string, int>, pathtracer::gfx::ImageTexture> loaded;
+    std::map<std::pair<std::string, int>, TextureHandle> loaded;
     for (const auto& [nodeName, slots] : textures) {
         for (const auto& [slot, path] : slots) {
             if (!kSlots.contains(slot)) {
@@ -61,7 +62,7 @@ bool bindSceneTextures(std::vector<MeshInstance>& instances,
                 std::cerr << "bindSceneTextures: '" << nodeName << "' texture '" << path << "' failed to load\n";
                 return false;
             }
-            loaded.emplace(std::move(key), std::move(*texture));
+            loaded.emplace(std::move(key), std::make_shared<const pathtracer::gfx::ImageTexture>(std::move(*texture)));
         }
     }
     for (MeshInstance& instance : instances) {
