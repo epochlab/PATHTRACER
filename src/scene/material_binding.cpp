@@ -40,30 +40,34 @@ bool bindSceneTextures(std::vector<MeshInstance>& instances,
         {"bumpTexture", &Material::bumpTexture},           {"roughnessTexture", &Material::roughnessTexture},
         {"specularTexture", &Material::specularTexture},
     };
-    // Everything validated and loaded before any instance changes, each distinct file once however many slots share it.
-    std::map<std::string, pathtracer::gfx::ImageTexture> loaded;
+    // Each slot loads at its default's channel count, so a file shared by an RGB and a scalar slot is decoded once per count.
+    const Material defaults = makeDefaultMaterial();
+    const auto channelsOf = [&](const std::string& slot) { return (defaults.*kSlots.at(slot)).channels; };
+    // Everything validated and loaded before any instance changes, each distinct (file, channel count) once however many slots share it.
+    std::map<std::pair<std::string, int>, pathtracer::gfx::ImageTexture> loaded;
     for (const auto& [nodeName, slots] : textures) {
         for (const auto& [slot, path] : slots) {
             if (!kSlots.contains(slot)) {
                 std::cerr << "bindSceneTextures: '" << nodeName << "' names unknown slot '" << slot << "'\n";
                 return false;
             }
-            if (loaded.contains(path)) {
+            std::pair<std::string, int> key{path, channelsOf(slot)};
+            if (loaded.contains(key)) {
                 continue;
             }
             std::optional<pathtracer::gfx::ImageTexture> texture =
-                pathtracer::gfx::loadImageTexture(assetRoot + "/" + path, textureType);
+                pathtracer::gfx::loadImageTexture(assetRoot + "/" + path, textureType, key.second);
             if (!texture) {
                 std::cerr << "bindSceneTextures: '" << nodeName << "' texture '" << path << "' failed to load\n";
                 return false;
             }
-            loaded.emplace(path, std::move(*texture));
+            loaded.emplace(std::move(key), std::move(*texture));
         }
     }
     for (MeshInstance& instance : instances) {
         if (const auto it = textures.find(instance.name); it != textures.end()) {
             for (const auto& [slot, path] : it->second) {
-                instance.material.*kSlots.at(slot) = loaded.at(path);
+                instance.material.*kSlots.at(slot) = loaded.at({path, channelsOf(slot)});
             }
         }
     }

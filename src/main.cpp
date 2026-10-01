@@ -349,7 +349,8 @@ std::optional<AppResources> initializeApp(const pathtracer::config::SceneConfig&
         pathtracer::gfx::OcioDisplayTransform::create();
     // Decoded once here, not through a texture-upload helper: the path tracer samples this CPU ImageTexture directly, with no GPU upload.
     std::optional<pathtracer::gfx::ImageTexture> environmentImage = pathtracer::gfx::loadImageTexture(
-        std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.environment.hdriPath, profileConfig.render.textureType);
+        std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.environment.hdriPath, profileConfig.render.textureType,
+        pathtracer::gfx::kRgbChannels);
     std::optional<pathtracer::config::MaterialConfig> materialConfig = pathtracer::config::loadMaterialConfig(
         std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.materialPath);
 

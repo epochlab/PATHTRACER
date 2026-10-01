@@ -48,8 +48,8 @@ struct Options {
 // The neutral default material, varying only the two slots the G-buffer AOVs under test read.
 Material makeMaterial(glm::vec3 baseColor, float roughness) {
     Material material = makeDefaultMaterial();
-    material.baseColorTexture = {1, 1, std::vector<float>{baseColor.r, baseColor.g, baseColor.b, 1.0F}};
-    material.roughnessTexture = {1, 1, std::vector<float>{roughness, roughness, roughness, 1.0F}};
+    material.baseColorTexture = {1, 1, pathtracer::gfx::kRgbChannels, std::vector<float>{baseColor.r, baseColor.g, baseColor.b}};
+    material.roughnessTexture = {1, 1, pathtracer::gfx::kScalarChannels, std::vector<float>{roughness}};
     return material;
 }
 

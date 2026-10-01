@@ -727,7 +727,8 @@ PT_CHECK(constant_surface_returns_texel, Fast, Exact) {
     perInstance[0].diffuseColour = tint;
 
     const EnvironmentMap black(tools::fixtures::makeImageTexture(
-        kEnvWidth, kEnvHeight, std::vector<float>(static_cast<std::size_t>(kEnvWidth) * kEnvHeight * 4, 0.0F),
+        kEnvWidth, kEnvHeight, pathtracer::gfx::kRgbChannels,
+        std::vector<float>(static_cast<std::size_t>(kEnvWidth) * kEnvHeight * pathtracer::gfx::kRgbChannels, 0.0F),
         pathtracer::gfx::ScalarType::Float32));
     const EnvironmentMap uniform = makeUniformEnvironment();
     // Identical samples average to themselves up to one rounding per accumulation: kTexelSamples per pixel, then the 16-pixel block.
@@ -950,20 +951,27 @@ PT_CHECK(texture_binding_resolution, Fast, Exact) {
         return pathtracer::scene::bindSceneTextures(instances, textures, root.string(),
                                                      pathtracer::gfx::ScalarType::Float32);
     };
-    const glm::vec4 white(1.0F);
-    const glm::vec4 flatNormal(0.5F, 0.5F, 1.0F, 1.0F);
+    const glm::vec3 rgb(texel);
+    // The scalar slot holds R alone: had the cache handed it the RGB decode, its texel would read (0.25, 0.5, 0.75).
+    const glm::vec3 red(texel.r, 0.0F, 0.0F);
+    const glm::vec3 white(1.0F);
+    const glm::vec3 flatNormal(0.5F, 0.5F, 1.0F);
 
-    ctx.plan(11);
+    ctx.plan(12);
     PT_EXPECT(ctx, written, "could not write the override EXR");
     std::vector<MeshInstance> instances = makeInstances();
     PT_EXPECT(ctx, apply(instances, {{"beta", {{"baseColorTexture", exr}, {"roughnessTexture", exr}}}}),
               "a valid override was rejected");
-    PT_EXPECT(ctx, instances[1].material.baseColorTexture.texel(0, 0) == texel &&
-                       instances[2].material.baseColorTexture.texel(0, 0) == texel,
+    PT_EXPECT(ctx, instances[1].material.baseColorTexture.texel(0, 0) == rgb &&
+                       instances[2].material.baseColorTexture.texel(0, 0) == rgb,
               "baseColorTexture did not reach both of beta's primitives");
-    PT_EXPECT(ctx, instances[1].material.roughnessTexture.texel(0, 0) == texel &&
-                       instances[2].material.roughnessTexture.texel(0, 0) == texel,
-              "roughnessTexture did not reach both of beta's primitives");
+    PT_EXPECT(ctx, instances[1].material.roughnessTexture.texel(0, 0) == red &&
+                       instances[2].material.roughnessTexture.texel(0, 0) == red,
+              "roughnessTexture did not reach both of beta's primitives as R alone");
+    // One file in an RGB and a scalar slot: each must hold its own channel count, not whichever decode the cache kept first.
+    PT_EXPECT(ctx, instances[1].material.baseColorTexture.channels == pathtracer::gfx::kRgbChannels &&
+                       instances[1].material.roughnessTexture.channels == pathtracer::gfx::kScalarChannels,
+              "a file shared by an RGB and a scalar slot was stored at one channel count for both");
     PT_EXPECT(ctx, instances[1].material.normalTexture.texel(0, 0) == flatNormal,
               "an unnamed slot on an overridden node changed");
     PT_EXPECT(ctx, instances[0].material.baseColorTexture.texel(0, 0) == white,

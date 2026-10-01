@@ -18,7 +18,7 @@ glm::vec3 rotateAboutY(const glm::vec3& v, YRotation rotation) {
 
 // Rec.709 weights, kRec709LuminanceWeights, floored at 0: a negative texel makes the CDF non-monotonic, which invertCdf's search needs.
 float luminanceOf(const pathtracer::gfx::ImageTexture& image, int x, int y) {
-    const glm::vec4 texel = image.texel(x, y);
+    const glm::vec3 texel = image.texel(x, y);
     return std::max(0.0F, (0.2126F * texel.r) + (0.7152F * texel.g) + (0.0722F * texel.b));
 }
 
@@ -109,7 +109,7 @@ glm::vec3 EnvironmentMap::sampleDirection(const glm::vec3& direction, YRotation 
     const float theta = std::acos(glm::clamp(rotated.y, -1.0F, 1.0F));
     const float phi = std::atan2(rotated.x, rotated.z);
     const glm::vec2 uv((phi / (2.0F * glm::pi<float>())) + 0.5F, theta / glm::pi<float>());
-    return glm::vec3(pathtracer::gfx::sampleBilinear(image_, uv, pathtracer::gfx::WrapMode::ClampV));
+    return pathtracer::gfx::sampleBilinear(image_, uv, pathtracer::gfx::WrapMode::ClampV);
 }
 
 EnvironmentMap::EnvSample EnvironmentMap::importanceSampleDirection(glm::vec2 u,

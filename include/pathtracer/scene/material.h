@@ -16,7 +16,7 @@ struct Material {
     pathtracer::gfx::ImageTexture specularTexture;
 };
 
-// Neutral default: every slot a 1x1 identity texture, which avoids a div-by-zero in buildShadingFrame and zeroes the bump difference.
+// Neutral default, every slot a 1x1 identity texture; also the single definition of each slot's channel count bindSceneTextures loads at.
 [[nodiscard]] Material makeDefaultMaterial();
 
 }  // namespace pathtracer::scene

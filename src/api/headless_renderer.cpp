@@ -121,7 +121,7 @@ std::unique_ptr<HeadlessRenderer> HeadlessRenderer::open(const std::string& asse
         return nullptr;
     }
     std::optional<pathtracer::gfx::ImageTexture> environmentImage = pathtracer::gfx::loadImageTexture(
-        assetRoot + "/" + scene->environment.hdriPath, profile->render.textureType);
+        assetRoot + "/" + scene->environment.hdriPath, profile->render.textureType, pathtracer::gfx::kRgbChannels);
     if (!environmentImage) {
         error = "failed to load environment " + assetRoot + "/" + scene->environment.hdriPath;
         return nullptr;

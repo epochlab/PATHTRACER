@@ -4,8 +4,10 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <exception>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <limits>
 #include <optional>
 #include <random>
@@ -14,6 +16,10 @@
 #include <variant>
 #include <vector>
 
+#include <OpenEXR/ImfChannelList.h>
+#include <OpenEXR/ImfFrameBuffer.h>
+#include <OpenEXR/ImfHeader.h>
+#include <OpenEXR/ImfOutputFile.h>
 #include <glm/glm.hpp>
 #include <nlohmann/json.hpp>
 
@@ -587,6 +593,7 @@ PT_CHECK(profile_config_integer_counts, Fast, Exact) {
 // loadImageTexture's typed read: Float16 must equal the IEEE round-to-nearest-even cast, and a source above kHalfMax is rejected there.
 PT_CHECK(image_texture_half_load, Fast, Exact) {
     using pathtracer::gfx::ScalarType;
+    constexpr int kRgb = pathtracer::gfx::kRgbChannels;
     const auto writeProbe = [](const char* name, const std::vector<float>& values) {
         pathtracer::gfx::HdrImage image{static_cast<int>(values.size()), 1, {}};
         for (const float v : values) {
@@ -597,7 +604,7 @@ PT_CHECK(image_texture_half_load, Fast, Exact) {
     };
     const auto sameTexels = [](const pathtracer::gfx::ImageTexture& a, const std::vector<float>& expected) {
         for (int x = 0; x < a.width; ++x) {
-            const glm::vec4 texel = a.texel(x, 0);
+            const glm::vec3 texel = a.texel(x, 0);
             if (texel.r != expected[static_cast<std::size_t>(x)] || texel.b != expected[static_cast<std::size_t>(x)]) {
                 return false;
             }
@@ -610,9 +617,9 @@ PT_CHECK(image_texture_half_load, Fast, Exact) {
     const std::vector<float> exact = {0.0F, 1.0F, 1.5F, 0.25F, 2048.0F, -3.0F, pathtracer::gfx::kHalfMax, 1.0F / 16384.0F};
     const std::optional<std::filesystem::path> exactPath = writeProbe("engine_io_half_exact.exr", exact);
     const std::optional<pathtracer::gfx::ImageTexture> exact16 =
-        exactPath ? pathtracer::gfx::loadImageTexture(exactPath->string(), ScalarType::Float16) : std::nullopt;
+        exactPath ? pathtracer::gfx::loadImageTexture(exactPath->string(), ScalarType::Float16, kRgb) : std::nullopt;
     const std::optional<pathtracer::gfx::ImageTexture> exact32 =
-        exactPath ? pathtracer::gfx::loadImageTexture(exactPath->string(), ScalarType::Float32) : std::nullopt;
+        exactPath ? pathtracer::gfx::loadImageTexture(exactPath->string(), ScalarType::Float32, kRgb) : std::nullopt;
     PT_EXPECT(ctx, exact16 && exact32 && std::holds_alternative<std::vector<pathtracer::gfx::Half>>(exact16->texels) && sameTexels(*exact16, exact) &&
                            sameTexels(*exact32, exact),
                   "binary16-exact values did not load bit-identically at Float16 and Float32");
@@ -625,24 +632,102 @@ PT_CHECK(image_texture_half_load, Fast, Exact) {
     }
     const std::optional<std::filesystem::path> arbitraryPath = writeProbe("engine_io_half_arbitrary.exr", arbitrary);
     const std::optional<pathtracer::gfx::ImageTexture> arbitrary16 =
-        arbitraryPath ? pathtracer::gfx::loadImageTexture(arbitraryPath->string(), ScalarType::Float16) : std::nullopt;
+        arbitraryPath ? pathtracer::gfx::loadImageTexture(arbitraryPath->string(), ScalarType::Float16, kRgb) : std::nullopt;
     PT_EXPECT(ctx, arbitrary16 && sameTexels(*arbitrary16, rounded),
                   "Float16 load differs from static_cast<Half> (round to nearest even)");
     const std::optional<pathtracer::gfx::ImageTexture> arbitrary32 =
-        arbitraryPath ? pathtracer::gfx::loadImageTexture(arbitraryPath->string(), ScalarType::Float32) : std::nullopt;
+        arbitraryPath ? pathtracer::gfx::loadImageTexture(arbitraryPath->string(), ScalarType::Float32, kRgb) : std::nullopt;
     PT_EXPECT(ctx, arbitrary32 && sameTexels(*arbitrary32, arbitrary), "Float32 load is not an exact copy");
 
     // Overflow: 70000 is finite in float and beyond kHalfMax, so Float16 must reject it and Float32 must not.
     const std::optional<std::filesystem::path> overPath = writeProbe("engine_io_half_overflow.exr", {1.0F, 70000.0F});
-    PT_EXPECT(ctx, overPath && !pathtracer::gfx::loadImageTexture(overPath->string(), ScalarType::Float16),
+    PT_EXPECT(ctx, overPath && !pathtracer::gfx::loadImageTexture(overPath->string(), ScalarType::Float16, kRgb),
                   "Float16 accepted a texel above binary16's finite max");
-    PT_EXPECT(ctx, overPath && pathtracer::gfx::loadImageTexture(overPath->string(), ScalarType::Float32),
+    PT_EXPECT(ctx, overPath && pathtracer::gfx::loadImageTexture(overPath->string(), ScalarType::Float32, kRgb),
                   "Float32 rejected a finite texel");
     for (const std::optional<std::filesystem::path>& path : {exactPath, arbitraryPath, overPath}) {
         if (path) {
             std::filesystem::remove(*path);
         }
     }
+}
+
+// loadImageTexture keeps exactly the channels its slot reads: R alone for a scalar map, RGB otherwise, and a missing one is an error.
+PT_CHECK(image_texture_channel_selection, Fast, Exact) {
+    using pathtracer::gfx::ScalarType;
+    constexpr int kWidth = 3;
+    constexpr int kHeight = 2;
+    constexpr std::size_t kTexels = static_cast<std::size_t>(kWidth) * kHeight;
+    const auto probe = [](int x, int y) {
+        const auto t = static_cast<float>(x + (kWidth * y));
+        return glm::vec3(t, 10.0F + t, 20.0F + t);  // distinct per lane, so a stride or lane slip reads a wrong value
+    };
+    pathtracer::gfx::HdrImage rgba{kWidth, kHeight, {}};
+    for (int y = 0; y < kHeight; ++y) {
+        for (int x = 0; x < kWidth; ++x) {
+            const glm::vec3 v = probe(x, y);
+            rgba.rgba.insert(rgba.rgba.end(), {v.r, v.g, v.b, 1.0F});
+        }
+    }
+    const std::filesystem::path rgbaPath = scratchPath("engine_io_channels_rgba.exr");
+    const bool rgbaWritten = pathtracer::gfx::writeExr(rgbaPath.string(), rgba);
+
+    // An R-only file, as a DCC writes a scalar map: OpenEXR zero-fills absent slices, so only an explicit check rejects it at RGB.
+    const std::filesystem::path redPath = scratchPath("engine_io_channels_r.exr");
+    bool redWritten = true;
+    try {
+        std::vector<float> red(kTexels);
+        for (std::size_t i = 0; i < kTexels; ++i) {
+            red[i] = static_cast<float>(i);
+        }
+        Imf::Header header(kWidth, kHeight);
+        header.channels().insert("R", Imf::Channel(Imf::FLOAT));
+        Imf::FrameBuffer frameBuffer;
+        frameBuffer.insert("R", Imf::Slice(Imf::FLOAT, reinterpret_cast<char*>(red.data()), sizeof(float),
+                                           sizeof(float) * kWidth));
+        Imf::OutputFile file(redPath.string().c_str(), header);
+        file.setFrameBuffer(frameBuffer);
+        file.writePixels(kHeight);
+    } catch (const std::exception& e) {
+        std::cerr << "io_validate: could not write the R-only probe: " << e.what() << '\n';
+        redWritten = false;
+    }
+
+    const auto matches = [&](const pathtracer::gfx::ImageTexture& image, int channels) {
+        const auto* texels = std::get_if<std::vector<float>>(&image.texels);
+        if (image.channels != channels || texels == nullptr || texels->size() != kTexels * static_cast<std::size_t>(channels)) {
+            return false;
+        }
+        for (int y = 0; y < kHeight; ++y) {
+            for (int x = 0; x < kWidth; ++x) {
+                const glm::vec3 expected = channels == pathtracer::gfx::kScalarChannels
+                                               ? glm::vec3(probe(x, y).r, 0.0F, 0.0F)
+                                               : probe(x, y);
+                if (image.texel(x, y) != expected) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+    ctx.plan(6);
+    PT_EXPECT(ctx, rgbaWritten && redWritten, "could not write the channel probes");
+    const std::optional<pathtracer::gfx::ImageTexture> scalar =
+        pathtracer::gfx::loadImageTexture(rgbaPath.string(), ScalarType::Float32, pathtracer::gfx::kScalarChannels);
+    PT_EXPECT(ctx, scalar && matches(*scalar, pathtracer::gfx::kScalarChannels),
+              "a scalar load of an RGBA file did not keep R alone at one float per texel");
+    const std::optional<pathtracer::gfx::ImageTexture> rgb =
+        pathtracer::gfx::loadImageTexture(rgbaPath.string(), ScalarType::Float32, pathtracer::gfx::kRgbChannels);
+    PT_EXPECT(ctx, rgb && matches(*rgb, pathtracer::gfx::kRgbChannels),
+              "an RGB load of an RGBA file did not keep exact RGB at three floats per texel");
+    PT_EXPECT(ctx, pathtracer::gfx::loadImageTexture(redPath.string(), ScalarType::Float32, pathtracer::gfx::kScalarChannels),
+              "an R-only file was rejected by a scalar slot, which reads R alone");
+    std::cout << "  the stderr diagnostics below are expected: an R-only file has no G or B channel to read\n";
+    PT_EXPECT(ctx, !pathtracer::gfx::loadImageTexture(redPath.string(), ScalarType::Float32, pathtracer::gfx::kRgbChannels),
+              "an R-only file was accepted by an RGB slot, which would have read zero-filled G and B");
+    PT_EXPECT(ctx, !pathtracer::gfx::loadExr(redPath.string()), "loadExr accepted an R-only file as RGBA");
+    std::filesystem::remove(rgbaPath);
+    std::filesystem::remove(redPath);
 }
 
 // sampleBilinear at Float16 against Float32: the bound is derived from u = 2^-11 and gamma_6 (Higham 2002, 3.1), never fitted.
@@ -658,31 +743,37 @@ PT_CHECK(image_texture_bilinear_half_bound, Fast, Exact) {
     std::mt19937 rng(static_cast<std::mt19937::result_type>(ctx.seed()));
     // Normal range of binary16: [2^-14, kHalfMax], log-uniform so every binade is exercised.
     std::uniform_real_distribution<float> logValue(-14.0F, std::log2(pathtracer::gfx::kHalfMax));
-    std::vector<float> rgba(static_cast<std::size_t>(kWidth) * kHeight * 4);
-    for (float& v : rgba) {
-        v = std::exp2(logValue(rng));
-    }
-    const pathtracer::gfx::ImageTexture full{kWidth, kHeight, rgba};
-    const pathtracer::gfx::ImageTexture half{kWidth, kHeight, std::vector<pathtracer::gfx::Half>(rgba.begin(), rgba.end())};
-
     std::uniform_real_distribution<float> unit(-1.0F, 2.0F);  // beyond [0,1] so both wrap directions are covered
-    double worst = 0.0;
-    double largest = 0.0;
-    for (int i = 0; i < kSamples; ++i) {
-        const glm::vec2 uv(unit(rng), unit(rng));
-        const glm::vec4 s32 = pathtracer::gfx::sampleBilinear(full, uv);
-        const glm::vec4 s16 = pathtracer::gfx::sampleBilinear(half, uv);
-        for (int c = 0; c < 4; ++c) {
-            const double relative = std::fabs(static_cast<double>(s16[c]) - s32[c]) / s32[c];
-            worst = std::max(worst, relative / bound);
-            largest = std::max(largest, relative);
+    // Both strides: a scalar map filters one lane through its own code path, so it needs the bound checked separately.
+    ctx.plan(4);
+    for (const int channels : {pathtracer::gfx::kScalarChannels, pathtracer::gfx::kRgbChannels}) {
+        std::vector<float> texels(static_cast<std::size_t>(kWidth) * kHeight * static_cast<std::size_t>(channels));
+        for (float& v : texels) {
+            v = std::exp2(logValue(rng));
         }
+        const pathtracer::gfx::ImageTexture full{kWidth, kHeight, channels, texels};
+        const pathtracer::gfx::ImageTexture half{kWidth, kHeight, channels,
+                                                 std::vector<pathtracer::gfx::Half>(texels.begin(), texels.end())};
+        double worst = 0.0;
+        double largest = 0.0;
+        for (int i = 0; i < kSamples; ++i) {
+            const glm::vec2 uv(unit(rng), unit(rng));
+            const glm::vec3 s32 = pathtracer::gfx::sampleBilinear(full, uv);
+            const glm::vec3 s16 = pathtracer::gfx::sampleBilinear(half, uv);
+            for (int c = 0; c < channels; ++c) {
+                const double relative = std::fabs(static_cast<double>(s16[c]) - s32[c]) / s32[c];
+                worst = std::max(worst, relative / bound);
+                largest = std::max(largest, relative);
+            }
+        }
+        char detail[192];
+        std::snprintf(detail, sizeof(detail), "%d-channel: worst |s16 - s32| / s32 is %.4g of the derived bound %.4g",
+                      channels, worst, bound);
+        PT_EXPECT(ctx, worst <= 1.0, detail);
+        std::snprintf(detail, sizeof(detail), "%d-channel: Float16 and Float32 never differed, the half path was not exercised",
+                      channels);
+        PT_EXPECT(ctx, largest > 0.0, detail);
     }
-    ctx.plan(2);
-    char detail[192];
-    std::snprintf(detail, sizeof(detail), "worst |s16 - s32| / s32 is %.4g of the derived bound %.4g", worst, bound);
-    PT_EXPECT(ctx, worst <= 1.0, detail);
-    PT_EXPECT(ctx, largest > 0.0, "Float16 and Float32 samples never differed: the half path was not exercised");
 }
 
 // The film-back catalogue's contract: every preset's dimensions feed verticalFovRadians() as a denominator and an aspect ratio.

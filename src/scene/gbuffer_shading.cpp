@@ -7,8 +7,7 @@ namespace pathtracer::scene {
 
 glm::vec3 resolveBaseColor(const Material& material, glm::vec2 uv, const glm::vec3& vertexColour,
                             const PathTraceSettings& settings) {
-    const glm::vec4 sample = pathtracer::gfx::sampleBilinear(material.baseColorTexture, uv);
-    return glm::vec3(sample) * settings.diffuseColour * vertexColour;
+    return pathtracer::gfx::sampleBilinear(material.baseColorTexture, uv) * settings.diffuseColour * vertexColour;
 }
 
 namespace {
@@ -34,7 +33,7 @@ BsdfParams resolveBsdfParams(const Material& material, glm::vec2 uv, const glm::
                               std::optional<int> heroChannel) {
     const glm::vec3 baseColor = resolveBaseColor(material, uv, vertexColour, settings);
     const float roughness = resolveRoughness(material, uv, settings);
-    const glm::vec3 specular = glm::vec3(pathtracer::gfx::sampleBilinear(material.specularTexture, uv));
+    const glm::vec3 specular = pathtracer::gfx::sampleBilinear(material.specularTexture, uv);
     const glm::vec3 f0 = glm::mix(specular, baseColor, settings.metallicFactor);
     // Dispersion enters here alone: every downstream ior consumer reads this one scalar, so the vertex stays spectrally consistent.
     const float ior = heroChannel.has_value()
@@ -56,8 +55,8 @@ ShadingFrame buildShadingFrame(const ShadingVertex& shading, const Material& mat
     tangent = glm::normalize(tangent - (glm::dot(tangent, normal) * normal));
     const glm::vec3 bitangent = glm::cross(normal, tangent) * shading.tangent.w;
 
-    const glm::vec4 normalSample = pathtracer::gfx::sampleBilinear(material.normalTexture, shading.uv);
-    const glm::vec3 tangentSpaceNormal = glm::normalize((glm::vec3(normalSample) * 2.0F) - 1.0F);
+    const glm::vec3 normalSample = pathtracer::gfx::sampleBilinear(material.normalTexture, shading.uv);
+    const glm::vec3 tangentSpaceNormal = glm::normalize((normalSample * 2.0F) - 1.0F);
     const glm::vec3 mappedNormal = glm::normalize(
         (tangentSpaceNormal.x * tangent) + (tangentSpaceNormal.y * bitangent) +
         (tangentSpaceNormal.z * normal));
