@@ -1,6 +1,7 @@
 // Gate for CIE 1931 (scene/cie.cpp), the cone space on it (scene/cone_space.cpp), the metal fit, and the Fresnel shading chrome.
 
 #include <cfloat>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -14,15 +15,18 @@
 #include "pathtracer/scene/bsdf.h"
 #include "pathtracer/scene/cie.h"
 #include "pathtracer/scene/cone_space.h"
+#include "colorchecker.h"
 #include "metal_fit.h"
 
 namespace {
 
 namespace cie = pathtracer::scene::cie;
 namespace cone = pathtracer::scene::cone;
+using tools::colorchecker::Patch;
 using tools::metal_fit::Interpolation;
 
 const std::string kChromiumTable = std::string(TOOLS_DATA_DIR) + "/chromium_johnson_christy_1974.csv";
+const std::string kColorCheckerTable = std::string(TOOLS_DATA_DIR) + "/colorchecker_babelcolor_average.csv";
 
 // Two 3x3 double inversions on O(1) entries round at ~1e-15; three orders of headroom still resolves any real defect.
 constexpr double kDoubleRoundoff = 1e-12;
@@ -145,6 +149,103 @@ PT_CHECK(nk_table_and_fit_reject_invalid_input, Fast, Exact) {
     const auto step = loadText("engine_colour_step.csv", "0.30,1.2,0\n0.55,1.2,0\n0.56,10,0\n0.90,10,0\n");
     PT_EXPECT(ctx, step && !tools::metal_fit::fitGulbrandsen(*step, Interpolation::Wavelength),
                   "average outside the edgeTint range accepted");
+}
+
+// Interior property: two intervals from either end, where no boundary point enters the stencil, Sprague reproduces any quartic exactly.
+PT_CHECK(sprague_reproduces_quartics, Fast, Exact) {
+    ctx.plan(1);
+    constexpr double kFirstNm = 380.0;
+    constexpr double kIntervalNm = 10.0;
+    constexpr int kSamples = 36;
+    constexpr double kLastNm = kFirstNm + (kIntervalNm * (kSamples - 1));
+    // Unit-scale in the centred variable, so the roundoff bound below applies without rescaling.
+    const auto quartic = [](double nm) {
+        const double u = (nm - 555.0) / 175.0;
+        return 0.5 + (u * (0.3 + (u * (-0.2 + (u * (0.1 + (0.05 * u)))))));
+    };
+    std::vector<double> samples;
+    for (int i = 0; i < kSamples; ++i) {
+        samples.push_back(quartic(kFirstNm + (kIntervalNm * i)));
+    }
+    const cie::Spectrum resampled = tools::colorchecker::resampleSprague(kFirstNm, kIntervalNm, samples);
+    double worst = 0.0;
+    for (int i = 0; i < cie::kSampleCount; ++i) {
+        const double nm = cie::wavelengthNm(i);
+        if (nm >= kFirstNm + (2.0 * kIntervalNm) && nm <= kLastNm - (2.0 * kIntervalNm)) {
+            worst = std::max(worst, std::abs(resampled[i] - quartic(nm)));
+        }
+    }
+    char detail[160];
+    std::snprintf(detail, sizeof(detail), "Sprague misses a quartic by %.3e in the interior", worst);
+    PT_EXPECT(ctx, worst <= kDoubleRoundoff, detail);
+}
+
+// Oracle: colour-science 0.4.6 Sprague align, Integration XYZ, BT.709 NPM, fed cie_1931.inc's CIE CSVs (its own D65 is 5 nm-interpolated).
+PT_CHECK(colorchecker_matches_colour_science, Fast, Exact) {
+    // Printed to 12 decimals, so each oracle entry carries 5e-13 of quantisation on top of either side's double roundoff.
+    const std::array<glm::dvec3, tools::colorchecker::kPatchCount> oracle{{
+        {0.172480673006, 0.083742975237, 0.057585578315},  // dark skin
+        {0.548125514103, 0.298460038633, 0.216980613957},  // light skin
+        {0.110266878137, 0.196752190552, 0.335929333768},  // blue sky
+        {0.103821901447, 0.150234506643, 0.052123162248},  // foliage
+        {0.224404585523, 0.217723858121, 0.430269691533},  // blue flower
+        {0.123162717692, 0.519046931914, 0.404461871984},  // bluish green
+        {0.716822676018, 0.198957573449, 0.027136959786},  // orange
+        {0.064995722249, 0.106239257106, 0.392552066080},  // purplish blue
+        {0.541695427015, 0.088284772070, 0.120289679529},  // moderate red
+        {0.104210323250, 0.043810412110, 0.139609612723},  // purple
+        {0.354628911947, 0.507844885402, 0.048234441858},  // yellow green
+        {0.780444229676, 0.354000699765, 0.021502170189},  // orange yellow
+        {0.023408077059, 0.049155285872, 0.291663042582},  // blue
+        {0.065248390752, 0.301890964771, 0.064507829370},  // green
+        {0.429315816563, 0.031882203252, 0.040180924337},  // red
+        {0.856774201400, 0.575317964882, 0.007840168280},  // yellow
+        {0.503128686293, 0.088866221202, 0.305565062881},  // magenta
+        {-0.028565975691, 0.248963298201, 0.383032645845},  // cyan
+        {0.916346914439, 0.915400535569, 0.870596899190},  // white 9.5 (.05 D)
+        {0.581930354497, 0.591081386351, 0.583996466577},  // neutral 8 (.23 D)
+        {0.355225344379, 0.360931981377, 0.358994374019},  // neutral 6.5 (.44 D)
+        {0.187568435802, 0.192347040051, 0.191767604263},  // neutral 5 (.70 D)
+        {0.087066702355, 0.090060938708, 0.090848048863},  // neutral 3.5 (1.05 D)
+        {0.032068901815, 0.031930560325, 0.032594962823},  // black 2 (1.5 D)
+    }};
+    const auto patches = tools::colorchecker::loadColorChecker(kColorCheckerTable);
+    ctx.plan(1 + tools::colorchecker::kPatchCount);
+    PT_EXPECT(ctx, patches.has_value(), "shipped ColorChecker table rejected");
+    if (!patches) {
+        return;
+    }
+    for (int i = 0; i < tools::colorchecker::kPatchCount; ++i) {
+        const Patch& patch = (*patches)[static_cast<std::size_t>(i)];
+        const double error = maxAbs(patch.rec709 - oracle[static_cast<std::size_t>(i)]);
+        char detail[200];
+        std::snprintf(detail, sizeof(detail), "%s: linear Rec.709 off colour-science by %.3e", patch.name.c_str(), error);
+        PT_EXPECT(ctx, error <= kDoubleRoundoff, detail);
+    }
+}
+
+// Each row is a transcription mistake the loader must refuse rather than resample into a plausible-looking wrong chart.
+PT_CHECK(colorchecker_table_rejects_invalid_input, Fast, Exact) {
+    const auto load = [](const char* name, const std::string& text) {
+        const std::filesystem::path path = std::filesystem::temp_directory_path() / name;
+        std::ofstream(path) << text;
+        return tools::colorchecker::loadColorChecker(path.string()).has_value();
+    };
+    const std::string header = "patch,400,410,420,430,440,450\n";
+    std::string rows;
+    for (int i = 0; i < tools::colorchecker::kPatchCount; ++i) {
+        rows += "p" + std::to_string(i) + ",0.1,0.2,0.3,0.4,0.5,0.6\n";
+    }
+    ctx.plan(6);
+    PT_EXPECT(ctx, load("engine_colour_cc_valid.csv", header + rows), "well-formed table rejected");
+    PT_EXPECT(ctx, !load("engine_colour_cc_uneven.csv", "patch,400,410,420,430,440,460\n" + rows), "non-uniform grid accepted");
+    PT_EXPECT(ctx, !load("engine_colour_cc_short.csv", "patch,400,410,420,430,440\n" + rows), "five-sample header accepted");
+    PT_EXPECT(ctx, !load("engine_colour_cc_count.csv", header + rows + "extra,0.1,0.2,0.3,0.4,0.5,0.6\n"),
+                  "25-patch table accepted");
+    PT_EXPECT(ctx, !load("engine_colour_cc_range.csv", header + rows.substr(0, rows.rfind("0.6")) + "1.2\n"),
+                  "reflectance above 1 accepted");
+    PT_EXPECT(ctx, !load("engine_colour_cc_ragged.csv", header + rows.substr(0, rows.rfind(",0.6")) + "\n"),
+                  "row shorter than the header accepted");
 }
 
 }  // namespace
