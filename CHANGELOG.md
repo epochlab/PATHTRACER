@@ -51,6 +51,9 @@ It is evidenced by `results/optic_flow`: 62 before/after EXRs, paired benches, a
 - note: cornell under-covers, at 0.60-0.82. Glossy clay, grazing walls and creases are systematic misfits along weakly
   constrained directions, and noiseless WorldPos shows the same shortfall (0.84). Range is the coarsest octave's: 5.1 px at
   256x128, 82 px at 2048x1152
+- note: a 1-pass view has unknown Luminance noise (Welford needs n >= 2) and is weighed as deterministic. Mid-motion in the
+  viewer, a view is often 1-2 passes, so sigma is overconfident: with either view at 1 pass, 3-sigma coverage at 256x128 is
+  0.53-0.69 on cornell and 0.54-0.85 on stump, against 0.87-0.96 at 8/64 passes
 - test: `flow_validate` (10 checks):
   - exact zero for identical frames, the prior bit for bit, and a joint 2^k gain changing no bit
   - integer shifts converging at every interior texel
