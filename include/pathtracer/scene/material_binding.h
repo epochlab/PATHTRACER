@@ -25,7 +25,7 @@ namespace pathtracer::scene {
     const PathTraceSettings& base, const std::vector<MeshInstance>& instances,
     const std::map<std::string, std::string>& materialOverrides, const std::string& assetRoot);
 
-// Transforms authored quad lights into world space: origin as a point, edge0/edge1 as displacements. sceneTransform must be rigid.
+// Places each authored quad by sceneTransform * its own placement, as QuadLight corner + edges. sceneTransform must be rigid.
 [[nodiscard]] std::vector<QuadLight> buildQuadLights(
     const std::vector<pathtracer::config::QuadLightConfig>& lights, const glm::mat4& sceneTransform);
 

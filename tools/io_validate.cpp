@@ -221,7 +221,7 @@ PT_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
                lights + "}";
     };
     const std::string validLights =
-        ",\"lights\":[{\"type\":\"quad\",\"origin\":[0,0,0],\"edge0\":[1,0,0],\"edge1\":[0,0,1],"
+        ",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
         "\"color\":[1,1,1],\"intensity\":5.0,\"twoSided\":false}]";
 
     const std::vector<Case> cases = {
@@ -232,12 +232,23 @@ PT_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
          "{\"environment\":{\"hdriPath\":\"x.exr\"},\"materialPath\":\"materials/clay.json\"}"},
         // Negative radiance is not a scene, and would propagate as negative energy through every estimator.
         {"negative light intensity", "engine_io_scene_negintensity.json",
-         scene(",\"lights\":[{\"type\":\"quad\",\"origin\":[0,0,0],\"edge0\":[1,0,0],\"edge1\":[0,0,1],"
+         scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
                "\"color\":[1,1,1],\"intensity\":-5.0,\"twoSided\":false}]")},
-        // The spherical-rectangle sampler (Urena et al. 2013) is exact only for a RECTANGLE, so skewed edges sample geometry it lacks.
-        {"quad light with non-perpendicular edges", "engine_io_scene_skewlight.json",
-         scene(",\"lights\":[{\"type\":\"quad\",\"origin\":[0,0,0],\"edge0\":[1,0,0],\"edge1\":[1,1,0],"
+        // A zero extent is a quad with no area; a negative one would mirror it and silently flip the emitting face.
+        {"quad light with a zero size", "engine_io_scene_zerosizelight.json",
+         scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,0],"
                "\"color\":[1,1,1],\"intensity\":5.0,\"twoSided\":false}]")},
+        {"quad light with a negative size", "engine_io_scene_negsizelight.json",
+         scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[-1,1],"
+               "\"color\":[1,1,1],\"intensity\":5.0,\"twoSided\":false}]")},
+        // The retired corner + edges form has no position, so it fails rather than placing a light nobody authored.
+        {"the retired quad light origin/edge0/edge1 keys", "engine_io_scene_cornerlight.json",
+         scene(",\"lights\":[{\"type\":\"quad\",\"origin\":[0,0,0],\"edge0\":[1,0,0],\"edge1\":[0,0,1],"
+               "\"color\":[1,1,1],\"intensity\":5.0,\"twoSided\":false}]")},
+        // Closed key set: a leftover edge0 beside a complete placement would otherwise be ignored silently.
+        {"a stale quad light edge0 key", "engine_io_scene_staleedge.json",
+         scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
+               "\"edge0\":[1,0,0],\"color\":[1,1,1],\"intensity\":5.0,\"twoSided\":false}]")},
         // Each node maps slot names to paths; a bare path string would leave the slot unstated.
         {"textures entry that is not a slot object", "engine_io_scene_textureflat.json",
          scene(",\"textures\":{\"sphere01\":\"textures/macbeth.exr\"}")},
@@ -253,11 +264,11 @@ PT_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
          "\"environment\":{\"hdriPath\":\"textures/republiqueHDR_2k.exr\",\"lightEnable\":false},"
          "\"materialPath\":\"materials/clay.json\"}"},
         {"negative light colour", "engine_io_scene_negcolor.json",
-         scene(",\"lights\":[{\"type\":\"quad\",\"origin\":[0,0,0],\"edge0\":[1,0,0],\"edge1\":[0,0,1],"
+         scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
                "\"color\":[1,-1,1],\"intensity\":5.0,\"twoSided\":false}]")},
     };
 
-    // Anti-vacuity: the base the three light rows are built from must itself LOAD, or they would prove nothing.
+    // Anti-vacuity: the base the scene() rows are built from must itself LOAD, or they would prove nothing.
     const std::filesystem::path basePath = writeJson("engine_io_scene_base.json", scene(validLights));
     const bool baseLoads = pathtracer::config::loadSceneConfig(basePath.string()).has_value();
     std::filesystem::remove(basePath);

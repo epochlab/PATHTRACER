@@ -20,6 +20,7 @@
 #include <vector>
 
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
 #include "pathtracer/config/scene_config.h"
 #include "pathtracer/gfx/hdr_image.h"
@@ -932,6 +933,63 @@ PT_CHECK(material_binding_resolution, Fast, Exact) {
     }
     finish(ctx, ok, "material_binding_resolution failed; see the rows above");
     return;
+}
+
+// buildQuadLights places a centred quad emitting local -Z by sceneTransform * T * Rz * Ry * Rx, its edges w and h, perpendicular.
+PT_CHECK(quad_light_placement, Fast, Exact) {
+    struct Case {
+        const char* name;
+        pathtracer::config::QuadLightConfig light;
+        glm::mat4 sceneTransform;
+        glm::vec3 expectedNormal;
+    };
+    const auto light = [](glm::vec3 position, glm::vec3 rotation, glm::vec2 size) {
+        return pathtracer::config::QuadLightConfig{position, rotation, size, glm::vec3(1.0F), 1.0F};
+    };
+    const glm::mat4 identity(1.0F);
+    const glm::mat4 sceneMoved = glm::translate(identity, glm::vec3(1.0F, 2.0F, 3.0F)) *
+                                 glm::rotate(identity, glm::radians(90.0F), glm::vec3(0.0F, 1.0F, 0.0F));
+    const std::vector<Case> cases = {
+        {"rest pose", light({0.1F, 0.2F, 0.3F}, {0.0F, 0.0F, 0.0F}, {0.4F, 0.2F}), identity, {0.0F, 0.0F, -1.0F}},
+        {"ceiling, Rx(-90)", light({0.0F, 0.49F, 0.0F}, {-90.0F, 0.0F, 0.0F}, {0.3F, 0.3F}), identity, {0.0F, -1.0F, 0.0F}},
+        // X before Y gives +Y; Y before X would give -X, so this row pins the Euler order.
+        {"Rx(90) then Ry(90)", light({0.0F, 0.0F, 0.0F}, {90.0F, 90.0F, 0.0F}, {0.5F, 0.25F}), identity, {0.0F, 1.0F, 0.0F}},
+        {"under a moved scene root", light({0.0F, 0.0F, 0.0F}, {0.0F, 0.0F, 0.0F}, {0.3F, 0.6F}), sceneMoved, {-1.0F, 0.0F, 0.0F}},
+    };
+    // Higham's gamma_n, n = 8 chained 4-term products, at coordinate magnitude <= 4; eps, not u = eps/2, also covers sin/cos's ulp.
+    constexpr float kTolerance = 8.0F * 4.0F * std::numeric_limits<float>::epsilon() * 4.0F;
+
+    ctx.plan(static_cast<int>(cases.size()) + 1);
+    for (const Case& testCase : cases) {
+        const pathtracer::scene::QuadLight quad = pathtracer::scene::buildQuadLights({testCase.light}, testCase.sceneTransform)[0];
+        const glm::vec3 centre = quad.origin + (0.5F * quad.edge0) + (0.5F * quad.edge1);
+        const glm::vec3 expectedCentre = glm::vec3(testCase.sceneTransform * glm::vec4(testCase.light.position, 1.0F));
+        const float centreError = glm::length(centre - expectedCentre);
+        const float normalError = glm::length(quad.normal - testCase.expectedNormal);
+        const float widthError = std::fabs(glm::length(quad.edge0) - testCase.light.size.x);
+        const float heightError = std::fabs(glm::length(quad.edge1) - testCase.light.size.y);
+        const float skew = std::fabs(glm::dot(quad.edge0, quad.edge1));
+        const float maxError = std::max({centreError, normalError, widthError, heightError, skew});
+        char detail[288];
+        std::snprintf(detail, sizeof(detail),
+                      "%s: centre error %.3e, normal (%.6f, %.6f, %.6f) error %.3e, width/height error %.3e/%.3e, edge dot %.3e "
+                      "vs %.3e",
+                      testCase.name, centreError, quad.normal.x, quad.normal.y, quad.normal.z, normalError, widthError,
+                      heightError, skew, kTolerance);
+        std::cout << "  " << detail << '\n';
+        PT_EXPECT(ctx, maxError <= kTolerance, detail);
+    }
+
+    // The shipped cornell light must reproduce the retired corner-authored quad it replaced, corner and both edges.
+    const pathtracer::scene::QuadLight ceiling = pathtracer::scene::buildQuadLights({cases[1].light}, identity)[0];
+    const float migrationError = std::max({glm::length(ceiling.origin - glm::vec3(-0.15F, 0.49F, -0.15F)),
+                                           glm::length(ceiling.edge0 - glm::vec3(0.3F, 0.0F, 0.0F)),
+                                           glm::length(ceiling.edge1 - glm::vec3(0.0F, 0.0F, 0.3F))});
+    char detail[160];
+    std::snprintf(detail, sizeof(detail), "ceiling light vs the retired corner (-0.15, 0.49, -0.15) + edges: max error %.3e vs %.3e",
+                  migrationError, kTolerance);
+    std::cout << "  " << detail << '\n';
+    PT_EXPECT(ctx, migrationError <= kTolerance, detail);
 }
 
 // Texture binding: bindSceneTextures fills exactly the named nodes' named slots, atomically, and rejects every bad entry.

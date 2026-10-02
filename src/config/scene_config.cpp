@@ -42,25 +42,20 @@ std::optional<std::vector<QuadLightConfig>> parseQuadLights(const nlohmann::json
             std::cerr << "loadSceneConfig: " << path << ": lights[" << index << "] has unknown type '" << type << "', only 'quad' exists\n";
             return std::nullopt;
         }
+        if (!onlyKnownKeys(light, {"type", "position", "rotation", "size", "color", "intensity", "twoSided"}, path, "light")) {
+            return std::nullopt;
+        }
         const QuadLightConfig quad{
-            light.at("origin").get<glm::vec3>(),
-            light.at("edge0").get<glm::vec3>(),
-            light.at("edge1").get<glm::vec3>(),
+            light.at("position").get<glm::vec3>(),
+            light.at("rotation").get<glm::vec3>(),
+            light.at("size").get<glm::vec2>(),
             light.at("color").get<glm::vec3>(),
             light.at("intensity").get<float>(),
             light.value("twoSided", false),
         };
-        const float length0 = glm::length(quad.edge0);
-        const float length1 = glm::length(quad.edge1);
-        // A zero-length edge subtends no solid angle: degenerate geometry in the BVH emitting nothing NEE could sample.
-        if (!(length0 > 0.0F) || !(length1 > 0.0F)) {
-            std::cerr << "loadSceneConfig: " << path << ": lights[" << index << "] has a zero-length edge0/edge1\n";
-            return std::nullopt;
-        }
-        // The sampler's frame is normalize(edge0)/normalize(edge1); bound is its worst-case error, |cos| 6.1e-3 at 3dp and 9.9e-8 at 8dp.
-        constexpr float kMaxEdgeCosine = 1e-4F;
-        if (const float cosEdges = glm::dot(quad.edge0 / length0, quad.edge1 / length1); std::fabs(cosEdges) > kMaxEdgeCosine) {
-            std::cerr << "loadSceneConfig: " << path << ": lights[" << index << "] has non-perpendicular edge0/edge1 (cos " << cosEdges << ")\n";
+        // A zero extent subtends no solid angle; a negative one mirrors the quad and flips which face emits.
+        if (!(quad.size.x > 0.0F) || !(quad.size.y > 0.0F)) {
+            std::cerr << "loadSceneConfig: " << path << ": lights[" << index << "] has a non-positive size\n";
             return std::nullopt;
         }
         // Negative radiance is unrepresentable and would propagate through NEE as a permanent bias no downstream clamp removes.
