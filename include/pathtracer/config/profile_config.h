@@ -6,6 +6,7 @@
 
 #include <glm/glm.hpp>
 
+#include "pathtracer/debug/aov.h"
 #include "pathtracer/gfx/ocio_display_transform.h"
 #include "pathtracer/gfx/scalar_type.h"
 #include "pathtracer/scene/camera.h"
@@ -60,12 +61,18 @@ struct PathTracerConfig {
     float lookaheadDistance;  // horizon of the Lookahead AOV's ramp, scene units; geometry at or beyond it reads 0
 };
 
+struct OpticFlowConfig {
+    // The AOV whose consecutive views the Optic Flow AOV compares, every channel stacked; any AOV but Optic Flow itself.
+    pathtracer::debug::AovId source;
+};
+
 // Session-wide defaults: the controller's initial and reset pose, lens, exposure and tuning constants -- what is not specific to one scene.
 struct ProfileConfig {
     CameraConfig camera;
     ControlsConfig controls;
     RenderConfig render;
     PathTracerConfig pathTracer;
+    OpticFlowConfig opticFlow;
 };
 
 // Reads and parses path; nullopt and a stderr log if missing, unreadable or unparseable. User input: failure is surfaced, not asserted.

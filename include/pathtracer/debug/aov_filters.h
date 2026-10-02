@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstddef>
+#include <span>
+#include <vector>
 
 #include <glm/glm.hpp>
 
@@ -23,6 +25,36 @@ inline constexpr float kMorletOctaves = 1.0F;
 
 // Orientations needed to cover every direction at half response or better, from the angular bandwidth the carrier already fixes.
 [[nodiscard]] int morletOrientations();
+
+// One bank orientation's plane wave exp(i(kx x + ky y)), held as row and column factors so no texel pays a transcendental.
+struct MorletPlaneWave {
+    double stepX = 0.0;  // kx, radians per pixel
+    double stepY = 0.0;  // ky, radians per pixel
+    std::vector<float> cosX, sinX;  // cos(kx x), sin(kx x), one per column
+    std::vector<float> cosY, sinY;  // cos(ky y), sin(ky y), one per row
+};
+
+// Orientation `index` of `count` spread over a half turn at `carrier` radians per pixel, tabulated on a width x height grid.
+[[nodiscard]] MorletPlaneWave morletPlaneWave(float carrier, int index, int count, int width, int height);
+
+// real + i imaginary = plane * exp(-i(kx x + ky y)): the carrier factors out, so a Gaussian blur after it is the Morlet envelope.
+void demodulate(std::span<const float> plane, const MorletPlaneWave& wave, int width, int height, std::span<float> real,
+                std::span<float> imaginary, pathtracer::scene::ThreadPool& threadPool);
+
+// Admissible baseband at (x, y): the blurred demodulated pair minus what a constant field of the local lowpass would have produced.
+[[nodiscard]] inline glm::vec2 morletBaseband(const MorletPlaneWave& blurredWave, int x, int y, float real, float imaginary,
+                                              float lowpass) {
+    const float rowCos = blurredWave.cosY[static_cast<std::size_t>(y)];
+    const float rowSin = blurredWave.sinY[static_cast<std::size_t>(y)];
+    // The blurred plane wave under the same mirror, which is what a constant field would have produced right here.
+    const float meanReal = (blurredWave.cosX[static_cast<std::size_t>(x)] * rowCos) -
+                           (blurredWave.sinX[static_cast<std::size_t>(x)] * rowSin);
+    const float meanImaginary = (blurredWave.sinX[static_cast<std::size_t>(x)] * rowCos) +
+                                (blurredWave.cosX[static_cast<std::size_t>(x)] * rowSin);
+    const float centredReal = real - (meanReal * lowpass);
+    const float centredImaginary = imaginary + (meanImaginary * lowpass);
+    return {centredReal, centredImaginary};
+}
 
 // Rec.709 luminance, one channel. Single centre tap, no neighbourhood.
 [[nodiscard]] pathtracer::gfx::HdrImage luminanceAov(const pathtracer::gfx::HdrImage& beauty,
@@ -52,6 +84,9 @@ inline constexpr float kMorletOctaves = 1.0F;
 [[nodiscard]] pathtracer::gfx::HdrImage snrAov(const pathtracer::gfx::HdrImage& beauty,
                                             const float* beautyLuminanceM2, int samples,
                                             pathtracer::scene::ThreadPool& threadPool);
+
+// Variance of each texel's mean luminance, M2 / (n (n - 1)) from the Welford second moment; empty below two passes, where it is undefined.
+[[nodiscard]] pathtracer::gfx::HdrImage luminanceMeanVariance(int width, int height, const float* beautyLuminanceM2, int samples);
 
 // Everything a BeautyFilter AOV reads, as explicit fields rather than a PathTraceResult, so a validator can build one with no renderer.
 struct FilterInput {

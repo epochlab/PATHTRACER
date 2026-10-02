@@ -2,10 +2,13 @@
 
 #include "pathtracer/debug/aov_routing.h"
 #include "pathtracer/debug/colormap.h"
+#include "pathtracer/debug/optic_flow.h"
 
 #include <cctype>
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -36,6 +39,10 @@ AovSource aovSource(AovId aov) {
         case AovId::ColourOpponent:
         case AovId::SNR:
             return AovSource::BeautyFilter;
+
+        // Computed from a pair of views of another AOV, so its producer is whichever one makes that source.
+        case AovId::OpticFlow:
+            return AovSource::Derived;
 
         // The 14 primary-hit lanes renderRasterGBuffer scan-converts. No default: -Werror makes an unclassified AovId a compile error.
         case AovId::Wireframe:
@@ -82,7 +89,8 @@ int aovChannels(AovId aov) {
         case AovId::ColourOpponent:
             return 2;
 
-        // Radiance triples, world-space vectors and the two false-coloured lanes, all needing three channels, not a broadcast scalar.
+        // Radiance triples, world-space vectors, the two false-coloured lanes, and flow's (dx, dy, sigma), all three-channel.
+        case AovId::OpticFlow:
         case AovId::Beauty:
         case AovId::HSV:
         case AovId::WorldPos:
@@ -122,6 +130,7 @@ bool aovCarriesRadiance(AovId aov) {
         // Ratios, reflectances, counts, lengths, directions and frequencies: scaling any of them by an exposure means nothing.
         case AovId::HSV:
         case AovId::ColourOpponent:
+        case AovId::OpticFlow:
         case AovId::Wireframe:
         case AovId::Alpha:
         case AovId::Depth:
@@ -154,7 +163,8 @@ bool aovIsBipolar(AovId aov) {
         case AovId::ColourOpponent:
             return true;
 
-        // Direction and position lanes are signed but not bipolar: a normal's components span a sphere, not a response about zero.
+        // Signed but not bipolar: a normal spans a sphere; flow's two signed lanes share one unit, so it takes its own display.
+        case AovId::OpticFlow:
         case AovId::Beauty:
         case AovId::Wireframe:
         case AovId::Alpha:
@@ -190,39 +200,51 @@ bool aovIsBipolar(AovId aov) {
     return false;
 }
 
-BipolarDisplay bipolarDisplay(const pathtracer::gfx::HdrImage& image) {
+namespace {
+
+// Symmetric display range over the pooled samples of `lanes`, so lanes sharing one unit share one scale.
+[[nodiscard]] float pooledRange(const pathtracer::gfx::HdrImage& image, std::span<const int> lanes) {
     const auto stride = static_cast<std::size_t>(image.channels);
-    const auto laneRange = [&image, stride](int lane) {
-        double sumOfSquares = 0.0;
-        float peak = 0.0F;
-        std::size_t count = 0;
+    double sumOfSquares = 0.0;
+    float peak = 0.0F;
+    std::size_t count = 0;
+    for (const int lane : lanes) {
         for (std::size_t sample = static_cast<std::size_t>(lane); sample < image.texels.size(); sample += stride) {
             const float value = image.texels[sample];
             sumOfSquares += static_cast<double>(value) * static_cast<double>(value);
             peak = std::max(peak, std::fabs(value));
             ++count;
         }
-        if (count == 0) {
-            return 0.0F;
-        }
-        // Zero is the operator's own centre, so the scale is the RMS about zero rather than a sample deviation about an estimated mean.
-        const double rms = std::sqrt(sumOfSquares / static_cast<double>(count));
-        // Cramer 1946: the max of n iid normals concentrates at sigma*sqrt(2 ln n), Donoho-Johnstone's universal threshold at this RMS.
-        const double expectedMaximum = rms * std::sqrt(2.0 * std::log(static_cast<double>(count)));
-        // The smaller of the two: a Gaussian field keeps its true peak, and a heavy-tailed one stops a lone outlier crushing the preview.
-        return std::min(peak, static_cast<float>(expectedMaximum));
-    };
+    }
+    if (count == 0) {
+        return 0.0F;
+    }
+    // Zero is the operator's own centre, so the scale is the RMS about zero rather than a sample deviation about an estimated mean.
+    const double rms = std::sqrt(sumOfSquares / static_cast<double>(count));
+    // Cramer 1946: the max of n iid normals concentrates at sigma*sqrt(2 ln n), Donoho-Johnstone's universal threshold at this RMS.
+    const double expectedMaximum = rms * std::sqrt(2.0 * std::log(static_cast<double>(count)));
+    // The smaller of the two: a Gaussian field keeps its true peak, and a heavy-tailed one stops a lone outlier crushing the preview.
+    return std::min(peak, static_cast<float>(expectedMaximum));
+}
 
+// A lane with no range has no scale to fit, and every finite gain then reads mid-grey, so unity is the choice that assumes least.
+[[nodiscard]] float bipolarGain(float range) {
+    return range > 0.0F ? kBipolarDisplayOffset / range : 1.0F;
+}
+
+}  // namespace
+
+BipolarDisplay bipolarDisplay(const pathtracer::gfx::HdrImage& image) {
     // Ranged per lane, because each lane is its own operator in its own unit: sharing one range would crush the narrower axis to nothing.
     BipolarDisplay display{glm::vec3(0.0F), glm::vec3(0.0F)};
     // Texture's swizzle broadcasts a scalar to all three display lanes, so channel 0's range is theirs, not absences left at zero gain.
     const bool scalar = image.channels == pathtracer::gfx::kScalarChannels;
     const int lanes = scalar ? glm::vec3::length() : image.channels;
-    const float scalarRange = scalar ? laneRange(0) : 0.0F;
+    const std::array<int, 1> firstLane{0};
+    const float scalarRange = scalar ? pooledRange(image, firstLane) : 0.0F;
     for (int lane = 0; lane < lanes; ++lane) {
-        const float range = scalar ? scalarRange : laneRange(lane);
-        // A lane with no range has no scale to fit, and every finite gain then reads mid-grey, so unity is the choice that assumes least.
-        display.gain[lane] = range > 0.0F ? kBipolarDisplayOffset / range : 1.0F;
+        const std::array<int, 1> ownLane{lane};
+        display.gain[lane] = bipolarGain(scalar ? scalarRange : pooledRange(image, ownLane));
         display.offset[lane] = kBipolarDisplayOffset;
     }
     return display;
@@ -284,6 +306,14 @@ AovDisplay aovDisplay(AovId aov, const pathtracer::gfx::HdrImage& image, const A
         case AovId::BounceCount:
             mapBounceCountForDisplay(image, context.maxBounces, display.mapped);
             return display;
+        // dx and dy share the pixel, so one pooled range keeps the direction; sigma never exceeds the prior std, an exact ceiling.
+        case AovId::OpticFlow: {
+            const std::array<int, 2> displacementLanes{0, 1};
+            const float gain = bipolarGain(pooledRange(image, displacementLanes));
+            display.affine.gain = glm::vec3(gain, gain, 1.0F / opticFlowPriorStd(image.width, image.height));
+            display.affine.offset = glm::vec3(kBipolarDisplayOffset, kBipolarDisplayOffset, 0.0F);
+            return display;
+        }
         // Every other AOV's values reach the display unchanged, under the unity gain and zero offset this was initialised with.
         default:
             return display;

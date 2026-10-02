@@ -132,10 +132,6 @@ int pt_aov_channels(int aov) {
     return validAov(aov) ? pathtracer::debug::aovChannels(static_cast<AovId>(aov)) : -1;
 }
 
-int pt_aov_needs_samples(int aov) {
-    return validAov(aov) && pathtracer::debug::aovNeedsLightTransport(static_cast<AovId>(aov)) ? 1 : 0;
-}
-
 void pt_renderer_default_camera(const PtRenderer* renderer, PtCamera* out) {
     if (renderer == nullptr || out == nullptr) {
         return;
@@ -171,6 +167,14 @@ void pt_renderer_default_camera(const PtRenderer* renderer, PtCamera* out) {
 
 int pt_abi_version(void) {
     return PT_ABI_VERSION;
+}
+
+int pt_renderer_aov_needs_samples(const PtRenderer* renderer, int aov) {
+    if (renderer == nullptr || !validAov(aov)) {
+        return 0;
+    }
+    const AovId source = reinterpret_cast<const HeadlessRenderer*>(renderer)->opticFlowSource();
+    return pathtracer::debug::aovNeedsLightTransport(static_cast<AovId>(aov), source) ? 1 : 0;
 }
 
 int pt_renderer_default_width(const PtRenderer* renderer) {

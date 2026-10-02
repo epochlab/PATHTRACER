@@ -24,7 +24,7 @@ import numpy as np
 
 from . import _ffi
 
-__all__ = ["AOVS", "Camera", "Renderer", "aov_channels", "aov_needs_samples", "display_encode"]
+__all__ = ["AOVS", "Camera", "Renderer", "aov_channels", "display_encode"]
 
 _LIB = _ffi.load_library()
 
@@ -45,15 +45,6 @@ def _aov_id(name: str) -> int:
 def aov_channels(name: str) -> int:
     """Channels this AOV carries: 1 for a depth or filter response, 2 for UV, 3 for radiance and vectors."""
     return int(_LIB.pt_aov_channels(_aov_id(name)))
-
-
-def aov_needs_samples(name: str) -> bool:
-    """Whether ``samples`` affects this AOV.
-
-    False for the 14 primary-hit AOVs the rasterizer scan-converts in a single pass; those are essentially free and
-    converge immediately, so raising ``samples`` for them only wastes time.
-    """
-    return bool(_LIB.pt_aov_needs_samples(_aov_id(name)))
 
 
 def display_encode(
@@ -215,6 +206,15 @@ class Renderer:
     def default_resolution(self) -> tuple[int, int]:
         return (_LIB.pt_renderer_default_width(self._handle), _LIB.pt_renderer_default_height(self._handle))
 
+    def aov_needs_samples(self, name: str) -> bool:
+        """Whether ``samples`` affects this AOV.
+
+        False for the 14 primary-hit AOVs the rasterizer scan-converts in a single pass; those are essentially free and
+        converge immediately, so raising ``samples`` for them only wastes time. Optic Flow answers for its source, which
+        this renderer's profile.json names.
+        """
+        return bool(_LIB.pt_renderer_aov_needs_samples(self._handle, _aov_id(name)))
+
     def render(
         self,
         *,
@@ -243,6 +243,10 @@ class Renderer:
 
         ``env_light_enabled`` decides whether the environment is in the light set at all, which does change the
         lighting. ``None`` keeps the scene's authored ``environment.lightEnabled``.
+
+        ``Optic Flow`` is stateful: each call that requests it is paired with the previous call that did, at the same
+        resolution, and reports ``(dx, dy, sigma)`` in pixels with ``current(x) ~ previous(x - d)``. The first call, or
+        one after a resize, has no pair and returns the prior: zero flow at the prior's standard deviation.
 
         Returns arrays of shape ``(height, width, channels)``, float32, row 0 at the top.
         """
