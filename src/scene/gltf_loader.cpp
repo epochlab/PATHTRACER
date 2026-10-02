@@ -172,7 +172,7 @@ std::optional<MeshInstance> loadPrimitive(const cgltf_primitive& prim, const glm
 
     // Geometry only: every slot starts at its neutral default, and bindSceneTextures binds the scene JSON's maps by node name.
     return MeshInstance{
-        makeDefaultMaterial(),
+        Material{},
         transform,
         name,
     };
@@ -273,7 +273,7 @@ void appendQuadLights(LoadedModel& model, const std::vector<QuadLight>& lights,
         model.worldTriangles.push_back(Triangle{p00.position, p11.position, p01.position});
         model.shadingTriangles.push_back(ShadingTriangle{p00, p10, p11, instanceIndex});
         model.shadingTriangles.push_back(ShadingTriangle{p00, p11, p01, instanceIndex});
-        model.instances.push_back(MeshInstance{makeDefaultMaterial(), glm::mat4(1.0F),
+        model.instances.push_back(MeshInstance{Material{}, glm::mat4(1.0F),
                                                  "__quadLight" + std::to_string(i)});
         instanceLightIndex.push_back(static_cast<int>(i));
     }

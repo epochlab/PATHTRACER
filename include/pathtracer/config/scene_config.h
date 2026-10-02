@@ -40,7 +40,7 @@ struct MaterialConfig {
     float bumpStrength;   // scales the bump texture's raw per-texel height difference; see path_tracer.cpp's buildShadingFrame
     float roughnessMin;   // floor applied to the roughness texture sample, avoids a near-zero-roughness GGX singularity
     float roughnessMax;   // ceiling applied to the roughness texture sample
-    glm::vec3 diffuseColour;      // multiplies baseColorTexture
+    glm::vec3 diffuseColour;      // multiplies Material::baseColor
     // Dielectric IOR, non-metal lobes only. Optional, default 1.5: nullified by (1-metallic), so a pure conductor need not declare it.
     float ior = 1.5F;
     // Abbe number V_d = (n_d-1)/(n_F-n_C), giving ior a wavelength dependence. Optional, default 0.0 = no dispersion (Arnold, OpenPBR).

@@ -8,7 +8,6 @@
 #include <cstring>
 #include <iostream>
 #include <limits>
-#include <memory>
 #include <optional>
 #include <random>
 #include <string>
@@ -48,12 +47,7 @@ struct Options {
 
 // The neutral default material, varying only the two slots the G-buffer AOVs under test read.
 Material makeMaterial(glm::vec3 baseColor, float roughness) {
-    Material material = makeDefaultMaterial();
-    material.baseColorTexture = std::make_shared<const pathtracer::gfx::ImageTexture>(pathtracer::gfx::ImageTexture{
-        1, 1, pathtracer::gfx::kRgbChannels, std::vector<float>{baseColor.r, baseColor.g, baseColor.b}});
-    material.roughnessTexture = std::make_shared<const pathtracer::gfx::ImageTexture>(
-        pathtracer::gfx::ImageTexture{1, 1, pathtracer::gfx::kScalarChannels, std::vector<float>{roughness}});
-    return material;
+    return Material{.baseColor = baseColor, .roughness = roughness};
 }
 
 glm::vec4 tangentFor(const glm::vec3& normal) {
