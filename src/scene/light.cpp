@@ -17,10 +17,8 @@ float angleBetween(const glm::vec3& a, const glm::vec3& b) {
     return std::atan2(glm::length(glm::cross(a, b)), glm::dot(a, b));
 }
 
-}  // namespace
-
-std::optional<SphericalRectangle> buildSphericalRectangle(const QuadLight& quad,
-                                                            const glm::vec3& referencePoint) {
+// Urena et al. 2013's local frame at referencePoint: unit edges x, y, normal z with z0 < 0, and the rectangle's extents in it.
+std::optional<SphericalRectangle> sphericalRectangleFrame(const QuadLight& quad, const glm::vec3& referencePoint) {
     const float exl = glm::length(quad.edge0);
     const float eyl = glm::length(quad.edge1);
     if (!(exl > 0.0F) || !(eyl > 0.0F)) {
@@ -50,14 +48,16 @@ std::optional<SphericalRectangle> buildSphericalRectangle(const QuadLight& quad,
 
     const float x0 = glm::dot(d, x);
     const float y0 = glm::dot(d, y);
-    const float x1 = x0 + exl;
-    const float y1 = y0 + eyl;
+    return SphericalRectangle{referencePoint, x, y, zFrame, z0, x0, x0 + exl, y0, y0 + eyl, 0.0F, 0.0F, 0.0F, 0.0F};
+}
 
+// The spherical quadrilateral's edge-plane normals and interior angles, giving sample()'s b0, b1, k and the solid angle.
+void sphericalRectangleAngles(SphericalRectangle& rect) {
     // Vectors from referencePoint to the four corners, in the local (x, y, zFrame) frame.
-    const glm::vec3 v00(x0, y0, z0);
-    const glm::vec3 v01(x0, y1, z0);
-    const glm::vec3 v10(x1, y0, z0);
-    const glm::vec3 v11(x1, y1, z0);
+    const glm::vec3 v00(rect.x0, rect.y0, rect.z0);
+    const glm::vec3 v01(rect.x0, rect.y1, rect.z0);
+    const glm::vec3 v10(rect.x1, rect.y0, rect.z0);
+    const glm::vec3 v11(rect.x1, rect.y1, rect.z0);
     const glm::vec3 n0 = glm::normalize(glm::cross(v00, v10));
     const glm::vec3 n1 = glm::normalize(glm::cross(v10, v11));
     const glm::vec3 n2 = glm::normalize(glm::cross(v11, v01));
@@ -69,16 +69,26 @@ std::optional<SphericalRectangle> buildSphericalRectangle(const QuadLight& quad,
     const float g2 = angleBetween(-n2, n3);
     const float g3 = angleBetween(-n3, n0);
 
-    const float b0 = n0.z;
-    const float b1 = n2.z;
-    const float k = (2.0F * glm::pi<float>()) - g2 - g3;
+    rect.b0 = n0.z;
+    rect.b1 = n2.z;
+    rect.k = (2.0F * glm::pi<float>()) - g2 - g3;
     // Girard's theorem: a spherical polygon's solid angle is its interior-angle sum minus (N-2)*pi.
-    const float solidAngle = g0 + g1 - k;
+    rect.solidAngle = g0 + g1 - rect.k;
+}
 
-    if (!(solidAngle > 0.0F) || !std::isfinite(solidAngle)) {
+}  // namespace
+
+std::optional<SphericalRectangle> buildSphericalRectangle(const QuadLight& quad,
+                                                            const glm::vec3& referencePoint) {
+    std::optional<SphericalRectangle> rect = sphericalRectangleFrame(quad, referencePoint);
+    if (!rect) {
         return std::nullopt;
     }
-    return SphericalRectangle{referencePoint, x, y, zFrame, z0, x0, x1, y0, y1, b0, b1, k, solidAngle};
+    sphericalRectangleAngles(*rect);
+    if (!(rect->solidAngle > 0.0F) || !std::isfinite(rect->solidAngle)) {
+        return std::nullopt;
+    }
+    return rect;
 }
 
 glm::vec3 SphericalRectangle::sample(glm::vec2 u) const {
