@@ -23,8 +23,9 @@ enum class AovId : int {
     DoG,
     WorldPos,
     UV,
-    // Perceptual: observer models over Beauty, as against the Utility block's image-space derivative operators.
+    // Perceptual: observer models, as against the Utility block's image-space derivative operators.
     ColourOpponent,
+    OpticFlow,  // image motion between consecutive views of profile.json's opticFlow.source (optic_flow.h)
     // Material.
     Normal,
     GeomNormal,
@@ -54,7 +55,7 @@ inline constexpr const char* kAovNames[] = {
     "Beauty",       "Wireframe",      "Alpha",           "Depth",
     "Lookahead",    "HSV",            "Luminance",       "Sobel",
     "Gabor",        "DoG",            "WorldPos",        "UV",
-    "Colour Opponent",
+    "Colour Opponent", "Optic Flow",
     "Normal",       "GeomNormal",     "Albedo",          "Metallic",
     "Roughness",    "Tangent",        "ObjectID",        "AO",
     "Fresnel",      "IOR",            "Bounce Count",    "SNR",
@@ -64,8 +65,8 @@ inline constexpr const char* kAovNames[] = {
 static_assert(sizeof(kAovNames) / sizeof(kAovNames[0]) == static_cast<int>(AovId::Count),
               "kAovNames must stay index-parallel with AovId");
 
-// Which of the three producers computes each AOV: 10 accumulated path-traced lanes, 14 rasterizer lanes, 7 filters over Beauty.
-enum class AovSource { PathTraced, GBuffer, BeautyFilter };
+// Which producer computes each AOV: 10 path-traced lanes, 14 rasterizer lanes, 7 filters over Beauty, 1 derived from another AOV.
+enum class AovSource { PathTraced, GBuffer, BeautyFilter, Derived };
 
 [[nodiscard]] AovSource aovSource(AovId aov);
 
@@ -110,9 +111,9 @@ struct AovDisplay {
     return aovCarriesRadiance(aov) && !aovIsBipolar(aov);
 }
 
-// True for AOVs needing light transport, false for the 14 primary-hit ones. Derived from aovSource, so the two cannot drift apart.
-[[nodiscard]] inline bool aovNeedsLightTransport(AovId aov) {
-    return aovSource(aov) != AovSource::GBuffer;
+// True for AOVs needing light transport, false for the 14 primary-hit ones; Optic Flow needs what its source needs.
+[[nodiscard]] inline bool aovNeedsLightTransport(AovId aov, AovId opticFlowSource) {
+    return aovSource(aov == AovId::OpticFlow ? opticFlowSource : aov) != AovSource::GBuffer;
 }
 
 // Case- and separator-insensitive lookup against kAovNames, so "bounce-count" and "bouncecount" match. AovId::Count doubles as "unknown".

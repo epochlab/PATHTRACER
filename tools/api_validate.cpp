@@ -16,6 +16,7 @@
 #include "pathtracer/debug/aov.h"
 #include "pathtracer/debug/aov_filters.h"
 #include "pathtracer/debug/colormap.h"
+#include "pathtracer/debug/optic_flow.h"
 #include "pathtracer/debug/scale_space.h"
 #include "pathtracer/debug/aov_routing.h"
 #include "pathtracer/scene/camera.h"
@@ -56,7 +57,7 @@ void setTexel(HdrImage& image, int x, int y, float r, float g, float b) {
 
 // Every AovId must be classified, sized and owned by the producer its classification names; an unclassified one routes to the rasterizer.
 PT_CHECK(aov_tables_are_total_and_consistent, Fast, Exact) {
-    ctx.plan(kAovCount * 3);
+    ctx.plan((kAovCount * 3) + (kAovCount - 1));
     for (int i = 0; i < kAovCount; ++i) {
         const auto aov = static_cast<AovId>(i);
         const int channels = pathtracer::debug::aovChannels(aov);
@@ -69,12 +70,24 @@ PT_CHECK(aov_tables_are_total_and_consistent, Fast, Exact) {
         // Exactly one lane accessor may answer, and only the one the classification points at.
         const bool ownedCorrectly = (source == AovSource::PathTraced && traced != nullptr && raster == nullptr) ||
                                      (source == AovSource::GBuffer && raster != nullptr && traced == nullptr) ||
-                                     (source == AovSource::BeautyFilter && traced == nullptr && raster == nullptr);
+                                     (source == AovSource::BeautyFilter && traced == nullptr && raster == nullptr) ||
+                                     (source == AovSource::Derived && traced == nullptr && raster == nullptr);
         PT_EXPECT(ctx, ownedCorrectly, std::string(pathtracer::debug::kAovNames[i]) + " lane/source disagree");
 
-        // aovNeedsLightTransport is derived from aovSource; this pins the derivation itself.
-        PT_EXPECT(ctx, pathtracer::debug::aovNeedsLightTransport(aov) == (source != AovSource::GBuffer),
+        // aovNeedsLightTransport is derived from aovSource; this pins the derivation itself. Optic Flow's answer is pinned below.
+        PT_EXPECT(ctx, aov == AovId::OpticFlow ||
+                           pathtracer::debug::aovNeedsLightTransport(aov, AovId::Depth) == (source != AovSource::GBuffer),
                       std::string(pathtracer::debug::kAovNames[i]) + " transport flag disagrees with source");
+    }
+    // Optic Flow is computed from its source, so it needs exactly the producer its source needs, for every source it may name.
+    for (int i = 0; i < kAovCount; ++i) {
+        const auto opticFlowSource = static_cast<AovId>(i);
+        if (opticFlowSource == AovId::OpticFlow) {
+            continue;
+        }
+        PT_EXPECT(ctx, pathtracer::debug::aovNeedsLightTransport(AovId::OpticFlow, opticFlowSource) ==
+                           (pathtracer::debug::aovSource(opticFlowSource) != AovSource::GBuffer),
+                      std::string("Optic Flow over ") + pathtracer::debug::kAovNames[i] + " needs the wrong producer");
     }
 }
 
@@ -430,6 +443,19 @@ PT_CHECK(display_premap_applies_to_exactly_two_aovs, Fast, Exact) {
     }
 }
 
+// dx and dy share the pixel as their unit, so one pooled range keeps a flow's direction on screen; sigma reads against the prior.
+PT_CHECK(optic_flow_display_pools_its_displacement_lanes, Fast, Exact) {
+    ctx.plan(3);
+    // Lane ranges far apart, so per-lane ranging would give the two displacement gains different values.
+    const HdrImage flow = frame(3, {0.5F, 16.0F, 1.0F, -4.0F, 0.125F, 2.0F});
+    const pathtracer::debug::AovDisplay display = pathtracer::debug::aovDisplay(AovId::OpticFlow, flow, {1024, 8});
+    PT_EXPECT(ctx, display.mapped.texels.empty(), "Optic Flow gained a pre-map");
+    PT_EXPECT(ctx, display.affine.gain.x == display.affine.gain.y && display.affine.offset == glm::vec3(0.5F, 0.5F, 0.0F),
+                  "dx and dy do not share one zero-centred range");
+    PT_EXPECT(ctx, display.affine.gain.z == 1.0F / pathtracer::debug::opticFlowPriorStd(flow.width, flow.height),
+                  "sigma is not displayed against the prior it can never exceed");
+}
+
 // A unit step edge has a closed-form Sobel magnitude: both adjacent columns read exactly 4 and everything further exactly 0.
 PT_CHECK(sobel_step_edge_matches_closed_form, Fast, Exact) {
     ctx.plan(4);
@@ -774,6 +800,76 @@ PT_CHECK(gbuffer_aov_with_a_fisheye_lens_is_rejected, Fast, Exact) {
     PT_EXPECT(ctx, attempt(fisheye, AovId::Beauty), "a path-traced AOV failed under a fisheye lens: " + error);
     PT_EXPECT(ctx, attempt(rectilinear, AovId::Depth),
               "a G-buffer AOV failed under the default rectilinear lens: " + error);
+}
+
+// Optic Flow pairs each request that asks for it with the previous one that did, at the same size; anything else reads the prior.
+PT_CHECK(optic_flow_pairs_consecutive_requests, Slow, Exact) {
+    ctx.plan(5);
+    std::string error;
+    const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", error);
+    if (!renderer) {
+        for (int i = 0; i < 5; ++i) {
+            PT_EXPECT(ctx, false, "scene load failed: " + error);
+        }
+        return;
+    }
+    const auto render = [&](int width, std::vector<AovId> aovs) {
+        const pathtracer::api::HeadlessRenderer::Request request{
+            .camera = renderer->defaultCamera(), .width = width, .height = 48, .samples = 2, .scrambleSeed = 5, .aovs = aovs};
+        error.clear();
+        return renderer->render(request, error) ? renderer->lastImage(aovs.front()) : HdrImage{};
+    };
+    const auto isPrior = [](const HdrImage& flow) {
+        const float spread = pathtracer::debug::opticFlowPriorStd(flow.width, flow.height);
+        bool prior = !flow.texels.empty();
+        for (std::size_t i = 0; i < flow.texels.size(); i += 3) {
+            prior = prior && flow.texels[i] == 0.0F && flow.texels[i + 1] == 0.0F && flow.texels[i + 2] == spread;
+        }
+        return prior;
+    };
+    const auto isStill = [](const HdrImage& flow) {
+        bool still = !flow.texels.empty();
+        for (std::size_t i = 0; i < flow.texels.size(); i += 3) {
+            still = still && flow.texels[i] == 0.0F && flow.texels[i + 1] == 0.0F;
+        }
+        return still;
+    };
+    PT_EXPECT(ctx, isPrior(render(64, {AovId::OpticFlow})), "the first view did not read the prior");
+    // The same seeded view again renders a bit-identical source, so every phase step is exactly zero.
+    PT_EXPECT(ctx, isStill(render(64, {AovId::OpticFlow})), "a repeated view did not read exactly zero flow");
+    PT_EXPECT(ctx, isPrior(render(72, {AovId::OpticFlow})), "a resized view did not read the prior");
+    // A request that does not ask for flow leaves the history alone, so the next flow still pairs with the 72-wide view.
+    PT_EXPECT(ctx, !render(64, {AovId::Beauty}).texels.empty(), "an intervening Beauty request failed: " + error);
+    PT_EXPECT(ctx, isStill(render(72, {AovId::OpticFlow})), "a request without flow disturbed the pairing");
+}
+
+// The source is produced once per request whatever else is asked for, so the flow cannot depend on the rest of the request.
+PT_CHECK(optic_flow_matches_across_request_mixes, Slow, Exact) {
+    ctx.plan(2);
+    std::string error;
+    const auto alone = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", error);
+    const auto mixed = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", error);
+    if (!alone || !mixed) {
+        PT_EXPECT(ctx, false, "scene load failed: " + error);
+        PT_EXPECT(ctx, false, "scene load failed: " + error);
+        return;
+    }
+    const pathtracer::scene::Camera& start = alone->defaultCamera();
+    // A small pan, so the second view pairs with the first through real motion rather than an identical frame.
+    const pathtracer::scene::Camera panned{start.position(),    start.yawDegrees() + 0.5F, start.pitchDegrees(),
+                                           start.filmBack(),    start.focalLengthMm(),     start.nearClip(),
+                                           start.farClip(),     start.aperture(),          start.shutterSeconds(),
+                                           start.iso(),         start.lens()};
+    for (const pathtracer::scene::Camera* camera : {&start, &panned}) {
+        const auto request = [camera](std::vector<AovId> aovs) {
+            return pathtracer::api::HeadlessRenderer::Request{
+                .camera = *camera, .width = 96, .height = 64, .samples = 2, .scrambleSeed = 9, .aovs = std::move(aovs)};
+        };
+        const bool rendered = alone->render(request({AovId::OpticFlow}), error) &&
+                              mixed->render(request({AovId::Beauty, AovId::OpticFlow, AovId::Luminance, AovId::Depth}), error);
+        PT_EXPECT(ctx, rendered && alone->lastImage(AovId::OpticFlow).texels == mixed->lastImage(AovId::OpticFlow).texels,
+                      "flow differs between a flow-only and a mixed request: " + error);
+    }
 }
 
 PT_CHECK_MAIN("api")

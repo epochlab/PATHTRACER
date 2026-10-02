@@ -1,4 +1,4 @@
-// Correctness gate for the shared scale space and the Beauty filters: kernel identities, DoG, Colour Opponent, SNR, the Morlet bank.
+// Correctness gate for the shared scale space and the Beauty filters: kernel identities, octave cascade, DoG, Colour Opponent, SNR, Morlet.
 
 #include <algorithm>
 #include <array>
@@ -182,6 +182,88 @@ PT_CHECK(diffusion_reproduces_affine_fields, Fast, Exact) {
         }
     }
     PT_EXPECT(ctx, identical, "diffusion must leave an affine field bit-identical in the interior");
+}
+
+// Levels 0 and 1 are one diffusion, the direct blur bit for bit; past them the decimated band and summation rounding (Higham 3.5) differ.
+PT_CHECK(octave_level_matches_direct_diffusion, Fast, Exact) {
+    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    constexpr int kWidth = 256;
+    constexpr int kHeight = 160;
+    std::vector<float> source(static_cast<std::size_t>(kWidth) * kHeight);
+    for (int y = 0; y < kHeight; ++y) {
+        for (int x = 0; x < kWidth; ++x) {
+            // Broadband and asymmetric, so a level that silently aliased on decimation cannot match the direct reference by luck.
+            source[(static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x)] =
+                (0.5F * std::sin(0.31F * static_cast<float>(x))) + (0.25F * std::cos(0.73F * static_cast<float>(y))) +
+                ((x + (2 * y)) % 7 == 0 ? 1.0F : 0.0F);
+        }
+    }
+    const int levels = pathtracer::debug::octaveLevelCount(kWidth, kHeight);
+    ctx.plan(levels);
+    double rounding = 0.0;
+    for (int k = 0; k < levels; ++k) {
+        const pathtracer::debug::ScaleSpaceLevel level = pathtracer::debug::octaveLevel(source, kWidth, kHeight, k, pool);
+        std::vector<float> direct = source;
+        pathtracer::debug::diffuse(direct, kWidth, kHeight, level.baseVariance, pool);
+        const int radius = static_cast<int>(pathtracer::debug::discreteGaussianKernel(level.baseVariance).size()) - 1;
+        float worst = 0.0F;
+        // Co-located samples only, so no interpolation enters, and the interior only, the boundary being a different operator per route.
+        for (int y = 0; y < level.height; ++y) {
+            for (int x = 0; x < level.width; ++x) {
+                const int baseX = x * level.decimation;
+                const int baseY = y * level.decimation;
+                if (baseX < radius || baseX >= kWidth - radius || baseY < radius || baseY >= kHeight - radius) {
+                    continue;
+                }
+                const float cascaded = level.plane[(static_cast<std::size_t>(y) * static_cast<std::size_t>(level.width)) +
+                                                   static_cast<std::size_t>(x)];
+                const float reference = direct[(static_cast<std::size_t>(baseY) * kWidth) + static_cast<std::size_t>(baseX)];
+                worst = std::max(worst, std::fabs(cascaded - reference));
+            }
+        }
+        // Both routes sum two separable passes of 2r+1 taps over a field of peak 1.75; each decimation drops under 2^-24 of it.
+        const double peak = 1.75;
+        const auto taps = static_cast<double>((2 * radius) + 1);
+        rounding += 2.0 * taps * static_cast<double>(kFloatEpsilon) * peak;
+        const double decimations = std::log2(static_cast<double>(level.decimation));
+        const double bound = k < 2 ? 0.0 : (2.0 * rounding) + (decimations * pathtracer::debug::kFloat32Roundoff * peak);
+        PT_EXPECT(ctx, static_cast<double>(worst) <= bound,
+                      "level " + std::to_string(k) + " deviates by " + std::to_string(worst) + ", bound " + std::to_string(bound));
+    }
+}
+
+// A level exists exactly when its own envelope's support fits its own grid, so each count steps at that support and not a pixel before.
+PT_CHECK(octave_level_count_steps_at_each_kernel_support, Fast, Exact) {
+    const float inner = pathtracer::debug::innerScaleVariance();
+    const auto support = [](float t) { return (2 * (static_cast<int>(pathtracer::debug::discreteGaussianKernel(t).size()) - 1)) + 1; };
+    // Level 0 at t0 and level 1 at 4 t0 share the base grid; level 2 is 4 t0 again on a grid halved by ceiling, (E + 1) / 2.
+    const int fine = support(inner);
+    const int coarse = support(4.0F * inner);
+    const std::array<std::pair<int, int>, 3> steps{{{fine, 1}, {coarse, 2}, {(2 * coarse) - 1, 3}}};
+    ctx.plan(2 * static_cast<int>(steps.size()));
+    for (const auto& [extent, count] : steps) {
+        PT_EXPECT(ctx, pathtracer::debug::octaveLevelCount(extent - 1, extent - 1) == count - 1,
+                      std::to_string(extent - 1) + " px already holds " + std::to_string(count) + " levels");
+        PT_EXPECT(ctx, pathtracer::debug::octaveLevelCount(extent, 4 * extent) == count,
+                      std::to_string(extent) + " px does not hold " + std::to_string(count) + " levels");
+    }
+}
+
+// Bilinear expansion is a convex combination of level samples, so a constant level must expand to that constant with no rounding at all.
+PT_CHECK(expansion_reproduces_a_constant_level_exactly, Fast, Exact) {
+    ctx.plan(1);
+    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    constexpr int kWidth = 320;
+    constexpr int kHeight = 208;
+    const std::vector<float> ones(static_cast<std::size_t>(kWidth) * kHeight, 1.0F);
+    const int coarsest = pathtracer::debug::octaveLevelCount(kWidth, kHeight) - 1;
+    const pathtracer::debug::ScaleSpaceLevel level = pathtracer::debug::octaveLevel(ones, kWidth, kHeight, coarsest, pool);
+    std::vector<float> expanded(ones.size(), 0.0F);
+    pathtracer::debug::addExpanded(level, 1.0F, expanded, kWidth, kHeight, pool);
+    const auto extremes = std::minmax_element(expanded.begin(), expanded.end());
+    PT_EXPECT(ctx, *extremes.first == 1.0F && *extremes.second == 1.0F,
+                  "coarsest level expands to [" + std::to_string(*extremes.first) + ", " + std::to_string(*extremes.second) +
+                      "], not exactly one");
 }
 
 // A constant field survives the mirror exactly, so DoG must read zero at every pixel, border included.

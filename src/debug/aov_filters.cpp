@@ -89,6 +89,44 @@ int morletOrientations() {
     return static_cast<int>(std::ceil(std::numbers::pi / angularWidth));
 }
 
+MorletPlaneWave morletPlaneWave(float carrier, int index, int count, int width, int height) {
+    MorletPlaneWave wave;
+    const double theta = (std::numbers::pi * static_cast<double>(index)) / static_cast<double>(count);
+    wave.stepX = static_cast<double>(carrier) * std::cos(theta);
+    wave.stepY = static_cast<double>(carrier) * std::sin(theta);
+    wave.cosX.resize(static_cast<std::size_t>(width));
+    wave.sinX.resize(static_cast<std::size_t>(width));
+    wave.cosY.resize(static_cast<std::size_t>(height));
+    wave.sinY.resize(static_cast<std::size_t>(height));
+    // Split by the angle-addition formula, so the row loop carries no transcendental at all.
+    for (int x = 0; x < width; ++x) {
+        wave.cosX[static_cast<std::size_t>(x)] = static_cast<float>(std::cos(wave.stepX * static_cast<double>(x)));
+        wave.sinX[static_cast<std::size_t>(x)] = static_cast<float>(std::sin(wave.stepX * static_cast<double>(x)));
+    }
+    for (int y = 0; y < height; ++y) {
+        wave.cosY[static_cast<std::size_t>(y)] = static_cast<float>(std::cos(wave.stepY * static_cast<double>(y)));
+        wave.sinY[static_cast<std::size_t>(y)] = static_cast<float>(std::sin(wave.stepY * static_cast<double>(y)));
+    }
+    return wave;
+}
+
+void demodulate(std::span<const float> plane, const MorletPlaneWave& wave, int width, int height, std::span<float> real,
+                std::span<float> imaginary, ThreadPool& threadPool) {
+    threadPool.parallelFor(height, [&](int y) {
+        const float rowCos = wave.cosY[static_cast<std::size_t>(y)];
+        const float rowSin = wave.sinY[static_cast<std::size_t>(y)];
+        const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
+        for (int x = 0; x < width; ++x) {
+            const std::size_t pixel = row + static_cast<std::size_t>(x);
+            const float cosPhase = (wave.cosX[static_cast<std::size_t>(x)] * rowCos) - (wave.sinX[static_cast<std::size_t>(x)] * rowSin);
+            const float sinPhase = (wave.sinX[static_cast<std::size_t>(x)] * rowCos) + (wave.cosX[static_cast<std::size_t>(x)] * rowSin);
+            // Demodulate, blur, remodulate: the plane wave factors out of the convolution, so every orientation stays separable.
+            real[pixel] = plane[pixel] * cosPhase;
+            imaginary[pixel] = -plane[pixel] * sinPhase;
+        }
+    });
+}
+
 HdrImage gaborAov(const HdrImage& beauty, ThreadPool& threadPool) {
     const int width = beauty.width;
     const int height = beauty.height;
@@ -107,63 +145,27 @@ HdrImage gaborAov(const HdrImage& beauty, ThreadPool& threadPool) {
     std::vector<float> peak(pixels, 0.0F);
     std::vector<float> real(pixels);
     std::vector<float> imaginary(pixels);
-    std::vector<float> phaseCos(static_cast<std::size_t>(width));
-    std::vector<float> phaseSin(static_cast<std::size_t>(width));
     for (int orientation = 0; orientation < orientations; ++orientation) {
         // A half turn covers the bank: the magnitude at theta and theta+pi is the same, the two being complex conjugates.
-        const double theta = (std::numbers::pi * static_cast<double>(orientation)) / static_cast<double>(orientations);
-        const double stepX = static_cast<double>(carrier) * std::cos(theta);
-        const double stepY = static_cast<double>(carrier) * std::sin(theta);
-        // Split by the angle-addition formula, so the row loop carries no transcendental at all.
-        for (int x = 0; x < width; ++x) {
-            phaseCos[static_cast<std::size_t>(x)] = static_cast<float>(std::cos(stepX * static_cast<double>(x)));
-            phaseSin[static_cast<std::size_t>(x)] = static_cast<float>(std::sin(stepX * static_cast<double>(x)));
-        }
+        const MorletPlaneWave wave = morletPlaneWave(carrier, orientation, orientations, width, height);
         // Morlet's admissibility term as the blurred plane wave itself, under the same mirror: zero mean at the border, not just inside.
-        std::vector<float> meanCosX(phaseCos);
-        std::vector<float> meanSinX(phaseSin);
-        diffuse(meanCosX, width, 1, variance, threadPool);
-        diffuse(meanSinX, width, 1, variance, threadPool);
+        MorletPlaneWave mean = wave;
         // Separable, so its own blur is the product of a width-long and a height-long one and costs nothing against the 2-D passes.
-        std::vector<float> meanCosY(static_cast<std::size_t>(height));
-        std::vector<float> meanSinY(static_cast<std::size_t>(height));
-        for (int y = 0; y < height; ++y) {
-            meanCosY[static_cast<std::size_t>(y)] = static_cast<float>(std::cos(stepY * static_cast<double>(y)));
-            meanSinY[static_cast<std::size_t>(y)] = static_cast<float>(std::sin(stepY * static_cast<double>(y)));
-        }
-        diffuse(meanCosY, 1, height, variance, threadPool);
-        diffuse(meanSinY, 1, height, variance, threadPool);
-        threadPool.parallelFor(height, [&](int y) {
-            const auto rowCos = static_cast<float>(std::cos(stepY * static_cast<double>(y)));
-            const auto rowSin = static_cast<float>(std::sin(stepY * static_cast<double>(y)));
-            const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
-            for (int x = 0; x < width; ++x) {
-                const std::size_t pixel = row + static_cast<std::size_t>(x);
-                const float cosPhase = (phaseCos[static_cast<std::size_t>(x)] * rowCos) - (phaseSin[static_cast<std::size_t>(x)] * rowSin);
-                const float sinPhase = (phaseSin[static_cast<std::size_t>(x)] * rowCos) + (phaseCos[static_cast<std::size_t>(x)] * rowSin);
-                // Demodulate, blur, remodulate: the plane wave factors out of the convolution, so every orientation stays separable.
-                real[pixel] = plane[pixel] * cosPhase;
-                imaginary[pixel] = -plane[pixel] * sinPhase;
-            }
-        });
+        diffuse(mean.cosX, width, 1, variance, threadPool);
+        diffuse(mean.sinX, width, 1, variance, threadPool);
+        diffuse(mean.cosY, 1, height, variance, threadPool);
+        diffuse(mean.sinY, 1, height, variance, threadPool);
+        demodulate(plane, wave, width, height, real, imaginary, threadPool);
         diffuse(real, width, height, variance, threadPool);
         diffuse(imaginary, width, height, variance, threadPool);
         // Remodulating is a rotation by the carrier's phase, which a magnitude discards, so only the admissibility term is left to apply.
         threadPool.parallelFor(height, [&](int y) {
-            const float rowCos = meanCosY[static_cast<std::size_t>(y)];
-            const float rowSin = meanSinY[static_cast<std::size_t>(y)];
             const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
             for (int x = 0; x < width; ++x) {
                 const std::size_t pixel = row + static_cast<std::size_t>(x);
-                // The blurred plane wave under the same mirror, which is what a constant field would have produced right here.
-                const float meanReal = (meanCosX[static_cast<std::size_t>(x)] * rowCos) -
-                                        (meanSinX[static_cast<std::size_t>(x)] * rowSin);
-                const float meanImaginary = (meanSinX[static_cast<std::size_t>(x)] * rowCos) +
-                                             (meanCosX[static_cast<std::size_t>(x)] * rowSin);
-                const float centredReal = real[pixel] - (meanReal * lowpass[pixel]);
-                const float centredImaginary = imaginary[pixel] + (meanImaginary * lowpass[pixel]);
+                const glm::vec2 centred = morletBaseband(mean, x, y, real[pixel], imaginary[pixel], lowpass[pixel]);
                 // Squared, so the root is paid once per texel at the end rather than once per texel per orientation; max commutes with it.
-                peak[pixel] = std::max(peak[pixel], (centredReal * centredReal) + (centredImaginary * centredImaginary));
+                peak[pixel] = std::max(peak[pixel], (centred.x * centred.x) + (centred.y * centred.y));
             }
         });
     }
@@ -257,6 +259,19 @@ HdrImage colourOpponentAov(const HdrImage& beauty, ThreadPool& threadPool) {
     return out;
 }
 
+HdrImage luminanceMeanVariance(int width, int height, const float* beautyLuminanceM2, int samples) {
+    if (beautyLuminanceM2 == nullptr || samples < 2) {
+        return {};
+    }
+    HdrImage out = pathtracer::gfx::makeImage(width, height, pathtracer::gfx::kScalarChannels);
+    // Widened before the product, as snrAov is: n(n-1) leaves int at 46341 passes.
+    const float passes = static_cast<float>(samples);
+    const float inverseDegrees = 1.0F / (passes * (passes - 1.0F));
+    std::transform(beautyLuminanceM2, beautyLuminanceM2 + out.texels.size(), out.texels.begin(),
+                   [inverseDegrees](float m2) { return m2 * inverseDegrees; });
+    return out;
+}
+
 HdrImage snrAov(const HdrImage& beauty, const float* beautyLuminanceM2, int samples, ThreadPool& threadPool) {
     HdrImage out = makeAovImage(AovId::SNR, beauty.width, beauty.height);
     // A single sample carries no dispersion, so the ratio is undefined rather than infinite, and a black frame says so.
@@ -293,6 +308,7 @@ HdrImage evaluateFilterAov(AovId aov, const FilterInput& input, ThreadPool& thre
         case AovId::SNR:       return snrAov(input.beauty, input.beautyLuminanceM2, input.samples, threadPool);
 
         // The lanes their own producers write. No default arm: -Werror then makes an unrouted new filter a compile error.
+        case AovId::OpticFlow:
         case AovId::Beauty:
         case AovId::Wireframe:
         case AovId::Alpha:

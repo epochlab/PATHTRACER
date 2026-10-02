@@ -132,6 +132,7 @@ add_library(pathtracer_core STATIC
     src/debug/frame_stats.cpp
     src/debug/host_info.cpp
     src/debug/memory_tracker.cpp
+    src/debug/optic_flow.cpp
     src/debug/perf_dashboard.cpp
     src/debug/power_spectrum.cpp
     src/debug/scale_space.cpp
@@ -268,7 +269,7 @@ target_link_libraries(check_selftest PRIVATE glm::glm)
 # Every validator links pathtracer_core and pathtracer_check; what each asserts is documented at the top of its own tools/*.cpp.
 foreach(validator embree_validate bsdf_validate sampler_validate nee_validate rasterizer_validate
                   integrator_validate driver_validate io_validate display_validate filter_validate
-                  camera_validate)
+                  flow_validate camera_validate)
     add_executable(${validator} tools/${validator}.cpp $<TARGET_OBJECTS:pathtracer_check>)
     target_include_directories(${validator} PRIVATE tools)
     pathtracer_target_defaults(${validator} NATIVE IPO)
@@ -375,5 +376,6 @@ pathtracer_discover_checks(display_validate)
 pathtracer_discover_checks(colour_validate)
 pathtracer_discover_checks(api_validate)
 pathtracer_discover_checks(filter_validate)
+pathtracer_discover_checks(flow_validate)
 pathtracer_discover_checks(camera_validate)
 

@@ -18,7 +18,7 @@ _ERROR_CAPACITY = 512
 PT_DEFAULT = -1
 
 # PT_ABI_VERSION in pathtracer_c.h. PtCamera and PtRenderRequest cross the boundary by value, so a layout drift must fail loudly.
-PT_ABI_VERSION = 2
+PT_ABI_VERSION = 3
 
 # PtCamera.lens_projection, PT_LENS_* in pathtracer_c.h. Index-parallel with LENS_PROJECTIONS in __init__.py.
 PT_LENS_RECTILINEAR = 0
@@ -105,8 +105,6 @@ def load_library() -> ctypes.CDLL:
     library.pt_aov_id.restype = ctypes.c_int
     library.pt_aov_channels.argtypes = [ctypes.c_int]
     library.pt_aov_channels.restype = ctypes.c_int
-    library.pt_aov_needs_samples.argtypes = [ctypes.c_int]
-    library.pt_aov_needs_samples.restype = ctypes.c_int
 
     library.pt_renderer_default_camera.argtypes = [ctypes.c_void_p, ctypes.POINTER(PtCamera)]
     library.pt_renderer_default_camera.restype = None
@@ -114,6 +112,8 @@ def load_library() -> ctypes.CDLL:
     library.pt_renderer_default_width.restype = ctypes.c_int
     library.pt_renderer_default_height.argtypes = [ctypes.c_void_p]
     library.pt_renderer_default_height.restype = ctypes.c_int
+    library.pt_renderer_aov_needs_samples.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    library.pt_renderer_aov_needs_samples.restype = ctypes.c_int
 
     library.pt_render.argtypes = [
         ctypes.c_void_p,
