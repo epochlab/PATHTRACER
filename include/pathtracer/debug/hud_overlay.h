@@ -6,7 +6,6 @@
 
 #include <glm/glm.hpp>
 
-#include "pathtracer/debug/aov.h"
 #include "pathtracer/debug/scene_stats.h"
 
 struct GLFWwindow;
@@ -63,7 +62,6 @@ struct HudFrameData {
     float overRangeFraction;
     float overRangePeakMultiple;
     bool vsync;  // profile.json frame cap, for the Cap readout
-    AovId opticFlowSource;  // profile.json: Optic Flow is rasterized exactly when its source is
 };
 
 // Owns the ImGui context and GLFW/OpenGL3 backends for one window's lifetime, move-only. Composites the debug panel onto the backbuffer.

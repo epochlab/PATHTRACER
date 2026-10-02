@@ -37,7 +37,6 @@
 #include "pathtracer/debug/spec_report.h"
 #include "pathtracer/debug/hud_overlay.h"
 #include "pathtracer/debug/memory_tracker.h"
-#include "pathtracer/debug/optic_flow.h"
 #include "pathtracer/debug/scene_stats.h"
 #include "pathtracer/debug/system_info.h"
 #include "pathtracer/gfx/gl_debug.h"
@@ -89,6 +88,12 @@ struct ViewInputState {
     bool operator==(const ViewInputState&) const = default;
 };
 
+// One definition for the current and previous views, so the raster trigger compares the two on identical fields.
+ViewInputState viewInputState(const pathtracer::scene::Camera& camera) {
+    return ViewInputState{camera.position(), camera.yawDegrees(), camera.pitchDegrees(), camera.focalLengthMm(),
+                          camera.filmBack().heightMm, camera.lens().projection};
+}
+
 // Every input renderPathTraced depends on bar the resolution, compared frame to frame.
 struct PathTraceInputState {
     ViewInputState view;
@@ -111,6 +116,8 @@ struct PathTraceTriggerState {
 // The rasterizer's own last-rendered state: separate because an environment change must retrace without re-rasterizing a G-buffer.
 struct RasterTriggerState {
     ViewInputState view;
+    // MotionVector's origin: the first still frame after a move differs here alone, and re-rasterizes to exact zero motion.
+    ViewInputState previousView;
     float renderScale = 0.0F;  // same sentinel, same bound
 
     bool operator==(const RasterTriggerState&) const = default;
@@ -170,15 +177,6 @@ struct FilterCache {
     pathtracer::gfx::HdrImage image;
 };
 
-// Optic Flow's pairing: the source as of the previous view and the current one, held as copies so no pool slot stays pinned.
-struct OpticFlowHistory {
-    pathtracer::gfx::HdrImage previous;
-    pathtracer::gfx::HdrImage previousVariance;  // empty where that view's noise was unknown
-    pathtracer::gfx::HdrImage latest;
-    pathtracer::gfx::HdrImage latestVariance;
-    std::uint64_t latestView = 0;
-};
-
 struct AppResources {
     pathtracer::gfx::OcioDisplayTransform ocioTransform;
     pathtracer::scene::EmbreeAccel sceneAccel;     // path tracer scene intersection
@@ -205,10 +203,6 @@ struct AppResources {
     pathtracer::scene::DebugCameraController debugCamera;
     pathtracer::debug::GpuInfo gpuInfo;
     FilterCache filterCache;
-    // Optic Flow's own entry, apart from filterCache, which its source may occupy when that source is itself a filter.
-    FilterCache opticFlowCache;
-    OpticFlowHistory opticFlowHistory;
-    pathtracer::debug::AovId opticFlowSource;
 
     // HUD-editable UI/run state.
     int aov;
@@ -255,6 +249,8 @@ struct AppResources {
     std::shared_ptr<const void> pathTraceDisplayedOwner;
     PathTraceTriggerState lastPathTraceTrigger;  // sentinel-initialized, see its own doc comment
     RasterTriggerState lastRasterTrigger;        // the same, for the rasterizer's independent refresh
+    // The camera the last frame displayed, MotionVector's origin; the startup pose before the first frame, so it moves from itself.
+    pathtracer::scene::Camera previousFrameCamera;
     // The authored image in pixels (profile.json render.width/height), fixed for the session and independent of the window.
     int imageWidth;
     int imageHeight;
@@ -263,7 +259,7 @@ struct AppResources {
     float interactiveRenderScale;
     std::chrono::steady_clock::time_point lastInputChange;
 
-    // Synchronous CPU rasterizer for the 14 primary-hit AOVs, their only producer. unique_ptr: ThreadPool owns threads and cannot move.
+    // Synchronous CPU rasterizer for the 15 primary-hit AOVs, their only producer. unique_ptr: ThreadPool owns threads and cannot move.
     std::unique_ptr<pathtracer::scene::ThreadPool> rasterThreadPool;
     // Allocated once and rendered into in place, never republished: its `generation`, not its address, tells one render from the next.
     std::shared_ptr<pathtracer::scene::RasterGBuffer> rasterGBuffer;
@@ -328,6 +324,7 @@ std::optional<AppResources> initializeApp(const pathtracer::config::SceneConfig&
         profileConfig.camera.shutterSeconds, profileConfig.camera.iso, profileConfig.camera.lens,
         profileConfig.controls.flySpeedMetersPerSecond,
         profileConfig.controls.orbitSensitivityDegPerPixel);
+    const pathtracer::scene::Camera initialCamera = debugCamera.snapshot();
     // Scene-level placement (scene.json model.position/model.rotation), order X,Y,Z.
     const glm::mat4 sceneTransform =
         glm::translate(glm::mat4(1.0F), sceneConfig.model.position) *
@@ -477,9 +474,6 @@ std::optional<AppResources> initializeApp(const pathtracer::config::SceneConfig&
         .debugCamera = std::move(debugCamera),
         .gpuInfo = gpuInfo,
         .filterCache = {},
-        .opticFlowCache = {},
-        .opticFlowHistory = {},
-        .opticFlowSource = profileConfig.opticFlow.source,
         // aov selects which lane the snapshot supplies; userLut stays separate because non-Beauty AOVs force Raw and must not overwrite it.
         .aov = profileConfig.render.defaultAov,
         .filmBackPresets = std::move(*filmBackPresets),
@@ -517,6 +511,7 @@ std::optional<AppResources> initializeApp(const pathtracer::config::SceneConfig&
         .pathTraceDisplayedOwner = nullptr,
         .lastPathTraceTrigger = PathTraceTriggerState{},
         .lastRasterTrigger = RasterTriggerState{},
+        .previousFrameCamera = initialCamera,
         .imageWidth = profileConfig.render.width,
         .imageHeight = profileConfig.render.height,
         .renderScale = profileConfig.render.renderScale,
@@ -661,11 +656,6 @@ void resolveOrbitPick(pathtracer::platform::Window& window, AppResources& app,
     app.lastCursorY = cursorY;
 }
 
-// Whether the selected AOV's producer is the path tracer: Optic Flow needs whatever its profile source needs.
-bool selectedNeedsLightTransport(const AppResources& app) {
-    return aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(app.aov), app.opticFlowSource);
-}
-
 // Bundles the HdrImage an AOV displays with a type-erased strong ref to its owner, which is also an ABA-safe cache key.
 struct DisplayedAovSource {
     const pathtracer::gfx::HdrImage* image = nullptr;
@@ -699,10 +689,10 @@ const pathtracer::gfx::HdrImage* ensureFilterImage(
     return &cache.image;
 }
 
-// A producer's own image: a G-buffer lane, a path-traced lane or a filter, everything Optic Flow can take as its source.
-DisplayedAovSource resolveProducedImage(AppResources& app,
-                                        const std::shared_ptr<const pathtracer::scene::PathTraceResult>& snapshot,
-                                        pathtracer::debug::AovId aov) {
+// Null image if the AOV's producer has not published, so callers show black. The one place an AovId becomes an HdrImage.
+DisplayedAovSource resolveAovImage(AppResources& app,
+                                   const std::shared_ptr<const pathtracer::scene::PathTraceResult>& snapshot,
+                                   pathtracer::debug::AovId aov) {
     if (const pathtracer::debug::GBufferLane lane = pathtracer::debug::gbufferLane(aov)) {
         // The buffer is allocated for the process's life now, so a null check no longer distinguishes "no render yet" -- generation 0 does.
         return app.rasterGBuffer->generation == 0
@@ -715,62 +705,6 @@ DisplayedAovSource resolveProducedImage(AppResources& app,
     const pathtracer::gfx::HdrImage* filtered = ensureFilterImage(app, snapshot, aov);
     return filtered != nullptr ? DisplayedAovSource{filtered, snapshot, app.filterCache.revision}
                                : DisplayedAovSource{};
-}
-
-// Flow from the source's previous view to its current one, re-evaluated only when the source image changes. Nested source time adds in.
-const pathtracer::gfx::HdrImage* ensureOpticFlowImage(
-    AppResources& app, const std::shared_ptr<const pathtracer::scene::PathTraceResult>& snapshot) {
-    // A view is one request to the source's producer: the rasterizer's generation, or the path-trace driver's.
-    const bool rasterized = pathtracer::debug::aovSource(app.opticFlowSource) == pathtracer::debug::AovSource::GBuffer;
-    if (!rasterized && !snapshot) {
-        return nullptr;
-    }
-    const DisplayedAovSource source = resolveProducedImage(app, snapshot, app.opticFlowSource);
-    if (source.image == nullptr) {
-        return nullptr;
-    }
-    FilterCache& cache = app.opticFlowCache;
-    if (cache.revision != 0 && cache.owner == source.owner && cache.generation == source.generation) {
-        return &cache.image;
-    }
-    float flowMs = 0.0F;
-    {
-        const pathtracer::debug::ScopedCpuTimer flowTimer(flowMs);
-        const std::uint64_t view = rasterized ? app.rasterGBuffer->generation : snapshot->generation;
-        OpticFlowHistory& history = app.opticFlowHistory;
-        if (view != history.latestView) {
-            history.previous = std::move(history.latest);
-            history.previousVariance = std::move(history.latestVariance);
-            history.latestView = view;
-        }
-        // Within one view the source refines as passes accumulate, so the newest refinement replaces the last against the same previous.
-        history.latest = *source.image;
-        // Luminance's noise is known from the driver's second moment; any other source is weighed as deterministic.
-        history.latestVariance = app.opticFlowSource == pathtracer::debug::AovId::Luminance
-                                     ? pathtracer::debug::luminanceMeanVariance(history.latest.width, history.latest.height,
-                                                                                snapshot->beautyLuminanceM2.data(), snapshot->samples)
-                                     : pathtracer::gfx::HdrImage{};
-        const auto known = [](const pathtracer::gfx::HdrImage& image) { return image.texels.empty() ? nullptr : &image; };
-        cache.image = pathtracer::debug::opticFlowAov({&history.latest, known(history.latestVariance)},
-                                                      {&history.previous, known(history.previousVariance)}, *app.rasterThreadPool);
-    }
-    app.stages.filterMs += flowMs;
-    cache.owner = source.owner;
-    cache.generation = source.generation;
-    ++cache.revision;
-    return &cache.image;
-}
-
-// Null image if the AOV's producer has not published, so callers show black. The one place an AovId becomes an HdrImage.
-DisplayedAovSource resolveAovImage(AppResources& app,
-                                   const std::shared_ptr<const pathtracer::scene::PathTraceResult>& snapshot,
-                                   pathtracer::debug::AovId aov) {
-    if (aov == pathtracer::debug::AovId::OpticFlow) {
-        const pathtracer::gfx::HdrImage* flow = ensureOpticFlowImage(app, snapshot);
-        return flow != nullptr ? DisplayedAovSource{flow, app.opticFlowCache.owner, app.opticFlowCache.revision}
-                               : DisplayedAovSource{};
-    }
-    return resolveProducedImage(app, snapshot, aov);
 }
 
 // Cursor offset within imageRect, in framebuffer pixels with GL's bottom-left origin. Nullopt off-window or over a letterbox bar.
@@ -904,12 +838,9 @@ std::uint64_t requestPathTrace(AppResources& app, const pathtracer::scene::Camer
 // Once per frame, re-tracing on any input that changes the image. The rasterizer is synchronous, 21 ms at 1024x576, so it stays gated.
 void requestPathTraceIfTriggerChanged(AppResources& app, const pathtracer::scene::Camera& camera,
                                        std::chrono::steady_clock::time_point now) {
-    const ViewInputState view{camera.position(),
-                               app.debugCamera.yawDegrees(),
-                               app.debugCamera.pitchDegrees(),
-                               app.debugCamera.focalLengthMm(),
-                               app.debugCamera.filmBack().heightMm,
-                               camera.lens().projection};
+    const ViewInputState view = viewInputState(camera);
+    const pathtracer::scene::Camera previousCamera = app.previousFrameCamera;
+    app.previousFrameCamera = camera;
     const PathTraceInputState input{view, app.envRotationDegrees, app.showSky, app.envLightEnabled,
                                      app.envExposureStops};
 
@@ -922,7 +853,7 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const pathtracer::scene
     const float renderScale = settled ? app.renderScale : app.interactiveRenderScale;
     const int traceWidth = scaledExtent(app.imageWidth, renderScale);
     const int traceHeight = scaledExtent(app.imageHeight, renderScale);
-    const bool needsLightTransport = selectedNeedsLightTransport(app);
+    const bool needsLightTransport = aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(app.aov));
 
     // Park the driver when the selected AOV is not its own: otherwise it accumulates an off-screen image on every core.
     app.pathTraceDriver->setSuspended(!needsLightTransport);
@@ -936,7 +867,7 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const pathtracer::scene
         app.lastPathTraceTrigger = pathTrace;
     }
 
-    const RasterTriggerState raster{view, renderScale};
+    const RasterTriggerState raster{view, viewInputState(previousCamera), renderScale};
     const bool rasterizable = camera.lens().projection == pathtracer::scene::LensProjection::Rectilinear;
     if (needsLightTransport || !rasterizable || raster == app.lastRasterTrigger || traceWidth <= 0 ||
         traceHeight <= 0) {
@@ -944,7 +875,7 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const pathtracer::scene
     }
     {
         const pathtracer::debug::ScopedCpuTimer rasterTimer(app.stages.rasterMs);
-        pathtracer::scene::renderRasterGBuffer(camera, app.stumpModel.shadingTriangles,
+        pathtracer::scene::renderRasterGBuffer(camera, previousCamera, app.stumpModel.shadingTriangles,
                                             app.stumpModel.instances, app.perInstanceSettings,
                                             app.instanceBounds,
                                             traceWidth, traceHeight, *app.rasterThreadPool,
@@ -1010,7 +941,6 @@ void updateHud(AppResources& app, const pathtracer::platform::Window& window,
         app.overRangeFraction,
         app.overRangePeakMultiple,
         app.vsync,
-        app.opticFlowSource,
     };
     // Round-tripped through locals so the sliders can bind plain float&s; DebugCameraController stays the authoritative owner.
     float focalLengthMm = app.debugCamera.focalLengthMm();
@@ -1038,7 +968,7 @@ void updateHud(AppResources& app, const pathtracer::platform::Window& window,
     app.debugCamera.setLensProjection(static_cast<pathtracer::scene::LensProjection>(lensProjection));
     // A rasterizer AOV has no fisheye producer, so switching projection with one selected falls back to the lane that always has one.
     if (lensProjection != static_cast<int>(pathtracer::scene::LensProjection::Rectilinear) &&
-        !selectedNeedsLightTransport(app)) {
+        !aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(app.aov))) {
         app.aov = static_cast<int>(pathtracer::debug::AovId::Beauty);
     }
     app.filmBackPresetIndex = filmBackPresetIndex;
@@ -1085,7 +1015,7 @@ void updateDashboard(AppResources& app,
         app.postTimer.millisecondsElapsed(),
         pathTraceSnapshot != nullptr ? pathTraceSnapshot->samples : 0,
         app.maxSamples,
-        !selectedNeedsLightTransport(app),
+        !aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(app.aov)),
         app.ramBytes,
         pathtracer::debug::gpuAllocatedBytes(),
         app.bvhBytes,
@@ -1112,7 +1042,7 @@ void updateDashboard(AppResources& app,
 
 // True once the selected AOV's producer has nothing left to do: a rasterizer AOV is finished as soon as a G-buffer exists.
 bool stageComplete(const AppResources& app, const BenchCapture& bench) {
-    if (!selectedNeedsLightTransport(app)) {
+    if (!aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(app.aov))) {
         return app.rasterGBuffer->generation != 0;
     }
     return !bench.passes.empty() && bench.passes.back().generation == bench.generation &&
@@ -1136,7 +1066,7 @@ void captureBenchFrame(pathtracer::platform::Window& window, AppResources& app, 
     bench.presentGpuMs.push_back(app.postTimer.millisecondsElapsed());
     bench.refreshHz.push_back(static_cast<float>(app.refreshHz));
     // Only uploads the displayed AOV's producer issued: a superseded request can still publish, and a raster upload is never the driver's.
-    const bool ourUpload = !selectedNeedsLightTransport(app) ||
+    const bool ourUpload = !aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(app.aov)) ||
                            (snapshot != nullptr && snapshot->generation == bench.generation);
     if (app.stages.uploaded && ourUpload) {
         bench.uploadMs.push_back(app.stages.uploadMs);
@@ -1162,12 +1092,11 @@ void captureBenchFrame(pathtracer::platform::Window& window, AppResources& app, 
 // True when every AOV the session starts on -- profile.json's default and the whole bench schedule -- needs light transport.
 bool aovSelectionAvoidsRasterizer(const pathtracer::config::ProfileConfig& profileConfig,
                                const std::vector<int>& benchAovs) {
-    const pathtracer::debug::AovId source = profileConfig.opticFlow.source;
-    if (!aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(profileConfig.render.defaultAov), source)) {
+    if (!aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(profileConfig.render.defaultAov))) {
         return false;
     }
-    return std::all_of(benchAovs.begin(), benchAovs.end(), [source](int aov) {
-        return aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(aov), source);
+    return std::all_of(benchAovs.begin(), benchAovs.end(), [](int aov) {
+        return aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(aov));
     });
 }
 
@@ -1487,9 +1416,8 @@ int main(int argc, char** argv) {
         } else if (!options->benchLogPath.empty() &&
                    (profileConfig->pathTracer.maxSamples <= 0 ||
                     !aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(
-                                                options->benchAovs.empty() ? profileConfig->render.defaultAov
-                                                                           : options->benchAovs.front()),
-                                            profileConfig->opticFlow.source))) {
+                        options->benchAovs.empty() ? profileConfig->render.defaultAov
+                                                   : options->benchAovs.front())))) {
             // An unbounded accumulation never ends and a rasterizer AOV parks the driver, so neither is a benchmark workload.
             std::cerr << "main: -bench needs profile.json maxSamples > 0 and a path-traced first AOV\n";
             exitCode = EXIT_FAILURE;

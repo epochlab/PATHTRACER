@@ -78,11 +78,6 @@ bool resolveAov(const std::string& requested, Options& options) {
         std::cerr << '\n';
         return false;
     }
-    // One fixed view has nothing to pair with, so the AOV would only ever be its prior; flow needs two views (pt_render, Python).
-    if (aov == pathtracer::debug::AovId::OpticFlow) {
-        std::cerr << "render_beauty: Optic Flow pairs consecutive views and render_beauty renders one; use the C API or Python\n";
-        return false;
-    }
     options.aov = aov;
     return true;
 }

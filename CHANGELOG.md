@@ -3,6 +3,56 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## motionVector: geometric screen-space motion replaces Optic Flow
+
+Optic Flow estimated motion from Luminance pixels, so it was coarse, noise-driven, the prior wherever texture was missing, and
+not zero for a static view. `motionVector` is the geometric motion field instead: the displacement of the point each pixel sees,
+reprojected through the previous camera (reverse reprojection, Nehab et al. 2007). It is exact, dense and zero when nothing moves.
+Evidence is in `results/motion_vector`.
+
+- **breaking**: Optic Flow is removed, with `opticFlow.source` in profile.json, `AovSource::Derived`, `optic_flow.{h,cpp}`,
+  `flow_validate`, `luminanceMeanVariance` and the scale-space octave API (`octaveLevel`, `octaveLevelCount`, `addExpanded`,
+  `ScaleSpaceLevel`) that only it used. `aovNeedsLightTransport(aov)` takes one argument again
+- **breaking**: C ABI 4. `PtRenderRequest.previous_camera` is a `const PtCamera*`, where NULL means the request's own camera.
+  `pt_aov_needs_samples(aov)` and Python's module-level `aov_needs_samples` return, since no answer depends on the profile.
+  `motionVector` takes id 12 and `colourOpponent` moves to 13; every other id is unchanged and the count stays 32
+- feat: `AovId::MotionVector` (`"motionVector"`) is a G-buffer lane with 2 channels, `(dx, dy)` in current-frame pixels, +x right,
+  +y down: `x_now - x_previous`, so `current(x) ~ previous(x - d)`
+  - a hit reprojects its rasterized world position, `(p, 1)`. A miss reprojects its pixel-centre direction as a point at infinity,
+    `(d, 0)`, so the environment moves under rotation and zoom and never under translation
+  - both terms are one projection of one point, so identical cameras give exactly zero with no special case. Divides, not
+    reciprocals: `x * (1/z) - x' * (1/z')` contracts to an FMA that rounds the two sides differently
+  - zero where the previous view has no image of the point: behind a pinhole, or past a fisheye's thetaMax
+  - both views are projected at the current aspect, so a resize or render-scale change reads as no motion
+  - display: dx and dy share one pooled, zero-centred range, so zero is (0.5, 0.5, 0)
+- feat: `Camera::pinholeMatrix` returns the pinhole matrix `P = K [R | -R c]` (Hartley & Zisserman 2004, eq. 6.8) as NDC rows.
+  `Camera::project(basis, (p, w))` is `primaryRay`'s inverse for both lenses, with Kannala & Brandt's forward model for a fisheye.
+  An inline static `project(matrix, point)` serves per-pixel callers
+- feat: the request carries the previous view. `HeadlessRenderer::Request::previousCamera` defaults to the camera itself, and
+  Python has `render(previous_camera=...)`; either lens is accepted. The viewer passes the previous frame's camera, and the raster
+  trigger includes that view, so the first still frame after a move re-rasterizes to zero
+- perf: motion is a per-row pass after shading. It reads `worldPos`, projects through each view's pinhole matrix and dispatches on
+  the lens once per row, not per pixel
+- measured, paired against `main` (594ed45), 11 rounds:
+  - macbeth G-buffer `raster_ms` at 2048x1152: 1.110x [1.065, 1.176]
+  - `raster_bench` `frame_ms`: 1.074x [1.036, 1.124]
+  - Beauty `pass_ms`: 1.015x [0.974, 1.376], unresolved
+  - RSS +3.3% (macbeth) / +6.0% (raster_bench): the 2-channel lane, 18.9 MB at 2048x1152
+- image: the 31 shared AOVs are byte-identical on cornell and macbeth, in EXR and PNG (124/124). Against an independent NumPy
+  reprojection, the largest error is 1.0e-4 px over pans up to 138 px, dollies, tilts and trucks. A static view has no non-zero
+  texel
+- test: `camera_validate` gains `project_inverts_primary_rays` and `project_refuses_points_outside_the_lens_domain`.
+  `rasterizer_validate` gains four motion checks:
+  - exact zero for an unmoved camera
+  - a double-precision pinhole and equidistant-fisheye oracle over rotation, translation, zoom and a lens toggle, within
+    16 ulps x kWidth
+  - the environment held still under translation
+  - zero from a view facing away
+
+  `api_validate` gains `motion_vector_display_pools_its_two_lanes` and `motion_vector_follows_the_previous_camera`. pytest gains
+  `test_motion_vector_follows_the_previous_camera`. `ctest` 195/195, pytest 31 passed plus 1 skipped (no OpenEXR module in the
+  test env)
+
 ## camelCase AOV names, matched exactly
 
 - **breaking**: `kAovNames` is camelCase with acronyms kept upper case (`beauty`, `worldPos`, `indirectDiffuse`, `HSV`, `DoG`,

@@ -68,22 +68,6 @@ std::optional<pathtracer::scene::Lens> parseLens(const nlohmann::json& lens, con
     return parsed;
 }
 
-// Optic flow block: the source named exactly as kAovNames spells it, as --aov and pt_aov_id accept it.
-std::optional<OpticFlowConfig> parseOpticFlow(const nlohmann::json& opticFlow, const std::string& path) {
-    const std::string name = opticFlow.at("source").get<std::string>();
-    const pathtracer::debug::AovId source = pathtracer::debug::aovIdFromName(name);
-    if (source == pathtracer::debug::AovId::Count) {
-        std::cerr << "loadProfileConfig: " << path << " has opticFlow.source \"" << name << "\", which names no AOV\n";
-        return std::nullopt;
-    }
-    // Flow of flow would need the flow it is computing: a source must exist before the AOV derived from it.
-    if (source == pathtracer::debug::AovId::OpticFlow) {
-        std::cerr << "loadProfileConfig: " << path << " has opticFlow.source \"" << name << "\", which cannot be its own source\n";
-        return std::nullopt;
-    }
-    return OpticFlowConfig{source};
-}
-
 // The counts loadProfileConfig otherwise takes on trust. Nothing downstream re-checks them, and each has a concrete failure mode.
 bool validCounts(const RenderConfig& render, const PathTracerConfig& pathTracer, const std::string& path) {
     bool ok = true;
@@ -157,8 +141,7 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
         const float shutterSeconds = camera.at("shutterSeconds").get<float>();
         const float iso = camera.at("iso").get<float>();
         const std::optional<pathtracer::scene::Lens> lens = parseLens(camera.at("lens"), path);
-        const std::optional<OpticFlowConfig> opticFlow = parseOpticFlow(j.at("opticFlow"), path);
-        if (!lens.has_value() || !opticFlow.has_value()) {
+        if (!lens.has_value()) {
             return std::nullopt;
         }
         const float flySpeed = controls.at("flySpeedMetersPerSecond").get<float>();
@@ -247,7 +230,6 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
             },
             renderConfig,
             pathTracerConfig,
-            *opticFlow,
         };
     } catch (const nlohmann::json::exception& e) {
         std::cerr << "loadProfileConfig: " << path << ": " << e.what() << '\n';

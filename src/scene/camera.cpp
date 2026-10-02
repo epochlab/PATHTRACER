@@ -39,6 +39,23 @@ std::optional<Ray> fisheyeRay(const Camera::ViewBasis& basis, const glm::vec3& o
     return Ray{origin, dir, nearClip, farClip};
 }
 
+// Kannala & Brandt 2006 forward model: polar angle off the axis, image radius f * theta_d(theta) along the azimuth.
+std::optional<glm::vec2> fisheyeProjection(const Camera::ViewBasis& basis, const glm::vec3& view) {
+    const float depth = glm::dot(view, basis.forward);
+    const glm::vec2 lateral(glm::dot(view, basis.right), glm::dot(view, basis.up));
+    const float lateralLength = glm::length(lateral);
+    const float theta = std::atan2(lateralLength, depth);
+    if (theta > basis.maxThetaRadians) {
+        return std::nullopt;
+    }
+    // On the axis the azimuth is undefined: ahead images the centre, behind (theta = pi under a 360-degree lens) the whole rim.
+    if (lateralLength == 0.0F) {
+        return depth > 0.0F ? std::optional<glm::vec2>(glm::vec2(0.0F)) : std::nullopt;
+    }
+    const float radiusMm = basis.focalLengthMm * kannalaBrandtRadius(basis.lens.radialCoefficients, theta);
+    return (radiusMm / lateralLength) * lateral / glm::vec2(basis.halfWidthMm, basis.halfHeightMm);
+}
+
 }  // namespace
 
 Camera::Camera(const glm::vec3& position, float yawDegrees, float pitchDegrees, FilmBack filmBack,
@@ -101,6 +118,20 @@ std::optional<Ray> Camera::primaryRay(const ViewBasis& basis, float ndcX, float 
     const glm::vec3 dir = glm::normalize(basis.forward + (ndcX * basis.halfWidth * basis.right) +
                                           (ndcY * basis.halfHeight * basis.up));
     return Ray{position_, dir, nearClip_, farClip_};
+}
+
+Camera::PinholeMatrix Camera::pinholeMatrix(const ViewBasis& basis) const {
+    const glm::vec3 ndcRight = basis.right / basis.halfWidth;
+    const glm::vec3 ndcUp = basis.up / basis.halfHeight;
+    return PinholeMatrix{glm::vec4(ndcRight, -glm::dot(ndcRight, position_)), glm::vec4(ndcUp, -glm::dot(ndcUp, position_)),
+                         glm::vec4(basis.forward, -glm::dot(basis.forward, position_))};
+}
+
+std::optional<glm::vec2> Camera::project(const ViewBasis& basis, const glm::vec4& point) const {
+    if (basis.lens.projection == LensProjection::FisheyePolynomial) {
+        return fisheyeProjection(basis, glm::vec3(point) - (point.w * position_));
+    }
+    return project(pinholeMatrix(basis), point);
 }
 
 float Camera::ev100() const {

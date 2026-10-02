@@ -77,6 +77,27 @@ public:
     // Same ray from a basis the caller already built; the aspect-taking overload rebuilds two sin, two cos, an atan and a tan every call.
     [[nodiscard]] std::optional<Ray> primaryRay(const ViewBasis& basis, float ndcX, float ndcY) const;
 
+    // Pinhole camera matrix P = K [R | -R c] (Hartley & Zisserman 2004, eq. 6.8) as NDC rows: ndc = (x . X, y . X) / (depth . X).
+    struct PinholeMatrix {
+        glm::vec4 x;
+        glm::vec4 y;
+        glm::vec4 depth;
+    };
+    [[nodiscard]] PinholeMatrix pinholeMatrix(const ViewBasis& basis) const;
+
+    // primaryRay's inverse on homogeneous (p, w), w = 0 a direction at infinity; nullopt behind the camera or past a fisheye's thetaMax.
+    [[nodiscard]] std::optional<glm::vec2> project(const ViewBasis& basis, const glm::vec4& point) const;
+
+    // Pinhole arm, inline for per-pixel use. Divides, not reciprocals: x * (1/z) - x' * (1/z') would contract to an FMA, losing exact 0.
+    [[nodiscard]] static std::optional<glm::vec2> project(const PinholeMatrix& matrix, const glm::vec4& point) {
+        const float depth = glm::dot(matrix.depth, point);
+        // The pinhole images only the half-space ahead; depth <= 0 has no finite image-plane point.
+        if (!(depth > 0.0F)) {
+            return std::nullopt;
+        }
+        return glm::vec2(glm::dot(matrix.x, point) / depth, glm::dot(matrix.y, point) / depth);
+    }
+
     // Exposure value at ISO 100 (log2): log2(aperture^2 / shutterSeconds * (100/iso)). The static overload is the formula's one definition.
     [[nodiscard]] float ev100() const;
     [[nodiscard]] static float ev100(float aperture, float shutterSeconds, float iso);

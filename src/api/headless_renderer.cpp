@@ -11,7 +11,6 @@
 
 #include "pathtracer/debug/aov_filters.h"
 #include "pathtracer/debug/aov_routing.h"
-#include "pathtracer/debug/optic_flow.h"
 #include "pathtracer/debug/render_stats.h"
 #include "pathtracer/scene/material_binding.h"
 
@@ -79,16 +78,6 @@ using pathtracer::debug::AovSource;
     return pathtracer::scene::Camera(camera.position, camera.yawDegrees, camera.pitchDegrees, preset->filmBack,
                                   camera.focalLengthMm, camera.nearClip, camera.farClip, camera.aperture,
                                   camera.shutterSeconds, camera.iso, camera.lens);
-}
-
-// The AOVs a request makes producers run for: those asked for, plus Optic Flow's source when flow is asked for.
-[[nodiscard]] std::vector<AovId> producedAovs(const std::vector<AovId>& requested, AovId opticFlowSource) {
-    std::vector<AovId> produced = requested;
-    if (std::find(requested.begin(), requested.end(), AovId::OpticFlow) != requested.end() &&
-        std::find(requested.begin(), requested.end(), opticFlowSource) == requested.end()) {
-        produced.push_back(opticFlowSource);
-    }
-    return produced;
 }
 
 }  // namespace
@@ -216,8 +205,6 @@ const pathtracer::gfx::HdrImage& HeadlessRenderer::lastImage(AovId aov) const {
             const auto it = std::find(filteredAovs_.begin(), filteredAovs_.end(), aov);
             return filtered_.at(static_cast<std::size_t>(it - filteredAovs_.begin()));
         }
-        case AovSource::Derived:
-            return opticFlow_;
     }
     // Not dead: a scoped enum holds any value of its underlying type, so falling off a covered switch is still undefined behaviour.
     return gbuffer_.depth;
@@ -253,11 +240,10 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
         error = "no AOVs requested";
         return false;
     }
-    const std::vector<AovId> produced = producedAovs(request.aovs, profile_.opticFlow.source);
-    const bool wantsFilter = std::any_of(produced.begin(), produced.end(), [](AovId aov) {
+    const bool wantsFilter = std::any_of(request.aovs.begin(), request.aovs.end(), [](AovId aov) {
         return pathtracer::debug::aovSource(aov) == AovSource::BeautyFilter;
     });
-    const bool wantsGBuffer = std::any_of(produced.begin(), produced.end(), [](AovId aov) {
+    const bool wantsGBuffer = std::any_of(request.aovs.begin(), request.aovs.end(), [](AovId aov) {
         return pathtracer::debug::aovSource(aov) == AovSource::GBuffer;
     });
     // Scan conversion is a perspective divide, which a fisheye has no equivalent of: rejected rather than silently approximated.
@@ -269,7 +255,7 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
 
     // The path-traced lanes this request needs. Beauty joins whenever a filter is asked for, every filter reading accumulated Beauty.
     accumulatedAovs_.clear();
-    for (const AovId aov : produced) {
+    for (const AovId aov : request.aovs) {
         if (pathtracer::debug::aovSource(aov) == AovSource::PathTraced &&
             std::find(accumulatedAovs_.begin(), accumulatedAovs_.end(), aov) == accumulatedAovs_.end()) {
             accumulatedAovs_.push_back(aov);
@@ -372,7 +358,8 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
 
     if (wantsGBuffer) {
         const auto rasterStart = std::chrono::steady_clock::now();
-        pathtracer::scene::renderRasterGBuffer(request.camera, model_.shadingTriangles, model_.instances,
+        pathtracer::scene::renderRasterGBuffer(request.camera, request.previousCamera.value_or(request.camera),
+                                            model_.shadingTriangles, model_.instances,
                                             perInstanceSettings_, instanceBounds_, request.width,
                                             request.height, threadPool_, gbuffer_);
         stats_.rasterMilliseconds =
@@ -386,7 +373,7 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
         const auto filterStart = std::chrono::steady_clock::now();
         const pathtracer::gfx::HdrImage& beauty = lastImage(AovId::Beauty);
         const pathtracer::debug::FilterInput filterInput{beauty, beautyLuminanceM2_.data(), request.samples};
-        for (const AovId aov : produced) {
+        for (const AovId aov : request.aovs) {
             if (pathtracer::debug::aovSource(aov) != AovSource::BeautyFilter ||
                 std::find(filteredAovs_.begin(), filteredAovs_.end(), aov) != filteredAovs_.end()) {
                 continue;
@@ -397,29 +384,8 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
         stats_.filterMilliseconds =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - filterStart).count();
     }
-    if (std::find(request.aovs.begin(), request.aovs.end(), AovId::OpticFlow) != request.aovs.end()) {
-        renderOpticFlow(request.samples);
-    }
-    return true;
-}
 
-void HeadlessRenderer::renderOpticFlow(int samples) {
-    const auto flowStart = std::chrono::steady_clock::now();
-    const AovId source = profile_.opticFlow.source;
-    const pathtracer::gfx::HdrImage& mean = lastImage(source);
-    // Luminance's noise is known from the accumulated second moment; any other source is weighed as deterministic.
-    pathtracer::gfx::HdrImage variance =
-        source == AovId::Luminance
-            ? pathtracer::debug::luminanceMeanVariance(mean.width, mean.height, beautyLuminanceM2_.data(), samples)
-            : pathtracer::gfx::HdrImage{};
-    const auto known = [](const pathtracer::gfx::HdrImage& image) { return image.texels.empty() ? nullptr : &image; };
-    // The history starts empty, a 0x0 image, so the first view and any resize compare against no same-shape frame: the prior.
-    opticFlow_ = pathtracer::debug::opticFlowAov({&mean, known(variance)}, {&opticFlowPrevious_, known(opticFlowPreviousVariance_)},
-                                                 threadPool_);
-    opticFlowPrevious_ = mean;
-    opticFlowPreviousVariance_ = std::move(variance);
-    stats_.filterMilliseconds +=
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - flowStart).count();
+    return true;
 }
 
 }  // namespace pathtracer::api

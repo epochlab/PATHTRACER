@@ -30,6 +30,8 @@ class HeadlessRenderer {
 public:
     struct Request {
         pathtracer::scene::Camera camera;
+        // The view MotionVector measures motion from, either lens; nullopt is camera itself, so motion reads exactly zero.
+        std::optional<pathtracer::scene::Camera> previousCamera;
         int width = 0;
         int height = 0;
         // Path-traced passes at one sample each, averaged. Ignored when every requested AOV comes from the rasterizer.
@@ -70,9 +72,6 @@ public:
     [[nodiscard]] int defaultWidth() const { return profile_.render.width; }
     [[nodiscard]] int defaultHeight() const { return profile_.render.height; }
 
-    // Optic Flow pairs each render() that requests it with the previous one that did, at the same size; the first sees the prior.
-    [[nodiscard]] pathtracer::debug::AovId opticFlowSource() const { return profile_.opticFlow.source; }
-
     // Blocking. outputs parallels request.aovs, caller-allocated at width * height * aovChannels(aovs[i]); each producer runs at most once.
     [[nodiscard]] bool render(const Request& request, std::span<float* const> outputs,
                                std::string& error);
@@ -100,9 +99,6 @@ private:
 
     // Sizes the reused path-traced and rasterizer buffers to this request, reallocating only on a resolution change.
     void resizeBuffers(int width, int height);
-
-    // Flow from the last view that asked for it to this one, then this view's source becomes the history the next one pairs with.
-    void renderOpticFlow(int samples);
 
     pathtracer::config::ProfileConfig profile_;
     pathtracer::scene::LoadedModel model_;
@@ -132,10 +128,6 @@ private:
     // One evaluated filter per distinct BeautyFilter AOV, so lastImage() can return one and two AOVs sharing a filter evaluate it once.
     std::vector<pathtracer::debug::AovId> filteredAovs_;
     std::vector<pathtracer::gfx::HdrImage> filtered_;
-    // The latest Optic Flow, and its source as of the last render() that requested it: the view the next one is paired with.
-    pathtracer::gfx::HdrImage opticFlow_;
-    pathtracer::gfx::HdrImage opticFlowPrevious_;
-    pathtracer::gfx::HdrImage opticFlowPreviousVariance_;  // empty where that view's noise was unknown
     RenderStats stats_;
     int bufferWidth_ = 0;
     int bufferHeight_ = 0;

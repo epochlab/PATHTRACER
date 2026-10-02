@@ -259,19 +259,6 @@ HdrImage colourOpponentAov(const HdrImage& beauty, ThreadPool& threadPool) {
     return out;
 }
 
-HdrImage luminanceMeanVariance(int width, int height, const float* beautyLuminanceM2, int samples) {
-    if (beautyLuminanceM2 == nullptr || samples < 2) {
-        return {};
-    }
-    HdrImage out = pathtracer::gfx::makeImage(width, height, pathtracer::gfx::kScalarChannels);
-    // Widened before the product, as snrAov is: n(n-1) leaves int at 46341 passes.
-    const float passes = static_cast<float>(samples);
-    const float inverseDegrees = 1.0F / (passes * (passes - 1.0F));
-    std::transform(beautyLuminanceM2, beautyLuminanceM2 + out.texels.size(), out.texels.begin(),
-                   [inverseDegrees](float m2) { return m2 * inverseDegrees; });
-    return out;
-}
-
 HdrImage snrAov(const HdrImage& beauty, const float* beautyLuminanceM2, int samples, ThreadPool& threadPool) {
     HdrImage out = makeAovImage(AovId::SNR, beauty.width, beauty.height);
     // A single sample carries no dispersion, so the ratio is undefined rather than infinite, and a black frame says so.
@@ -308,7 +295,6 @@ HdrImage evaluateFilterAov(AovId aov, const FilterInput& input, ThreadPool& thre
         case AovId::SNR:       return snrAov(input.beauty, input.beautyLuminanceM2, input.samples, threadPool);
 
         // The lanes their own producers write. No default arm: -Werror then makes an unrouted new filter a compile error.
-        case AovId::OpticFlow:
         case AovId::Beauty:
         case AovId::Wireframe:
         case AovId::Alpha:
@@ -316,6 +302,7 @@ HdrImage evaluateFilterAov(AovId aov, const FilterInput& input, ThreadPool& thre
         case AovId::Lookahead:
         case AovId::WorldPos:
         case AovId::UV:
+        case AovId::MotionVector:
         case AovId::Normal:
         case AovId::GeomNormal:
         case AovId::Albedo:

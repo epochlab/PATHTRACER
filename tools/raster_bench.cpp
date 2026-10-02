@@ -205,7 +205,7 @@ int main(int argc, char** argv) {
     // One buffer for the whole run as the app owns it: renderRasterGBuffer reuses it in place, so timed frames measure steady state.
     RasterGBuffer gbuffer;
     // Discarded warm-up pass absorbing the once-only costs: spinning up and parking the pool's workers, and the buffer's only allocation.
-    renderRasterGBuffer(camera, shadingTriangles, instances, perInstanceSettings, instanceBounds,
+    renderRasterGBuffer(camera, camera, shadingTriangles, instances, perInstanceSettings, instanceBounds,
                          options->width, options->height, threadPool, gbuffer);
     if (gbuffer.depth.width != options->width) {
         std::cerr << "raster_bench: warm-up produced a " << gbuffer.depth.width << "px-wide buffer\n";
@@ -216,7 +216,7 @@ int main(int argc, char** argv) {
     milliseconds.reserve(static_cast<std::size_t>(options->frames));
     for (int frame = 0; frame < options->frames; ++frame) {
         const auto start = std::chrono::steady_clock::now();
-        renderRasterGBuffer(camera, shadingTriangles, instances, perInstanceSettings, instanceBounds,
+        renderRasterGBuffer(camera, camera, shadingTriangles, instances, perInstanceSettings, instanceBounds,
                              options->width, options->height, threadPool, gbuffer);
         const auto end = std::chrono::steady_clock::now();
         milliseconds.push_back(std::chrono::duration<double, std::milli>(end - start).count());

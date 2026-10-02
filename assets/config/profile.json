@@ -38,8 +38,5 @@
         "maxSamples": 64,
         "aoMaxDistance": 1.0,
         "lookaheadDistance": 10.0
-    },
-    "opticFlow": {
-        "source": "luminance"
     }
 }

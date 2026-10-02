@@ -85,9 +85,6 @@ void demodulate(std::span<const float> plane, const MorletPlaneWave& wave, int w
                                             const float* beautyLuminanceM2, int samples,
                                             pathtracer::scene::ThreadPool& threadPool);
 
-// Variance of each texel's mean luminance, M2 / (n (n - 1)) from the Welford second moment; empty below two passes, where it is undefined.
-[[nodiscard]] pathtracer::gfx::HdrImage luminanceMeanVariance(int width, int height, const float* beautyLuminanceM2, int samples);
-
 // Everything a BeautyFilter AOV reads, as explicit fields rather than a PathTraceResult, so a validator can build one with no renderer.
 struct FilterInput {
     const pathtracer::gfx::HdrImage& beauty;  // published mean radiance, linear Rec.709, scene-referred and unbounded
