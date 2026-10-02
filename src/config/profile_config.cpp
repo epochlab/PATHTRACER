@@ -31,7 +31,7 @@ std::optional<pathtracer::gfx::ScalarType> parseBitDepth(const nlohmann::json& b
     return bitDepth.is_number_integer() ? pathtracer::gfx::scalarTypeFromBitDepth(bitDepth.get<int>()) : std::nullopt;
 }
 
-// Camera lens block, its own function because loadProfileConfig already exceeds readability-function-size.
+// Camera lens block: projection, Kannala-Brandt k1..k4 and field of view, rejected unless r(theta) is invertible over it.
 std::optional<pathtracer::scene::Lens> parseLens(const nlohmann::json& lens, const std::string& path) {
     const std::string projection = lens.at("projection").get<std::string>();
     pathtracer::scene::Lens parsed;
@@ -91,8 +91,98 @@ bool validCounts(const RenderConfig& render, const PathTracerConfig& pathTracer,
     return ok;
 }
 
+// The render block's output fields: display LUT, the two bit depths and the image size. Scales, AOV and vsync are read after controls.
+std::optional<RenderConfig> parseRenderOutput(const nlohmann::json& render, const std::string& path) {
+    const std::string defaultLutName = render.at("defaultLUT").get<std::string>();
+    const std::optional<pathtracer::gfx::OcioDisplayTransform::Lut> defaultLut =
+        parseLut(defaultLutName);
+    if (!defaultLut.has_value()) {
+        std::cerr << "loadProfileConfig: " << path << " has an unrecognised defaultLUT \""
+                   << defaultLutName << "\"\n";
+        return std::nullopt;
+    }
+
+    const nlohmann::json& displayBitDepth = render.at("displayBitDepth");
+    const nlohmann::json& textureBitDepth = render.at("textureBitDepth");
+    const std::optional<pathtracer::gfx::ScalarType> displayFormat = parseBitDepth(displayBitDepth);
+    const std::optional<pathtracer::gfx::ScalarType> textureType = parseBitDepth(textureBitDepth);
+    if (!displayFormat.has_value() || !textureType.has_value()) {
+        std::cerr << "loadProfileConfig: " << path << " has displayBitDepth " << displayBitDepth.dump()
+                   << ", textureBitDepth " << textureBitDepth.dump() << ", each expected 16 or 32\n";
+        return std::nullopt;
+    }
+    const int width = render.at("width").get<int>();
+    const int height = render.at("height").get<int>();
+    return RenderConfig{width, height, 0.0F, 0.0F, 0, *defaultLut, false, *displayFormat, *textureType};
+}
+
+// The camera block in field order, then its lens. Ranges are validCamera's, run once every block has been read.
+std::optional<CameraConfig> parseCamera(const nlohmann::json& camera, const std::string& path) {
+    CameraConfig config{
+        camera.at("position").get<glm::vec3>(),
+        camera.at("yawDegrees").get<float>(),
+        camera.at("pitchDegrees").get<float>(),
+        camera.at("filmBackPreset").get<std::string>(),
+        camera.at("focalLengthMm").get<float>(),
+        camera.at("nearClip").get<float>(),
+        camera.at("farClip").get<float>(),
+        camera.at("aperture").get<float>(),
+        camera.at("shutterSeconds").get<float>(),
+        camera.at("iso").get<float>(),
+        {},
+    };
+    const std::optional<pathtracer::scene::Lens> lens = parseLens(camera.at("lens"), path);
+    if (!lens.has_value()) {
+        return std::nullopt;
+    }
+    config.lens = *lens;
+    return config;
+}
+
+// Denominators in verticalFovRadians() and ev100(): a non-positive value gives inf or NaN, not a wrong-but-finite render.
+bool validCamera(const CameraConfig& camera, const std::string& path) {
+    if (camera.focalLengthMm <= 0.0F || camera.aperture <= 0.0F || camera.shutterSeconds <= 0.0F || camera.iso <= 0.0F) {
+        std::cerr << "loadProfileConfig: " << path
+                   << " has a non-positive focalLengthMm/aperture/shutterSeconds/iso\n";
+        return false;
+    }
+    return true;
+}
+
+bool validRender(const RenderConfig& render, const std::string& path) {
+    // Bounded at (0,1], not merely positive: above 1 renders past the framebuffer, at or below 0 the render target has no pixels.
+    if (render.renderScale <= 0.0F || render.renderScale > 1.0F || render.interactiveRenderScale <= 0.0F ||
+        render.interactiveRenderScale > 1.0F) {
+        std::cerr << "loadProfileConfig: " << path
+                   << " has a renderScale/interactiveRenderScale outside (0,1]\n";
+        return false;
+    }
+    // A raw index into kAovNames, dereferenced unchecked by the spec block, so out of range is an out-of-bounds read.
+    if (render.defaultAov < 0 || render.defaultAov >= static_cast<int>(pathtracer::debug::AovId::Count)) {
+        std::cerr << "loadProfileConfig: " << path << " has a defaultAOV outside [0, "
+                   << static_cast<int>(pathtracer::debug::AovId::Count) - 1 << "]\n";
+        return false;
+    }
+    return true;
+}
+
+bool validPathTracer(const PathTracerConfig& pathTracer, const std::string& path) {
+    // AO ray tfar. At or below zero every occlusion ray is degenerate and the AO lane reads a uniform 1.0: inert white, not an error.
+    if (pathTracer.aoMaxDistance <= 0.0F) {
+        std::cerr << "loadProfileConfig: " << path << " has a non-positive aoMaxDistance\n";
+        return false;
+    }
+    // The Lookahead ramp divisor: at or below zero every covered pixel divides by it, giving inf or NaN, not the [0,1] gradient.
+    if (pathTracer.lookaheadDistance <= 0.0F) {
+        std::cerr << "loadProfileConfig: " << path << " has a non-positive lookaheadDistance\n";
+        return false;
+    }
+    return true;
+}
+
 }  // namespace
 
+// Reads every block before any range check, so a file with several faults reports the first in read order, then in check order.
 std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
     std::ifstream file(path, std::ios::binary);
     if (!file) {
@@ -109,128 +199,36 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
         const nlohmann::json& render = j.at("render");
         const nlohmann::json& pathTracer = j.at("pathTracer");
 
-        const std::string defaultLutName = render.at("defaultLUT").get<std::string>();
-        const std::optional<pathtracer::gfx::OcioDisplayTransform::Lut> defaultLut =
-            parseLut(defaultLutName);
-        if (!defaultLut.has_value()) {
-            std::cerr << "loadProfileConfig: " << path << " has an unrecognised defaultLUT \""
-                       << defaultLutName << "\"\n";
+        std::optional<RenderConfig> renderConfig = parseRenderOutput(render, path);
+        if (!renderConfig.has_value()) {
             return std::nullopt;
         }
-
-        const nlohmann::json& displayBitDepth = render.at("displayBitDepth");
-        const nlohmann::json& textureBitDepth = render.at("textureBitDepth");
-        const std::optional<pathtracer::gfx::ScalarType> displayFormat = parseBitDepth(displayBitDepth);
-        const std::optional<pathtracer::gfx::ScalarType> textureType = parseBitDepth(textureBitDepth);
-        if (!displayFormat.has_value() || !textureType.has_value()) {
-            std::cerr << "loadProfileConfig: " << path << " has displayBitDepth " << displayBitDepth.dump()
-                       << ", textureBitDepth " << textureBitDepth.dump() << ", each expected 16 or 32\n";
+        const std::optional<CameraConfig> cameraConfig = parseCamera(camera, path);
+        if (!cameraConfig.has_value()) {
             return std::nullopt;
         }
-
-        const int renderWidth = render.at("width").get<int>();
-        const int renderHeight = render.at("height").get<int>();
-        const glm::vec3 position = camera.at("position").get<glm::vec3>();
-        const float yawDegrees = camera.at("yawDegrees").get<float>();
-        const float pitchDegrees = camera.at("pitchDegrees").get<float>();
-        const std::string defaultFilmBackPresetName = camera.at("filmBackPreset").get<std::string>();
-        const float focalLengthMm = camera.at("focalLengthMm").get<float>();
-        const float nearClip = camera.at("nearClip").get<float>();
-        const float farClip = camera.at("farClip").get<float>();
-        const float aperture = camera.at("aperture").get<float>();
-        const float shutterSeconds = camera.at("shutterSeconds").get<float>();
-        const float iso = camera.at("iso").get<float>();
-        const std::optional<pathtracer::scene::Lens> lens = parseLens(camera.at("lens"), path);
-        if (!lens.has_value()) {
-            return std::nullopt;
-        }
-        const float flySpeed = controls.at("flySpeedMetersPerSecond").get<float>();
-        const float orbitSensitivity = controls.at("orbitSensitivityDegPerPixel").get<float>();
-        const float renderScale = render.at("renderScale").get<float>();
-        const float interactiveRenderScale = render.at("interactiveRenderScale").get<float>();
-        const int defaultAov = render.at("defaultAOV").get<int>();
-        const bool vsync = render.at("vsync").get<bool>();
-        const int samplesPerPixel = pathTracer.at("samplesPerPixel").get<int>();
-        const int maxBounces = pathTracer.at("maxBounces").get<int>();
-        const int russianRouletteStartBounce = pathTracer.at("russianRouletteStartBounce").get<int>();
-        const int maxSamples = pathTracer.at("maxSamples").get<int>();
-        const float aoMaxDistance = pathTracer.at("aoMaxDistance").get<float>();
-        const float lookaheadDistance = pathTracer.at("lookaheadDistance").get<float>();
-
-        // Denominators in verticalFovRadians() and ev100(): a non-positive value gives inf or NaN, not a wrong-but-finite render.
-        if (focalLengthMm <= 0.0F || aperture <= 0.0F || shutterSeconds <= 0.0F || iso <= 0.0F) {
-            std::cerr << "loadProfileConfig: " << path
-                       << " has a non-positive focalLengthMm/aperture/shutterSeconds/iso\n";
-            return std::nullopt;
-        }
-        // Bounded at (0,1], not merely positive: above 1 renders past the framebuffer, at or below 0 the render target has no pixels.
-        if (renderScale <= 0.0F || renderScale > 1.0F || interactiveRenderScale <= 0.0F ||
-            interactiveRenderScale > 1.0F) {
-            std::cerr << "loadProfileConfig: " << path
-                       << " has a renderScale/interactiveRenderScale outside (0,1]\n";
-            return std::nullopt;
-        }
-        // A raw index into kAovNames, dereferenced unchecked by the spec block, so out of range is an out-of-bounds read.
-        if (defaultAov < 0 || defaultAov >= static_cast<int>(pathtracer::debug::AovId::Count)) {
-            std::cerr << "loadProfileConfig: " << path << " has a defaultAOV outside [0, "
-                       << static_cast<int>(pathtracer::debug::AovId::Count) - 1 << "]\n";
-            return std::nullopt;
-        }
-        // AO ray tfar. At or below zero every occlusion ray is degenerate and the AO lane reads a uniform 1.0: inert white, not an error.
-        if (aoMaxDistance <= 0.0F) {
-            std::cerr << "loadProfileConfig: " << path << " has a non-positive aoMaxDistance\n";
-            return std::nullopt;
-        }
-        // The Lookahead ramp divisor: at or below zero every covered pixel divides by it, giving inf or NaN, not the [0,1] gradient.
-        if (lookaheadDistance <= 0.0F) {
-            std::cerr << "loadProfileConfig: " << path << " has a non-positive lookaheadDistance\n";
-            return std::nullopt;
-        }
-
-        const RenderConfig renderConfig{
-            renderWidth,
-            renderHeight,
-            renderScale,
-            interactiveRenderScale,
-            defaultAov,
-            *defaultLut,
-            vsync,
-            *displayFormat,
-            *textureType,
+        const ControlsConfig controlsConfig{
+            controls.at("flySpeedMetersPerSecond").get<float>(),
+            controls.at("orbitSensitivityDegPerPixel").get<float>(),
         };
+        renderConfig->renderScale = render.at("renderScale").get<float>();
+        renderConfig->interactiveRenderScale = render.at("interactiveRenderScale").get<float>();
+        renderConfig->defaultAov = render.at("defaultAOV").get<int>();
+        renderConfig->vsync = render.at("vsync").get<bool>();
         const PathTracerConfig pathTracerConfig{
-            samplesPerPixel,
-            maxBounces,
-            russianRouletteStartBounce,
-            maxSamples,
-            aoMaxDistance,
-            lookaheadDistance,
+            pathTracer.at("samplesPerPixel").get<int>(),
+            pathTracer.at("maxBounces").get<int>(),
+            pathTracer.at("russianRouletteStartBounce").get<int>(),
+            pathTracer.at("maxSamples").get<int>(),
+            pathTracer.at("aoMaxDistance").get<float>(),
+            pathTracer.at("lookaheadDistance").get<float>(),
         };
-        if (!validCounts(renderConfig, pathTracerConfig, path)) {
+
+        if (!validCamera(*cameraConfig, path) || !validRender(*renderConfig, path) ||
+            !validPathTracer(pathTracerConfig, path) || !validCounts(*renderConfig, pathTracerConfig, path)) {
             return std::nullopt;
         }
-
-        return ProfileConfig{
-            CameraConfig{
-                position,
-                yawDegrees,
-                pitchDegrees,
-                defaultFilmBackPresetName,
-                focalLengthMm,
-                nearClip,
-                farClip,
-                aperture,
-                shutterSeconds,
-                iso,
-                *lens,
-            },
-            ControlsConfig{
-                flySpeed,
-                orbitSensitivity,
-            },
-            renderConfig,
-            pathTracerConfig,
-        };
+        return ProfileConfig{*cameraConfig, controlsConfig, *renderConfig, pathTracerConfig};
     } catch (const nlohmann::json::exception& e) {
         std::cerr << "loadProfileConfig: " << path << ": " << e.what() << '\n';
         return std::nullopt;
