@@ -167,12 +167,12 @@ bool checkPose(const char* poseName, const Camera& camera, const EmbreeAccel& ac
                  kUnitEpsilon},
                 {"worldPos", texelAt(raster.worldPos, x, y), shading.position, kPosEpsilon},
                 {"uv", texelAt(raster.uv, x, y), glm::vec3(glm::fract(shading.uv), 0.0F), kUnitEpsilon},
-                {"normal", texelAt(raster.normal, x, y), frame.normal, kUnitEpsilon},
+                {"normal", texelAt(raster.normal, x, y), frame[2], kUnitEpsilon},
                 {"geomNormal", texelAt(raster.geomNormal, x, y), glm::normalize(shading.normal), kUnitEpsilon},
                 {"albedo", texelAt(raster.albedo, x, y), params.baseColor, kUnitEpsilon},
                 {"metallic", texelAt(raster.metallic, x, y), glm::vec3(params.metallic), kUnitEpsilon},
                 {"roughness", texelAt(raster.roughness, x, y), glm::vec3(params.roughness), kUnitEpsilon},
-                {"tangent", texelAt(raster.tangent, x, y), frame.tangent, kUnitEpsilon},
+                {"tangent", texelAt(raster.tangent, x, y), frame[0], kUnitEpsilon},
                 {"objectId", texelAt(raster.objectId, x, y), falseColorForId(triangle.instanceIndex), kUnitEpsilon},
                 {"iorAov", texelAt(raster.iorAov, x, y), glm::vec3(settings.ior), kUnitEpsilon},
             };
@@ -608,10 +608,6 @@ bool sameBsdfParams(const BsdfParams& a, const BsdfParams& b) {
            a.diffuseRoughness == b.diffuseRoughness && a.diffuseRho == b.diffuseRho && a.transmissionTint == b.transmissionTint;
 }
 
-bool sameFrame(const ShadingFrame& a, const ShadingFrame& b) {
-    return a.tangent == b.tangent && a.bitangent == b.bitangent && a.normal == b.normal;
-}
-
 // An unbound slot's constant shades bit-identically to the 1x1 texture of that value it replaced: no tolerance, any uv/frame/settings.
 PT_CHECK(constant_inputs_match_unit_textures, Fast, Exact) {
     constexpr int kCases = 256;
@@ -662,9 +658,9 @@ PT_CHECK(constant_inputs_match_unit_textures, Fast, Exact) {
         const BsdfParams texturedParams = resolveBsdfParams(textured, vertex.uv, vertex.colour, settings, std::nullopt);
         paramMismatches += sameBsdfParams(constantParams, texturedParams) ? 0 : 1;
         const ShadingFrame constantFrame = buildShadingFrame(vertex, constant, settings);
-        frameMismatches += sameFrame(constantFrame, buildShadingFrame(vertex, textured, settings)) ? 0 : 1;
+        frameMismatches += constantFrame == buildShadingFrame(vertex, textured, settings) ? 0 : 1;
         // Four taps of a constant height differ by exactly 0, so the texture path only renormalises the unbumped normal.
-        bumpMismatches += buildShadingFrame(vertex, bumped, settings).normal == glm::normalize(constantFrame.normal) ? 0 : 1;
+        bumpMismatches += buildShadingFrame(vertex, bumped, settings)[2] == glm::normalize(constantFrame[2]) ? 0 : 1;
     }
     std::cout << "rasterizer_validate: constant vs 1x1 texture over " << kCases << " cases -- " << paramMismatches
               << " BsdfParams, " << frameMismatches << " frame, " << bumpMismatches << " bump mismatches\n";

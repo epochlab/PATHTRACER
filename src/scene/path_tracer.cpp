@@ -268,7 +268,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
         // True flat plane normal, for light-leak rejection and ray-origin offsets: both need geometry, not the shading normal.
         const glm::vec3 geoNormal = geometricNormalOf(triangle);
 
-        const glm::vec3 woLocal = frame.toLocal(woWorld);
+        const glm::vec3 woLocal = woWorld * frame;
         // Built once for both estimators below: the continuation draw and NEE's evaluation share every wo-side lookup it holds.
         const BsdfClosure closure = makeBsdfClosure(params, woLocal);
 
@@ -279,7 +279,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             // Obscurance (Zhukov 1998; Iones 2003): sampling at pdf = cos/pi cancels both factors, so the estimator is the mean of rho.
             const bool frontSide = glm::dot(geoNormal, woWorld) > 0.0F;
             const glm::vec3 aoDir =
-                frame.toWorld(sampleCosineHemisphere(aoSample)) * (frontSide ? 1.0F : -1.0F);
+                frame * sampleCosineHemisphere(aoSample) * (frontSide ? 1.0F : -1.0F);
             // NEE's near-side origin verbatim: the shading-terminator offset plus a geometric-normal back-off, on whichever side wo is.
             const glm::vec3 aoOrigin = shadowTerminatorOffset(triangle, hit->u, hit->v, frontSide) +
                                         (geoNormal * kRayEpsilon * (frontSide ? 1.0F : -1.0F));
@@ -323,12 +323,12 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
         const std::optional<LightSample> lightSample = lights.sample(shading.position, sampler);
         if (lightSample.has_value()) {
             const float geoCos = glm::dot(lightSample->direction, geoNormal);
-            const float shadingCos = glm::dot(lightSample->direction, frame.normal);
+            const float shadingCos = glm::dot(lightSample->direction, frame[2]);
             // Both sides, not just wo's: on a transmissive surface a light behind the vertex reaches the eye through the transmission lobe.
             const bool nearSide = geoCos > 0.0F && shadingCos > 0.0F;
             const bool farSide = geoCos < 0.0F && shadingCos < 0.0F && params.transmissionFactor > 0.0F;
             if (nearSide || farSide) {
-                const glm::vec3 wiLocalLight = frame.toLocal(lightSample->direction);
+                const glm::vec3 wiLocalLight = lightSample->direction * frame;
                 const float lightCos = std::abs(shadingCos);  // far-side samples carry a negative cosine
                 // One evaluation for the value, the pdf and the per-lobe split: four separate calls recomputed the same lookups.
                 const BsdfEval eval = evaluateBsdfSplit(closure, wiLocalLight);
@@ -385,7 +385,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
         lastSampleWasDelta = lastBsdfPdf <= 0.0F;
         lastShadingPosition = shading.position;
 
-        const glm::vec3 wiWorld = frame.toWorld(sample->wiLocal);
+        const glm::vec3 wiWorld = frame * sample->wiLocal;
 
         // Geometric-normal-consistency rejection, a stand-in for Schussler et al. 2017: a sample crossing to the wrong side is rejected.
         if (sample->type != LobeType::Transmission) {

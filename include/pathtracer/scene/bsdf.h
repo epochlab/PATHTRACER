@@ -29,18 +29,8 @@ struct BsdfParams {
     glm::vec3 transmissionTint;
 };
 
-// Local shading frame (z = shading normal) for world<->local direction transforms.
-struct ShadingFrame {
-    glm::vec3 tangent;
-    glm::vec3 bitangent;
-    glm::vec3 normal;
-    [[nodiscard]] glm::vec3 toLocal(const glm::vec3& v) const {
-        return {glm::dot(v, tangent), glm::dot(v, bitangent), glm::dot(v, normal)};
-    }
-    [[nodiscard]] glm::vec3 toWorld(const glm::vec3& v) const {
-        return (v.x * tangent) + (v.y * bitangent) + (v.z * normal);
-    }
-};
+// Orthonormal shading basis, columns (tangent, bitangent, normal): frame * local is world, world * frame its transpose, local.
+using ShadingFrame = glm::mat3;
 
 // Which lobe sampleBsdf drew from; path_tracer.cpp buckets the transport AOVs by it. Transmission is delta only below the smooth threshold.
 enum class LobeType { Diffuse, SpecularReflection, Transmission };
