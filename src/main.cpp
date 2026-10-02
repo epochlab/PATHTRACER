@@ -215,8 +215,7 @@ struct AppResources {
     FilterCache filterCache{};
 
     // HUD-editable UI/run state.
-    // Selects which lane the snapshot supplies; userLut stays separate because non-Beauty AOVs force Raw and must not overwrite it.
-    int aov;
+    int aov;  // the lane the snapshot supplies; userLut stays apart, as non-Beauty AOVs force Raw and must not overwrite it
     // Film-back preset catalogue, loaded once at startup; filmBackPresetNames is index-parallel .c_str() pointers built for ImGui::Combo.
     std::vector<pathtracer::scene::Camera::FilmBackPreset> filmBackPresets;
     std::vector<const char*> filmBackPresetNames;
