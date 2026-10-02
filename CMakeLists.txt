@@ -146,7 +146,6 @@ add_library(pathtracer_core STATIC
     src/scene/gltf_loader.cpp
     src/scene/lens.cpp
     src/scene/light.cpp
-    src/scene/material.cpp
     src/scene/material_binding.cpp
     src/scene/path_trace_driver.cpp
     src/scene/path_tracer.cpp

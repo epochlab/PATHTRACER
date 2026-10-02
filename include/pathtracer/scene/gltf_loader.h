@@ -28,7 +28,7 @@ struct LoadedModel {
     std::vector<ShadingTriangle> shadingTriangles;
 };
 
-// Parses path's geometry via cgltf, ignoring its materials: each instance gets makeDefaultMaterial(). rootTransform seeds the walk.
+// Parses path's geometry via cgltf, ignoring its materials: each instance gets the neutral Material{}. rootTransform seeds the walk.
 std::optional<LoadedModel> loadGltf(const std::string& path, const glm::mat4& rootTransform = glm::mat4(1.0F));
 
 // Appends each light's emitting geometry to `model`, plus one entry per light to `instanceLightIndex`, pre-sized to instances, all -1.

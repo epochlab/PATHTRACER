@@ -3,6 +3,32 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Constant material inputs: unbound slots resolve to constants at load
+
+An unbound `Material` slot was a 1x1 identity texture, bilinear-filtered at every shading vertex, and its bump slot cost four
+more taps whose difference was zero by construction. Each slot now holds a constant or a bound texture, so only bound maps are
+filtered: constant folding of unconnected shader parameters (Gritz et al., *Open Shading Language*, runtime optimisation).
+Measured against `main` (3b06993) with `bench_compare run`, 11 interleaved rounds, `results/constant_inputs`.
+
+- perf: `MaterialInput<T> = std::variant<T, TextureHandle>`; `Material`'s slots are `baseColor`, `normal` (vec3), `bump`,
+  `roughness` (float) and `specular` (vec3), and default member initializers state the neutral constants, so `Material{}`
+  replaces `makeDefaultMaterial()` and `material.cpp`. The scene JSON keys (`baseColorTexture`, ...) are unchanged
+- perf: `gbuffer_shading.cpp`'s `evaluate` returns a constant input as is and filters only a bound texture. `buildShadingFrame`
+  skips bump mapping for a constant height, whose gradient is zero analytically (Blinn 1978), not by four taps cancelling
+- refactor: `bindSceneTextures` takes each slot's channel count from its input type (`float` -> R, `vec3` -> RGB), not from the
+  default material's 1x1 texture; the load-once cache, atomicity and diagnostics are unchanged
+- measured: cornell (every slot unbound) `pass_ms` **0.949x [0.946, 0.950]**, the rasterizer's `frame_ms` (`raster_bench`)
+  **0.704x [0.687, 0.716]**. macbeth 0.975x [0.926, 1.028] and stump, every slot bound, 0.995x [0.982, 1.003]: both unresolved.
+  RSS unchanged. In cornell's CPU profile `sampleBilinear` falls from 9.4% to 2.1% of busy samples, the remainder the HDRI alone
+- image: macbeth and stump byte-identical in Beauty, Albedo, Normal and Roughness, cornell in Albedo and Roughness. cornell's
+  Normal is within 2 ulp on 1% of components: the old path renormalised the already-unit mapped normal after its zero bump tilt.
+  The perturbed normals reroute 5 of 46.4M rays, so Beauty decorrelates per path: RMSE 3.9e-5 (PSNR 112 dB), mean signed
+  difference -4.5e-8 against a standard error of 2.9e-8, no bias. Viewer captures differ at 28 Beauty pixels by 1/255
+- test: `constant_inputs_match_unit_textures` asserts over 256 random materials, frames, uvs and settings that constants resolve
+  `BsdfParams` and the shading frame bit-identically to the equivalent 1x1 textures, and that a bound constant bump texture
+  only renormalises the normal. Mutation-checked: decoding a scalar texture's G channel fails it. `texture_binding_resolution`
+  asserts an unbound slot stays the neutral constant, not a texture. `ctest` 187/187
+
 ## Framebuffer memory: every AOV stored at its declared channel count
 
 Each AOV image holds the 1-3 channels `aovChannels` declares rather than four floats, and the display texture is uploaded

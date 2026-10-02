@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <memory>
 #include <optional>
 #include <random>
 #include <vector>
@@ -100,17 +99,9 @@ inline pathtracer::scene::EnvironmentMap makeUniformEnvironment() {
         pathtracer::gfx::ScalarType::Float32));
 }
 
-inline pathtracer::gfx::ImageTexture makeConstantTexture(glm::vec3 rgb) {
-    return makeImageTexture(1, 1, pathtracer::gfx::kRgbChannels, {rgb.x, rgb.y, rgb.z}, pathtracer::gfx::ScalarType::Float32);
-}
-
-// The neutral default (white baseColor, flat normal, constant bump) with roughness in .r and f0 in the specular slot.
+// The neutral default (white baseColor, flat normal, constant bump) with constant roughness and specular f0.
 inline pathtracer::scene::Material makeMaterial(float roughness, glm::vec3 f0) {
-    pathtracer::scene::Material material = pathtracer::scene::makeDefaultMaterial();
-    material.roughnessTexture = std::make_shared<const pathtracer::gfx::ImageTexture>(
-        makeImageTexture(1, 1, pathtracer::gfx::kScalarChannels, {roughness}, pathtracer::gfx::ScalarType::Float32));
-    material.specularTexture = std::make_shared<const pathtracer::gfx::ImageTexture>(makeConstantTexture(f0));
-    return material;
+    return pathtracer::scene::Material{.roughness = roughness, .specular = f0};
 }
 
 }  // namespace tools::fixtures

@@ -6,6 +6,7 @@
 #include <set>
 #include <string_view>
 #include <utility>
+#include <variant>
 
 namespace pathtracer::scene {
 
@@ -36,14 +37,18 @@ bool bindSceneTextures(std::vector<MeshInstance>& instances,
     if (!everyKeyNamesAnInstance(textures, instances, "bindSceneTextures", "textures")) {
         return false;
     }
-    static const std::map<std::string_view, TextureHandle Material::*> kSlots = {
-        {"baseColorTexture", &Material::baseColorTexture}, {"normalTexture", &Material::normalTexture},
-        {"bumpTexture", &Material::bumpTexture},           {"roughnessTexture", &Material::roughnessTexture},
-        {"specularTexture", &Material::specularTexture},
+    using ScalarSlot = MaterialInput<float> Material::*;
+    using ColorSlot = MaterialInput<glm::vec3> Material::*;
+    static const std::map<std::string_view, std::variant<ScalarSlot, ColorSlot>> kSlots = {
+        {"baseColorTexture", &Material::baseColor}, {"normalTexture", &Material::normal},
+        {"bumpTexture", &Material::bump},           {"roughnessTexture", &Material::roughness},
+        {"specularTexture", &Material::specular},
     };
-    // Each slot loads at its default's channel count, so a file shared by an RGB and a scalar slot is decoded once per count.
-    const Material defaults = makeDefaultMaterial();
-    const auto channelsOf = [&](const std::string& slot) { return (defaults.*kSlots.at(slot))->channels; };
+    // A slot loads at its input type's channel count, so a file shared by an RGB and a scalar slot is decoded once per count.
+    const auto channelsOf = [](const std::string& slot) {
+        return std::holds_alternative<ScalarSlot>(kSlots.at(slot)) ? pathtracer::gfx::kScalarChannels
+                                                                   : pathtracer::gfx::kRgbChannels;
+    };
     // Everything validated and loaded before any instance changes, each distinct (file, channel count) once however many slots share it.
     std::map<std::pair<std::string, int>, TextureHandle> loaded;
     for (const auto& [nodeName, slots] : textures) {
@@ -68,7 +73,8 @@ bool bindSceneTextures(std::vector<MeshInstance>& instances,
     for (MeshInstance& instance : instances) {
         if (const auto it = textures.find(instance.name); it != textures.end()) {
             for (const auto& [slot, path] : it->second) {
-                instance.material.*kSlots.at(slot) = loaded.at({path, channelsOf(slot)});
+                const TextureHandle& texture = loaded.at({path, channelsOf(slot)});
+                std::visit([&](auto member) { instance.material.*member = texture; }, kSlots.at(slot));
             }
         }
     }

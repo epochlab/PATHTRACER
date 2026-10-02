@@ -43,12 +43,7 @@ constexpr float kMaxValueMismatchFraction = 0.02F;
 
 // The neutral default material, varying only the two slots the G-buffer AOVs under test read.
 Material makeMaterial(glm::vec3 baseColor, float roughness) {
-    Material material = makeDefaultMaterial();
-    material.baseColorTexture = std::make_shared<const pathtracer::gfx::ImageTexture>(pathtracer::gfx::ImageTexture{
-        1, 1, pathtracer::gfx::kRgbChannels, std::vector<float>{baseColor.r, baseColor.g, baseColor.b}});
-    material.roughnessTexture = std::make_shared<const pathtracer::gfx::ImageTexture>(
-        pathtracer::gfx::ImageTexture{1, 1, pathtracer::gfx::kScalarChannels, std::vector<float>{roughness}});
-    return material;
+    return Material{.baseColor = baseColor, .roughness = roughness};
 }
 
 glm::vec4 tangentFor(const glm::vec3& normal) {
@@ -601,6 +596,77 @@ PT_CHECK(wireframe_ignores_clip_edges, Fast, Exact) {
     ctx.plan(2);
     PT_EXPECT(ctx, uncovered == 0, "the screen-covering triangle left pixels uncovered");
     PT_EXPECT(ctx, wirePixels == 0, "clip-plane or fan edges were drawn as mesh wireframe");
+}
+
+bool sameBsdfParams(const BsdfParams& a, const BsdfParams& b) {
+    return a.baseColor == b.baseColor && a.metallic == b.metallic && a.roughness == b.roughness && a.f0 == b.f0 &&
+           a.edgeTint == b.edgeTint && a.ior == b.ior && a.transmissionFactor == b.transmissionFactor &&
+           a.diffuseRoughness == b.diffuseRoughness && a.diffuseRho == b.diffuseRho && a.transmissionTint == b.transmissionTint;
+}
+
+bool sameFrame(const ShadingFrame& a, const ShadingFrame& b) {
+    return a.tangent == b.tangent && a.bitangent == b.bitangent && a.normal == b.normal;
+}
+
+// An unbound slot's constant shades bit-identically to the 1x1 texture of that value it replaced: no tolerance, any uv/frame/settings.
+PT_CHECK(constant_inputs_match_unit_textures, Fast, Exact) {
+    constexpr int kCases = 256;
+    std::mt19937 rng(static_cast<std::mt19937::result_type>(ctx.seed()));
+    std::uniform_real_distribution<float> unit(0.0F, 1.0F);
+    std::uniform_real_distribution<float> wrappedUv(-4.0F, 4.0F);
+    const auto randomVec3 = [&] { return glm::vec3(unit(rng), unit(rng), unit(rng)); };
+    const auto unitTexture = [](const float* value, int channels) {
+        return std::make_shared<const pathtracer::gfx::ImageTexture>(
+            pathtracer::gfx::ImageTexture{1, 1, channels, std::vector<float>(value, value + channels)});
+    };
+    ctx.plan(3);
+    int paramMismatches = 0;
+    int frameMismatches = 0;
+    int bumpMismatches = 0;
+    for (int i = 0; i < kCases; ++i) {
+        const glm::vec3 baseColor = randomVec3();
+        const glm::vec3 encodedNormal = randomVec3();
+        const float height = unit(rng);
+        const float roughness = unit(rng);
+        const glm::vec3 specular = randomVec3();
+        const Material constant{.baseColor = baseColor, .normal = encodedNormal, .bump = height, .roughness = roughness,
+                                .specular = specular};
+        // Bump stays constant here so the frames compare exactly; the bound bump texture is the third material's alone.
+        const Material textured{.baseColor = unitTexture(&baseColor.x, pathtracer::gfx::kRgbChannels),
+                                .normal = unitTexture(&encodedNormal.x, pathtracer::gfx::kRgbChannels),
+                                .bump = height,
+                                .roughness = unitTexture(&roughness, pathtracer::gfx::kScalarChannels),
+                                .specular = unitTexture(&specular.x, pathtracer::gfx::kRgbChannels)};
+        Material bumped = constant;
+        bumped.bump = unitTexture(&height, pathtracer::gfx::kScalarChannels);
+
+        PathTraceSettings settings = makeTestSettings();
+        settings.bumpStrength = unit(rng);
+        settings.diffuseColour = randomVec3();
+        settings.roughnessFactor = unit(rng);
+        settings.metallicFactor = unit(rng);
+        settings.transmissionFactor = unit(rng);
+        settings.diffuseRoughness = unit(rng);
+        settings.ior = 1.0F + unit(rng);
+        const glm::vec3 normal = glm::normalize(randomVec3() - glm::vec3(0.5F));
+        glm::vec4 tangent = tangentFor(normal);
+        tangent.w = unit(rng) < 0.5F ? -1.0F : 1.0F;
+        const ShadingVertex vertex{glm::vec3(0.0F), normal, glm::vec2(wrappedUv(rng), wrappedUv(rng)), tangent,
+                                   randomVec3()};
+
+        const BsdfParams constantParams = resolveBsdfParams(constant, vertex.uv, vertex.colour, settings, std::nullopt);
+        const BsdfParams texturedParams = resolveBsdfParams(textured, vertex.uv, vertex.colour, settings, std::nullopt);
+        paramMismatches += sameBsdfParams(constantParams, texturedParams) ? 0 : 1;
+        const ShadingFrame constantFrame = buildShadingFrame(vertex, constant, settings);
+        frameMismatches += sameFrame(constantFrame, buildShadingFrame(vertex, textured, settings)) ? 0 : 1;
+        // Four taps of a constant height differ by exactly 0, so the texture path only renormalises the unbumped normal.
+        bumpMismatches += buildShadingFrame(vertex, bumped, settings).normal == glm::normalize(constantFrame.normal) ? 0 : 1;
+    }
+    std::cout << "rasterizer_validate: constant vs 1x1 texture over " << kCases << " cases -- " << paramMismatches
+              << " BsdfParams, " << frameMismatches << " frame, " << bumpMismatches << " bump mismatches\n";
+    PT_EXPECT(ctx, paramMismatches == 0, "a constant input resolved BsdfParams differently from its 1x1 texture");
+    PT_EXPECT(ctx, frameMismatches == 0, "a constant normal built a different shading frame from its 1x1 texture");
+    PT_EXPECT(ctx, bumpMismatches == 0, "a constant bump texture tilted the normal: its gradient is not exactly zero");
 }
 
 }  // namespace

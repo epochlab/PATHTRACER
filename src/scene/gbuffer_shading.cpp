@@ -2,23 +2,39 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <type_traits>
+#include <variant>
 
 namespace pathtracer::scene {
 
-glm::vec3 resolveBaseColor(const Material& material, glm::vec2 uv, const glm::vec3& vertexColour,
-                            const PathTraceSettings& settings) {
-    return pathtracer::gfx::sampleBilinear(*material.baseColorTexture, uv) * settings.diffuseColour * vertexColour;
-}
-
 namespace {
 
+// A constant input is its own value at every uv: only a bound texture is filtered, so an unbound slot costs one load.
+template <typename T>
+T evaluate(const MaterialInput<T>& input, glm::vec2 uv) {
+    if (const T* constant = std::get_if<T>(&input)) {
+        return *constant;
+    }
+    const glm::vec3 texel = pathtracer::gfx::sampleBilinear(**std::get_if<TextureHandle>(&input), uv);
+    if constexpr (std::is_same_v<T, float>) {
+        return texel.r;
+    } else {
+        return texel;
+    }
+}
+
 float resolveRoughness(const Material& material, glm::vec2 uv, const PathTraceSettings& settings) {
-    const float sample = pathtracer::gfx::sampleBilinear(*material.roughnessTexture, uv).r;
+    const float sample = evaluate(material.roughness, uv);
     // Floor (UE4/Frostbite convention) avoids a near-zero-roughness GGX singularity.
     return std::clamp(sample * settings.roughnessFactor, settings.roughnessMin, settings.roughnessMax);
 }
 
 }  // namespace
+
+glm::vec3 resolveBaseColor(const Material& material, glm::vec2 uv, const glm::vec3& vertexColour,
+                            const PathTraceSettings& settings) {
+    return evaluate(material.baseColor, uv) * settings.diffuseColour * vertexColour;
+}
 
 LineProximity nearLineSegmentPx(glm::vec2 p, glm::vec2 a, glm::vec2 b, float thicknessPx) {
     const glm::vec2 ab = b - a;
@@ -33,7 +49,7 @@ BsdfParams resolveBsdfParams(const Material& material, glm::vec2 uv, const glm::
                               std::optional<int> heroChannel) {
     const glm::vec3 baseColor = resolveBaseColor(material, uv, vertexColour, settings);
     const float roughness = resolveRoughness(material, uv, settings);
-    const glm::vec3 specular = pathtracer::gfx::sampleBilinear(*material.specularTexture, uv);
+    const glm::vec3 specular = evaluate(material.specular, uv);
     const glm::vec3 f0 = glm::mix(specular, baseColor, settings.metallicFactor);
     // Dispersion enters here alone: every downstream ior consumer reads this one scalar, so the vertex stays spectrally consistent.
     const float ior = heroChannel.has_value()
@@ -55,22 +71,25 @@ ShadingFrame buildShadingFrame(const ShadingVertex& shading, const Material& mat
     tangent = glm::normalize(tangent - (glm::dot(tangent, normal) * normal));
     const glm::vec3 bitangent = glm::cross(normal, tangent) * shading.tangent.w;
 
-    const glm::vec3 normalSample = pathtracer::gfx::sampleBilinear(*material.normalTexture, shading.uv);
+    const glm::vec3 normalSample = evaluate(material.normal, shading.uv);
     const glm::vec3 tangentSpaceNormal = glm::normalize((normalSample * 2.0F) - 1.0F);
     const glm::vec3 mappedNormal = glm::normalize(
         (tangentSpaceNormal.x * tangent) + (tangentSpaceNormal.y * bitangent) +
         (tangentSpaceNormal.z * normal));
 
-    // Blinn 1978 bump mapping: the bump texture's height difference between adjacent texels becomes a shading-normal tilt.
-    const pathtracer::gfx::ImageTexture& bump = *material.bumpTexture;
-    const glm::vec2 texel(1.0F / static_cast<float>(bump.width), 1.0F / static_cast<float>(bump.height));
-    const float dHdu = pathtracer::gfx::sampleBilinear(bump, shading.uv + glm::vec2(texel.x, 0.0F)).r -
-                       pathtracer::gfx::sampleBilinear(bump, shading.uv - glm::vec2(texel.x, 0.0F)).r;
-    const float dHdv = pathtracer::gfx::sampleBilinear(bump, shading.uv + glm::vec2(0.0F, texel.y)).r -
-                       pathtracer::gfx::sampleBilinear(bump, shading.uv - glm::vec2(0.0F, texel.y)).r;
-    const glm::vec3 bumpedNormal = glm::normalize(
-        mappedNormal - (settings.bumpStrength * dHdu * tangent) -
-        (settings.bumpStrength * dHdv * bitangent));
+    // Blinn 1978 bump mapping: adjacent-texel height differences tilt the normal. A constant height has zero gradient: no tilt.
+    glm::vec3 bumpedNormal = mappedNormal;
+    if (const TextureHandle* bumpTexture = std::get_if<TextureHandle>(&material.bump)) {
+        const pathtracer::gfx::ImageTexture& bump = **bumpTexture;
+        const glm::vec2 texel(1.0F / static_cast<float>(bump.width), 1.0F / static_cast<float>(bump.height));
+        const float dHdu = pathtracer::gfx::sampleBilinear(bump, shading.uv + glm::vec2(texel.x, 0.0F)).r -
+                           pathtracer::gfx::sampleBilinear(bump, shading.uv - glm::vec2(texel.x, 0.0F)).r;
+        const float dHdv = pathtracer::gfx::sampleBilinear(bump, shading.uv + glm::vec2(0.0F, texel.y)).r -
+                           pathtracer::gfx::sampleBilinear(bump, shading.uv - glm::vec2(0.0F, texel.y)).r;
+        bumpedNormal = glm::normalize(
+            mappedNormal - (settings.bumpStrength * dHdu * tangent) -
+            (settings.bumpStrength * dHdv * bitangent));
+    }
 
     const glm::vec3 finalTangent =
         glm::normalize(tangent - (glm::dot(tangent, bumpedNormal) * bumpedNormal));
