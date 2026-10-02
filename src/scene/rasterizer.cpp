@@ -9,6 +9,7 @@
 #include <limits>
 #include <tuple>
 
+#include "pathtracer/debug/aov_routing.h"
 #include "pathtracer/scene/bsdf.h"
 #include "pathtracer/scene/false_color.h"
 #include "pathtracer/scene/gbuffer_shading.h"
@@ -442,21 +443,20 @@ void shadePixel(RasterGBuffer& result, int x, int y, float viewZ, float origU, f
                       ((st.meshEdges & 2U) != 0 && nearLineSegmentPx(p, p2, p0, kLineThicknessPx).near) ||
                       ((st.meshEdges & 4U) != 0 && nearLineSegmentPx(p, p0, p1, kLineThicknessPx).near);
 
-    writeTexel(result.depth, x, y, glm::vec3(viewZ));
-    writeTexel(result.lookahead, x, y,
-                glm::vec3(std::clamp(1.0F - (viewZ / settings.lookaheadDistance), 0.0F, 1.0F)));
+    writeTexel(result.depth, x, y, viewZ);
+    writeTexel(result.lookahead, x, y, std::clamp(1.0F - (viewZ / settings.lookaheadDistance), 0.0F, 1.0F));
     writeTexel(result.worldPos, x, y, shading.position);
-    writeTexel(result.uv, x, y, glm::vec3(glm::fract(shading.uv), 0.0F));
+    writeTexel(result.uv, x, y, glm::fract(shading.uv));
     writeTexel(result.normal, x, y, frame.normal);
     writeTexel(result.geomNormal, x, y, glm::normalize(shading.normal));
     writeTexel(result.albedo, x, y, params.baseColor);
-    writeTexel(result.metallic, x, y, glm::vec3(params.metallic));
-    writeTexel(result.roughness, x, y, glm::vec3(params.roughness));
+    writeTexel(result.metallic, x, y, params.metallic);
+    writeTexel(result.roughness, x, y, params.roughness);
     writeTexel(result.tangent, x, y, frame.tangent);
     writeTexel(result.objectId, x, y, falseColorForId(triangle.instanceIndex));
-    writeTexel(result.alpha, x, y, glm::vec3(1.0F));
+    writeTexel(result.alpha, x, y, 1.0F);
     writeTexel(result.wireframe, x, y, wire ? kWireframeColor : glm::vec3(0.0F));
-    writeTexel(result.iorAov, x, y, glm::vec3(settings.ior));
+    writeTexel(result.iorAov, x, y, settings.ior);
 }
 
 // Pass one: resolves visibility without shading, bounding shading to one evaluation per visible pixel; `>=` lets row order win ties.
@@ -536,13 +536,6 @@ void drawBoxEdgesRow(RasterGBuffer& result, int y, const std::vector<RasterLineS
     }
 }
 
-// Every AOV image in one place: the fixed size catches an AOV added to RasterGBuffer but not here, which would go uncleared.
-std::array<pathtracer::gfx::HdrImage*, 14> aovImages(RasterGBuffer& g) {
-    return {&g.iorAov, &g.depth,    &g.lookahead, &g.worldPos, &g.uv,      &g.normal,
-            &g.geomNormal, &g.albedo, &g.metallic, &g.roughness, &g.tangent,
-            &g.objectId, &g.alpha,  &g.wireframe};
-}
-
 }  // namespace
 
 void renderRasterGBuffer(const Camera& camera, const std::vector<ShadingTriangle>& shadingTriangles,
@@ -550,11 +543,13 @@ void renderRasterGBuffer(const Camera& camera, const std::vector<ShadingTriangle
                           const std::vector<PathTraceSettings>& perInstanceSettings,
                           const std::vector<AabbBounds>& instanceBounds, int width, int height,
                           ThreadPool& threadPool, RasterGBuffer& result) {
-    const std::array<pathtracer::gfx::HdrImage*, 14> images = aovImages(result);
     // Reallocated only on a resolution change; every other call reuses the storage and relies on renderRow's per-row clear.
     if (result.depth.width != width || result.depth.height != height) {
-        for (pathtracer::gfx::HdrImage* image : images) {
-            *image = makeImage(width, height);
+        for (int i = 0; i < static_cast<int>(pathtracer::debug::AovId::Count); ++i) {
+            const auto aov = static_cast<pathtracer::debug::AovId>(i);
+            if (const pathtracer::debug::GBufferLane lane = pathtracer::debug::gbufferLane(aov)) {
+                result.*lane = pathtracer::gfx::makeImage(width, height, pathtracer::debug::aovChannels(aov));
+            }
         }
     }
     ++result.generation;
@@ -579,19 +574,22 @@ void renderRasterGBuffer(const Camera& camera, const std::vector<ShadingTriangle
     // The depth pass's other output: which sub-triangle owns each pixel, -1 for uncovered. Sized like the z-buffer, same row owner.
     std::vector<int> winners(pixelCount);
 
+    const std::span<const pathtracer::debug::GBufferLane> lanes = pathtracer::debug::gbufferLanes();
     const auto renderRow = [&](int y) {
         // Clearing this row of every AOV is what makes the buffers reusable: zeroed while cache-warm, so an uncovered pixel reads zero.
         const std::size_t rowStart = static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
-        for (pathtracer::gfx::HdrImage* image : images) {
-            float* row = image->rgba.data() + (rowStart * 4);
-            std::fill(row, row + (static_cast<std::size_t>(width) * 4), 0.0F);
+        for (const pathtracer::debug::GBufferLane lane : lanes) {
+            pathtracer::gfx::HdrImage& image = result.*lane;
+            const auto channels = static_cast<std::size_t>(image.channels);
+            float* row = image.texels.data() + (rowStart * channels);
+            std::fill(row, row + (static_cast<std::size_t>(width) * channels), 0.0F);
         }
         float* zRow = zbuffer.data() + rowStart;
         int* winnerRow = winners.data() + rowStart;
         std::fill(zRow, zRow + width, std::numeric_limits<float>::max());
         std::fill(winnerRow, winnerRow + width, -1);
         for (int x = 0; x < width; ++x) {
-            writeTexel(result.iorAov, x, y, glm::vec3(-1.0F));
+            writeTexel(result.iorAov, x, y, -1.0F);
         }
 
         depthPassRow(y, subTriangles, rowBuckets, grid, zRow, winnerRow);

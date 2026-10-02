@@ -190,13 +190,14 @@ bool aovIsBipolar(AovId aov) {
     return false;
 }
 
-BipolarDisplay bipolarDisplay(std::span<const float> rgba, int channels) {
-    const auto laneRange = [rgba](int lane) {
+BipolarDisplay bipolarDisplay(const pathtracer::gfx::HdrImage& image) {
+    const auto stride = static_cast<std::size_t>(image.channels);
+    const auto laneRange = [&image, stride](int lane) {
         double sumOfSquares = 0.0;
         float peak = 0.0F;
         std::size_t count = 0;
-        for (std::size_t sample = static_cast<std::size_t>(lane); sample < rgba.size(); sample += 4) {
-            const float value = rgba[sample];
+        for (std::size_t sample = static_cast<std::size_t>(lane); sample < image.texels.size(); sample += stride) {
+            const float value = image.texels[sample];
             sumOfSquares += static_cast<double>(value) * static_cast<double>(value);
             peak = std::max(peak, std::fabs(value));
             ++count;
@@ -214,11 +215,12 @@ BipolarDisplay bipolarDisplay(std::span<const float> rgba, int channels) {
 
     // Ranged per lane, because each lane is its own operator in its own unit: sharing one range would crush the narrower axis to nothing.
     BipolarDisplay display{glm::vec3(0.0F), glm::vec3(0.0F)};
-    // writeScalar broadcasts a scalar AOV to all three lanes: replicas, so lane 0's range is theirs, not absences left at zero gain.
-    const int lanes = channels == 1 ? 3 : std::min(channels, 3);
-    const float scalarRange = channels == 1 ? laneRange(0) : 0.0F;
+    // Texture's swizzle broadcasts a scalar to all three display lanes, so channel 0's range is theirs, not absences left at zero gain.
+    const bool scalar = image.channels == pathtracer::gfx::kScalarChannels;
+    const int lanes = scalar ? glm::vec3::length() : image.channels;
+    const float scalarRange = scalar ? laneRange(0) : 0.0F;
     for (int lane = 0; lane < lanes; ++lane) {
-        const float range = channels == 1 ? scalarRange : laneRange(lane);
+        const float range = scalar ? scalarRange : laneRange(lane);
         // A lane with no range has no scale to fit, and every finite gain then reads mid-grey, so unity is the choice that assumes least.
         display.gain[lane] = range > 0.0F ? kBipolarDisplayOffset / range : 1.0F;
         display.offset[lane] = kBipolarDisplayOffset;
@@ -229,50 +231,46 @@ BipolarDisplay bipolarDisplay(std::span<const float> rgba, int channels) {
 namespace {
 
 // SNR's preview is decibels, the domain-standard unit for a ratio of like-dimensioned amplitudes, so the factor is 20 (EMVA 1288).
-void mapSnrForDisplay(std::span<const float> rgba, int samples, std::vector<float>& out) {
+void mapSnrForDisplay(const pathtracer::gfx::HdrImage& snr, int samples, pathtracer::gfx::HdrImage& out) {
     // From 0 dB, the ratio 1 where a texel equals its own uncertainty, to 10*log10(n), the ratio sqrt(n); the shared factor cancels.
     const double inverseCeiling = 2.0 / std::log(static_cast<double>(samples));
-    out.resize(rgba.size());
-    for (std::size_t texel = 0; texel + 3 < rgba.size(); texel += 4) {
-        // snrAov broadcasts its scalar, so lane 0 is the ratio; at or below the floor nothing is resolved, which absorbs its zero too.
-        const float ratio = rgba[texel];
+    out = pathtracer::gfx::makeImage(snr.width, snr.height, pathtracer::gfx::kScalarChannels);
+    for (std::size_t pixel = 0; pixel < snr.texels.size(); ++pixel) {
+        // snrAov stores the ratio as its one channel; at or below the floor nothing is resolved, which absorbs its zero too.
+        const float ratio = snr.texels[pixel];
         // sqrt(n) is the SNR at unit per-sample coefficient of variation, since SNR = sqrt(n)*mu/sigma, so that reference is white.
-        const auto grey = static_cast<float>(
+        out.texels[pixel] = static_cast<float>(
             ratio > 1.0F ? std::min(std::log(static_cast<double>(ratio)) * inverseCeiling, 1.0) : 0.0);
-        out[texel] = grey;
-        out[texel + 1] = grey;
-        out[texel + 2] = grey;
-        out[texel + 3] = rgba[texel + 3];
     }
 }
 
 // Bounce Count's domain is a real bound -- maxBounces + 1 possible terminations -- so the colormap's argument is exact and frame-stable.
-void mapBounceCountForDisplay(std::span<const float> rgba, int maxBounces, std::vector<float>& out) {
+void mapBounceCountForDisplay(const pathtracer::gfx::HdrImage& bounces, int maxBounces, pathtracer::gfx::HdrImage& out) {
     const float ceiling = static_cast<float>(maxBounces) + 1.0F;
-    out.resize(rgba.size());
-    for (std::size_t texel = 0; texel + 3 < rgba.size(); texel += 4) {
-        const glm::vec3 mapped = turbo(rgba[texel] / ceiling);
-        out[texel] = mapped.r;
-        out[texel + 1] = mapped.g;
-        out[texel + 2] = mapped.b;
-        out[texel + 3] = rgba[texel + 3];
+    out = pathtracer::gfx::makeImage(bounces.width, bounces.height, pathtracer::gfx::kRgbChannels);
+    for (std::size_t pixel = 0; pixel < bounces.texels.size(); ++pixel) {
+        const glm::vec3 mapped = turbo(bounces.texels[pixel] / ceiling);
+        float* texel = out.texels.data() + (pixel * pathtracer::gfx::kRgbChannels);
+        texel[0] = mapped.r;
+        texel[1] = mapped.g;
+        texel[2] = mapped.b;
     }
 }
 
 }  // namespace
 
-AovDisplay aovDisplay(AovId aov, std::span<const float> rgba, const AovDisplayContext& context) {
+AovDisplay aovDisplay(AovId aov, const pathtracer::gfx::HdrImage& image, const AovDisplayContext& context) {
     AovDisplay display{{}, {glm::vec3(1.0F), glm::vec3(0.0F)}};
     if (aovIsBipolar(aov)) {
-        display.affine = bipolarDisplay(rgba, aovChannels(aov));
+        display.affine = bipolarDisplay(image);
         return display;
     }
     switch (aov) {
         // Raw metres quantize to white and farClip is a ray bound, not a depth span, so Depth ranges to the depth actually present.
         case AovId::Depth: {
             float maxDepth = 0.0F;
-            for (std::size_t texel = 0; texel < rgba.size(); texel += 4) {
-                maxDepth = std::max(maxDepth, rgba[texel]);
+            for (const float depth : image.texels) {
+                maxDepth = std::max(maxDepth, depth);
             }
             display.affine.gain = glm::vec3(std::pow(2.0F, -std::log2(std::max(maxDepth, 1e-4F))));
             return display;
@@ -280,11 +278,11 @@ AovDisplay aovDisplay(AovId aov, std::span<const float> rgba, const AovDisplayCo
         // A variance is undefined below two passes, where snrAov is uniformly zero and the log window has no positive ceiling.
         case AovId::SNR:
             if (context.samples >= 2) {
-                mapSnrForDisplay(rgba, context.samples, display.rgba);
+                mapSnrForDisplay(image, context.samples, display.mapped);
             }
             return display;
         case AovId::BounceCount:
-            mapBounceCountForDisplay(rgba, context.maxBounces, display.rgba);
+            mapBounceCountForDisplay(image, context.maxBounces, display.mapped);
             return display;
         // Every other AOV's values reach the display unchanged, under the unity gain and zero offset this was initialised with.
         default:
@@ -328,6 +326,32 @@ GBufferLane gbufferLane(AovId aov) {
         case AovId::Wireframe:  return &GBuffer::wireframe;
         default:                return nullptr;
     }
+}
+
+namespace {
+
+// The non-null images of laneOf over every AovId, in AovId order.
+template <typename Lane>
+std::vector<Lane> collectLanes(Lane (*laneOf)(AovId)) {
+    std::vector<Lane> lanes;
+    for (int i = 0; i < static_cast<int>(AovId::Count); ++i) {
+        if (const Lane lane = laneOf(static_cast<AovId>(i))) {
+            lanes.push_back(lane);
+        }
+    }
+    return lanes;
+}
+
+}  // namespace
+
+std::span<const PathTracedLane> pathTracedLanes() {
+    static const std::vector<PathTracedLane> lanes = collectLanes(&pathTracedLane);
+    return lanes;
+}
+
+std::span<const GBufferLane> gbufferLanes() {
+    static const std::vector<GBufferLane> lanes = collectLanes(&gbufferLane);
+    return lanes;
 }
 
 namespace {

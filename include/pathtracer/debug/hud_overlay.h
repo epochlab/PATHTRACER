@@ -33,7 +33,7 @@ struct PathTracedStatus {
     int maxSamples = 0;  // 0 = unbounded
 };
 
-// Pixel under the cursor (samplePixelProbe): the composited post-LUT pixel for Beauty and post-filter AOVs, else the raw AOV value.
+// Pixel under the cursor (samplePixelProbe): the display-transformed texel for Beauty, the raw texel for any other AOV.
 struct PixelProbeSample {
     bool valid = false;
     glm::vec4 color{0.0F};

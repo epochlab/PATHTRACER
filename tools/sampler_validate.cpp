@@ -27,7 +27,7 @@ constexpr int kPixelX = 37;
 constexpr int kPixelY = 41;
 // Must match sampler.cpp's kMaskSize, the one place it is restated. 2^7 = 128 points, matching profile.json's maxSamples cap.
 constexpr int kM = 7;
-// A 12-bounce path consumes ~5 sets per bounce plus 2 at the camera, so set 64+ is reached and is where an unpadded sampler degraded.
+// A 12-bounce path consumes up to 6 sets per bounce plus 1 at the camera, so set 64+ is reached, where an unpadded sampler degraded.
 constexpr int kSetCount = 72;
 // Depths spanning the padded range, including the last two sets, where a shuffle running out of distinct scrambles shows first.
 constexpr std::array<int, 7> kNetDepths = {0, 1, 2, 7, 31, 64, 71};

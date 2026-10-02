@@ -22,11 +22,11 @@ using pathtracer::scene::ThreadPool;
     threadPool.parallelFor(beauty.height, [&](int y) {
         const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(beauty.width);
         for (int x = 0; x < beauty.width; ++x) {
-            const std::size_t texel = (row + static_cast<std::size_t>(x)) * 4;
+            const std::size_t texel = (row + static_cast<std::size_t>(x)) * static_cast<std::size_t>(beauty.channels);
             plane[row + static_cast<std::size_t>(x)] =
-                (beauty.rgba[texel] * kRec709LuminanceWeights.r) +
-                (beauty.rgba[texel + 1] * kRec709LuminanceWeights.g) +
-                (beauty.rgba[texel + 2] * kRec709LuminanceWeights.b);
+                (beauty.texels[texel] * kRec709LuminanceWeights.r) +
+                (beauty.texels[texel + 1] * kRec709LuminanceWeights.g) +
+                (beauty.texels[texel + 2] * kRec709LuminanceWeights.b);
         }
     });
     return plane;
@@ -39,37 +39,20 @@ using pathtracer::scene::ThreadPool;
     return plane[(static_cast<std::size_t>(cy) * static_cast<std::size_t>(width)) + static_cast<std::size_t>(cx)];
 }
 
-[[nodiscard]] HdrImage makeBroadcastImage(int width, int height) {
-    return HdrImage{width, height,
-                    std::vector<float>(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4, 0.0F)};
-}
-
-// Writes one scalar to RGB with alpha 1, the broadcast convention every AOV uses, so it goes straight through HdrImage to the GPU.
-void writeScalar(HdrImage& out, std::size_t pixel, float value) {
-    const std::size_t texel = pixel * 4;
-    out.rgba[texel] = value;
-    out.rgba[texel + 1] = value;
-    out.rgba[texel + 2] = value;
-    out.rgba[texel + 3] = 1.0F;
+// The filter's output image, zeroed at the channel count aovChannels declares for it.
+[[nodiscard]] HdrImage makeAovImage(AovId aov, int width, int height) {
+    return pathtracer::gfx::makeImage(width, height, aovChannels(aov));
 }
 
 }  // namespace
 
 HdrImage luminanceAov(const HdrImage& beauty, ThreadPool& threadPool) {
-    const std::vector<float> plane = luminancePlane(beauty, threadPool);
-    HdrImage out = makeBroadcastImage(beauty.width, beauty.height);
-    threadPool.parallelFor(beauty.height, [&](int y) {
-        const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(beauty.width);
-        for (int x = 0; x < beauty.width; ++x) {
-            writeScalar(out, row + static_cast<std::size_t>(x), plane[row + static_cast<std::size_t>(x)]);
-        }
-    });
-    return out;
+    return {beauty.width, beauty.height, pathtracer::gfx::kScalarChannels, luminancePlane(beauty, threadPool)};
 }
 
 HdrImage sobelAov(const HdrImage& beauty, ThreadPool& threadPool) {
     const std::vector<float> plane = luminancePlane(beauty, threadPool);
-    HdrImage out = makeBroadcastImage(beauty.width, beauty.height);
+    HdrImage out = makeAovImage(AovId::Sobel, beauty.width, beauty.height);
     const int width = beauty.width;
     const int height = beauty.height;
     threadPool.parallelFor(height, [&](int y) {
@@ -84,8 +67,7 @@ HdrImage sobelAov(const HdrImage& beauty, ThreadPool& threadPool) {
             const float br = tap(plane, width, height, x + 1, y + 1);
             const float gx = (-tl - (2.0F * l) - bl) + tr + (2.0F * r) + br;
             const float gy = (-bl - (2.0F * b) - br) + tl + (2.0F * t) + tr;
-            writeScalar(out, (static_cast<std::size_t>(y) * static_cast<std::size_t>(width)) + static_cast<std::size_t>(x),
-                        std::sqrt((gx * gx) + (gy * gy)));
+            writeTexel(out, x, y, std::sqrt((gx * gx) + (gy * gy)));
         }
     });
     return out;
@@ -112,7 +94,7 @@ HdrImage gaborAov(const HdrImage& beauty, ThreadPool& threadPool) {
     const int height = beauty.height;
     const auto pixels = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
     const std::vector<float> plane = luminancePlane(beauty, threadPool);
-    HdrImage out = makeBroadcastImage(width, height);
+    HdrImage out = makeAovImage(AovId::Gabor, width, height);
 
     // The finest scale the grid resolves, the same fine scale DoG starts from.
     const float variance = innerScaleVariance();
@@ -189,21 +171,21 @@ HdrImage gaborAov(const HdrImage& beauty, ThreadPool& threadPool) {
     threadPool.parallelFor(height, [&](int y) {
         const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
         for (int x = 0; x < width; ++x) {
-            writeScalar(out, row + static_cast<std::size_t>(x), std::sqrt(peak[row + static_cast<std::size_t>(x)]));
+            writeTexel(out, x, y, std::sqrt(peak[row + static_cast<std::size_t>(x)]));
         }
     });
     return out;
 }
 
 HdrImage hsvAov(const HdrImage& beauty, ThreadPool& threadPool) {
-    HdrImage out = makeBroadcastImage(beauty.width, beauty.height);
+    HdrImage out = makeAovImage(AovId::HSV, beauty.width, beauty.height);
     threadPool.parallelFor(beauty.height, [&](int y) {
         const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(beauty.width);
         for (int x = 0; x < beauty.width; ++x) {
-            const std::size_t texel = (row + static_cast<std::size_t>(x)) * 4;
-            const float r = beauty.rgba[texel];
-            const float g = beauty.rgba[texel + 1];
-            const float b = beauty.rgba[texel + 2];
+            const glm::vec3 rgb = beauty.rgb(row + static_cast<std::size_t>(x));
+            const float r = rgb.r;
+            const float g = rgb.g;
+            const float b = rgb.b;
             const float value = std::max({r, g, b});
             const float chroma = value - std::min({r, g, b});
             // Exact branches, not the shader's 1e-10 guard: hue is undefined on the achromatic axis, saturation on black (Smith 1978).
@@ -223,17 +205,14 @@ HdrImage hsvAov(const HdrImage& beauty, ThreadPool& threadPool) {
                     hue += 1.0F;
                 }
             }
-            out.rgba[texel] = hue;
-            out.rgba[texel + 1] = saturation;
-            out.rgba[texel + 2] = value;
-            out.rgba[texel + 3] = 1.0F;
+            writeTexel(out, x, y, glm::vec3(hue, saturation, value));
         }
     });
     return out;
 }
 
 HdrImage dogAov(const HdrImage& beauty, ThreadPool& threadPool) {
-    HdrImage out = makeBroadcastImage(beauty.width, beauty.height);
+    HdrImage out = makeAovImage(AovId::DoG, beauty.width, beauty.height);
     const float fineVariance = innerScaleVariance();
     // One octave up, sigma doubled: variance 4t, reached from the fine level by the semigroup's step 3t.
     const float coarseStep = (4.0F * fineVariance) - fineVariance;
@@ -250,7 +229,7 @@ HdrImage dogAov(const HdrImage& beauty, ThreadPool& threadPool) {
         for (int x = 0; x < beauty.width; ++x) {
             const std::size_t pixel = row + static_cast<std::size_t>(x);
             // Signed, not a magnitude: polarity separates a bright blob from a dark one, and Sobel already reports gradient magnitude.
-            writeScalar(out, pixel, fine[pixel] - coarse[pixel]);
+            writeTexel(out, x, y, fine[pixel] - coarse[pixel]);
         }
     });
     return out;
@@ -258,29 +237,28 @@ HdrImage dogAov(const HdrImage& beauty, ThreadPool& threadPool) {
 
 HdrImage colourOpponentAov(const HdrImage& beauty, ThreadPool& threadPool) {
     const pathtracer::scene::cone::OpponentBasis& basis = pathtracer::scene::cone::opponentBasis();
-    HdrImage out = makeBroadcastImage(beauty.width, beauty.height);
+    HdrImage out = makeAovImage(AovId::ColourOpponent, beauty.width, beauty.height);
     threadPool.parallelFor(beauty.height, [&](int y) {
         const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(beauty.width);
         for (int x = 0; x < beauty.width; ++x) {
-            const std::size_t texel = (row + static_cast<std::size_t>(x)) * 4;
-            const float red = beauty.rgba[texel];
-            const float green = beauty.rgba[texel + 1];
-            const float blue = beauty.rgba[texel + 2];
+            const glm::vec3 rgb = beauty.rgb(row + static_cast<std::size_t>(x));
+            const float red = rgb.r;
+            const float green = rgb.g;
+            const float blue = rgb.b;
             const glm::vec2 difference(red - green, blue - green);
             const float sum = (basis.denominator.r * red) + (basis.denominator.g * green) + (basis.denominator.b * blue);
             // Zero where no light arrives: the cone chromaticity of black is undefined, not achromatic, and must not read as white.
             const float scale = sum > 0.0F ? 1.0F / sum : 0.0F;
-            out.rgba[texel] = glm::dot(basis.redGreenNumerator, difference) * scale;
-            out.rgba[texel + 1] = glm::dot(basis.blueYellowNumerator, difference) * scale;
-            out.rgba[texel + 2] = 0.0F;
-            out.rgba[texel + 3] = 1.0F;
+            writeTexel(out, x, y,
+                       glm::vec2(glm::dot(basis.redGreenNumerator, difference), glm::dot(basis.blueYellowNumerator, difference)) *
+                           scale);
         }
     });
     return out;
 }
 
 HdrImage snrAov(const HdrImage& beauty, const float* beautyLuminanceM2, int samples, ThreadPool& threadPool) {
-    HdrImage out = makeBroadcastImage(beauty.width, beauty.height);
+    HdrImage out = makeAovImage(AovId::SNR, beauty.width, beauty.height);
     // A single sample carries no dispersion, so the ratio is undefined rather than infinite, and a black frame says so.
     if (beautyLuminanceM2 == nullptr || samples < 2) {
         return out;
@@ -293,13 +271,12 @@ HdrImage snrAov(const HdrImage& beauty, const float* beautyLuminanceM2, int samp
         const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(beauty.width);
         for (int x = 0; x < beauty.width; ++x) {
             const std::size_t pixel = row + static_cast<std::size_t>(x);
-            const std::size_t texel = pixel * 4;
-            const float luminance = (beauty.rgba[texel] * kRec709LuminanceWeights.r) +
-                                    (beauty.rgba[texel + 1] * kRec709LuminanceWeights.g) +
-                                    (beauty.rgba[texel + 2] * kRec709LuminanceWeights.b);
+            const glm::vec3 rgb = beauty.rgb(pixel);
+            const float luminance = (rgb.r * kRec709LuminanceWeights.r) + (rgb.g * kRec709LuminanceWeights.g) +
+                                    (rgb.b * kRec709LuminanceWeights.b);
             const float standardError = std::sqrt(beautyLuminanceM2[pixel] * inverseDegrees);
             // Zero dispersion is a converged texel, not an infinite ratio; a background pixel every pass agrees on is the usual case.
-            writeScalar(out, pixel, standardError > 0.0F ? luminance / standardError : 0.0F);
+            writeTexel(out, x, y, standardError > 0.0F ? luminance / standardError : 0.0F);
         }
     });
     return out;

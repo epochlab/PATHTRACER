@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Comment budget gate for every first-party source (notes/architect.md section 7).
+"""Comment budget gate for every first-party source.
 
 Two rules: a comment occupies exactly one line, and the line carrying it fits in 140 columns.
-Section 7 says "single line only, no multi-line splitting", so a run of consecutive comment lines
+The rule is "single line only, no multi-line splitting", so a run of consecutive comment lines
 is a violation however short. The 140 matches python/pyproject.toml's ruff line-length, which cites
 the same rule; ruff enforces the column on Python alone and cannot see the one-line rule at all, so
 this gate is what applies both to every language in the repo.
@@ -14,7 +14,7 @@ albedo_table.inc, and a regex would score that generated text as over-length com
 
 Out of scope, deliberately: third_party/ and build/ are not ours, *.inc is generated (its comments
 are albedo_table.cpp's output, fixed there), *.json admits no comments, and *.md is prose, which is
-where section 7 sends a derivation too long for one line.
+where a derivation too long for one line belongs.
 """
 
 from __future__ import annotations
@@ -274,7 +274,7 @@ def check(path: Path, name: Path | None = None, spans: SpansFn | None = None) ->
             longest_run = max(longest_run, length)
             if length > MAX_RUN:
                 over_run += 1
-                found.append(Violation(name, run_start + 1, f"comment spans {length} lines, section 7 allows one"))
+                found.append(Violation(name, run_start + 1, f"comment spans {length} lines, the budget allows one"))
             run_start = None
     stats = Stats(1, len(lines), len(carries), comment_bytes, over_cols, over_run, longest, longest_run)
     return found, stats

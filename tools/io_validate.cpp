@@ -1,6 +1,7 @@
 // Correctness gate for the engine's file boundaries: the EXR round trip and the JSON scene, profile and bench-log parsers.
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -19,6 +20,7 @@
 #include <OpenEXR/ImfChannelList.h>
 #include <OpenEXR/ImfFrameBuffer.h>
 #include <OpenEXR/ImfHeader.h>
+#include <OpenEXR/ImfInputFile.h>
 #include <OpenEXR/ImfOutputFile.h>
 #include <glm/glm.hpp>
 #include <nlohmann/json.hpp>
@@ -40,21 +42,39 @@ std::filesystem::path scratchPath(const char* name) {
 
 // Values hostile to a lossy or narrowing round trip: denormal-scale, exact halves, far outside display range, and a negative.
 pathtracer::gfx::HdrImage makeProbeImage() {
-    pathtracer::gfx::HdrImage image;
-    image.width = 7;   // deliberately not a power of two or a multiple of any tile size
-    image.height = 5;
-    image.rgba.resize(static_cast<std::size_t>(image.width) * image.height * 4);
-    for (std::size_t i = 0; i < image.rgba.size(); ++i) {
-        const std::size_t channel = i % 4;
+    // 7x5: deliberately not a power of two or a multiple of any tile size.
+    pathtracer::gfx::HdrImage image = pathtracer::gfx::makeImage(7, 5, pathtracer::gfx::kRgbChannels);
+    for (std::size_t i = 0; i < image.texels.size(); ++i) {
         const auto t = static_cast<float>(i);
-        switch (channel) {
-            case 0: image.rgba[i] = t * 1.5F; break;              // exact halves
-            case 1: image.rgba[i] = 1.0e-20F * (t + 1.0F); break;  // far below display range
-            case 2: image.rgba[i] = 65504.0F - t; break;           // near the half-float maximum, if one were used
-            default: image.rgba[i] = 1.0F; break;                  // alpha
+        switch (i % pathtracer::gfx::kRgbChannels) {
+            case 0: image.texels[i] = t * 1.5F; break;              // exact halves
+            case 1: image.texels[i] = 1.0e-20F * (t + 1.0F); break;  // far below display range
+            default: image.texels[i] = 65504.0F - t; break;          // near the half-float maximum, if one were used
         }
     }
     return image;
+}
+
+// Writes interleaved full-float `planes` straight through OpenEXR, for probes writeExr never produces: an RGBA or an R-only file.
+bool writeExrPlanes(const std::filesystem::path& path, int width, int height, const std::vector<const char*>& planes,
+                    std::vector<float> texels) {
+    try {
+        Imf::Header header(width, height);
+        Imf::FrameBuffer frameBuffer;
+        const std::size_t xStride = sizeof(float) * planes.size();
+        for (std::size_t c = 0; c < planes.size(); ++c) {
+            header.channels().insert(planes[c], Imf::Channel(Imf::FLOAT));
+            frameBuffer.insert(planes[c], Imf::Slice(Imf::FLOAT, reinterpret_cast<char*>(texels.data() + c), xStride,
+                                                     xStride * static_cast<std::size_t>(width)));
+        }
+        Imf::OutputFile file(path.string().c_str(), header);
+        file.setFrameBuffer(frameBuffer);
+        file.writePixels(height);
+        return true;
+    } catch (const std::exception& e) {
+        std::cerr << "io_validate: could not write " << path << ": " << e.what() << '\n';
+        return false;
+    }
 }
 
 // The losslessness hdr_image.h claims in prose, bit-exact: the 1e-20 and 65504 rows are what would expose a half-float channel.
@@ -78,23 +98,67 @@ PT_CHECK(exr_round_trip_is_lossless, Fast, Exact) {
     std::snprintf(dimDetail, sizeof(dimDetail), "round trip returned %dx%d, wrote %dx%d", loaded->width,
                   loaded->height, original.width, original.height);
     PT_EXPECT(ctx, loaded->width == original.width && loaded->height == original.height, dimDetail);
-    PT_EXPECT(ctx, loaded->rgba.size() == original.rgba.size(), "round trip changed the channel count");
+    PT_EXPECT(ctx, loaded->channels == original.channels && loaded->texels.size() == original.texels.size(),
+              "round trip changed the channel count");
 
     std::size_t differing = 0;
     float worst = 0.0F;
-    if (loaded->rgba.size() == original.rgba.size()) {
-        for (std::size_t i = 0; i < original.rgba.size(); ++i) {
-            if (loaded->rgba[i] != original.rgba[i]) {
+    if (loaded->texels.size() == original.texels.size()) {
+        for (std::size_t i = 0; i < original.texels.size(); ++i) {
+            if (loaded->texels[i] != original.texels[i]) {
                 ++differing;
-                worst = std::max(worst, std::fabs(loaded->rgba[i] - original.rgba[i]));
+                worst = std::max(worst, std::fabs(loaded->texels[i] - original.texels[i]));
             }
         }
     }
     char detail[192];
     std::snprintf(detail, sizeof(detail), "%zu of %zu floats changed across the round trip, worst delta %.9g",
-                  differing, original.rgba.size(), static_cast<double>(worst));
+                  differing, original.texels.size(), static_cast<double>(worst));
     PT_EXPECT(ctx, differing == 0, detail);
     std::filesystem::remove(path);
+}
+
+// An AOV is written at the channels it carries, exactly the first `channels` of R,G,B, and loadExr reads it back as itself.
+PT_CHECK(exr_write_keeps_the_declared_channels, Fast, Exact) {
+    constexpr int kWidth = 3;
+    constexpr int kHeight = 2;
+    constexpr std::array<const char*, 3> kPlanes{"R", "G", "B"};
+    ctx.plan(2 * static_cast<int>(kPlanes.size()));
+    for (int channels = 1; channels <= static_cast<int>(kPlanes.size()); ++channels) {
+        pathtracer::gfx::HdrImage image = pathtracer::gfx::makeImage(kWidth, kHeight, channels);
+        for (std::size_t i = 0; i < image.texels.size(); ++i) {
+            image.texels[i] = 0.5F + static_cast<float>(i);  // distinct per float, so a stride or plane slip reads a wrong value
+        }
+        const std::filesystem::path path = scratchPath("engine_io_validate_channels.exr");
+        std::vector<std::string> names;
+        std::optional<pathtracer::gfx::HdrImage> loaded;
+        if (pathtracer::gfx::writeExr(path.string(), image)) {
+            const Imf::InputFile file(path.string().c_str());
+            for (auto it = file.header().channels().begin(); it != file.header().channels().end(); ++it) {
+                names.emplace_back(it.name());
+            }
+            loaded = pathtracer::gfx::loadExr(path.string());
+        }
+        std::filesystem::remove(path);
+        // ChannelList iterates by name, not by insertion, so the plane sets are compared sorted.
+        std::vector<std::string> expected(kPlanes.begin(), kPlanes.begin() + channels);
+        std::sort(names.begin(), names.end());
+        std::sort(expected.begin(), expected.end());
+        PT_EXPECT(ctx, names == expected, std::to_string(channels) + "-channel image wrote the wrong plane set");
+        PT_EXPECT(ctx, loaded && loaded->channels == channels && loaded->texels == image.texels,
+                  std::to_string(channels) + "-channel image did not load back as itself");
+    }
+}
+
+// HdrImage::rgb is the CPU half of the display contract Texture's swizzle states: a scalar broadcasts, a second channel leaves B 0.
+PT_CHECK(hdr_image_rgb_expands_as_the_display_swizzle, Fast, Exact) {
+    ctx.plan(3);
+    const pathtracer::gfx::HdrImage scalar{1, 1, 1, {0.25F}};
+    const pathtracer::gfx::HdrImage pair{1, 1, 2, {0.25F, 0.5F}};
+    const pathtracer::gfx::HdrImage triple{1, 1, 3, {0.25F, 0.5F, 0.75F}};
+    PT_EXPECT(ctx, scalar.rgb(0) == glm::vec3(0.25F), "a scalar did not broadcast to RGB");
+    PT_EXPECT(ctx, pair.rgb(0) == glm::vec3(0.25F, 0.5F, 0.0F), "a two-channel texel did not read blue 0");
+    PT_EXPECT(ctx, triple.rgb(0) == glm::vec3(0.25F, 0.5F, 0.75F), "an RGB texel did not read through unchanged");
 }
 
 // A missing file must be reported, not treated as an empty image: a caller given a zero-sized image renders black and never knows.
@@ -595,9 +659,9 @@ PT_CHECK(image_texture_half_load, Fast, Exact) {
     using pathtracer::gfx::ScalarType;
     constexpr int kRgb = pathtracer::gfx::kRgbChannels;
     const auto writeProbe = [](const char* name, const std::vector<float>& values) {
-        pathtracer::gfx::HdrImage image{static_cast<int>(values.size()), 1, {}};
+        pathtracer::gfx::HdrImage image{static_cast<int>(values.size()), 1, kRgb, {}};
         for (const float v : values) {
-            image.rgba.insert(image.rgba.end(), {v, v, v, 1.0F});
+            image.texels.insert(image.texels.end(), {v, v, v});
         }
         const std::filesystem::path path = scratchPath(name);
         return pathtracer::gfx::writeExr(path.string(), image) ? std::optional(path) : std::nullopt;
@@ -662,36 +726,23 @@ PT_CHECK(image_texture_channel_selection, Fast, Exact) {
         const auto t = static_cast<float>(x + (kWidth * y));
         return glm::vec3(t, 10.0F + t, 20.0F + t);  // distinct per lane, so a stride or lane slip reads a wrong value
     };
-    pathtracer::gfx::HdrImage rgba{kWidth, kHeight, {}};
+    std::vector<float> rgba;
     for (int y = 0; y < kHeight; ++y) {
         for (int x = 0; x < kWidth; ++x) {
             const glm::vec3 v = probe(x, y);
-            rgba.rgba.insert(rgba.rgba.end(), {v.r, v.g, v.b, 1.0F});
+            rgba.insert(rgba.end(), {v.r, v.g, v.b, 1.0F});
         }
     }
     const std::filesystem::path rgbaPath = scratchPath("engine_io_channels_rgba.exr");
-    const bool rgbaWritten = pathtracer::gfx::writeExr(rgbaPath.string(), rgba);
+    const bool rgbaWritten = writeExrPlanes(rgbaPath, kWidth, kHeight, {"R", "G", "B", "A"}, rgba);
 
     // An R-only file, as a DCC writes a scalar map: OpenEXR zero-fills absent slices, so only an explicit check rejects it at RGB.
     const std::filesystem::path redPath = scratchPath("engine_io_channels_r.exr");
-    bool redWritten = true;
-    try {
-        std::vector<float> red(kTexels);
-        for (std::size_t i = 0; i < kTexels; ++i) {
-            red[i] = static_cast<float>(i);
-        }
-        Imf::Header header(kWidth, kHeight);
-        header.channels().insert("R", Imf::Channel(Imf::FLOAT));
-        Imf::FrameBuffer frameBuffer;
-        frameBuffer.insert("R", Imf::Slice(Imf::FLOAT, reinterpret_cast<char*>(red.data()), sizeof(float),
-                                           sizeof(float) * kWidth));
-        Imf::OutputFile file(redPath.string().c_str(), header);
-        file.setFrameBuffer(frameBuffer);
-        file.writePixels(kHeight);
-    } catch (const std::exception& e) {
-        std::cerr << "io_validate: could not write the R-only probe: " << e.what() << '\n';
-        redWritten = false;
+    std::vector<float> red(kTexels);
+    for (std::size_t i = 0; i < kTexels; ++i) {
+        red[i] = static_cast<float>(i);
     }
+    const bool redWritten = writeExrPlanes(redPath, kWidth, kHeight, {"R"}, red);
 
     const auto matches = [&](const pathtracer::gfx::ImageTexture& image, int channels) {
         const auto* texels = std::get_if<std::vector<float>>(&image.texels);
@@ -710,7 +761,7 @@ PT_CHECK(image_texture_channel_selection, Fast, Exact) {
         }
         return true;
     };
-    ctx.plan(6);
+    ctx.plan(7);
     PT_EXPECT(ctx, rgbaWritten && redWritten, "could not write the channel probes");
     const std::optional<pathtracer::gfx::ImageTexture> scalar =
         pathtracer::gfx::loadImageTexture(rgbaPath.string(), ScalarType::Float32, pathtracer::gfx::kScalarChannels);
@@ -725,7 +776,22 @@ PT_CHECK(image_texture_channel_selection, Fast, Exact) {
     std::cout << "  the stderr diagnostics below are expected: an R-only file has no G or B channel to read\n";
     PT_EXPECT(ctx, !pathtracer::gfx::loadImageTexture(redPath.string(), ScalarType::Float32, pathtracer::gfx::kRgbChannels),
               "an R-only file was accepted by an RGB slot, which would have read zero-filled G and B");
-    PT_EXPECT(ctx, !pathtracer::gfx::loadExr(redPath.string()), "loadExr accepted an R-only file as RGBA");
+    const std::optional<pathtracer::gfx::HdrImage> redExr = pathtracer::gfx::loadExr(redPath.string());
+    PT_EXPECT(ctx, redExr && redExr->channels == pathtracer::gfx::kScalarChannels && redExr->texels == red,
+              "loadExr did not read an R-only file as its one channel");
+    const std::optional<pathtracer::gfx::HdrImage> rgbExr = pathtracer::gfx::loadExr(rgbaPath.string());
+    const auto rgbExrMatches = [&] {
+        for (int y = 0; y < kHeight; ++y) {
+            for (int x = 0; x < kWidth; ++x) {
+                if (rgbExr->rgb((static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x)) != probe(x, y)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+    PT_EXPECT(ctx, rgbExr && rgbExr->channels == pathtracer::gfx::kRgbChannels && rgbExrMatches(),
+              "loadExr of an RGBA file did not return its exact RGB at three floats per texel");
     std::filesystem::remove(rgbaPath);
     std::filesystem::remove(redPath);
 }

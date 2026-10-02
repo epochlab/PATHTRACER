@@ -243,11 +243,8 @@ glm::vec3 regionMean(const pathtracer::gfx::HdrImage& image, int x0, int y0, int
     int count = 0;
     for (int y = y0; y < y1; ++y) {
         for (int x = x0; x < x1; ++x) {
-            const std::size_t idx =
-                ((static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width)) +
-                 static_cast<std::size_t>(x)) *
-                4;
-            sum += glm::vec3(image.rgba[idx + 0], image.rgba[idx + 1], image.rgba[idx + 2]);
+            sum += image.rgb((static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width)) +
+                             static_cast<std::size_t>(x));
             ++count;
         }
     }
@@ -940,8 +937,9 @@ PT_CHECK(material_binding_resolution, Fast, Exact) {
 PT_CHECK(texture_binding_resolution, Fast, Exact) {
     const std::filesystem::path root = std::filesystem::temp_directory_path();
     const std::string exr = "engine_integrator_scene_texture.exr";
-    const glm::vec4 texel(0.25F, 0.5F, 0.75F, 1.0F);
-    const bool written = pathtracer::gfx::writeExr((root / exr).string(), {1, 1, {texel.x, texel.y, texel.z, texel.w}});
+    const glm::vec3 texel(0.25F, 0.5F, 0.75F);
+    const bool written = pathtracer::gfx::writeExr((root / exr).string(),
+                                                   {1, 1, pathtracer::gfx::kRgbChannels, {texel.x, texel.y, texel.z}});
     // "beta" owns two primitives, as a multi-primitive glTF node does: an override must reach both.
     const auto makeInstances = [] {
         return std::vector<MeshInstance>{MeshInstance{makeMaterial(1.0F, glm::vec3(0.04F)), glm::mat4(1.0F), "alpha"},
@@ -953,7 +951,7 @@ PT_CHECK(texture_binding_resolution, Fast, Exact) {
         return pathtracer::scene::bindSceneTextures(instances, textures, root.string(),
                                                      pathtracer::gfx::ScalarType::Float32);
     };
-    const glm::vec3 rgb(texel);
+    const glm::vec3 rgb = texel;
     // The scalar slot holds R alone: had the cache handed it the RGB decode, its texel would read (0.25, 0.5, 0.75).
     const glm::vec3 red(texel.r, 0.0F, 0.0F);
     const glm::vec3 white(1.0F);
@@ -1051,20 +1049,18 @@ PT_CHECK(transport_aov_partition, Slow, Exact) {
         float worstGap = 0.0F;
         float worstBeauty = 0.0F;
         float maxIndirect = 0.0F;
-        for (std::size_t i = 0; i < result.beauty.rgba.size(); i += 4) {
-            for (std::size_t c = 0; c < 3; ++c) {
-                const float beauty = result.beauty.rgba[i + c];
-                const float sum = result.directDiffuse.rgba[i + c] + result.indirectDiffuse.rgba[i + c] +
-                                   result.directSpecular.rgba[i + c] +
-                                   result.indirectSpecular.rgba[i + c] + result.refraction.rgba[i + c];
-                const float gap = std::fabs(beauty - sum) / std::max(std::fabs(beauty), 1e-3F);
-                if (gap > worstGap) {
-                    worstGap = gap;
-                    worstBeauty = beauty;
-                }
-                maxIndirect = std::max({maxIndirect, result.indirectDiffuse.rgba[i + c],
-                                         result.indirectSpecular.rgba[i + c]});
+        // All six lanes are RGB, so one index walks every channel of every texel in step.
+        for (std::size_t i = 0; i < result.beauty.texels.size(); ++i) {
+            const float beauty = result.beauty.texels[i];
+            const float sum = result.directDiffuse.texels[i] + result.indirectDiffuse.texels[i] +
+                               result.directSpecular.texels[i] + result.indirectSpecular.texels[i] +
+                               result.refraction.texels[i];
+            const float gap = std::fabs(beauty - sum) / std::max(std::fabs(beauty), 1e-3F);
+            if (gap > worstGap) {
+                worstGap = gap;
+                worstBeauty = beauty;
             }
+            maxIndirect = std::max({maxIndirect, result.indirectDiffuse.texels[i], result.indirectSpecular.texels[i]});
         }
 
         std::cout << "  " << testCase.name;

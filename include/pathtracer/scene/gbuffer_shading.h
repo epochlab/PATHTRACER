@@ -2,7 +2,6 @@
 
 #include <glm/glm.hpp>
 
-#include "pathtracer/gfx/hdr_image.h"
 #include "pathtracer/scene/bsdf.h"
 #include "pathtracer/scene/material.h"
 #include "pathtracer/scene/path_tracer.h"
@@ -34,10 +33,5 @@ struct LineProximity {
                                               const PathTraceSettings& settings);
 
 [[nodiscard]] glm::vec3 geometricNormalOf(const ShadingTriangle& tri);
-
-// Writes an opaque (alpha=1) RGB texel: every AOV field broadcasts this way, matching HdrImage's fixed 4-floats/texel layout.
-void writeTexel(pathtracer::gfx::HdrImage& image, int x, int y, glm::vec3 rgb);
-
-[[nodiscard]] pathtracer::gfx::HdrImage makeImage(int width, int height);
 
 }  // namespace pathtracer::scene

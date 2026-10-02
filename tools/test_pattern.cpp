@@ -59,7 +59,7 @@ int main() {
     }
 
     try {
-        // WRITE_RGB, not WRITE_RGBA: deliberately omitting alpha so this file exercises the loader's missing-alpha-defaults-to-1.0 path.
+        // WRITE_RGB: every engine loader reads R, G and B alone, so an alpha plane would be written and never read.
         Imf::RgbaOutputFile file(outputPath.c_str(), kWidth, kHeight, Imf::WRITE_RGB);
         file.setFrameBuffer(pixels.data(), 1, kWidth);
         file.writePixels(kHeight);

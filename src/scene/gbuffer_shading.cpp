@@ -83,22 +83,4 @@ glm::vec3 geometricNormalOf(const ShadingTriangle& tri) {
         glm::cross(tri.v1.position - tri.v0.position, tri.v2.position - tri.v0.position));
 }
 
-void writeTexel(pathtracer::gfx::HdrImage& image, int x, int y, glm::vec3 rgb) {
-    const std::size_t idx = ((static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width)) +
-                              static_cast<std::size_t>(x)) *
-                             4;
-    image.rgba[idx + 0] = rgb.x;
-    image.rgba[idx + 1] = rgb.y;
-    image.rgba[idx + 2] = rgb.z;
-    image.rgba[idx + 3] = 1.0F;
-}
-
-pathtracer::gfx::HdrImage makeImage(int width, int height) {
-    pathtracer::gfx::HdrImage image;
-    image.width = width;
-    image.height = height;
-    image.rgba.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4, 0.0F);
-    return image;
-}
-
 }  // namespace pathtracer::scene

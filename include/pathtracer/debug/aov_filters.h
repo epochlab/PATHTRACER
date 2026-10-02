@@ -24,27 +24,27 @@ inline constexpr float kMorletOctaves = 1.0F;
 // Orientations needed to cover every direction at half response or better, from the angular bandwidth the carrier already fixes.
 [[nodiscard]] int morletOrientations();
 
-// Rec.709 luminance, broadcast to RGB. Single centre tap, no neighbourhood.
+// Rec.709 luminance, one channel. Single centre tap, no neighbourhood.
 [[nodiscard]] pathtracer::gfx::HdrImage luminanceAov(const pathtracer::gfx::HdrImage& beauty,
                                                   pathtracer::scene::ThreadPool& threadPool);
 
-// Gradient magnitude of Luminance under the fixed 3x3 Sobel operator (Sobel & Feldman 1968), broadcast to RGB.
+// Gradient magnitude of Luminance under the fixed 3x3 Sobel operator (Sobel & Feldman 1968), one channel.
 [[nodiscard]] pathtracer::gfx::HdrImage sobelAov(const pathtracer::gfx::HdrImage& beauty,
                                               pathtracer::scene::ThreadPool& threadPool);
 
-// Peak quadrature magnitude of the 2-D Morlet wavelet bank over Luminance (Morlet 1982; Antoine & Murenzi 1996), broadcast to RGB.
+// Peak quadrature magnitude of the 2-D Morlet wavelet bank over Luminance (Morlet 1982; Antoine & Murenzi 1996), one channel.
 [[nodiscard]] pathtracer::gfx::HdrImage gaborAov(const pathtracer::gfx::HdrImage& beauty,
                                               pathtracer::scene::ThreadPool& threadPool);
 
-// Hue, saturation and value in RGB; hue and saturation normalised to [0,1], value left scene-referred so it is not clamped at white.
+// HSV as three channels: hue and saturation normalised to [0,1], value left scene-referred so it is not clamped at white.
 [[nodiscard]] pathtracer::gfx::HdrImage hsvAov(const pathtracer::gfx::HdrImage& beauty,
                                             pathtracer::scene::ThreadPool& threadPool);
 
-// Signed first band of the Laplacian pyramid (Burt & Adelson 1983), finest octave minus the next, broadcast to RGB. Zero if it cannot fit.
+// Signed first band of the Laplacian pyramid (Burt & Adelson 1983), finest octave minus the next, one channel. Zero if it cannot fit.
 [[nodiscard]] pathtracer::gfx::HdrImage dogAov(const pathtracer::gfx::HdrImage& beauty,
                                             pathtracer::scene::ThreadPool& threadPool);
 
-// Cone-opponent displacement from Rec.709 white (cone_space.h): (l - l_white, s - s_white), exactly invariant to a positive gain.
+// Cone-opponent displacement from Rec.709 white (cone_space.h): (l - l_white, s - s_white), two channels, invariant to a positive gain.
 [[nodiscard]] pathtracer::gfx::HdrImage colourOpponentAov(const pathtracer::gfx::HdrImage& beauty,
                                                           pathtracer::scene::ThreadPool& threadPool);
 

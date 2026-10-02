@@ -24,7 +24,7 @@ constexpr const char* kBuiltinConfigName = kOcioConfigName;
 constexpr const char* kSceneColorSpace = kOcioSceneColorSpace;
 constexpr const char* kView = kOcioView;
 
-// Channel isolation before exposure and the display curve, the pipeline position the CPU bake held, so the result is unchanged.
+// Channel isolation after the exposure affine and before the display curve; the CPU bake isolates first, equal while gain is one scalar.
 constexpr const char* kChannelViewGlsl =
     "uniform int uChannelView;\n";
 

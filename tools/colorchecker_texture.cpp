@@ -21,15 +21,11 @@ using tools::colorchecker::Patch;
 pathtracer::gfx::HdrImage makeChart(const std::vector<Patch>& patches, int patchPx) {
     const int width = kColumns * patchPx;
     const int height = kRows * patchPx;
-    pathtracer::gfx::HdrImage image{width, height, std::vector<float>(static_cast<std::size_t>(width) * height * 4)};
+    pathtracer::gfx::HdrImage image = pathtracer::gfx::makeImage(width, height, pathtracer::gfx::kRgbChannels);
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
             const glm::dvec3& rgb = patches[static_cast<std::size_t>(((y / patchPx) * kColumns) + (x / patchPx))].rec709;
-            float* texel = &image.rgba[((static_cast<std::size_t>(y) * width) + static_cast<std::size_t>(x)) * 4];
-            texel[0] = static_cast<float>(rgb.r);
-            texel[1] = static_cast<float>(rgb.g);
-            texel[2] = static_cast<float>(rgb.b);
-            texel[3] = 1.0F;
+            writeTexel(image, x, y, glm::vec3(rgb));
         }
     }
     return image;

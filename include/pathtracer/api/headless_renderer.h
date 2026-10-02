@@ -74,10 +74,10 @@ public:
     [[nodiscard]] bool render(const Request& request, std::span<float* const> outputs,
                                std::string& error);
 
-    // Same render with no packing step, for a C++ caller reading results through lastImage() as 4-channel HdrImage.
+    // Same render with no output copy, for a C++ caller reading results in place through lastImage().
     [[nodiscard]] bool render(const Request& request, std::string& error);
 
-    // The full 4-channel buffer behind one requested AOV of the most recent render(), valid until the next -- for an EXR write or encode.
+    // The buffer behind one requested AOV of the most recent render(), at aovChannels, valid until the next: for an EXR write or encode.
     [[nodiscard]] const pathtracer::gfx::HdrImage& lastImage(pathtracer::debug::AovId aov) const;
     [[nodiscard]] const RenderStats& lastStats() const { return stats_; }
 

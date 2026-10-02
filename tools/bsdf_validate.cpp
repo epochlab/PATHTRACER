@@ -1802,7 +1802,7 @@ PT_CHECK(reciprocity, Fast, Exact) {
     return;
 }
 
-// eta^2-corrected transmission reciprocity, single scatter only and permanently so (ROADMAP transport #1): roughness 0.40 fails 5x.
+// eta^2-corrected transmission reciprocity, single scatter only: multiple-scatter transmission is not reciprocal (0.40 fails 5x).
 PT_CHECK(transmission_reciprocity, Fast, Exact) {
     // Not checkReciprocity's 1e-4: D is sharply peaked at these alphas and the two queries build ht from differently scaled sums.
     constexpr float kRelativeTolerance = 1e-2F;

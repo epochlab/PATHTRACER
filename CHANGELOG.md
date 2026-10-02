@@ -3,6 +3,39 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Framebuffer memory: every AOV stored at its declared channel count
+
+Each AOV image holds the 1-3 channels `aovChannels` declares rather than four floats, and the display texture is uploaded
+in its own storage type. Measured against `main` (96ccd41) with `bench_compare run`, 7 interleaved rounds,
+`results/framebuffer_memory`.
+
+- perf: `HdrImage` is `{width, height, channels, texels}`. `makePathTraceResult` and the G-buffer allocate every lane from
+  `aovChannels` through `pathTracedLane`/`gbufferLane`; the new `pathTracedLanes()`/`gbufferLanes()` replace the
+  hand-kept 10- and 14-entry lane arrays in `accumulateMean` and the row clear. A result slot drops from 40 to 24 floats per
+  texel (360 -> 216 MiB at 2048x1152) and the G-buffer from 56 to 29 (504 -> 261 MiB). No alpha is stored anywhere:
+  nothing read it, and Alpha is its own lane
+- refactor: `writeTexel` takes the value at the lane's arity (`float`, `vec2`, `vec3`) and asserts it equals the image's
+  channel count; it and `makeImage` move to `hdr_image.h`. The filters allocate at `aovChannels`; `writeScalar` is gone
+- refactor: `HdrImage::rgb(pixel)` states the display expansion once: one channel broadcasts, a second leaves blue 0. The
+  texture swizzle (RRR1, RG01, RGB1), the HUD probe and the PNG export all follow it. `aovDisplay` and `bipolarDisplay`
+  take an `HdrImage`; the SNR pre-map is one channel, Bounce Count's three
+- perf: the display texture is staged in its storage type and uploaded without driver conversion: R and RG as they are,
+  RGB padded to RGBA, since Metal, Vulkan and D3D have no sampled three-lane half or float format. Uploading RGB directly
+  cost 8.0 ms against main's 4.8, because the driver expands RGB sources on the CPU; staged, it is 2.3 ms.
+  `GL_UNPACK_ALIGNMENT` is set to 1 for the odd-width R16F rows the interactive scale produces
+- fix: the display texture's half values round to nearest even. The macOS GL driver truncated float uploads toward zero
+  (all 1,048,576 texels of a probe), dimming every texel by up to one half-precision step; on screen this moves at most
+  1/255, and only upward for unsigned AOVs
+- feat: `writeExr` writes the image's first `channels` of R, G, B, and `loadExr` reads the file's leading R, RG or RGB
+  planes, so every AOV round-trips bit for bit. A scalar AOV's EXR is now a single R plane, not RGBA broadcast
+- perf: `HeadlessRenderer` accumulates each lane at its own channel count, and the C API output is a straight copy
+- test: `every_aov_renders_finite` asserts each lane's stored channel count; `exr_write_keeps_the_declared_channels` and
+  `hdr_image_rgb_expands_as_the_display_swizzle` are new; the display, filter, driver and EXR checks follow the new layout
+- measured: viewer peak RSS **1870 -> 1191 MiB** (0.637x [0.637, 0.638]) at 2048x1152 over six AOV stages;
+  `pass_accumulate_ms` 22.9 -> 14.0 (0.610x), `upload_ms` 5.22 -> 2.93 (0.564x), `pass_ms` 0.978x [0.957, 0.984]; ray
+  counts identical. All 31 AOVs on cornell, macbeth and stump are byte-identical through the C API, 51 display PNGs are
+  byte-identical, and 51 EXRs are equal plane for plane
+
 ## Texture pipeline: geometry-only glTF, per-slot channel count, shared decodes
 
 The scene JSON is now the only texture source, each map stores only the channels its reader takes, and one decode serves every

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cassert>
 #include <cstddef>
 #include <optional>
 #include <string>
@@ -12,12 +13,35 @@
 
 namespace pathtracer::gfx {
 
-// CPU-side decode of a linear scanline EXR, shared by Texture's GPU upload and any CPU consumer wanting the same pixels.
+// Linear float image of 1-3 interleaved channels, row-major, row 0 top: every AOV lane at its aovChannels count, and EXR I/O.
 struct HdrImage {
     int width = 0;
     int height = 0;
-    std::vector<float> rgba;  // row-major, 4 floats/texel, linear light
+    int channels = 0;  // 0 only for an empty image, as width and height are
+    std::vector<float> texels;
+
+    // RGB of `pixel` as Texture's swizzle displays it: one channel broadcasts, a second leaves blue 0.
+    [[nodiscard]] glm::vec3 rgb(std::size_t pixel) const;
 };
+
+// Zeroed width x height image of `channels` interleaved floats.
+[[nodiscard]] HdrImage makeImage(int width, int height, int channels);
+
+// Stores value's L components at (x, y): L is the stride, so it must equal the channels the image was allocated at.
+template <glm::length_t L>
+void writeTexel(HdrImage& image, int x, int y, const glm::vec<L, float>& value) {
+    assert(image.channels == L);
+    const std::size_t pixel =
+        (static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width)) + static_cast<std::size_t>(x);
+    float* texel = image.texels.data() + (pixel * L);
+    for (glm::length_t c = 0; c < L; ++c) {
+        texel[c] = value[c];
+    }
+}
+
+inline void writeTexel(HdrImage& image, int x, int y, float value) {
+    writeTexel(image, x, y, glm::vec1(value));
+}
 
 // ImageTexture channel counts: what its reader consumes, never alpha. R for a scalar map (roughness, bump), RGB otherwise.
 inline constexpr int kScalarChannels = 1;
@@ -37,10 +61,10 @@ struct ImageTexture {
 // The first `channels` of R,G,B decoded straight into type's storage; nullopt if one is absent. Float16 rejects over-range as Inf.
 [[nodiscard]] std::optional<ImageTexture> loadImageTexture(const std::string& path, ScalarType type, int channels);
 
-// Linear EXR read as RGBA float; nullopt on I/O failure or absent R/G/B, absent alpha reads 1.0, all texels finite.
+// Linear EXR read as float at its leading R, RG or RGB planes, any other ignored; nullopt on I/O failure or no R, all texels finite.
 [[nodiscard]] std::optional<HdrImage> loadExr(const std::string& path);
 
-// Writes a linear scanline EXR, loadExr's inverse with the same full-float channels, so a round trip is lossless.
+// Writes a linear scanline EXR of the image's first `channels` of R,G,B, full float, so a round trip through loadExr is lossless.
 [[nodiscard]] bool writeExr(const std::string& path, const HdrImage& image);
 
 // How the v axis resolves outside [0,1). u always repeats; ClampV is for an equirect map, whose top and bottom rows are poles.

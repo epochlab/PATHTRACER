@@ -20,7 +20,6 @@ namespace {
 
 using pathtracer::debug::AovId;
 using pathtracer::debug::AovSource;
-using pathtracer::gfx::HdrImage;
 
 // Scene-level placement, order X,Y,Z -- identical to main.cpp's and render_beauty's, or headless places the scene differently.
 [[nodiscard]] glm::mat4 rootTransformOf(const pathtracer::config::SceneConfig& scene) {
@@ -79,22 +78,6 @@ using pathtracer::gfx::HdrImage;
     return pathtracer::scene::Camera(camera.position, camera.yawDegrees, camera.pitchDegrees, preset->filmBack,
                                   camera.focalLengthMm, camera.nearClip, camera.farClip, camera.aperture,
                                   camera.shutterSeconds, camera.iso, camera.lens);
-}
-
-// Gathers `channels` of each texel out of HdrImage's fixed RGBA into a packed destination: the one copy the boundary costs.
-void packChannels(const HdrImage& source, int channels, float* destination,
-                  pathtracer::scene::ThreadPool& threadPool) {
-    const int width = source.width;
-    threadPool.parallelFor(source.height, [&](int y) {
-        const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
-        for (int x = 0; x < width; ++x) {
-            const std::size_t pixel = row + static_cast<std::size_t>(x);
-            for (int c = 0; c < channels; ++c) {
-                destination[(pixel * static_cast<std::size_t>(channels)) + static_cast<std::size_t>(c)] =
-                    source.rgba[(pixel * 4) + static_cast<std::size_t>(c)];
-            }
-        }
-    });
 }
 
 }  // namespace
@@ -236,9 +219,10 @@ bool HeadlessRenderer::render(const Request& request, std::span<float* const> ou
     if (!render(request, error)) {
         return false;
     }
+    // Every lane is stored at its aovChannels count, the caller's layout, so the boundary costs one straight copy.
     for (std::size_t i = 0; i < request.aovs.size(); ++i) {
-        packChannels(lastImage(request.aovs[i]), pathtracer::debug::aovChannels(request.aovs[i]), outputs[i],
-                     threadPool_);
+        const std::vector<float>& texels = lastImage(request.aovs[i]).texels;
+        std::copy(texels.begin(), texels.end(), outputs[i]);
     }
     return true;
 }
@@ -287,11 +271,11 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
     stats_.filterMilliseconds = 0.0;
     stats_.rays = pathtracer::debug::RayCounts{};
     if (!accumulatedAovs_.empty()) {
-        accumulators_.assign(accumulatedAovs_.size(),
-                              pathtracer::gfx::HdrImage{request.width, request.height,
-                                                     std::vector<float>(static_cast<std::size_t>(request.width) *
-                                                                            static_cast<std::size_t>(request.height) * 4,
-                                                                        0.0F)});
+        accumulators_.clear();
+        for (const AovId aov : accumulatedAovs_) {
+            accumulators_.push_back(
+                pathtracer::gfx::makeImage(request.width, request.height, pathtracer::debug::aovChannels(aov)));
+        }
         // A synchronous caller uses no cooperative cancellation, so generation stays where requestedGeneration asks and never goes stale.
         const std::atomic<std::uint64_t> generation{1};
         pathtracer::debug::PassStats stats;
@@ -304,9 +288,10 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
         std::vector<const std::vector<float>*> laneSources;
         laneSources.reserve(accumulatedAovs_.size());
         for (const AovId aov : accumulatedAovs_) {
-            laneSources.push_back(&(pathTraced_.*pathtracer::debug::pathTracedLane(aov)).rgba);
+            laneSources.push_back(&(pathTraced_.*pathtracer::debug::pathTracedLane(aov)).texels);
         }
-        const auto rowFloats = static_cast<std::size_t>(request.width) * 4;
+        const auto width = static_cast<std::size_t>(request.width);
+        const auto beautyChannels = static_cast<std::size_t>(pathTraced_.beauty.channels);
         // Only Beauty carries a second moment, and only where it is accumulated at all; -1 leaves the lane zero and SNR black.
         const auto beautyLane = std::find(accumulatedAovs_.begin(), accumulatedAovs_.end(), AovId::Beauty);
         const auto beautyIndex = beautyLane == accumulatedAovs_.end()
@@ -328,14 +313,15 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - passStart).count());
             // By row, as the interactive driver's accumulateMean is: each element's chain stays in order, so the sum is bit-identical.
             threadPool_.parallelFor(request.height, [&](int y) {
-                const std::size_t begin = static_cast<std::size_t>(y) * rowFloats;
+                const std::size_t rowPixel = static_cast<std::size_t>(y) * width;
                 if (beautyIndex >= 0) {
                     const float* drawnLane = laneSources[static_cast<std::size_t>(beautyIndex)]->data();
                     // Still the passes before this one, so dividing recovers exactly the mean the driver's own lane would hold.
-                    const float* runningSum = accumulators_[static_cast<std::size_t>(beautyIndex)].rgba.data();
+                    const float* runningSum = accumulators_[static_cast<std::size_t>(beautyIndex)].texels.data();
                     const float inversePrevious = pass == 0 ? 0.0F : 1.0F / static_cast<float>(pass);
                     const float inverseCount = 1.0F / static_cast<float>(pass + 1);
-                    for (std::size_t i = begin; i < begin + rowFloats; i += 4) {
+                    for (std::size_t pixel = rowPixel; pixel < rowPixel + width; ++pixel) {
+                        const std::size_t i = pixel * beautyChannels;
                         const float drawn = (drawnLane[i] * weights.r) + (drawnLane[i + 1] * weights.g) +
                                             (drawnLane[i + 2] * weights.b);
                         // At the first pass the mean is the draw, so Welford's product is exactly zero with no branch of its own.
@@ -343,13 +329,14 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
                                                        : ((runningSum[i] * weights.r) + (runningSum[i + 1] * weights.g) +
                                                           (runningSum[i + 2] * weights.b)) * inversePrevious;
                         const float after = before + ((drawn - before) * inverseCount);
-                        beautyLuminanceM2_[i / 4] += (drawn - before) * (drawn - after);
+                        beautyLuminanceM2_[pixel] += (drawn - before) * (drawn - after);
                     }
                 }
                 for (std::size_t lane = 0; lane < laneSources.size(); ++lane) {
+                    const auto channels = static_cast<std::size_t>(accumulators_[lane].channels);
                     const float* source = laneSources[lane]->data();
-                    float* sum = accumulators_[lane].rgba.data();
-                    for (std::size_t i = begin; i < begin + rowFloats; ++i) {
+                    float* sum = accumulators_[lane].texels.data();
+                    for (std::size_t i = rowPixel * channels; i < (rowPixel + width) * channels; ++i) {
                         sum[i] += source[i];
                     }
                 }
@@ -358,11 +345,12 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
         stats_.rays = stats.rays();
         const auto passes = static_cast<float>(request.samples);
         threadPool_.parallelFor(request.height, [&](int y) {
-            const std::size_t begin = static_cast<std::size_t>(y) * rowFloats;
+            const std::size_t rowPixel = static_cast<std::size_t>(y) * width;
             for (pathtracer::gfx::HdrImage& accumulator : accumulators_) {
-                float* rgba = accumulator.rgba.data();
-                for (std::size_t i = begin; i < begin + rowFloats; ++i) {
-                    rgba[i] /= passes;
+                const auto channels = static_cast<std::size_t>(accumulator.channels);
+                float* texels = accumulator.texels.data();
+                for (std::size_t i = rowPixel * channels; i < (rowPixel + width) * channels; ++i) {
+                    texels[i] /= passes;
                 }
             }
         });

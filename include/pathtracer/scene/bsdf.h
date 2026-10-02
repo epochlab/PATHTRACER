@@ -75,7 +75,7 @@ struct LobeProbabilities {
     float diffuse;
     float msReflect;    // multiple-scattering reflection, drawn from kMsReflectDensity over the near hemisphere
     float msReflectTransmissive;  // a transmissive interface's reflected multiple scattering, drawn from reflectShape
-    float transmit;     // single-scatter refraction, VNDF-sampled about a microfacet normal
+    float transmit;     // delta refraction mass, 0 for a rough interface, whose refraction is the specular strategy's VNDF branch
     float msTransmit;   // multiple-scattering transmission, drawn from kMsTransmitDensity over the far hemisphere
     float etaI;
     float etaT;
@@ -153,7 +153,7 @@ struct BsdfClosure {
 // EON Appendix A: the rho whose normal-incidence directional albedo equals albedo under uniform light. Identity at r=0 and at albedo=1.
 [[nodiscard]] glm::vec3 eonAlbedoInversion(const glm::vec3& albedo, float r);
 
-// Representative wavelength per RGB channel (Adobe's OpenPBR reference); the RGB banding is known, see docs/ROADMAP.md transport #5.
+// Representative wavelength per RGB channel (Adobe's OpenPBR reference); three discrete bands, so dispersion shows RGB banding.
 inline constexpr glm::vec3 kRgbWavelengthsNm(620.0F, 540.0F, 450.0F);
 
 // Cauchy n(lambda) from an authored (ior at d line, Abbe V_d), per KHR_materials_dispersion.
