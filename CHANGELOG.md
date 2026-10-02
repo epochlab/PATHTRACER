@@ -3,6 +3,64 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Optic Flow: image motion between consecutive views of a profile-named source
+
+A new AOV, `Optic Flow`, measures apparent motion from the pixels of the AOV named by profile.json's `opticFlow.source`
+(default `Luminance`, the eye's luminance-driven motion pathway, Livingstone & Hubel 1987). This is optical flow in Horn's
+sense, not the geometric motion field: it works under either lens, and it is what a retina-to-MT pathway measures. The estimator
+stacks three standard pieces:
+- phase constancy on the shipped Morlet bank (Fleet & Jepson 1990);
+- per-texel intersection of constraints across orientations and source channels (Simoncelli & Heeger 1998);
+- a Bayesian coarse-to-fine posterior from a slow-speed prior (Simoncelli 1999; Weiss, Simoncelli & Adelson 2002).
+
+It is evidenced by `results/optic_flow`: 62 before/after EXRs, paired benches, and real renders scored against the exact motion field.
+
+- feat: `AovId::OpticFlow` (after `ColourOpponent`, so later ids shift by one), 3 channels: `(dx, dy)` in current-frame pixels,
+  `current(x) ~ previous(x - d)`, and sigma, the posterior std along the least-determined axis. A view with no same-size
+  predecessor reads the prior, zero flow at the prior std, never a fabricated zero. `AovSource::Derived` is its producer;
+  `aovNeedsLightTransport(aov, opticFlowSource)` answers for its source, so viewer, HUD and headless gating follow the source
+- feat: `debug/optic_flow.{h,cpp}`, `opticFlowAov({mean, variance}, {mean, variance}, pool)`; every constant derives from the bank:
+  - octave k demodulates at `morletCarrier(t0 4^k)` and cascades the baseband, exactly the shipped bank at 2^k (level 0 is
+    bit-identical to the Gabor AOV's), with the levels that fit given by `octaveLevelCount`
+  - the previous frame's responses are read at an integer warp with the carrier rotation restored, so nothing is resampled. The
+    slope and signal power come from the current frame, so the information cannot change with the warp
+  - weights are Rice `2P/(v0 + v1)` with `P = |C|^2 - v`, where v is the known texel variance through the envelope's energy,
+    unseen content behind the mirror (`2 V_I sum_out h^2`) and float rounding; overdispersion is pooled over the envelope
+    (McCullagh & Nelder 1989)
+  - a square-root information filter (Bierman 1977) folds eigen-rows by Givens rotations. Re-linearisation re-reads only texels
+    whose warp moved and freezes 2-cycles. The prior is the coarsest octave's unambiguous range, pi/omega_K
+- feat: profile.json `"opticFlow": {"source": ...}` names any AOV but Optic Flow itself (`aovIdFromName`), and is refused at
+  load otherwise. Luminance's noise comes from the Welford second moment (`luminanceMeanVariance`); other sources are
+  weighed as deterministic
+- feat: pairing. Headless pairs each `render()` that requests flow with the previous one that did; the viewer pairs successive
+  generations of the source, holding copies so no pool slot is pinned, in its own cache beside the filter cache. A failed
+  render leaves the history alone
+- feat: C ABI 3: `pt_renderer_aov_needs_samples(renderer, aov)` replaces `pt_aov_needs_samples`, the answer now depending on
+  the renderer's profile. Python's `Renderer.aov_needs_samples` replaces the module function. `render_beauty` refuses
+  `--aov "Optic Flow"`, having one view
+- feat: display pools dx and dy into one signed range, so the direction survives, and shows sigma against the prior, an exact
+  ceiling. `bipolarDisplay`'s range factors into `pooledRange`
+- refactor: `gaborAov` uses the extracted `morletPlaneWave` / `demodulate` / `morletBaseband`; `octaveLevel`,
+  `octaveLevelCount`, `ScaleSpaceLevel` and `addExpanded` are restored to the scale space (single diffusion per grid, exact by
+  the semigroup)
+- measured: Gabor `filter_ms` 1.0010x [0.9754, 1.0133] and Beauty `pass_ms` 0.9974x [0.9927, 1.0100], both unresolved; RSS
+  +0.1%. Flow costs 39 ms at 256x128, 0.26 s at 512x288 and 5.5 s at 2048x1152 (8 threads)
+- image: the 31 existing AOVs are byte-identical on cornell and macbeth, EXR and PNG. Against the geometric motion field, macbeth
+  at 64 spp reads a median end-point error of 0.010-0.036 px with 3-sigma coverage 0.89-1.00, and 0.03-0.11 px with 0.93-0.99
+  at 8 spp
+- note: cornell under-covers, at 0.60-0.82. Glossy clay, grazing walls and creases are systematic misfits along weakly
+  constrained directions, and noiseless WorldPos shows the same shortfall (0.84). Range is the coarsest octave's: 5.1 px at
+  256x128, 82 px at 2048x1152
+- test: `flow_validate` (10 checks):
+  - exact zero for identical frames, the prior bit for bit, and a joint 2^k gain changing no bit
+  - integer shifts converging at every interior texel
+  - 3-sigma coverage at or above the F(2,3) floor 0.875 for translations, the border band, a grating, a mirror pair and a
+    known-noise flat half
+  - nine mutations, each failing a check
+- test: `filter_validate` gains the octave cascade against direct diffusion, the level-count steps and constant expansion.
+  `io_validate` gains `profile_config_optic_flow_source`. `api_validate` gains consecutive pairing, request-mix independence and
+  the pooled display. pytest checks AOV count 32, flow pairing and `aov_needs_samples`. `ctest` 204/204, pytest 32/32
+
 ## Constant material inputs: unbound slots resolve to constants at load
 
 An unbound `Material` slot was a 1x1 identity texture, bilinear-filtered at every shading vertex, and its bump slot cost four
