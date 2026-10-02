@@ -68,7 +68,7 @@ std::optional<pathtracer::scene::Lens> parseLens(const nlohmann::json& lens, con
     return parsed;
 }
 
-// Optic flow block: the source named as kAovNames spells it, separators and case ignored, as --aov and pt_aov_id accept it.
+// Optic flow block: the source named exactly as kAovNames spells it, as --aov and pt_aov_id accept it.
 std::optional<OpticFlowConfig> parseOpticFlow(const nlohmann::json& opticFlow, const std::string& path) {
     const std::string name = opticFlow.at("source").get<std::string>();
     const pathtracer::debug::AovId source = pathtracer::debug::aovIdFromName(name);

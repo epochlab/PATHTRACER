@@ -244,7 +244,7 @@ class Renderer:
         ``env_light_enabled`` decides whether the environment is in the light set at all, which does change the
         lighting. ``None`` keeps the scene's authored ``environment.lightEnabled``.
 
-        ``Optic Flow`` is stateful: each call that requests it is paired with the previous call that did, at the same
+        ``opticFlow`` is stateful: each call that requests it is paired with the previous call that did, at the same
         resolution, and reports ``(dx, dy, sigma)`` in pixels with ``current(x) ~ previous(x - d)``. The first call, or
         one after a resize, has no pair and returns the prior: zero flow at the prior's standard deviation.
 

@@ -27,7 +27,7 @@ void pt_renderer_close(PtRenderer* renderer);
 /* The AOV table, exposed so a caller never hardcodes a parallel copy of it. Ids are dense in [0, pt_aov_count). */
 int pt_aov_count(void);
 const char* pt_aov_name(int aov);
-/* Case- and separator-insensitive: "bounce-count", "bounce_count" and "bouncecount" all resolve. -1 if unknown. */
+/* Exact, as pt_aov_name spells it: "bounceCount" resolves, "bounce-count" does not. -1 if unknown. */
 int pt_aov_id(const char* name);
 /* Channels the AOV carries, what pt_render writes per texel: 1 for depth or a scalar filter, 2 for UV, 3 for radiance. */
 int pt_aov_channels(int aov);

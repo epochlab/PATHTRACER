@@ -40,6 +40,6 @@
         "lookaheadDistance": 10.0
     },
     "opticFlow": {
-        "source": "Luminance"
+        "source": "luminance"
     }
 }

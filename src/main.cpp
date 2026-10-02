@@ -1443,7 +1443,7 @@ std::optional<Options> parseOptions(int argc, char** argv) {
             options.benchAovs = std::move(*aovs);
         } else {
             std::cerr << "pathtracer: unknown flag " << argv[i]
-                       << "\n  usage: pathtracer [-scene path/to/scene.json] [-stats] [-bench log.jsonl] [-bench-aovs Beauty,Normal,...]\n";
+                       << "\n  usage: pathtracer [-scene path/to/scene.json] [-stats] [-bench log.jsonl] [-bench-aovs beauty,normal,...]\n";
             return std::nullopt;
         }
     }
