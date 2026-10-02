@@ -15,7 +15,7 @@ namespace pathtracer::config {
 struct ModelConfig {
     std::string gltfPath;
     glm::vec3 position;         // model root, composed on top of the glTF's own node transforms
-    glm::vec3 rotation;  // degrees, order X,Y,Z, see main.cpp's loadGltf call
+    glm::vec3 rotation;  // degrees; the root rotation is Rz*Ry*Rx, so X applies first
 };
 
 // What lights the scene, IBL half.

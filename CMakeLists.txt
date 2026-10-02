@@ -74,7 +74,7 @@ if(CPPCHECK_EXE)
         COMMENT "cppcheck over src/ and tools/")
 endif()
 
-# The comment budget of notes/architect.md section 7: one line per comment, 140 columns, over every first-party source.
+# The comment budget: one line per comment, 140 columns, over every first-party source.
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
     add_custom_target(comment_lint
@@ -289,7 +289,7 @@ target_compile_definitions(colour_validate PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURC
 pathtracer_target_defaults(colour_validate NATIVE IPO)
 target_link_libraries(colour_validate PRIVATE pathtracer_core)
 
-# The headless render path exercised through the C ABI: producer dispatch, per-AOV channel counts, agreement with renderPathTraced.
+# The headless render path through HeadlessRenderer: producer dispatch, per-AOV channel counts, agreement with renderPathTraced.
 add_executable(api_validate tools/api_validate.cpp $<TARGET_OBJECTS:pathtracer_check>)
 target_include_directories(api_validate PRIVATE tools)
 target_compile_definitions(api_validate PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")

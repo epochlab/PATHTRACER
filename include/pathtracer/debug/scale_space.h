@@ -7,7 +7,7 @@
 
 namespace pathtracer::debug {
 
-// Lindeberg's discrete scale space over one float plane: kernel T(n;t) = exp(-t) I_n(t), the shared Gaussian facility. See PIPELINE.md.
+// Lindeberg's discrete scale space over one float plane: kernel T(n;t) = exp(-t) I_n(t), the shared Gaussian facility.
 
 // Unit roundoff of binary32, the one threshold this file is built on: a contribution below it cannot perturb a float result.
 inline constexpr double kFloat32Roundoff = 0x1p-24;

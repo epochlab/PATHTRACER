@@ -2,7 +2,7 @@
 
 #include <glm/glm.hpp>
 
-// Cone-excitation opponency on the CIE 1931 2-degree observer cie.h tabulates. See PIPELINE.md for why these fundamentals and not others.
+// Cone opponency on the CIE 1931 2-degree observer cie.h tabulates; Hunt-Pointer-Estevez is exact on it, Smith-Pokorny (Judd-Vos) is not.
 namespace pathtracer::scene::cone {
 
 // Hunt-Pointer-Estevez (Estevez 1979; Hunt 1998 App. 1), normalised so the equal-energy stimulus gives L = M = S.

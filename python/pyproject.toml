@@ -18,9 +18,8 @@ dev = ["pytest>=7", "ruff>=0.5", "mypy>=1.8"]
 include = ["pathtracer*"]
 
 [tool.ruff]
-# Wide enough for the project's single-line comment convention (notes/architect.md §7: "what and why", one
-# unwrapped line each), which a 79- or 110-column limit would force into exactly the multi-line comments that rule
-# exists to prevent. Code, as opposed to comments and docstrings, stays well inside this.
+# Wide enough for the project's single-line comment convention ("what and why", one unwrapped line each), which a 79- or
+# 110-column limit would force into exactly the multi-line comments that rule exists to prevent. Code stays well inside this.
 line-length = 140
 target-version = "py310"
 

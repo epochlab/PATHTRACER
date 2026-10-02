@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Lexer tests for comment_lint. Run standalone; ctest registers this as comment_lint.selftest."""
+"""Lexer tests for comment_lint. Run standalone; ctest registers this as style.comment_lint_selftest."""
 
 from __future__ import annotations
 

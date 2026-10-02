@@ -63,7 +63,7 @@ private:
     int failures_ = 0;
 };
 
-// Family-wise error rate per binary: across B binaries the suite rate is 1-(1-alpha)^B, about 6e-4 at B=6, one spurious red per 1700 runs.
+// Family-wise error rate per binary: across B binaries the suite rate is 1-(1-alpha)^B, about 1.4e-3 at B=14, one red per 700 runs.
 inline constexpr double kFamilyAlpha = 1e-4;
 
 int run(int argc, char** argv, const char* suiteName);

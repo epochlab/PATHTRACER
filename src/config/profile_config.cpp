@@ -31,7 +31,7 @@ std::optional<pathtracer::gfx::ScalarType> parseBitDepth(const nlohmann::json& b
     return bitDepth.is_number_integer() ? pathtracer::gfx::scalarTypeFromBitDepth(bitDepth.get<int>()) : std::nullopt;
 }
 
-// Camera lens block, its own function because loadProfileConfig already exceeds readability-function-size (docs/ROADMAP.md).
+// Camera lens block, its own function because loadProfileConfig already exceeds readability-function-size.
 std::optional<pathtracer::scene::Lens> parseLens(const nlohmann::json& lens, const std::string& path) {
     const std::string projection = lens.at("projection").get<std::string>();
     pathtracer::scene::Lens parsed;
