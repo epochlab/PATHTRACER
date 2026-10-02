@@ -2,7 +2,6 @@
 
 #include "pathtracer/debug/aov_routing.h"
 #include "pathtracer/debug/colormap.h"
-#include "pathtracer/debug/optic_flow.h"
 
 #include <algorithm>
 #include <array>
@@ -38,17 +37,14 @@ AovSource aovSource(AovId aov) {
         case AovId::SNR:
             return AovSource::BeautyFilter;
 
-        // Computed from a pair of views of another AOV, so its producer is whichever one makes that source.
-        case AovId::OpticFlow:
-            return AovSource::Derived;
-
-        // The 14 primary-hit lanes renderRasterGBuffer scan-converts. No default: -Werror makes an unclassified AovId a compile error.
+        // The 15 primary-hit lanes renderRasterGBuffer scan-converts. No default: -Werror makes an unclassified AovId a compile error.
         case AovId::Wireframe:
         case AovId::Alpha:
         case AovId::Depth:
         case AovId::Lookahead:
         case AovId::WorldPos:
         case AovId::UV:
+        case AovId::MotionVector:
         case AovId::Normal:
         case AovId::GeomNormal:
         case AovId::Albedo:
@@ -82,13 +78,13 @@ int aovChannels(AovId aov) {
         case AovId::DoG:
             return 1;
 
-        // Two-component lanes: UV's third channel is structurally zero, and Colour Opponent spans the two cardinal chromatic axes only.
+        // Two-component lanes: UV and image-plane motion have no third axis; Colour Opponent spans the two cardinal chromatic axes only.
         case AovId::UV:
+        case AovId::MotionVector:
         case AovId::ColourOpponent:
             return 2;
 
-        // Radiance triples, world-space vectors, the two false-coloured lanes, and flow's (dx, dy, sigma), all three-channel.
-        case AovId::OpticFlow:
+        // Radiance triples, world-space vectors and the two false-coloured lanes, all three-channel.
         case AovId::Beauty:
         case AovId::HSV:
         case AovId::WorldPos:
@@ -128,7 +124,7 @@ bool aovCarriesRadiance(AovId aov) {
         // Ratios, reflectances, counts, lengths, directions and frequencies: scaling any of them by an exposure means nothing.
         case AovId::HSV:
         case AovId::ColourOpponent:
-        case AovId::OpticFlow:
+        case AovId::MotionVector:
         case AovId::Wireframe:
         case AovId::Alpha:
         case AovId::Depth:
@@ -161,8 +157,8 @@ bool aovIsBipolar(AovId aov) {
         case AovId::ColourOpponent:
             return true;
 
-        // Signed but not bipolar: a normal spans a sphere; flow's two signed lanes share one unit, so it takes its own display.
-        case AovId::OpticFlow:
+        // Signed but not bipolar: a normal spans a sphere; motion's two signed lanes share one unit, so it takes its own display.
+        case AovId::MotionVector:
         case AovId::Beauty:
         case AovId::Wireframe:
         case AovId::Alpha:
@@ -304,11 +300,11 @@ AovDisplay aovDisplay(AovId aov, const pathtracer::gfx::HdrImage& image, const A
         case AovId::BounceCount:
             mapBounceCountForDisplay(image, context.maxBounces, display.mapped);
             return display;
-        // dx and dy share the pixel, so one pooled range keeps the direction; sigma never exceeds the prior std, an exact ceiling.
-        case AovId::OpticFlow: {
+        // dx and dy share the pixel, so one pooled range keeps the direction; the swizzle's zero third lane stays black.
+        case AovId::MotionVector: {
             const std::array<int, 2> displacementLanes{0, 1};
             const float gain = bipolarGain(pooledRange(image, displacementLanes));
-            display.affine.gain = glm::vec3(gain, gain, 1.0F / opticFlowPriorStd(image.width, image.height));
+            display.affine.gain = glm::vec3(gain, gain, 0.0F);
             display.affine.offset = glm::vec3(kBipolarDisplayOffset, kBipolarDisplayOffset, 0.0F);
             return display;
         }
@@ -343,6 +339,7 @@ GBufferLane gbufferLane(AovId aov) {
         case AovId::Lookahead:  return &GBuffer::lookahead;
         case AovId::WorldPos:   return &GBuffer::worldPos;
         case AovId::UV:         return &GBuffer::uv;
+        case AovId::MotionVector: return &GBuffer::motionVector;
         case AovId::Normal:     return &GBuffer::normal;
         case AovId::GeomNormal: return &GBuffer::geomNormal;
         case AovId::Albedo:     return &GBuffer::albedo;

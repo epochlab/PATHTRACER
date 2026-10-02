@@ -331,7 +331,7 @@ void drawResolutionAndSceneSection(const HudFrameData& frame) {
 }
 
 // Names/order come from the shared AovId enum (pathtracer/debug/aov.h), not a locally duplicated array.
-void drawAovSection(int& aov, bool gbufferAvailable, AovId opticFlowSource) {
+void drawAovSection(int& aov, bool gbufferAvailable) {
     ImGui::TextColored(kCyan, "AOV");
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
     if (gbufferAvailable) {
@@ -339,7 +339,7 @@ void drawAovSection(int& aov, bool gbufferAvailable, AovId opticFlowSource) {
     } else if (ImGui::BeginCombo("##aov", kAovNames[aov])) {
         for (int i = 0; i < IM_ARRAYSIZE(kAovNames); ++i) {
             // Greyed rather than hidden: the rasterizer cannot serve these under a fisheye, and the list is the place that says so.
-            const bool rasterized = !aovNeedsLightTransport(static_cast<AovId>(i), opticFlowSource);
+            const bool rasterized = aovSource(static_cast<AovId>(i)) == AovSource::GBuffer;
             const ImGuiSelectableFlags flags = rasterized ? ImGuiSelectableFlags_Disabled : 0;
             if (ImGui::Selectable(kAovNames[i], i == aov, flags)) {
                 aov = i;
@@ -533,7 +533,7 @@ void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm,
         ImGui::Separator();
     }
 
-    drawAovSection(aov, lensProjection == static_cast<int>(pathtracer::scene::LensProjection::Rectilinear), frame.opticFlowSource);
+    drawAovSection(aov, lensProjection == static_cast<int>(pathtracer::scene::LensProjection::Rectilinear));
     drawCameraSection(frame, focalLengthMm, aperture, shutterSeconds, iso, filmBackPresetIndex,
                        filmBackPresetNames, lensProjection, aberrationStrength);
     drawHdriSection(showSky, envLightEnabled, envRotationDegrees, envExposureStops);

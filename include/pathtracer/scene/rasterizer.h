@@ -20,6 +20,8 @@ struct RasterGBuffer {
     pathtracer::gfx::HdrImage lookahead;
     pathtracer::gfx::HdrImage worldPos;
     pathtracer::gfx::HdrImage uv;
+    // Screen-space motion in current pixels, x_now - x_previous of the point seen at the pixel centre; 0 where either view has no image.
+    pathtracer::gfx::HdrImage motionVector;
     pathtracer::gfx::HdrImage normal;
     pathtracer::gfx::HdrImage geomNormal;
     pathtracer::gfx::HdrImage albedo;
@@ -34,8 +36,9 @@ struct RasterGBuffer {
     std::uint64_t generation = 0;
 };
 
-// Watertight edge-function rasterization (Pineda 1988), row-parallel over disjoint rows.
-void renderRasterGBuffer(const Camera& camera, const std::vector<ShadingTriangle>& shadingTriangles,
+// Watertight edge-function rasterization (Pineda 1988), row-parallel over disjoint rows; previousCamera sets motionVector's origin.
+void renderRasterGBuffer(const Camera& camera, const Camera& previousCamera,
+                          const std::vector<ShadingTriangle>& shadingTriangles,
                           const std::vector<MeshInstance>& instances,
                           const std::vector<PathTraceSettings>& perInstanceSettings,
                           const std::vector<AabbBounds>& instanceBounds, int width, int height,

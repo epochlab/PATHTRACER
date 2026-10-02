@@ -24,7 +24,7 @@ import numpy as np
 
 from . import _ffi
 
-__all__ = ["AOVS", "Camera", "Renderer", "aov_channels", "display_encode"]
+__all__ = ["AOVS", "Camera", "Renderer", "aov_channels", "aov_needs_samples", "display_encode"]
 
 _LIB = _ffi.load_library()
 
@@ -43,8 +43,17 @@ def _aov_id(name: str) -> int:
 
 
 def aov_channels(name: str) -> int:
-    """Channels this AOV carries: 1 for a depth or filter response, 2 for UV, 3 for radiance and vectors."""
+    """Channels this AOV carries: 1 for a depth or filter response, 2 for UV and motion, 3 for radiance and vectors."""
     return int(_LIB.pt_aov_channels(_aov_id(name)))
+
+
+def aov_needs_samples(name: str) -> bool:
+    """Whether ``samples`` affects this AOV.
+
+    False for the 15 primary-hit AOVs the rasterizer scan-converts in a single pass; those are essentially free and
+    converge immediately, so raising ``samples`` for them only wastes time.
+    """
+    return bool(_LIB.pt_aov_needs_samples(_aov_id(name)))
 
 
 def display_encode(
@@ -206,15 +215,6 @@ class Renderer:
     def default_resolution(self) -> tuple[int, int]:
         return (_LIB.pt_renderer_default_width(self._handle), _LIB.pt_renderer_default_height(self._handle))
 
-    def aov_needs_samples(self, name: str) -> bool:
-        """Whether ``samples`` affects this AOV.
-
-        False for the 14 primary-hit AOVs the rasterizer scan-converts in a single pass; those are essentially free and
-        converge immediately, so raising ``samples`` for them only wastes time. Optic Flow answers for its source, which
-        this renderer's profile.json names.
-        """
-        return bool(_LIB.pt_renderer_aov_needs_samples(self._handle, _aov_id(name)))
-
     def render(
         self,
         *,
@@ -224,13 +224,14 @@ class Renderer:
         samples: int = 1,
         seed: int = 1,
         camera: Camera | None = None,
+        previous_camera: Camera | None = None,
         show_sky: bool | None = None,
         env_light_enabled: bool | None = None,
     ) -> Mapping[str, np.ndarray]:
         """Renders the requested AOVs and returns them keyed by the names given.
 
         Each producer runs at most once per call, so asking for several AOVs together costs far less than asking for
-        them separately: the 10 path-traced lanes share one sample set, the 14 rasterizer lanes share one
+        them separately: the 10 path-traced lanes share one sample set, the 15 rasterizer lanes share one
         scan-conversion, and the Beauty filters share the one accumulated Beauty.
 
         ``samples`` is the number of one-sample passes averaged. The sampler's scramble is fixed by ``seed`` and its
@@ -244,9 +245,9 @@ class Renderer:
         ``env_light_enabled`` decides whether the environment is in the light set at all, which does change the
         lighting. ``None`` keeps the scene's authored ``environment.lightEnabled``.
 
-        ``opticFlow`` is stateful: each call that requests it is paired with the previous call that did, at the same
-        resolution, and reports ``(dx, dy, sigma)`` in pixels with ``current(x) ~ previous(x - d)``. The first call, or
-        one after a resize, has no pair and returns the prior: zero flow at the prior's standard deviation.
+        ``previous_camera`` is the view ``motionVector`` measures from: ``(dx, dy)`` in pixels of this frame, the
+        displacement ``x_now - x_previous`` of the point seen at each pixel centre, zero where the previous view has no
+        image of it. ``None`` is ``camera`` itself, so the motion is exactly zero.
 
         Returns arrays of shape ``(height, width, channels)``, float32, row 0 at the top.
         """
@@ -274,6 +275,8 @@ class Renderer:
 
         request = _ffi.PtRenderRequest()
         request.camera = (camera if camera is not None else self.default_camera)._to_struct()
+        if previous_camera is not None:
+            request.previous_camera = ctypes.pointer(previous_camera._to_struct())
         request.width = width
         request.height = height
         request.samples = samples

@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <tuple>
 
 #include "pathtracer/debug/aov_routing.h"
@@ -425,6 +426,65 @@ void appendBoxEdges(const Camera& camera, const AabbBounds& box, const glm::vec3
     }
 }
 
+// The camera pair motionVector differences, built once per call; previousPinhole is empty for a lens with no projective matrix.
+struct MotionField {
+    const Camera& previous;
+    Camera::ViewBasis currentBasis;
+    Camera::ViewBasis previousBasis;
+    Camera::PinholeMatrix currentPinhole;
+    std::optional<Camera::PinholeMatrix> previousPinhole;
+    glm::vec2 pixelsPerNdc;  // (W/2, -H/2): NDC +Y up to pixels with row 0 at the top
+};
+
+// Both views on the current aspect: a resize or render-scale change re-frames the image, it moves nothing.
+MotionField motionField(const Camera& camera, const Camera& previousCamera, int width, int height) {
+    const float aspect = static_cast<float>(width) / static_cast<float>(height);
+    const Camera::ViewBasis currentBasis = camera.viewBasis(aspect);
+    const Camera::ViewBasis previousBasis = previousCamera.viewBasis(aspect);
+    const bool previousIsPinhole = previousBasis.lens.projection == LensProjection::Rectilinear;
+    return MotionField{previousCamera, currentBasis, previousBasis, camera.pinholeMatrix(currentBasis),
+                       previousIsPinhole ? std::optional(previousCamera.pinholeMatrix(previousBasis)) : std::nullopt,
+                       glm::vec2(0.5F * static_cast<float>(width), -0.5F * static_cast<float>(height))};
+}
+
+// x_now - x_previous by one projection of one point on both sides, so identical cameras give exactly zero; misses move by rotation alone.
+template <typename ProjectPrevious>
+void motionRow(RasterGBuffer& result, const MotionField& motion, int y, const int* winnerRow, ProjectPrevious projectPrevious) {
+    const int width = result.motionVector.width;
+    const float* worldRow = result.worldPos.texels.data() + (static_cast<std::size_t>(y) * static_cast<std::size_t>(width) * 3);
+    const Camera::ViewBasis& basis = motion.currentBasis;
+    const float ndcY = 1.0F - ((static_cast<float>(y) + 0.5F) / -motion.pixelsPerNdc.y);
+    // primaryRay's rectilinear direction before normalisation: a point at infinity is scale-free.
+    const glm::vec3 rowDirection = basis.forward + (ndcY * basis.halfHeight * basis.up);
+    const glm::vec3 columnStep = basis.halfWidth * basis.right;
+    // Locals, not motion's members: every float store below could alias a member, which would force a reload per pixel.
+    const Camera::PinholeMatrix current = motion.currentPinhole;
+    const glm::vec2 pixelsPerNdc = motion.pixelsPerNdc;
+    const float ndcPerPixel = 1.0F / pixelsPerNdc.x;
+    for (int x = 0; x < width; ++x) {
+        const float ndcX = ((static_cast<float>(x) + 0.5F) * ndcPerPixel) - 1.0F;
+        const float* world = worldRow + (static_cast<std::size_t>(x) * 3);
+        // A hit is its worldPos (w = 1); a miss sees the environment, the plane at infinity, along its pixel-centre direction (w = 0).
+        const glm::vec4 point = winnerRow[x] >= 0 ? glm::vec4(world[0], world[1], world[2], 1.0F)
+                                                  : glm::vec4(rowDirection + (ndcX * columnStep), 0.0F);
+        const std::optional<glm::vec2> now = Camera::project(current, point);
+        const std::optional<glm::vec2> before = projectPrevious(point);
+        writeTexel(result.motionVector, x, y, now && before ? (*now - *before) * pixelsPerNdc : glm::vec2(0.0F));
+    }
+}
+
+// The lens dispatch per row, not per pixel: a pinhole previous view stays inline, a fisheye one goes through its forward model.
+void motionRow(RasterGBuffer& result, const MotionField& motion, int y, const int* winnerRow) {
+    if (motion.previousPinhole) {
+        // Captured by value, so the matrix lives in registers rather than behind a pointer every store may alias.
+        motionRow(result, motion, y, winnerRow,
+                  [previous = *motion.previousPinhole](const glm::vec4& point) { return Camera::project(previous, point); });
+    } else {
+        motionRow(result, motion, y, winnerRow,
+                  [&motion](const glm::vec4& point) { return motion.previous.project(motion.previousBasis, point); });
+    }
+}
+
 // Resolves every G-buffer field for one covered, z-winning pixel: tracePath's bounce-0 sampling calls, never lighting or BSDF.
 void shadePixel(RasterGBuffer& result, int x, int y, float viewZ, float origU, float origV,
                  const ShadingTriangle& triangle, const Material& material,
@@ -489,7 +549,8 @@ void depthPassRow(int y, const std::vector<RasterSubTriangle>& subTriangles,
 }
 
 // Pass two: shades each covered pixel once from the recorded winner, in x order. viewZ is read back, so it is exact and cheaper.
-void shadeRow(RasterGBuffer& result, int y, int width, const std::vector<RasterSubTriangle>& subTriangles,
+void shadeRow(RasterGBuffer& result, int y, int width,
+               const std::vector<RasterSubTriangle>& subTriangles,
                const std::vector<ShadingTriangle>& shadingTriangles,
                const std::vector<MeshInstance>& instances,
                const std::vector<PathTraceSettings>& perInstanceSettings,
@@ -538,7 +599,8 @@ void drawBoxEdgesRow(RasterGBuffer& result, int y, const std::vector<RasterLineS
 
 }  // namespace
 
-void renderRasterGBuffer(const Camera& camera, const std::vector<ShadingTriangle>& shadingTriangles,
+void renderRasterGBuffer(const Camera& camera, const Camera& previousCamera,
+                          const std::vector<ShadingTriangle>& shadingTriangles,
                           const std::vector<MeshInstance>& instances,
                           const std::vector<PathTraceSettings>& perInstanceSettings,
                           const std::vector<AabbBounds>& instanceBounds, int width, int height,
@@ -554,6 +616,7 @@ void renderRasterGBuffer(const Camera& camera, const std::vector<ShadingTriangle
     }
     ++result.generation;
 
+    const MotionField motion = motionField(camera, previousCamera, width, height);
     const SubPixelGrid grid = subPixelGrid(width, height);
     const std::vector<RasterSubTriangle> subTriangles =
         buildSubTriangles(camera, shadingTriangles, width, height, grid, threadPool);
@@ -595,6 +658,7 @@ void renderRasterGBuffer(const Camera& camera, const std::vector<ShadingTriangle
         depthPassRow(y, subTriangles, rowBuckets, grid, zRow, winnerRow);
         shadeRow(result, y, width, subTriangles, shadingTriangles, instances, perInstanceSettings, grid,
                  zRow, winnerRow);
+        motionRow(result, motion, y, winnerRow);
         drawBoxEdgesRow(result, y, boxEdges, boxRowBuckets, zRow);
     };
 

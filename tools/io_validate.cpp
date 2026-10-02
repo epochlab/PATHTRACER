@@ -540,46 +540,6 @@ PT_CHECK(profile_config_default_aov_is_in_range, Fast, Exact) {
     }
 }
 
-// opticFlow.source names any AOV exactly as kAovNames spells it, except opticFlow itself; anything else is refused at load.
-PT_CHECK(profile_config_optic_flow_source, Fast, Exact) {
-    using pathtracer::debug::AovId;
-    struct Case {
-        nlohmann::json source;  // null = key removed
-        AovId expected;         // Count = rejected
-    };
-    const std::vector<Case> cases = {
-        {"luminance", AovId::Luminance}, {"Luminance", AovId::Count}, {"depth", AovId::Depth},
-        {"beauty", AovId::Beauty},       {"colourOpponent", AovId::ColourOpponent}, {"colour-opponent", AovId::Count},
-        {"opticFlow", AovId::Count},     {"NotAnAov", AovId::Count},     {nlohmann::json(nullptr), AovId::Count},
-        {1, AovId::Count},
-    };
-
-    const std::filesystem::path shippedPath = std::filesystem::path(ASSET_ROOT_DIR) / "config" / "profile.json";
-    std::ifstream shippedFile(shippedPath);
-    const nlohmann::json shipped = nlohmann::json::parse(shippedFile);
-    ctx.plan(static_cast<int>(cases.size()) + 1);
-    nlohmann::json withoutBlock = shipped;
-    withoutBlock.erase("opticFlow");
-    const std::filesystem::path blockless = writeJson("engine_io_profile_opticflow.json", withoutBlock.dump());
-    PT_EXPECT(ctx, !pathtracer::config::loadProfileConfig(blockless.string()).has_value(),
-                  "loadProfileConfig accepted a profile with no opticFlow block");
-    std::filesystem::remove(blockless);
-    for (const Case& testCase : cases) {
-        nlohmann::json edited = shipped;
-        if (testCase.source.is_null()) {
-            edited["opticFlow"].erase("source");
-        } else {
-            edited["opticFlow"]["source"] = testCase.source;
-        }
-        const std::filesystem::path path = writeJson("engine_io_profile_opticflow.json", edited.dump());
-        const std::optional<pathtracer::config::ProfileConfig> loaded = pathtracer::config::loadProfileConfig(path.string());
-        std::filesystem::remove(path);
-        const bool accepted = testCase.expected != AovId::Count;
-        PT_EXPECT(ctx, loaded.has_value() == accepted && (!accepted || loaded->opticFlow.source == testCase.expected),
-                      std::string("opticFlow.source ") + testCase.source.dump() + (accepted ? " not mapped" : " not refused"));
-    }
-}
-
 // The two scene-scale distances, each a divisor at its point of use: at or below zero the lane is inf/NaN, not a bounded gradient.
 PT_CHECK(profile_config_scene_scale_distances, Fast, Exact) {
     struct Case {

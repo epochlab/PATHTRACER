@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <random>
@@ -40,6 +41,8 @@ constexpr float kPosEpsilon = 5e-2F;    // world-space units (worldPos, depth)
 constexpr float kUnitEpsilon = 1e-2F;   // unit-vector/[0,1]-range fields (normal, uv, albedo, ...)
 constexpr float kMaxCoverageMismatchFraction = 0.02F;
 constexpr float kMaxValueMismatchFraction = 0.02F;
+// Two float projections, each within camera_validate's 16-ulp closed-form budget of an NDC scaled by kWidth/2 pixels.
+constexpr double kMotionEpsilonPx = 16.0 * kWidth * std::numeric_limits<float>::epsilon();
 
 // The neutral default material, varying only the two slots the G-buffer AOVs under test read.
 Material makeMaterial(glm::vec3 baseColor, float roughness) {
@@ -119,7 +122,7 @@ bool checkPose(const char* poseName, const Camera& camera, const EmbreeAccel& ac
                const std::vector<PathTraceSettings>& perInstanceSettings,
                const std::vector<AabbBounds>& instanceBounds, ThreadPool& threadPool) {
     RasterGBuffer raster;
-    renderRasterGBuffer(camera, shadingTriangles, instances, perInstanceSettings, instanceBounds, kWidth,
+    renderRasterGBuffer(camera, camera, shadingTriangles, instances, perInstanceSettings, instanceBounds, kWidth,
                          kHeight, threadPool, raster);
     const float aspect = static_cast<float>(kWidth) / static_cast<float>(kHeight);
     const glm::vec3 camPos = camera.position();
@@ -291,7 +294,7 @@ bool checkBoundingBoxOcclusion(ThreadPool& threadPool) {
     // Case 1: box spans x/y in [-0.5,0.5], z in [-15,-5], nothing solid anywhere -- all edges eligible.
     const std::vector<ShadingTriangle> scene{farMarker, nearMarker};
     RasterGBuffer raster;
-    renderRasterGBuffer(camera, scene, instances, perInstanceSettings,
+    renderRasterGBuffer(camera, camera, scene, instances, perInstanceSettings,
                          computeInstanceBounds(scene, instanceCount), kWidth, kHeight, threadPool, raster);
     const int unoccluded = boxPixelsOf(raster, 0).count;
     std::cout << "rasterizer_validate: boundingBox unoccluded -- " << unoccluded << " pixels\n";
@@ -305,7 +308,7 @@ bool checkBoundingBoxOcclusion(ThreadPool& threadPool) {
     const std::array<ShadingTriangle, 2> occluder = makeQuad(0.5F, glm::vec3(0.0F, 0.0F, -4.0F), 0);
     const std::vector<ShadingTriangle> occludedScene{farMarker, occluder[0], occluder[1]};
     RasterGBuffer occludedRaster;
-    renderRasterGBuffer(camera, occludedScene, instances, perInstanceSettings,
+    renderRasterGBuffer(camera, camera, occludedScene, instances, perInstanceSettings,
                          computeInstanceBounds(occludedScene, instanceCount), kWidth, kHeight, threadPool,
                          occludedRaster);
     const int occluded = boxPixelsOf(occludedRaster, 0).count;
@@ -334,7 +337,7 @@ bool checkPerInstanceBoxes(ThreadPool& threadPool) {
     const std::vector<ShadingTriangle> scene{left[0], left[1], right[0], right[1]};
 
     RasterGBuffer raster;
-    renderRasterGBuffer(camera, scene, instances, perInstanceSettings,
+    renderRasterGBuffer(camera, camera, scene, instances, perInstanceSettings,
                          computeInstanceBounds(scene, static_cast<int>(instances.size())), kWidth, kHeight,
                          threadPool, raster);
     const BoxPixels leftBox = boxPixelsOf(raster, 0);
@@ -361,7 +364,7 @@ bool checkWireframeSanity(const Camera& camera, const std::vector<ShadingTriangl
                            const std::vector<PathTraceSettings>& perInstanceSettings,
                            const std::vector<AabbBounds>& instanceBounds, ThreadPool& threadPool) {
     RasterGBuffer raster;
-    renderRasterGBuffer(camera, shadingTriangles, instances, perInstanceSettings, instanceBounds, kWidth,
+    renderRasterGBuffer(camera, camera, shadingTriangles, instances, perInstanceSettings, instanceBounds, kWidth,
                          kHeight, threadPool, raster);
     int hitPixels = 0;
     int wirePixels = 0;
@@ -547,7 +550,7 @@ PT_CHECK(watertight_closed_mesh, Fast, Exact) {
     const auto expectWatertight = [&](const std::string& pose, const Camera& camera,
                                       const std::vector<ShadingTriangle>& mesh) {
         RasterGBuffer raster;
-        renderRasterGBuffer(camera, mesh, instances, perInstanceSettings, computeInstanceBounds(mesh, 1), kWidth,
+        renderRasterGBuffer(camera, camera, mesh, instances, perInstanceSettings, computeInstanceBounds(mesh, 1), kWidth,
                              kHeight, threadPool, raster);
         const int uncovered = uncoveredPixels(raster);
         std::cout << "rasterizer_validate: watertight " << pose << " -- " << uncovered << " uncovered pixels\n";
@@ -582,7 +585,8 @@ PT_CHECK(wireframe_ignores_clip_edges, Fast, Exact) {
         ShadingVertex{glm::vec3(1000.0F, -1000.0F, 290.0F), normal, glm::vec2(1.0F, 0.0F), tangent},
         ShadingVertex{glm::vec3(0.0F, 1000.0F, -310.0F), normal, glm::vec2(0.0F, 1.0F), tangent}, 0}};
     RasterGBuffer raster;
-    renderRasterGBuffer(straightOnCamera(), scene, instances, perInstanceSettings, computeInstanceBounds(scene, 1),
+    const Camera camera = straightOnCamera();
+    renderRasterGBuffer(camera, camera, scene, instances, perInstanceSettings, computeInstanceBounds(scene, 1),
                          kWidth, kHeight, threadPool, raster);
     int wirePixels = 0;
     for (int y = 0; y < kHeight; ++y) {
@@ -670,5 +674,147 @@ PT_CHECK(constant_inputs_match_unit_textures, Fast, Exact) {
 }
 
 }  // namespace
+
+// Double-precision pinhole K [R | -R c] (Hartley & Zisserman 2004, eq. 6.8) on homogeneous (p, w): shares no arithmetic with project.
+std::optional<glm::dvec2> pinholeNdc(const Camera& camera, float aspect, const glm::dvec4& point) {
+    const Camera::ViewBasis basis = camera.viewBasis(aspect);
+    const glm::dmat3 worldToView =
+        glm::transpose(glm::dmat3(glm::dvec3(basis.right), glm::dvec3(basis.up), glm::dvec3(basis.forward)));
+    const glm::dvec3 view = worldToView * (glm::dvec3(point) - (point.w * glm::dvec3(camera.position())));
+    if (!(view.z > 0.0)) {
+        return std::nullopt;
+    }
+    return glm::dvec2(view.x / (view.z * static_cast<double>(basis.halfWidth)), view.y / (view.z * static_cast<double>(basis.halfHeight)));
+}
+
+// Double-precision equidistant fisheye, r = f * theta (Kannala & Brandt 2006 with k = 0): the closed form, independent of project.
+std::optional<glm::dvec2> equidistantNdc(const Camera& camera, float aspect, const glm::dvec4& point) {
+    const Camera::ViewBasis basis = camera.viewBasis(aspect);
+    const glm::dvec3 view = glm::dvec3(point) - (point.w * glm::dvec3(camera.position()));
+    const glm::dvec2 lateral(glm::dot(view, glm::dvec3(basis.right)), glm::dot(view, glm::dvec3(basis.up)));
+    const double theta = std::atan2(glm::length(lateral), glm::dot(view, glm::dvec3(basis.forward)));
+    if (theta > static_cast<double>(basis.maxThetaRadians)) {
+        return std::nullopt;
+    }
+    const double radiusMm = static_cast<double>(basis.focalLengthMm) * theta;
+    return radiusMm * glm::normalize(lateral) / glm::dvec2(basis.halfWidthMm, basis.halfHeightMm);
+}
+
+// The motion the oracle predicts at (x, y): the rasterizer's own hit point, else the pixel-centre direction at infinity, in double.
+glm::dvec2 oracleMotion(const RasterGBuffer& raster, const Camera& camera, const Camera& previous, int x, int y) {
+    const float aspect = static_cast<float>(kWidth) / static_cast<float>(kHeight);
+    const Camera::ViewBasis basis = camera.viewBasis(aspect);
+    const glm::dvec2 ndc((((x + 0.5) / kWidth) * 2.0) - 1.0, 1.0 - (((y + 0.5) / kHeight) * 2.0));
+    const glm::dvec3 direction = glm::dvec3(basis.forward) + (ndc.x * static_cast<double>(basis.halfWidth) * glm::dvec3(basis.right)) +
+                                 (ndc.y * static_cast<double>(basis.halfHeight) * glm::dvec3(basis.up));
+    const bool hit = texelAt(raster.alpha, x, y).x > 0.5F;
+    const glm::dvec4 point = hit ? glm::dvec4(glm::dvec3(texelAt(raster.worldPos, x, y)), 1.0) : glm::dvec4(direction, 0.0);
+    const std::optional<glm::dvec2> now = pinholeNdc(camera, aspect, point);
+    const bool fisheye = previous.lens().projection == LensProjection::FisheyePolynomial;
+    const std::optional<glm::dvec2> before = fisheye ? equidistantNdc(previous, aspect, point) : pinholeNdc(previous, aspect, point);
+    if (!now || !before) {
+        return glm::dvec2(0.0);
+    }
+    return (*now - *before) * glm::dvec2(0.5 * kWidth, -0.5 * kHeight);
+}
+
+glm::vec2 motionAt(const RasterGBuffer& raster, int x, int y) {
+    return glm::vec2(texelAt(raster.motionVector, x, y));
+}
+
+// The angled pose: off every axis and inside the cluster's depth span, so a frame holds both hits and misses.
+Camera angledCamera(glm::vec3 offset = glm::vec3(0.0F), float yawOffset = 0.0F, float pitchOffset = 0.0F, float focalMm = 35.0F) {
+    return Camera(glm::vec3(3.0F, 2.0F, 1.0F) + offset, 20.0F + yawOffset, -10.0F + pitchOffset, kFilmBack, focalMm, 0.1F,
+                  100.0F, 2.8F, 1.0F / 125.0F, 100.0F);
+}
+
+// Same camera both sides: one projection of one point twice, so every pixel, hit or miss, reads zero bitwise rather than nearly.
+PT_CHECK(motion_vector_is_exactly_zero_for_an_unmoved_camera, Fast, Exact) {
+    const std::unique_ptr<RasterFixture> fixture = makeFixture(ctx);
+    ctx.plan(3);
+    const Camera camera = angledCamera();
+    RasterGBuffer raster;
+    renderRasterGBuffer(camera, camera, fixture->shadingTriangles, fixture->instances, fixture->perInstanceSettings,
+                         fixture->instanceBounds, kWidth, kHeight, fixture->threadPool, raster);
+    int nonZero = 0;
+    for (int y = 0; y < kHeight; ++y) {
+        for (int x = 0; x < kWidth; ++x) {
+            nonZero += motionAt(raster, x, y) == glm::vec2(0.0F) ? 0 : 1;
+        }
+    }
+    const int misses = uncoveredPixels(raster);
+    PT_EXPECT(ctx, misses > 0, "the pose shows no environment, so the w = 0 path went unexercised");
+    PT_EXPECT(ctx, misses < kWidth * kHeight, "the pose shows no geometry, so the w = 1 path went unexercised");
+    PT_EXPECT(ctx, nonZero == 0, std::to_string(nonZero) + " pixels moved although the camera did not");
+}
+
+// Rotation, translation, both, zoom and a lens toggle against the double oracle at every pixel; misses ignore translation.
+PT_CHECK(motion_vector_matches_a_pinhole_oracle, Fast, Exact) {
+    const std::unique_ptr<RasterFixture> fixture = makeFixture(ctx);
+    const Camera camera = angledCamera();
+    const std::array<std::pair<const char*, Camera>, 5> previousViews{{
+        {"rotation", angledCamera(glm::vec3(0.0F), 3.0F, -2.0F)},
+        {"translation", angledCamera(glm::vec3(0.3F, -0.2F, 0.5F))},
+        {"rotation+translation", angledCamera(glm::vec3(-0.4F, 0.1F, 0.25F), -4.0F, 1.5F)},
+        {"zoom", angledCamera(glm::vec3(0.0F), 0.0F, 0.0F, 50.0F)},
+        {"lens toggle from an equidistant fisheye", Camera(glm::vec3(3.0F, 2.0F, 1.0F), 20.0F, -10.0F, kFilmBack, 8.0F, 0.1F, 100.0F,
+                                                           2.8F, 1.0F / 125.0F, 100.0F,
+                                                           Lens{LensProjection::FisheyePolynomial, {}, 180.0F})},
+    }};
+    ctx.plan(static_cast<int>(previousViews.size()));
+    for (const auto& [name, previous] : previousViews) {
+        RasterGBuffer raster;
+        renderRasterGBuffer(camera, previous, fixture->shadingTriangles, fixture->instances, fixture->perInstanceSettings,
+                             fixture->instanceBounds, kWidth, kHeight, fixture->threadPool, raster);
+        double worst = 0.0;
+        for (int y = 0; y < kHeight; ++y) {
+            for (int x = 0; x < kWidth; ++x) {
+                const glm::dvec2 error = glm::dvec2(motionAt(raster, x, y)) - oracleMotion(raster, camera, previous, x, y);
+                worst = std::max(worst, std::max(std::abs(error.x), std::abs(error.y)));
+            }
+        }
+        std::cout << "rasterizer_validate: motion " << name << " -- worst " << worst << " px\n";
+        PT_EXPECT(ctx, worst <= kMotionEpsilonPx, std::string(name) + ": worst motion error " + std::to_string(worst) + " px");
+    }
+}
+
+// Translation leaves the plane at infinity fixed (w = 0 drops the camera centre), so every miss reads zero bitwise while hits move.
+PT_CHECK(motion_vector_holds_the_sky_still_under_translation, Fast, Exact) {
+    const std::unique_ptr<RasterFixture> fixture = makeFixture(ctx);
+    ctx.plan(2);
+    const Camera camera = angledCamera();
+    const Camera previous = angledCamera(glm::vec3(0.3F, -0.2F, 0.5F));
+    RasterGBuffer raster;
+    renderRasterGBuffer(camera, previous, fixture->shadingTriangles, fixture->instances, fixture->perInstanceSettings,
+                         fixture->instanceBounds, kWidth, kHeight, fixture->threadPool, raster);
+    int movedMisses = 0;
+    int movedHits = 0;
+    for (int y = 0; y < kHeight; ++y) {
+        for (int x = 0; x < kWidth; ++x) {
+            const bool moved = motionAt(raster, x, y) != glm::vec2(0.0F);
+            (texelAt(raster.alpha, x, y).x > 0.5F ? movedHits : movedMisses) += moved ? 1 : 0;
+        }
+    }
+    PT_EXPECT(ctx, movedMisses == 0, std::to_string(movedMisses) + " environment pixels moved under a pure translation");
+    PT_EXPECT(ctx, movedHits > 0, "no surface moved under a translation");
+}
+
+// Turned half a revolution, the previous view faces away from everything this one sees: no image point exists, so motion reads zero.
+PT_CHECK(motion_vector_is_zero_where_the_previous_view_has_no_image, Fast, Exact) {
+    const std::unique_ptr<RasterFixture> fixture = makeFixture(ctx);
+    ctx.plan(1);
+    const Camera camera = straightOnCamera();
+    const Camera previous(glm::vec3(0.0F), 180.0F, 0.0F, kFilmBack, 35.0F, 0.1F, 100.0F, 2.8F, 1.0F / 125.0F, 100.0F);
+    RasterGBuffer raster;
+    renderRasterGBuffer(camera, previous, fixture->shadingTriangles, fixture->instances, fixture->perInstanceSettings,
+                         fixture->instanceBounds, kWidth, kHeight, fixture->threadPool, raster);
+    int nonZero = 0;
+    for (int y = 0; y < kHeight; ++y) {
+        for (int x = 0; x < kWidth; ++x) {
+            nonZero += motionAt(raster, x, y) == glm::vec2(0.0F) ? 0 : 1;
+        }
+    }
+    PT_EXPECT(ctx, nonZero == 0, std::to_string(nonZero) + " pixels were given motion from a view that cannot see them");
+}
 
 PT_CHECK_MAIN("rasterizer")

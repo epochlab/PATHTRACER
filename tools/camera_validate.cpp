@@ -425,4 +425,75 @@ PT_CHECK(fisheye_theta_distribution_matches_the_area_jacobian, Slow, Statistical
                   " degrees of freedom gives p = " + std::to_string(pValue));
 }
 
+// project is primaryRay's inverse: re-casting at the projected ndc recovers the direction, for points at any depth and at infinity.
+PT_CHECK(project_inverts_primary_rays, Fast, Exact) {
+    ctx.plan(8);
+    const std::array<std::pair<const char*, Lens>, 2> lenses{
+        {{"rectilinear", Lens{}}, {"equisolid fisheye", fisheye(kEquisolidTaylor, 180.0F)}}};
+    for (const auto& [name, lens] : lenses) {
+        // Posed off every axis, so the basis rows are all exercised; at the origin, p - w * position is exact for both w.
+        const Camera camera{glm::vec3(0.0F), 37.0F, -21.0F, kFullFrame, 10.0F, 0.01F, 100.0F, 2.8F, 0.008F, 400.0F, lens};
+        const Camera::ViewBasis basis = camera.viewBasis(kAspect);
+        int imaged = 0;
+        int mismatches = 0;
+        int unprojected = 0;
+        constexpr int kGrid = 65;
+        constexpr std::array<float, 3> kDepths{0.5F, 8.0F, 0.0F};  // 0 marks the point at infinity, w = 0
+        for (int iy = 0; iy < kGrid; ++iy) {
+            for (int ix = 0; ix < kGrid; ++ix) {
+                const float ndcX = ((static_cast<float>(ix) / static_cast<float>(kGrid - 1)) * 2.0F) - 1.0F;
+                const float ndcY = ((static_cast<float>(iy) / static_cast<float>(kGrid - 1)) * 2.0F) - 1.0F;
+                const std::optional<Ray> ray = camera.primaryRay(basis, ndcX, ndcY);
+                if (!ray.has_value()) {
+                    continue;
+                }
+                ++imaged;
+                const float theta = angleBetween(ray->dir, basis.forward);
+                // One forward and one inverse projection: the lens's own inverse budget on top of the closed form's rounding.
+                const float budget = (lens.projection == LensProjection::Rectilinear
+                                          ? 0.0F
+                                          : thetaTolerance(lens.radialCoefficients, theta, basis.maxThetaRadians)) +
+                                     (2.0F * kClosedFormUlps * kEps * std::max(theta, 1.0F));
+                for (const float depth : kDepths) {
+                    const glm::vec4 point = depth > 0.0F ? glm::vec4(ray->origin + (depth * ray->dir), 1.0F)
+                                                         : glm::vec4(ray->dir, 0.0F);
+                    const std::optional<glm::vec2> ndc = camera.project(basis, point);
+                    const std::optional<Ray> recast = ndc ? camera.primaryRay(basis, ndc->x, ndc->y) : std::nullopt;
+                    if (!recast.has_value()) {
+                        ++unprojected;
+                        continue;
+                    }
+                    mismatches += angleBetween(recast->dir, ray->dir) > budget ? 1 : 0;
+                }
+            }
+        }
+        PT_EXPECT(ctx, imaged > 0, std::string(name) + ": no ndc sample on the grid was imaged");
+        PT_EXPECT(ctx, unprojected == 0, std::string(name) + ": " + std::to_string(unprojected) + " imaged points did not project back");
+        PT_EXPECT(ctx, mismatches == 0,
+                  std::string(name) + ": " + std::to_string(mismatches) + " round trips departed from the cast direction");
+        // Straight behind: no pinhole image, and theta = pi lies past a 180-degree circle's thetaMax.
+        PT_EXPECT(ctx, !camera.project(basis, glm::vec4(-basis.forward, 0.0F)).has_value(),
+                  std::string(name) + ": a direction straight behind the camera was given an image point");
+    }
+}
+
+// Domain edges: a fisheye images nothing past thetaMax; behind a 360-degree lens the on-axis azimuth, hence the point, is undefined.
+PT_CHECK(project_refuses_points_outside_the_lens_domain, Fast, Exact) {
+    ctx.plan(3);
+    const Camera narrow = makeCamera(10.0F, fisheye(std::array<float, 4>{}, 120.0F));
+    const Camera::ViewBasis narrowBasis = narrow.viewBasis(kAspect);
+    const auto offAxis = [&narrowBasis](float theta) {
+        return glm::vec4((std::cos(theta) * narrowBasis.forward) + (std::sin(theta) * narrowBasis.right), 0.0F);
+    };
+    const float thetaMax = narrowBasis.maxThetaRadians;
+    PT_EXPECT(ctx, narrow.project(narrowBasis, offAxis(thetaMax * (1.0F - (kBracketUlps * kEps)))).has_value(),
+              "a direction just inside thetaMax was refused");
+    PT_EXPECT(ctx, !narrow.project(narrowBasis, offAxis(thetaMax * (1.0F + (kBracketUlps * kEps)))).has_value(),
+              "a direction just past thetaMax was given an image point");
+    const Camera full = makeCamera(10.0F, fisheye(std::array<float, 4>{}, 360.0F));
+    const Camera::ViewBasis fullBasis = full.viewBasis(kAspect);
+    PT_EXPECT(ctx, !full.project(fullBasis, glm::vec4(-fullBasis.forward, 0.0F)).has_value(),
+              "the axis behind a 360-degree lens, imaged as the whole rim, was given one point");
+}
+
 PT_CHECK_MAIN("camera_validate")

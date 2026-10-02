@@ -26,11 +26,6 @@ using pathtracer::scene::ThreadPool;
     return folded < extent ? folded : period - folded;
 }
 
-// The inner-scale criterion at the halved Nyquist w = pi/2: exp(-t) <= 2^-24 gives t = 24 ln2, past which halving discards nothing.
-[[nodiscard]] float decimationVariance() {
-    return static_cast<float>(-std::log(kFloat32Roundoff));
-}
-
 // T(n;t) = exp(-t) I_n(t) via the ascending series for I_n, whose terms are all positive, so the sum carries no cancellation at all.
 [[nodiscard]] double discreteGaussianTap(int n, double t) {
     const double halfT = 0.5 * t;
@@ -145,26 +140,6 @@ void diffuseColumns(const float* __restrict src, float* __restrict dst, const st
     });
 }
 
-// Halves the grid by plain subsampling, not an average: an average would add variance the cascade's bookkeeping does not carry.
-[[nodiscard]] std::vector<float> subsample(const std::vector<float>& plane, int width, int height, ThreadPool& threadPool) {
-    const int nextWidth = (width + 1) / 2;
-    const int nextHeight = (height + 1) / 2;
-    std::vector<float> next(static_cast<std::size_t>(nextWidth) * static_cast<std::size_t>(nextHeight));
-    threadPool.parallelFor(nextHeight, [&](int y) {
-        const std::size_t source = static_cast<std::size_t>(2 * y) * static_cast<std::size_t>(width);
-        const std::size_t destination = static_cast<std::size_t>(y) * static_cast<std::size_t>(nextWidth);
-        for (int x = 0; x < nextWidth; ++x) {
-            next[destination + static_cast<std::size_t>(x)] = plane[source + static_cast<std::size_t>(2 * x)];
-        }
-    });
-    return next;
-}
-
-// Level k's own variance on a grid of `decimation` base pixels per sample: exact, both factors being powers of two.
-[[nodiscard]] float ownVarianceOf(int level, int decimation) {
-    return std::ldexp(innerScaleVariance(), 2 * level) / static_cast<float>(decimation * decimation);
-}
-
 }  // namespace
 
 float innerScaleVariance() {
@@ -205,76 +180,6 @@ void diffuse(std::span<float> plane, int width, int height, float t, ThreadPool&
     std::vector<float> scratch(plane.size());
     diffuseRows(plane.data(), scratch.data(), kernel, width, height, threadPool);
     diffuseColumns(scratch.data(), plane.data(), kernel, width, height, threadPool);
-}
-
-ScaleSpaceLevel octaveLevel(std::span<const float> plane, int width, int height, int level, ThreadPool& threadPool) {
-    ScaleSpaceLevel current{std::vector<float>(plane.begin(), plane.end()), width, height, 1, 0.0F};
-    float ownVariance = 0.0F;
-    for (int k = 0;; ++k) {
-        const float targetOwn = ownVarianceOf(k, current.decimation);
-        // Diffused only where the grid is about to halve or the level is reached: the semigroup makes one step equal the cascade.
-        if (k == level || targetOwn >= decimationVariance()) {
-            diffuse(current.plane, current.width, current.height, targetOwn - ownVariance, threadPool);
-            ownVariance = targetOwn;
-        }
-        if (k == level) {
-            current.baseVariance = std::ldexp(innerScaleVariance(), 2 * k);
-            return current;
-        }
-        // Halving the grid discards nothing once the level is band-limited to the halved Nyquist, which decimationVariance defines.
-        if (targetOwn >= decimationVariance()) {
-            current.plane = subsample(current.plane, current.width, current.height, threadPool);
-            current.width = (current.width + 1) / 2;
-            current.height = (current.height + 1) / 2;
-            current.decimation *= 2;
-            ownVariance *= 0.25F;
-        }
-    }
-}
-
-int octaveLevelCount(int width, int height) {
-    int count = 0;
-    int decimation = 1;
-    for (int k = 0;; ++k) {
-        const float targetOwn = ownVarianceOf(k, decimation);
-        const auto radius = static_cast<int>(discreteGaussianKernel(targetOwn).size()) - 1;
-        if ((2 * radius) + 1 > std::min(width, height)) {
-            return count;
-        }
-        ++count;
-        if (targetOwn >= decimationVariance()) {
-            width = (width + 1) / 2;
-            height = (height + 1) / 2;
-            decimation *= 2;
-        }
-    }
-}
-
-void addExpanded(const ScaleSpaceLevel& level, float weight, std::span<float> target, int targetWidth, int targetHeight,
-                 ThreadPool& threadPool, int targetDecimation) {
-    // A ratio of powers of two, so exact: target sample i sits on level coordinate i*targetDecimation/decimation.
-    const float inverseDecimation = static_cast<float>(targetDecimation) / static_cast<float>(level.decimation);
-    threadPool.parallelFor(targetHeight, [&](int y) {
-        // Level sample j sits on target sample j*decimation/targetDecimation: a plain scale with no half-pixel offset.
-        const float v = static_cast<float>(y) * inverseDecimation;
-        const int y0 = std::min(static_cast<int>(v), level.height - 1);
-        // Past the last level sample the level's own mirror applies, as its diffusion did, rather than a zeroth-order hold.
-        const int y1 = mirror(y0 + 1, level.height);
-        const float fractionY = v - static_cast<float>(y0);
-        const float* upper = level.plane.data() + (static_cast<std::size_t>(y0) * static_cast<std::size_t>(level.width));
-        const float* lower = level.plane.data() + (static_cast<std::size_t>(y1) * static_cast<std::size_t>(level.width));
-        float* row = target.data() + (static_cast<std::size_t>(y) * static_cast<std::size_t>(targetWidth));
-        for (int x = 0; x < targetWidth; ++x) {
-            const float u = static_cast<float>(x) * inverseDecimation;
-            const int x0 = std::min(static_cast<int>(u), level.width - 1);
-            // The fold's modulo only past the last sample: interior columns take the next sample directly, off the per-texel path.
-            const int x1 = x0 + 1 < level.width ? x0 + 1 : mirror(x0 + 1, level.width);
-            const float fractionX = u - static_cast<float>(x0);
-            const float top = upper[x0] + ((upper[x1] - upper[x0]) * fractionX);
-            const float bottom = lower[x0] + ((lower[x1] - lower[x0]) * fractionX);
-            row[x] += weight * (top + ((bottom - top) * fractionY));
-        }
-    });
 }
 
 }  // namespace pathtracer::debug

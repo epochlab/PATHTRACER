@@ -13,7 +13,7 @@ typedef struct PtRenderer PtRenderer;
 #define PT_OK 0
 #define PT_ERROR 1
 /* PtCamera is passed by value, so a caller built against a different layout must be caught rather than reading the fields as garbage. */
-#define PT_ABI_VERSION 3
+#define PT_ABI_VERSION 4
 /* Lens projections, PtCamera.lens_projection: rectilinear is the pinhole, fisheye is Kannala & Brandt's polynomial. */
 #define PT_LENS_RECTILINEAR 0
 #define PT_LENS_FISHEYE_POLYNOMIAL 1
@@ -29,8 +29,11 @@ int pt_aov_count(void);
 const char* pt_aov_name(int aov);
 /* Exact, as pt_aov_name spells it: "bounceCount" resolves, "bounce-count" does not. -1 if unknown. */
 int pt_aov_id(const char* name);
-/* Channels the AOV carries, what pt_render writes per texel: 1 for depth or a scalar filter, 2 for UV, 3 for radiance. */
+/* Channels the AOV carries, what pt_render writes per texel: 1 for depth or a scalar filter, 2 for UV or motion, 3 for radiance. */
 int pt_aov_channels(int aov);
+/* Non-zero if this AOV needs light transport, so a caller can tell which requests the `samples` field affects. */
+int pt_aov_needs_samples(int aov);
+
 /* PT_ABI_VERSION this library was built with: a caller compares it to its own header's and refuses to call on a mismatch. */
 int pt_abi_version(void);
 
@@ -58,11 +61,11 @@ typedef struct {
 void pt_renderer_default_camera(const PtRenderer* renderer, PtCamera* out);
 int pt_renderer_default_width(const PtRenderer* renderer);
 int pt_renderer_default_height(const PtRenderer* renderer);
-/* Non-zero if this AOV needs light transport, so `samples` affects it; Optic Flow answers for this renderer's profile source. */
-int pt_renderer_aov_needs_samples(const PtRenderer* renderer, int aov);
 
 typedef struct {
     PtCamera camera;
+    /* The view motionVector measures motion from, either lens; NULL is camera itself, so motion reads exactly zero. */
+    const PtCamera* previous_camera;
     int width;
     int height;
     /* Path-traced passes at one sample each, averaged. Ignored by a request whose AOVs are all rasterizer-backed. */
