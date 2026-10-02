@@ -19,7 +19,6 @@
 
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
-#include <glm/gtc/matrix_transform.hpp>
 
 #include <OpenColorIO/OpenColorIO.h>
 
@@ -325,12 +324,7 @@ std::optional<AppResources> initializeApp(const pathtracer::config::SceneConfig&
         profileConfig.controls.flySpeedMetersPerSecond,
         profileConfig.controls.orbitSensitivityDegPerPixel);
     const pathtracer::scene::Camera initialCamera = debugCamera.snapshot();
-    // Scene-level placement (scene.json model.position/model.rotation), order X,Y,Z.
-    const glm::mat4 sceneTransform =
-        glm::translate(glm::mat4(1.0F), sceneConfig.model.position) *
-        glm::rotate(glm::mat4(1.0F), glm::radians(sceneConfig.model.rotation.z), glm::vec3(0.0F, 0.0F, 1.0F)) *
-        glm::rotate(glm::mat4(1.0F), glm::radians(sceneConfig.model.rotation.y), glm::vec3(0.0F, 1.0F, 0.0F)) *
-        glm::rotate(glm::mat4(1.0F), glm::radians(sceneConfig.model.rotation.x), glm::vec3(1.0F, 0.0F, 0.0F));
+    const glm::mat4 sceneTransform = pathtracer::scene::rootTransformOf(sceneConfig);
 
     const auto loadStart = std::chrono::steady_clock::now();
     std::optional<pathtracer::scene::LoadedModel> stumpModel =
@@ -391,27 +385,8 @@ std::optional<AppResources> initializeApp(const pathtracer::config::SceneConfig&
                                                     accelBuildStart)
             .count();
 
-    const pathtracer::scene::PathTraceSettings basePathTraceSettings{
-        .samplesPerPixel = profileConfig.pathTracer.samplesPerPixel,
-        .maxBounces = profileConfig.pathTracer.maxBounces,
-        .russianRouletteStartBounce = profileConfig.pathTracer.russianRouletteStartBounce,
-        .aoMaxDistance = profileConfig.pathTracer.aoMaxDistance,
-        .lookaheadDistance = profileConfig.pathTracer.lookaheadDistance,
-        .bumpStrength = materialConfig->bumpStrength,
-        .roughnessMin = materialConfig->roughnessMin,
-        .roughnessMax = materialConfig->roughnessMax,
-        .diffuseColour = materialConfig->diffuseColour,
-        .ior = materialConfig->ior,
-        .abbe = materialConfig->abbe,
-        .transmissionFactor = materialConfig->transmissionFactor,
-        .metallicFactor = materialConfig->metallicFactor,
-        .roughnessFactor = materialConfig->roughnessFactor,
-        .diffuseRoughness = materialConfig->diffuseRoughness,
-        .transmissionColor = materialConfig->transmissionColor,
-        .transmissionDepth = materialConfig->transmissionDepth,
-        .edgeTint = materialConfig->edgeTint,
-        .shadingModel = materialConfig->shadingModel,
-    };
+    const pathtracer::scene::PathTraceSettings basePathTraceSettings =
+        pathtracer::scene::baseSettingsOf(profileConfig, *materialConfig, profileConfig.pathTracer.samplesPerPixel);
 
     std::optional<std::vector<pathtracer::scene::PathTraceSettings>> perInstanceSettings =
         pathtracer::scene::resolvePerInstanceSettings(basePathTraceSettings, stumpModel->instances,

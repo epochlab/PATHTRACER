@@ -80,6 +80,59 @@ void writeError(char* err, int errCap, const std::string& message) {
         lens};
 }
 
+// The request across the boundary, each field checked in ABI order; error names the first bad one, matching what callers parse.
+[[nodiscard]] std::optional<HeadlessRenderer::Request> decodeRequest(const PtRenderRequest& request, float* const* out,
+                                                                     std::string& error) {
+    if (request.aovs == nullptr || request.aov_count <= 0) {
+        error = "no AOVs requested";
+        return std::nullopt;
+    }
+    std::vector<AovId> aovs;
+    aovs.reserve(static_cast<std::size_t>(request.aov_count));
+    for (int i = 0; i < request.aov_count; ++i) {
+        if (!validAov(request.aovs[i])) {
+            error = "AOV id " + std::to_string(request.aovs[i]) + " is out of range";
+            return std::nullopt;
+        }
+        aovs.push_back(static_cast<AovId>(request.aovs[i]));
+    }
+    std::optional<bool> envLightEnabled;
+    std::optional<bool> showSky;
+    if (!toOptionalBool(request.env_light_enabled, "env_light_enabled", envLightEnabled, error) ||
+        !toOptionalBool(request.show_sky, "show_sky", showSky, error)) {
+        return std::nullopt;
+    }
+    const std::optional<pathtracer::scene::Camera> camera = toCamera(request.camera, error);
+    if (!camera.has_value()) {
+        return std::nullopt;
+    }
+    std::optional<pathtracer::scene::Camera> previousCamera;
+    if (request.previous_camera != nullptr) {
+        previousCamera = toCamera(*request.previous_camera, error);
+        if (!previousCamera.has_value()) {
+            error = "previous_camera: " + error;
+            return std::nullopt;
+        }
+    }
+    for (int i = 0; i < request.aov_count; ++i) {
+        if (out[i] == nullptr) {
+            error = "output buffer " + std::to_string(i) + " is null";
+            return std::nullopt;
+        }
+    }
+    return HeadlessRenderer::Request{
+        .camera = *camera,
+        .previousCamera = previousCamera,
+        .width = request.width,
+        .height = request.height,
+        .samples = request.samples,
+        .scrambleSeed = request.seed,
+        .aovs = std::move(aovs),
+        .envLightEnabled = envLightEnabled,
+        .showSky = showSky,
+    };
+}
+
 }  // namespace
 
 extern "C" {
@@ -188,61 +241,14 @@ int pt_render(PtRenderer* renderer, const PtRenderRequest* request, float* const
             writeError(err, err_cap, "null renderer, request or output");
             return PT_ERROR;
         }
-        if (request->aovs == nullptr || request->aov_count <= 0) {
-            writeError(err, err_cap, "no AOVs requested");
-            return PT_ERROR;
-        }
-        std::vector<AovId> aovs;
-        aovs.reserve(static_cast<std::size_t>(request->aov_count));
-        for (int i = 0; i < request->aov_count; ++i) {
-            if (!validAov(request->aovs[i])) {
-                writeError(err, err_cap, "AOV id " + std::to_string(request->aovs[i]) + " is out of range");
-                return PT_ERROR;
-            }
-            aovs.push_back(static_cast<AovId>(request->aovs[i]));
-        }
-        std::optional<bool> envLightEnabled;
-        std::optional<bool> showSky;
-        std::string decodeError;
-        if (!toOptionalBool(request->env_light_enabled, "env_light_enabled", envLightEnabled, decodeError) ||
-            !toOptionalBool(request->show_sky, "show_sky", showSky, decodeError)) {
-            writeError(err, err_cap, decodeError);
-            return PT_ERROR;
-        }
-        const std::optional<pathtracer::scene::Camera> camera = toCamera(request->camera, decodeError);
-        if (!camera.has_value()) {
-            writeError(err, err_cap, decodeError);
-            return PT_ERROR;
-        }
-        std::optional<pathtracer::scene::Camera> previousCamera;
-        if (request->previous_camera != nullptr) {
-            previousCamera = toCamera(*request->previous_camera, decodeError);
-            if (!previousCamera.has_value()) {
-                writeError(err, err_cap, "previous_camera: " + decodeError);
-                return PT_ERROR;
-            }
-        }
-        const HeadlessRenderer::Request internal{
-            .camera = *camera,
-            .previousCamera = previousCamera,
-            .width = request->width,
-            .height = request->height,
-            .samples = request->samples,
-            .scrambleSeed = request->seed,
-            .aovs = std::move(aovs),
-            .envLightEnabled = envLightEnabled,
-            .showSky = showSky,
-        };
-        for (int i = 0; i < request->aov_count; ++i) {
-            if (out[i] == nullptr) {
-                writeError(err, err_cap, "output buffer " + std::to_string(i) + " is null");
-                return PT_ERROR;
-            }
-        }
-
         std::string error;
+        const std::optional<HeadlessRenderer::Request> internal = decodeRequest(*request, out, error);
+        if (!internal.has_value()) {
+            writeError(err, err_cap, error);
+            return PT_ERROR;
+        }
         const std::span<float* const> outputs(out, static_cast<std::size_t>(request->aov_count));
-        if (!reinterpret_cast<HeadlessRenderer*>(renderer)->render(internal, outputs, error)) {
+        if (!reinterpret_cast<HeadlessRenderer*>(renderer)->render(*internal, outputs, error)) {
             writeError(err, err_cap, error);
             return PT_ERROR;
         }

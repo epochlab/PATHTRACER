@@ -99,6 +99,17 @@ private:
 
     // Sizes the reused path-traced and rasterizer buffers to this request, reallocating only on a resolution change.
     void resizeBuffers(int width, int height);
+    // Traces request.samples one-sample passes into accumulators_, the running sums, then divides them into means.
+    void accumulatePathTraced(const Request& request);
+    // Adds one pass's lanes to their sums and its Beauty luminance to the Welford second moment.
+    void accumulatePass(const Request& request, int pass, const std::vector<const std::vector<float>*>& laneSources,
+                        int beautyIndex);
+    // Divides every running sum by the pass count, by row on the pool.
+    void averageAccumulators(const Request& request);
+    // Scan-converts the G-buffer lanes, motion measured from request.previousCamera (camera itself when absent).
+    void rasterizeGBuffer(const Request& request);
+    // Evaluates each distinct BeautyFilter AOV the request names once, over the accumulated Beauty.
+    void evaluateFilters(const Request& request);
 
     pathtracer::config::ProfileConfig profile_;
     pathtracer::scene::LoadedModel model_;

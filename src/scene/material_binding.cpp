@@ -8,6 +8,8 @@
 #include <utility>
 #include <variant>
 
+#include <glm/gtc/matrix_transform.hpp>
+
 namespace pathtracer::scene {
 
 namespace {
@@ -145,6 +147,38 @@ std::vector<QuadLight> buildQuadLights(const std::vector<pathtracer::config::Qua
         });
     }
     return quadLights;
+}
+
+glm::mat4 rootTransformOf(const pathtracer::config::SceneConfig& scene) {
+    return glm::translate(glm::mat4(1.0F), scene.model.position) *
+           glm::rotate(glm::mat4(1.0F), glm::radians(scene.model.rotation.z), glm::vec3(0.0F, 0.0F, 1.0F)) *
+           glm::rotate(glm::mat4(1.0F), glm::radians(scene.model.rotation.y), glm::vec3(0.0F, 1.0F, 0.0F)) *
+           glm::rotate(glm::mat4(1.0F), glm::radians(scene.model.rotation.x), glm::vec3(1.0F, 0.0F, 0.0F));
+}
+
+PathTraceSettings baseSettingsOf(const pathtracer::config::ProfileConfig& profile,
+                                 const pathtracer::config::MaterialConfig& material, int samplesPerPixel) {
+    return PathTraceSettings{
+        .samplesPerPixel = samplesPerPixel,
+        .maxBounces = profile.pathTracer.maxBounces,
+        .russianRouletteStartBounce = profile.pathTracer.russianRouletteStartBounce,
+        .aoMaxDistance = profile.pathTracer.aoMaxDistance,
+        .lookaheadDistance = profile.pathTracer.lookaheadDistance,
+        .bumpStrength = material.bumpStrength,
+        .roughnessMin = material.roughnessMin,
+        .roughnessMax = material.roughnessMax,
+        .diffuseColour = material.diffuseColour,
+        .ior = material.ior,
+        .abbe = material.abbe,
+        .transmissionFactor = material.transmissionFactor,
+        .metallicFactor = material.metallicFactor,
+        .roughnessFactor = material.roughnessFactor,
+        .diffuseRoughness = material.diffuseRoughness,
+        .transmissionColor = material.transmissionColor,
+        .transmissionDepth = material.transmissionDepth,
+        .edgeTint = material.edgeTint,
+        .shadingModel = material.shadingModel,
+    };
 }
 
 }  // namespace pathtracer::scene
