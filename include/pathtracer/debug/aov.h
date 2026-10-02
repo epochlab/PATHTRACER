@@ -1,10 +1,10 @@
 #pragma once
 
-#include <span>
 #include <string_view>
-#include <vector>
 
 #include <glm/glm.hpp>
+
+#include "pathtracer/gfx/hdr_image.h"
 
 namespace pathtracer::debug {
 
@@ -69,7 +69,7 @@ enum class AovSource { PathTraced, GBuffer, BeautyFilter };
 
 [[nodiscard]] AovSource aovSource(AovId aov);
 
-// Channels the AOV means, not how it is stored: HdrImage is always 4 floats/texel, so this is what a packed consumer must allocate.
+// Channels the AOV carries: every producer allocates its lane at this count, so it is also that HdrImage's stride.
 [[nodiscard]] int aovChannels(AovId aov);
 
 // True where the AOV's value is proportional to scene radiance, so the display exposure is a gain on it rather than a distortion.
@@ -87,8 +87,8 @@ struct BipolarDisplay {
     glm::vec3 offset;
 };
 
-// Auto-ranged per lane over an interleaved RGBA buffer, because lanes of one AOV can be different quantities in incomparable units.
-[[nodiscard]] BipolarDisplay bipolarDisplay(std::span<const float> rgba, int channels);
+// Auto-ranged per channel of `image`, because channels of one AOV can be different quantities in incomparable units.
+[[nodiscard]] BipolarDisplay bipolarDisplay(const pathtracer::gfx::HdrImage& image);
 
 // What the display needs that an AOV's own texels do not carry: the pass count anchoring SNR's log window, the path-depth ceiling.
 struct AovDisplayContext {
@@ -98,12 +98,12 @@ struct AovDisplayContext {
 
 // Every display decision that has to read the values: a nonlinear pre-map where one applies, and the affine map for everything else.
 struct AovDisplay {
-    std::vector<float> rgba;  // the pre-mapped texels; empty where the source passes through, so the common path copies nothing
+    pathtracer::gfx::HdrImage mapped;  // the pre-mapped image; empty where the source passes through, so the common path copies nothing
     BipolarDisplay affine;
 };
 
 // One call per rebuilt pass, never per frame. The photographic exposure stays with the caller: it changes without a re-upload.
-[[nodiscard]] AovDisplay aovDisplay(AovId aov, std::span<const float> rgba, const AovDisplayContext& context);
+[[nodiscard]] AovDisplay aovDisplay(AovId aov, const pathtracer::gfx::HdrImage& image, const AovDisplayContext& context);
 
 // True where the display's gain is the photographic exposure: degree one in radiance, and not already auto-ranged by aovDisplay.
 [[nodiscard]] inline bool aovTakesDisplayExposure(AovId aov) {

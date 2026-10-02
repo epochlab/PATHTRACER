@@ -94,10 +94,7 @@ std::vector<Triangle> worldTrianglesOf(const std::vector<ShadingTriangle>& shadi
 }
 
 glm::vec3 texelAt(const pathtracer::gfx::HdrImage& image, int x, int y) {
-    const std::size_t idx = ((static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width)) +
-                              static_cast<std::size_t>(x)) *
-                             4;
-    return {image.rgba[idx], image.rgba[idx + 1], image.rgba[idx + 2]};
+    return image.rgb((static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width)) + static_cast<std::size_t>(x));
 }
 
 struct FieldCheck {

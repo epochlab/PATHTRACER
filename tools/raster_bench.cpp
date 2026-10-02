@@ -227,7 +227,7 @@ int main(int argc, char** argv) {
         const auto end = std::chrono::steady_clock::now();
         milliseconds.push_back(std::chrono::duration<double, std::milli>(end - start).count());
         // Reading one texel keeps the optimizer from treating the whole call as dead; the result is otherwise unused.
-        if (!std::isfinite(gbuffer.depth.rgba[0])) {
+        if (!std::isfinite(gbuffer.depth.texels[0])) {
             std::cerr << "raster_bench: non-finite depth at texel 0\n";
             return EXIT_FAILURE;
         }
@@ -256,7 +256,7 @@ int main(int argc, char** argv) {
                        {"seed", options->seed}},
             .samples = {{"frame_ms", milliseconds}},
             .work = {{"triangles_emitted", shadingTriangles.size()},
-                     {"crc32", pathtracer::debug::floatCrc32(gbuffer.depth.rgba)}},
+                     {"crc32", pathtracer::debug::floatCrc32(gbuffer.depth.texels)}},
         };
         if (!pathtracer::debug::appendBenchRecord(options->benchLogPath, record)) {
             return EXIT_FAILURE;

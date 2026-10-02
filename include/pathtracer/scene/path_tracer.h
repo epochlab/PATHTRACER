@@ -93,13 +93,13 @@ struct OverRangeStats {
     std::array<std::uint32_t, kOverRangeBinCount + 1> aboveBin{};
 };
 
-// One renderPathTraced() call's output, republished in full each pass. Per-sample quantities; single-channel fields broadcast to RGB.
+// One renderPathTraced() call's output, republished in full each pass. Per-sample quantities, each lane at its aovChannels count.
 struct PathTraceResult {
     pathtracer::gfx::HdrImage beauty;
     pathtracer::gfx::HdrImage bounceHeatmap;   // mean bounce depth at termination, across samples
     // Cosine-weighted obscurance (Zhukov 1998; Iones 2003), one bounded ray/sample. 1.0 = unoccluded, the OPPOSITE polarity to `shadow`.
     pathtracer::gfx::HdrImage ao;
-    // Fraction of the primary hit's env NEE samples occluded: 1.0 = fully shadowed, 0.0 = lit or background; converges to penumbra.
+    // Bounce-0 shadow: 1.0 on a surface unless the one NEE shadow ray was unoccluded, 0.0 on background; stays 1.0 with no NEE sample.
     pathtracer::gfx::HdrImage shadow;
 
     // These five plus the background sum to beauty per channel, bucketed by the bounce-0 lobe; transmission sticks to refraction.
@@ -121,7 +121,7 @@ struct PathTraceResult {
     int samples = 0;  // passes averaged in, stamped with generation so image and count publish as one snapshot
 };
 
-// All 10 images and the second-moment lane zeroed at width x height -- what renderPathTraced's `out` must be, allocated once.
+// All 10 images at their aovChannels counts and the second-moment lane, zeroed at width x height: renderPathTraced's `out`.
 [[nodiscard]] PathTraceResult makePathTraceResult(int width, int height);
 
 // Blocking multithreaded path trace: BSDF bounces, NEE with MIS, RR; a worker drops its tile when generation != requestedGeneration.

@@ -29,7 +29,7 @@ int pt_aov_count(void);
 const char* pt_aov_name(int aov);
 /* Case- and separator-insensitive: "bounce-count", "bounce_count" and "bouncecount" all resolve. -1 if unknown. */
 int pt_aov_id(const char* name);
-/* Channels the AOV carries, what pt_render writes per texel: 1 for depth or a filter, 2 for UV, 3 for radiance. Not HdrImage's 4. */
+/* Channels the AOV carries, what pt_render writes per texel: 1 for depth or a scalar filter, 2 for UV, 3 for radiance. */
 int pt_aov_channels(int aov);
 /* Non-zero if this AOV needs light transport, so a caller can tell which requests the `samples` field affects. */
 int pt_aov_needs_samples(int aov);

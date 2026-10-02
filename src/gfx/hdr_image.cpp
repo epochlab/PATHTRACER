@@ -48,6 +48,9 @@ inline constexpr ScalarType kScalarType = ScalarType::Float32;
 template <>
 inline constexpr ScalarType kScalarType<Half> = ScalarType::Float16;
 
+// The planes an image's channels map to, in order: an HdrImage or ImageTexture of n channels is the first n.
+constexpr std::array<const char*, 3> kRgbPlanes{"R", "G", "B"};
+
 template <typename T>
 struct ExrPixels {
     int width;
@@ -97,7 +100,7 @@ auto widenTexel(const std::vector<T>& texels, std::size_t idx) {
 glm::vec3 asVec3(float r) { return {r, 0.0F, 0.0F}; }
 glm::vec3 asVec3(const glm::vec3& rgb) { return rgb; }
 
-// Reads path's first `channels` of R,G,B,A interleaved as T. nullopt on I/O failure, an absent R/G/B, or a non-finite texel.
+// Reads path's first `channels` of R,G,B interleaved as T. nullopt on I/O failure, an absent R/G/B, or a non-finite texel.
 template <typename T>
 std::optional<ExrPixels<T>> readExrChannels(const std::string& path, int channels) {
     try {
@@ -123,13 +126,6 @@ std::optional<ExrPixels<T>> readExrChannels(const std::string& path, int channel
         const auto stride = static_cast<std::size_t>(channels);
         ExrPixels<T> image{width, height, {}};
         image.texels.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * stride, T(0));
-        // Missing-alpha source defaults to 1.0, matching RgbaInputFile's documented fill this loader previously relied on.
-        constexpr std::size_t kAlpha = 3;
-        if (stride > kAlpha) {
-            for (std::size_t i = kAlpha; i < image.texels.size(); i += stride) {
-                image.texels[i] = T(1);
-            }
-        }
 
         // Interleaved straight into T: a Float16 read turns an over-range source into Inf, caught by the check below.
         char* base = reinterpret_cast<char*>(image.texels.data()) -
@@ -138,15 +134,13 @@ std::optional<ExrPixels<T>> readExrChannels(const std::string& path, int channel
         const std::size_t xStride = stride * sizeof(T);
         const std::size_t yStride = xStride * static_cast<std::size_t>(width);
         Imf::FrameBuffer frameBuffer;
-        constexpr std::array<const char*, 4> kPlanes{"R", "G", "B", "A"};
         for (std::size_t c = 0; c < stride; ++c) {
-            if (file.header().channels().findChannel(kPlanes[c]) != nullptr) {
-                frameBuffer.insert(kPlanes[c], Imf::Slice(kExrPixelType<T>, base + (c * sizeof(T)), xStride, yStride));
-            } else if (c != kAlpha) {
-                // OpenEXR zero-fills an absent slice, so without this an RGB slot bound to a Y-only file would render black, silently.
-                std::cerr << "readExrChannels: " << path << " has no " << kPlanes[c] << " channel\n";
+            // OpenEXR zero-fills an absent slice, so without this an RGB slot bound to a Y-only file would render black, silently.
+            if (file.header().channels().findChannel(kRgbPlanes[c]) == nullptr) {
+                std::cerr << "readExrChannels: " << path << " has no " << kRgbPlanes[c] << " channel\n";
                 return std::nullopt;
             }
+            frameBuffer.insert(kRgbPlanes[c], Imf::Slice(kExrPixelType<T>, base + (c * sizeof(T)), xStride, yStride));
         }
         file.setFrameBuffer(frameBuffer);
         file.readPixels(dw.min.y, dw.max.y);
@@ -172,12 +166,41 @@ std::optional<ExrPixels<T>> readExrChannels(const std::string& path, int channel
 }  // namespace
 
 std::optional<HdrImage> loadExr(const std::string& path) {
-    constexpr int kRgbaChannels = 4;
-    std::optional<ExrPixels<float>> pixels = readExrChannels<float>(path, kRgbaChannels);
+    // The leading run of R, G, B the file holds is the channel count writeExr wrote, so a 1- or 2-channel AOV reads back as itself.
+    int channels = 0;
+    try {
+        const Imf::InputFile file(path.c_str());
+        while (channels < kRgbChannels && file.header().channels().findChannel(kRgbPlanes[channels]) != nullptr) {
+            ++channels;
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "loadExr: failed to load " << path << ": " << e.what() << '\n';
+        return std::nullopt;
+    }
+    if (channels == 0) {
+        std::cerr << "loadExr: " << path << " has no R channel\n";
+        return std::nullopt;
+    }
+    std::optional<ExrPixels<float>> pixels = readExrChannels<float>(path, channels);
     if (!pixels) {
         return std::nullopt;
     }
-    return HdrImage{pixels->width, pixels->height, std::move(pixels->texels)};
+    return HdrImage{pixels->width, pixels->height, channels, std::move(pixels->texels)};
+}
+
+HdrImage makeImage(int width, int height, int channels) {
+    return {width, height, channels,
+            std::vector<float>(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) *
+                                   static_cast<std::size_t>(channels),
+                               0.0F)};
+}
+
+glm::vec3 HdrImage::rgb(std::size_t pixel) const {
+    const float* texel = texels.data() + (pixel * static_cast<std::size_t>(channels));
+    if (channels == kScalarChannels) {
+        return glm::vec3(texel[0]);
+    }
+    return {texel[0], texel[1], channels == kRgbChannels ? texel[2] : 0.0F};
 }
 
 std::optional<ImageTexture> loadImageTexture(const std::string& path, ScalarType type, int channels) {
@@ -208,20 +231,17 @@ glm::vec3 ImageTexture::texel(int x, int y) const {
 bool writeExr(const std::string& path, const HdrImage& image) {
     try {
         Imf::Header header(image.width, image.height);
-        for (const char* channel : {"R", "G", "B", "A"}) {
-            header.channels().insert(channel, Imf::Channel(Imf::FLOAT));
-        }
-
         Imf::FrameBuffer frameBuffer;
         // const_cast because OpenEXR's OutputFile takes a mutable base pointer though it only reads through it.
 
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast) -- required by the OpenEXR API, see above.
-        auto* base = const_cast<float*>(image.rgba.data());
-        const std::size_t xStride = sizeof(float) * 4;
+        auto* base = const_cast<float*>(image.texels.data());
+        const auto channels = static_cast<std::size_t>(image.channels);
+        const std::size_t xStride = sizeof(float) * channels;
         const std::size_t yStride = xStride * static_cast<std::size_t>(image.width);
-        const std::array<const char*, 4> names = {"R", "G", "B", "A"};
-        for (std::size_t c = 0; c < names.size(); ++c) {
-            frameBuffer.insert(names[c],
+        for (std::size_t c = 0; c < channels; ++c) {
+            header.channels().insert(kRgbPlanes[c], Imf::Channel(Imf::FLOAT));
+            frameBuffer.insert(kRgbPlanes[c],
                                 Imf::Slice(Imf::FLOAT, reinterpret_cast<char*>(base + c), xStride, yStride));
         }
 

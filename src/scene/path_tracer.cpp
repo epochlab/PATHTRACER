@@ -9,6 +9,7 @@
 #include <optional>
 #include <vector>
 
+#include "pathtracer/debug/aov_routing.h"
 #include "pathtracer/scene/bsdf.h"
 #include "pathtracer/scene/gbuffer_shading.h"
 #include "pathtracer/scene/sampler.h"
@@ -426,13 +427,15 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
 }  // namespace
 
 PathTraceResult makePathTraceResult(int width, int height) {
-    // 10 images then the second-moment lane, in PathTraceResult's declaration order, which this positional init must match.
-    return {makeImage(width, height), makeImage(width, height), makeImage(width, height),
-            makeImage(width, height), makeImage(width, height), makeImage(width, height),
-            makeImage(width, height), makeImage(width, height), makeImage(width, height),
-            makeImage(width, height),
-            std::vector<float>(static_cast<std::size_t>(width) * static_cast<std::size_t>(height), 0.0F),
-            OverRangeStats{}};
+    PathTraceResult result;
+    for (int i = 0; i < static_cast<int>(pathtracer::debug::AovId::Count); ++i) {
+        const auto aov = static_cast<pathtracer::debug::AovId>(i);
+        if (const pathtracer::debug::PathTracedLane lane = pathtracer::debug::pathTracedLane(aov)) {
+            result.*lane = pathtracer::gfx::makeImage(width, height, pathtracer::debug::aovChannels(aov));
+        }
+    }
+    result.beautyLuminanceM2.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height), 0.0F);
+    return result;
 }
 
 void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
@@ -548,14 +551,14 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                 // Always positive: a film sample carries weight even where the lens formed no ray, and lands inside the 1.5px support.
                 const float invWeight = 1.0F / lanes[kSampleLanes];
                 writeTexel(out.beauty, x, y, glm::vec3(lanes[0], lanes[1], lanes[2]) * invWeight);
-                writeTexel(out.bounceHeatmap, x, y, glm::vec3(lanes[3] * invWeight));
-                writeTexel(out.shadow, x, y, glm::vec3(lanes[4] * invWeight));
+                writeTexel(out.bounceHeatmap, x, y, lanes[3] * invWeight);
+                writeTexel(out.shadow, x, y, lanes[4] * invWeight);
                 writeTexel(out.directDiffuse, x, y, glm::vec3(lanes[5], lanes[6], lanes[7]) * invWeight);
                 writeTexel(out.indirectDiffuse, x, y, glm::vec3(lanes[8], lanes[9], lanes[10]) * invWeight);
                 writeTexel(out.directSpecular, x, y, glm::vec3(lanes[11], lanes[12], lanes[13]) * invWeight);
                 writeTexel(out.indirectSpecular, x, y, glm::vec3(lanes[14], lanes[15], lanes[16]) * invWeight);
                 writeTexel(out.refraction, x, y, glm::vec3(lanes[17], lanes[18], lanes[19]) * invWeight);
-                writeTexel(out.ao, x, y, glm::vec3(lanes[20] * invWeight));
+                writeTexel(out.ao, x, y, lanes[20] * invWeight);
                 writeTexel(out.fresnel, x, y, glm::vec3(lanes[21], lanes[22], lanes[23]) * invWeight);
             }
         }

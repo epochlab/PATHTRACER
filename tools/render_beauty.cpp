@@ -227,10 +227,8 @@ void reportErrorSpectrum(const pathtracer::gfx::HdrImage& image, const pathtrace
     std::vector<double> luminanceError(pixels);
     double squaredSum = 0.0;
     for (std::size_t p = 0; p < pixels; ++p) {
-        const std::size_t i = p * 4;
-        const double e = (0.2126 * (image.rgba[i] - reference.rgba[i])) +
-                          (0.7152 * (image.rgba[i + 1] - reference.rgba[i + 1])) +
-                          (0.0722 * (image.rgba[i + 2] - reference.rgba[i + 2]));
+        const glm::vec3 delta = image.rgb(p) - reference.rgb(p);
+        const double e = (0.2126 * delta.r) + (0.7152 * delta.g) + (0.0722 * delta.b);
         luminanceError[p] = e;
         squaredSum += e * e;
     }
@@ -283,7 +281,7 @@ bool appendTimingRecord(const Options& options, int argc, char** argv, int width
         .samples = {milliseconds.empty() ? std::pair<std::string, std::vector<double>>{"raster_ms", {rasterMs}}
                                           : std::pair<std::string, std::vector<double>>{"pass_ms", milliseconds}},
         .work = {{"rays", {{"primary", rays.primary}, {"bounce", rays.bounce}, {"ao", rays.ao}, {"shadow", rays.shadow}}},
-                 {"crc32", pathtracer::debug::floatCrc32(accumulated.rgba)}},
+                 {"crc32", pathtracer::debug::floatCrc32(accumulated.texels)}},
     };
     // A Beauty filter runs once after the passes, so its wall clock is its own column rather than a pass sample.
     if (filterMs > 0.0) {
@@ -442,20 +440,20 @@ int main(int argc, char** argv) {
         const pathtracer::gfx::HdrImage second = accumulate(options.scrambleSeed, options.passes);
         std::size_t differing = 0;
         double worst = 0.0;
-        for (std::size_t i = 0; i < first.rgba.size(); ++i) {
-            if (first.rgba[i] != second.rgba[i]) {
+        for (std::size_t i = 0; i < first.texels.size(); ++i) {
+            if (first.texels[i] != second.texels[i]) {
                 ++differing;
-                worst = std::max(worst, std::fabs(static_cast<double>(first.rgba[i]) -
-                                                   static_cast<double>(second.rgba[i])));
+                worst = std::max(worst, std::fabs(static_cast<double>(first.texels[i]) -
+                                                   static_cast<double>(second.texels[i])));
             }
         }
         if (differing != 0) {
-            std::cerr << "render_beauty: FAILED determinism -- " << differing << " of " << first.rgba.size()
+            std::cerr << "render_beauty: FAILED determinism -- " << differing << " of " << first.texels.size()
                       << " floats differ between two runs at the same seed (worst " << worst
                       << "); the render depends on something that is not its inputs\n";
             return EXIT_FAILURE;
         }
-        std::cout << "render_beauty: determinism PASSED -- " << first.rgba.size()
+        std::cout << "render_beauty: determinism PASSED -- " << first.texels.size()
                   << " floats bit-identical across two runs at seed " << options.scrambleSeed << "\n";
     }
 
@@ -484,8 +482,8 @@ int main(int argc, char** argv) {
         std::size_t constantDisagreements = 0;
         for (std::size_t px = 0; px < pixels; ++px) {
             const auto luminance = [&](const pathtracer::gfx::HdrImage& image) {
-                return (0.2126 * image.rgba[(px * 4) + 0]) + (0.7152 * image.rgba[(px * 4) + 1]) +
-                       (0.0722 * image.rgba[(px * 4) + 2]);
+                const glm::vec3 rgb = image.rgb(px);
+                return (0.2126 * rgb.r) + (0.7152 * rgb.g) + (0.0722 * rgb.b);
             };
             tools::stats::Welford wa;
             tools::stats::Welford wb;
@@ -579,9 +577,10 @@ int main(int argc, char** argv) {
         if (!reference.has_value()) {
             return EXIT_FAILURE;
         }
-        if (reference->width != width || reference->height != height) {
-            std::cerr << "render_beauty: --compare-exr image is " << reference->width << "x"
-                      << reference->height << ", this render is " << width << "x" << height << "\n";
+        if (reference->width != width || reference->height != height || reference->channels != accumulated.channels) {
+            std::cerr << "render_beauty: --compare-exr image is " << reference->width << "x" << reference->height << "x"
+                      << reference->channels << ", this render is " << width << "x" << height << "x" << accumulated.channels
+                      << "\n";
             return EXIT_FAILURE;
         }
         // Absolute RMSE tracks the brightest pixels, relative MSE (Rousselle et al. 2011) dim ones equally; epsilon guards a black pixel.
@@ -589,12 +588,9 @@ int main(int argc, char** argv) {
         double squaredSum = 0.0;
         double relativeSum = 0.0;
         std::size_t counted = 0;
-        for (std::size_t i = 0; i < accumulated.rgba.size(); ++i) {
-            if (i % 4 == 3) {
-                continue;  // alpha carries no radiance
-            }
-            const double delta = static_cast<double>(accumulated.rgba[i]) - static_cast<double>(reference->rgba[i]);
-            const double ref = reference->rgba[i];
+        for (std::size_t i = 0; i < accumulated.texels.size(); ++i) {
+            const double delta = static_cast<double>(accumulated.texels[i]) - static_cast<double>(reference->texels[i]);
+            const double ref = reference->texels[i];
             squaredSum += delta * delta;
             relativeSum += (delta * delta) / ((ref * ref) + kRelativeEpsilon);
             ++counted;
@@ -611,19 +607,20 @@ int main(int argc, char** argv) {
     const bool isBeauty = options.aov == pathtracer::debug::AovId::Beauty;
     // The same display decision presentFrame makes, so a PNG and the viewer agree by construction rather than by two copies staying level.
     const pathtracer::debug::AovDisplay prepared = pathtracer::debug::aovDisplay(
-        options.aov, accumulated.rgba, {options.passes, renderer->baseSettings().maxBounces});
+        options.aov, accumulated, {options.passes, renderer->baseSettings().maxBounces});
     pathtracer::debug::BipolarDisplay display = prepared.affine;
     // The photographic exposure, which only the caller knows; aovDisplay leaves the gain at unity for every AOV that takes one.
     if (pathtracer::debug::aovTakesDisplayExposure(options.aov)) {
         display.gain = glm::vec3(std::pow(2.0F, options.exposureEv));
     }
-    // HdrImage carries RGBA; the shared encode takes packed RGB, so gather the three channels the display path reads.
-    const std::vector<float>& source = prepared.rgba.empty() ? accumulated.rgba : prepared.rgba;
+    // The shared encode takes packed RGB, so expand each texel exactly as the viewer's texture swizzle does.
+    const pathtracer::gfx::HdrImage& source = prepared.mapped.texels.empty() ? accumulated : prepared.mapped;
     std::vector<float> linearRgb(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3);
     for (std::size_t texel = 0; texel < linearRgb.size() / 3; ++texel) {
-        for (std::size_t channel = 0; channel < 3; ++channel) {
-            linearRgb[(texel * 3) + channel] = source[(texel * 4) + channel];
-        }
+        const glm::vec3 rgb = source.rgb(texel);
+        linearRgb[(texel * 3) + 0] = rgb.r;
+        linearRgb[(texel * 3) + 1] = rgb.g;
+        linearRgb[(texel * 3) + 2] = rgb.b;
     }
     const std::vector<unsigned char> encoded =
         pathtracer::gfx::encodeForDisplay(linearRgb, width, height, display.gain, isBeauty, display.offset);

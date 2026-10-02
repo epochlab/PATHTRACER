@@ -206,12 +206,11 @@ bool writeInc(const std::string& path, const std::array<std::uint16_t, kPixels>&
 
 // Greyscale dump for looking at. The radial spectrum in sampler_validate is the gate; this catches streaks and tile seams it hides.
 bool writePreview(const std::string& path, const std::array<std::uint16_t, kPixels>& ranks) {
-    pathtracer::gfx::HdrImage image{kSize, kSize, std::vector<float>(static_cast<std::size_t>(kPixels) * 4, 1.0F)};
+    // Three replicated channels, not one: a lone R plane reads as red in a viewer, and this file exists only to be looked at.
+    pathtracer::gfx::HdrImage image = pathtracer::gfx::makeImage(kSize, kSize, pathtracer::gfx::kRgbChannels);
     for (int i = 0; i < kPixels; ++i) {
         const auto value = static_cast<float>((ranks[static_cast<std::size_t>(i)] + 0.5) / kPixels);
-        for (int c = 0; c < 3; ++c) {
-            image.rgba[(static_cast<std::size_t>(i) * 4) + static_cast<std::size_t>(c)] = value;
-        }
+        writeTexel(image, i % kSize, i / kSize, glm::vec3(value));
     }
     return pathtracer::gfx::writeExr(path, image);
 }

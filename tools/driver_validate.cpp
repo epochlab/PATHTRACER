@@ -212,10 +212,10 @@ OracleMean oracleBatchMean(DriverFixture& fixture, const Camera& camera, int pas
     constexpr double kGamma4 = (4.0 * kUnitRoundoff) / (1.0 - (4.0 * kUnitRoundoff));
     const pathtracer::scene::LightSet lights(&fixture.environment, 0.0F, 1.0F, fixture.scene.quadLights);
     PathTraceResult pass = pathtracer::scene::makePathTraceResult(kImageSize, kImageSize);
-    const std::size_t floats = static_cast<std::size_t>(kImageSize) * kImageSize * 4;
     std::array<std::vector<double>, kLanes.size()> sum;
     OracleMean oracle;
     for (std::size_t lane = 0; lane < kLanes.size(); ++lane) {
+        const std::size_t floats = (pass.*kLanes[lane].image).texels.size();
         sum[lane].assign(floats, 0.0);
         oracle.tolerance[lane].assign(floats, 0.0);
     }
@@ -231,8 +231,8 @@ OracleMean oracleBatchMean(DriverFixture& fixture, const Camera& camera, int pas
                                          pass);
         const double k = p + 1;
         for (std::size_t lane = 0; lane < kLanes.size(); ++lane) {
-            const std::vector<float>& x = (pass.*kLanes[lane].image).rgba;
-            for (std::size_t i = 0; i < floats; ++i) {
+            const std::vector<float>& x = (pass.*kLanes[lane].image).texels;
+            for (std::size_t i = 0; i < x.size(); ++i) {
                 const double previousMean = p == 0 ? 0.0 : sum[lane][i] / (k - 1.0);
                 sum[lane][i] += static_cast<double>(x[i]);
                 // E_1 = 0: the driver publishes its first pass unaltered.
@@ -247,8 +247,8 @@ OracleMean oracleBatchMean(DriverFixture& fixture, const Camera& camera, int pas
         }
     }
     for (std::size_t lane = 0; lane < kLanes.size(); ++lane) {
-        oracle.mean[lane].resize(floats);
-        for (std::size_t i = 0; i < floats; ++i) {
+        oracle.mean[lane].resize(sum[lane].size());
+        for (std::size_t i = 0; i < sum[lane].size(); ++i) {
             const double mean = sum[lane][i] / static_cast<double>(passes);
             oracle.mean[lane][i] = static_cast<float>(mean);
             // Plus the oracle's own single rounding of the exact mean to float.
@@ -333,7 +333,7 @@ PT_CHECK(running_mean_matches_batch_mean, Slow, Exact) {
     double worstRatio = 0.0;
     const char* worstLane = kLanes[0].name;
     for (std::size_t lane = 0; lane < kLanes.size(); ++lane) {
-        const std::vector<float>& running = ((*published).*kLanes[lane].image).rgba;
+        const std::vector<float>& running = ((*published).*kLanes[lane].image).texels;
         for (std::size_t i = 0; i < running.size(); ++i) {
             const double error = std::fabs(static_cast<double>(running[i]) - expected.mean[lane][i]);
             const double tolerance = expected.tolerance[lane][i];
@@ -374,7 +374,7 @@ PT_CHECK(first_pass_is_bit_identical_to_oracle, Slow, Exact) {
     std::size_t differing = 0;
     std::size_t floats = 0;
     for (std::size_t lane = 0; lane < kLanes.size(); ++lane) {
-        const std::vector<float>& image = ((*published).*kLanes[lane].image).rgba;
+        const std::vector<float>& image = ((*published).*kLanes[lane].image).texels;
         for (std::size_t i = 0; i < image.size(); ++i) {
             differing += image[i] != expected.mean[lane][i] ? 1 : 0;
         }
@@ -533,8 +533,8 @@ PT_CHECK(suspension_preserves_the_accumulation_exactly, Slow, Exact) {
     std::size_t differing = 0;
     const char* differingLane = "";
     for (const Lane& lane : kLanes) {
-        const std::vector<float>& a = (uninterrupted.get()->*lane.image).rgba;
-        const std::vector<float>& b = (continued.get()->*lane.image).rgba;
+        const std::vector<float>& a = (uninterrupted.get()->*lane.image).texels;
+        const std::vector<float>& b = (continued.get()->*lane.image).texels;
         for (std::size_t i = 0; i < a.size(); ++i) {
             if (a[i] != b[i]) {
                 ++differing;
@@ -563,7 +563,7 @@ PT_CHECK(published_results_are_not_overwritten, Slow, Exact) {
         PT_EXPECT(ctx, false, "driver published nothing");
         return;
     }
-    const std::vector<float> snapshot = pinned->beauty.rgba;
+    const std::vector<float> snapshot = pinned->beauty.texels;
     const std::shared_ptr<const PathTraceResult> later =
         waitForPublished(*fixture->driver, generation, pinned->samples + 6);
     if (later == nullptr) {
@@ -572,7 +572,7 @@ PT_CHECK(published_results_are_not_overwritten, Slow, Exact) {
     }
     std::size_t moved = 0;
     for (std::size_t i = 0; i < snapshot.size(); ++i) {
-        moved += pinned->beauty.rgba[i] != snapshot[i] ? 1 : 0;
+        moved += pinned->beauty.texels[i] != snapshot[i] ? 1 : 0;
     }
     char detail[192];
     std::snprintf(detail, sizeof(detail), "%zu of %zu floats in a pinned result changed while %d further passes ran",
@@ -618,10 +618,8 @@ PT_CHECK(over_range_stats_match_serial_scan, Slow, Exact) {
 
     float serialPeak = 0.0F;
     for (std::size_t t = 0; t < texels; ++t) {
-        const float r = published->beauty.rgba[(t * 4) + 0];
-        const float g = published->beauty.rgba[(t * 4) + 1];
-        const float b = published->beauty.rgba[(t * 4) + 2];
-        serialPeak = std::max(serialPeak, std::max(r, std::max(g, b)));
+        const glm::vec3 rgb = published->beauty.rgb(t);
+        serialPeak = std::max(serialPeak, std::max(rgb.r, std::max(rgb.g, rgb.b)));
     }
     char peakDetail[176];
     std::snprintf(peakDetail, sizeof(peakDetail), "published rawPeak %.9g vs single-threaded scan %.9g",
@@ -698,7 +696,7 @@ PT_CHECK(render_is_invariant_to_tile_size, Slow, Exact) {
                                          kTiledImageSize, kTiledImageSize, /*showSky=*/true, makeSettings(),
                                          fixture->scene.perInstanceSettings, /*scrambleSeed=*/1U, /*sampleBase=*/0,
                                          /*sampleCount=*/1, generation, 1U, pool, stats, out);
-        return out.beauty.rgba;
+        return out.beauty.texels;
     };
     const std::vector<float> coarseImage = renderWith(kFewThreads);
     const std::vector<float> fineImage = renderWith(kManyThreads);
@@ -734,7 +732,7 @@ PT_CHECK(render_is_invariant_to_thread_count, Slow, Exact) {
                                          kImageSize, kImageSize, /*showSky=*/true, makeSettings(),
                                          fixture->scene.perInstanceSettings, /*scrambleSeed=*/1U, /*sampleBase=*/0,
                                          /*sampleCount=*/1, generation, 1U, pool, stats, out);
-        return out.beauty.rgba;
+        return out.beauty.texels;
     };
 
     const std::vector<float> single = renderWith(1);
@@ -777,7 +775,7 @@ PT_CHECK(running_m2_matches_batch_variance, Slow, Exact) {
     constexpr double kGamma3 = (3.0 * kUnitRoundoff) / (1.0 - (3.0 * kUnitRoundoff));
     constexpr double kGamma4 = (4.0 * kUnitRoundoff) / (1.0 - (4.0 * kUnitRoundoff));
     const auto pixels = static_cast<std::size_t>(kImageSize) * kImageSize;
-    const std::size_t floats = pixels * 4;
+    const std::size_t floats = pixels * pathtracer::gfx::kRgbChannels;
     const glm::dvec3 weights(pathtracer::debug::kRec709LuminanceWeights);
 
     // The same passes the driver ran, synchronously, with every per-texel luminance kept in double for an exact two-pass variance.
@@ -802,9 +800,9 @@ PT_CHECK(running_m2_matches_batch_variance, Slow, Exact) {
                                          /*sampleCount=*/kPasses, oracleGeneration, scrambleSeed, fixture->pool,
                                          stats, pass);
         const double k = p + 1;
-        const std::vector<float>& drawn = pass.beauty.rgba;
+        const std::vector<float>& drawn = pass.beauty.texels;
         for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
-            const std::size_t texel = pixel * 4;
+            const std::size_t texel = pixel * pathtracer::gfx::kRgbChannels;
             glm::dvec3 before(0.0);
             glm::dvec3 sample(0.0);
             double beforeError = 0.0;

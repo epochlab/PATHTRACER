@@ -305,7 +305,7 @@ std::optional<AppResources> initializeApp(const pathtracer::config::SceneConfig&
         filmBackPresetNames.push_back(preset.name.c_str());
     }
 
-    // ev100() is logged, not consumed: relativeExposureEv() derives the display-stage multiplier, not this log line.
+    // ev100() is not read here: relativeExposureEv() derives the display-stage multiplier from the profile's aperture, shutter and ISO.
     pathtracer::scene::DebugCameraController debugCamera(
         profileConfig.camera.position, profileConfig.camera.yawDegrees,
         profileConfig.camera.pitchDegrees, filmBackPresetIt->filmBack,
@@ -584,14 +584,6 @@ pathtracer::scene::Camera updateCamera(const pathtracer::platform::Window& windo
     return app.debugCamera.snapshot();
 }
 
-// Direct texel read, no bilinear -- gbuffer AOVs are per-pixel snapshots.
-glm::vec3 sampleTexel(const pathtracer::gfx::HdrImage& image, int x, int y) {
-    const std::size_t idx = ((static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width)) +
-                              static_cast<std::size_t>(x)) *
-                             4;
-    return {image.rgba[idx + 0], image.rgba[idx + 1], image.rgba[idx + 2]};
-}
-
 // Cached CPU OCIO processors for the Beauty probe, built once: getProcessor parses the builtin config, as the GPU shaders do at startup.
 const OCIO::ConstCPUProcessorRcPtr& ocioCpuProcessor(pathtracer::gfx::OcioDisplayTransform::Lut lut) {
     static const OCIO::ConstConfigRcPtr config =
@@ -745,7 +737,9 @@ pathtracer::debug::PixelProbeSample samplePixelProbe(
     const double v = (imageRect.height - 1 - rectY) / static_cast<double>(imageRect.height);
     const int imgX = std::min(source.image->width - 1, static_cast<int>(u * source.image->width));
     const int imgY = std::min(source.image->height - 1, static_cast<int>(v * source.image->height));
-    const glm::vec3 texel = sampleTexel(*source.image, imgX, imgY);
+    // Direct texel read, no bilinear: G-buffer AOVs are per-pixel snapshots, expanded as the display texture's swizzle does.
+    const glm::vec3 texel = source.image->rgb((static_cast<std::size_t>(imgY) * static_cast<std::size_t>(source.image->width)) +
+                                              static_cast<std::size_t>(imgX));
     const glm::vec3 color =
         aovId == pathtracer::debug::AovId::Beauty ? applyBeautyDisplayTransform(texel, app) : texel;
     return {true, glm::vec4(color, 1.0F)};
@@ -764,17 +758,17 @@ void ensurePathTraceDisplayTexture(AppResources& app, const std::shared_ptr<cons
     app.stages.uploaded = true;
     // Every display decision that has to read the texels, made once here rather than per frame; the exposure stays in presentFrame.
     app.pathTraceDisplay = pathtracer::debug::aovDisplay(
-        static_cast<pathtracer::debug::AovId>(app.aov), image.rgba,
+        static_cast<pathtracer::debug::AovId>(app.aov), image,
         {samples, app.pathTraceSettings.maxBounces});
     // A nonlinear pre-map cannot ride the shader's two vec3 uniforms, so where one applies the texture carries its output instead.
-    const float* texels =
-        app.pathTraceDisplay.rgba.empty() ? image.rgba.data() : app.pathTraceDisplay.rgba.data();
-    // Uploaded straight from the HdrImage: the vertex shader resolves row order, and upload reallocates only on a resolution change.
+    const pathtracer::gfx::HdrImage& shown =
+        app.pathTraceDisplay.mapped.texels.empty() ? image : app.pathTraceDisplay.mapped;
+    // Uploaded straight from the HdrImage: the vertex shader resolves row order, and upload reallocates only on a shape change.
     if (app.pathTraceDisplayTexture.has_value()) {
-        app.pathTraceDisplayTexture->upload(image.width, image.height, texels);
+        app.pathTraceDisplayTexture->upload(shown.width, shown.height, shown.channels, shown.texels.data());
     } else {
         app.pathTraceDisplayTexture = pathtracer::gfx::Texture::createFromFloatPixels(
-            image.width, image.height, texels, app.displayFormat);
+            shown.width, shown.height, shown.channels, shown.texels.data(), app.displayFormat);
     }
     app.pathTraceDisplayedImage = &image;
     app.pathTraceDisplayedOwner = owner;
@@ -1212,7 +1206,7 @@ bool finishBench(const AppResources& app, const BenchCapture& bench) {
         .config = benchConfig(app, bench),
         .samples = benchSamples(bench),
         .work = {{"rays", {{"primary", rays.primary}, {"bounce", rays.bounce}, {"ao", rays.ao}, {"shadow", rays.shadow}}},
-                 {"crc32", pathtracer::debug::floatCrc32(app.pathTraceDriver->latestResult()->beauty.rgba)}},
+                 {"crc32", pathtracer::debug::floatCrc32(app.pathTraceDriver->latestResult()->beauty.texels)}},
     };
     return pathtracer::debug::appendBenchRecord(bench.logPath, record);
 }

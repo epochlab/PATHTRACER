@@ -1,9 +1,9 @@
 #include "pathtracer/scene/path_trace_driver.h"
 
 #include "pathtracer/debug/aov_filters.h"
+#include "pathtracer/debug/aov_routing.h"
 
 #include <algorithm>
-#include <array>
 #include <chrono>
 #include <cstddef>
 #include <thread>
@@ -20,39 +20,31 @@ constexpr std::chrono::milliseconds kBufferRetryInterval{5};
 // Incremental running mean computed in the fresh pass buffer, so the published set is only read and publish is a pointer swap.
 void accumulateMean(PathTraceResult& sample, const PathTraceResult& previousMean, int n,
                      ThreadPool& threadPool) {
-    // Index-aligned with `sources` below; no compile-time guard here, so a missing entry silently publishes an un-averaged lane.
-    const std::array<pathtracer::gfx::HdrImage*, 10> destinations{
-        &sample.beauty,          &sample.bounceHeatmap,    &sample.ao,
-        &sample.shadow,          &sample.directDiffuse,    &sample.indirectDiffuse,
-        &sample.directSpecular,  &sample.indirectSpecular, &sample.refraction,
-        &sample.fresnel};
-    const std::array<const pathtracer::gfx::HdrImage*, 10> sources{
-        &previousMean.beauty,          &previousMean.bounceHeatmap,
-        &previousMean.ao,              &previousMean.shadow,
-        &previousMean.directDiffuse,   &previousMean.indirectDiffuse,
-        &previousMean.directSpecular,  &previousMean.indirectSpecular,
-        &previousMean.refraction,      &previousMean.fresnel};
     const float invN = 1.0F / static_cast<float>(n);
-    const auto rowFloats = static_cast<std::size_t>(sample.beauty.width) * 4;
+    const std::span<const pathtracer::debug::PathTracedLane> lanes = pathtracer::debug::pathTracedLanes();
+    const auto width = static_cast<std::size_t>(sample.beauty.width);
+    const auto beautyChannels = static_cast<std::size_t>(sample.beauty.channels);
     const glm::vec3 weights = pathtracer::debug::kRec709LuminanceWeights;
     threadPool.parallelFor(sample.beauty.height, [&](int y) {
-        const std::size_t begin = static_cast<std::size_t>(y) * rowFloats;
+        const std::size_t rowPixel = static_cast<std::size_t>(y) * width;
         // Before the loop below overwrites it: `beauty` still holds this pass's own radiance and its source the mean of the rest.
-        const float* passBeauty = sample.beauty.rgba.data();
-        const float* meanBeauty = previousMean.beauty.rgba.data();
+        const float* passBeauty = sample.beauty.texels.data();
+        const float* meanBeauty = previousMean.beauty.texels.data();
         const float* previousM2 = previousMean.beautyLuminanceM2.data();
         float* secondMoment = sample.beautyLuminanceM2.data();
-        for (std::size_t i = begin; i < begin + rowFloats; i += 4) {
+        for (std::size_t pixel = rowPixel; pixel < rowPixel + width; ++pixel) {
+            const std::size_t i = pixel * beautyChannels;
             const float drawn = (passBeauty[i] * weights.r) + (passBeauty[i + 1] * weights.g) + (passBeauty[i + 2] * weights.b);
             const float before = (meanBeauty[i] * weights.r) + (meanBeauty[i + 1] * weights.g) + (meanBeauty[i + 2] * weights.b);
             // Welford 1962 in West 1979's (x - m_prev)(x - m_new) form, the same recurrence and the same invN the RGB lanes use.
             const float after = before + ((drawn - before) * invN);
-            secondMoment[i / 4] = previousM2[i / 4] + ((drawn - before) * (drawn - after));
+            secondMoment[pixel] = previousM2[pixel] + ((drawn - before) * (drawn - after));
         }
-        for (std::size_t image = 0; image < destinations.size(); ++image) {
-            float* destination = destinations[image]->rgba.data();
-            const float* source = sources[image]->rgba.data();
-            for (std::size_t i = begin; i < begin + rowFloats; ++i) {
+        for (const pathtracer::debug::PathTracedLane lane : lanes) {
+            const auto channels = static_cast<std::size_t>((sample.*lane).channels);
+            float* destination = (sample.*lane).texels.data();
+            const float* source = (previousMean.*lane).texels.data();
+            for (std::size_t i = rowPixel * channels; i < (rowPixel + width) * channels; ++i) {
                 destination[i] = source[i] + ((destination[i] - source[i]) * invN);
             }
         }
@@ -66,7 +58,8 @@ void reduceOverRange(PathTraceResult& pass, std::vector<OverRangeHistogram>& his
     const int chunkCount =
         std::max(1, std::min(beauty.height, static_cast<int>(threadPool.threadCount())));
     const int chunkRows = (beauty.height + chunkCount - 1) / chunkCount;
-    const auto rowFloats = static_cast<std::size_t>(beauty.width) * 4;
+    const auto channels = static_cast<std::size_t>(beauty.channels);
+    const auto rowFloats = static_cast<std::size_t>(beauty.width) * channels;
     histograms.assign(static_cast<std::size_t>(chunkCount), OverRangeHistogram{});
     peaks.assign(static_cast<std::size_t>(chunkCount), 0.0F);
 
@@ -75,11 +68,11 @@ void reduceOverRange(PathTraceResult& pass, std::vector<OverRangeHistogram>& his
         const std::size_t begin = static_cast<std::size_t>(chunk * chunkRows) * rowFloats;
         const std::size_t end =
             static_cast<std::size_t>(std::min((chunk + 1) * chunkRows, beauty.height)) * rowFloats;
-        const float* rgba = beauty.rgba.data();
+        const float* rgb = beauty.texels.data();
         // Peak kept in a register and stored once: `peaks` is the only array adjacent chunks could false-share.
         float peak = 0.0F;
-        for (std::size_t i = begin; i < end; i += 4) {
-            const float maxChannel = std::max({rgba[i], rgba[i + 1], rgba[i + 2]});
+        for (std::size_t i = begin; i < end; i += channels) {
+            const float maxChannel = std::max({rgb[i], rgb[i + 1], rgb[i + 2]});
             ++bins[static_cast<std::size_t>(overRangeBin(maxChannel))];
             peak = std::max(peak, maxChannel);
         }

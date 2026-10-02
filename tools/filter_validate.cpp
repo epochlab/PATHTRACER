@@ -38,14 +38,10 @@ constexpr float kFloatEpsilon = 0x1p-23F;  // distance from 1 to the next float,
 
 // A grey field, so the Rec.709 reduction returns the plane value scaled by the weight sum rather than mixing three different fields.
 [[nodiscard]] HdrImage greyImage(int width, int height, const std::vector<float>& plane) {
-    HdrImage image{width, height,
-                   std::vector<float>(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4, 0.0F)};
+    HdrImage image = pathtracer::gfx::makeImage(width, height, pathtracer::gfx::kRgbChannels);
     for (std::size_t pixel = 0; pixel < plane.size(); ++pixel) {
-        const std::size_t texel = pixel * 4;
-        image.rgba[texel] = plane[pixel];
-        image.rgba[texel + 1] = plane[pixel];
-        image.rgba[texel + 2] = plane[pixel];
-        image.rgba[texel + 3] = 1.0F;
+        std::fill_n(image.texels.begin() + static_cast<std::ptrdiff_t>(pixel * pathtracer::gfx::kRgbChannels),
+                    pathtracer::gfx::kRgbChannels, plane[pixel]);
     }
     return image;
 }
@@ -77,8 +73,9 @@ constexpr float kFloatEpsilon = 0x1p-23F;  // distance from 1 to the next float,
 }
 
 [[nodiscard]] float texelAt(const HdrImage& image, int x, int y, int channel) {
-    return image.rgba[(((static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width)) +
-                        static_cast<std::size_t>(x)) * 4) + static_cast<std::size_t>(channel)];
+    return image.texels[(((static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width)) +
+                          static_cast<std::size_t>(x)) * static_cast<std::size_t>(image.channels)) +
+                        static_cast<std::size_t>(channel)];
 }
 
 }  // namespace
@@ -245,8 +242,8 @@ PT_CHECK(dog_is_empty_exactly_below_its_coarse_support, Fast, Exact) {
         plane[(static_cast<std::size_t>(height / 2) * kWidth) + (kWidth / 2)] = 1.0F;
         const HdrImage dog = pathtracer::debug::dogAov(greyImage(kWidth, height, plane), pool);
         float peak = 0.0F;
-        for (std::size_t texel = 0; texel < dog.rgba.size(); texel += 4) {
-            peak = std::max(peak, std::fabs(dog.rgba[texel]));
+        for (const float response : dog.texels) {
+            peak = std::max(peak, std::fabs(response));
         }
         return peak;
     };
@@ -344,18 +341,18 @@ PT_CHECK(colour_opponent_is_invariant_to_exposure, Fast, Exact) {
     ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
     constexpr int kWidth = 48;
     constexpr int kHeight = 32;
-    HdrImage image{kWidth, kHeight, std::vector<float>(static_cast<std::size_t>(kWidth) * kHeight * 4, 0.0F)};
+    HdrImage image = pathtracer::gfx::makeImage(kWidth, kHeight, pathtracer::gfx::kRgbChannels);
     HdrImage scaled = image;
     for (std::size_t pixel = 0; pixel < static_cast<std::size_t>(kWidth) * kHeight; ++pixel) {
-        for (int channel = 0; channel < 3; ++channel) {
+        for (int channel = 0; channel < pathtracer::gfx::kRgbChannels; ++channel) {
             const float value = 0.125F + (0.0625F * static_cast<float>((pixel * 7 + channel * 5) % 13));
-            image.rgba[(pixel * 4) + static_cast<std::size_t>(channel)] = value;
-            scaled.rgba[(pixel * 4) + static_cast<std::size_t>(channel)] = value * 256.0F;
+            image.texels[(pixel * pathtracer::gfx::kRgbChannels) + static_cast<std::size_t>(channel)] = value;
+            scaled.texels[(pixel * pathtracer::gfx::kRgbChannels) + static_cast<std::size_t>(channel)] = value * 256.0F;
         }
     }
     const HdrImage base = pathtracer::debug::colourOpponentAov(image, pool);
     const HdrImage gained = pathtracer::debug::colourOpponentAov(scaled, pool);
-    PT_EXPECT(ctx, base.rgba == gained.rgba, "a 256x gain changed the opponent response");
+    PT_EXPECT(ctx, base.texels == gained.texels, "a 256x gain changed the opponent response");
 }
 
 // The two axes are the L-versus-M and S-versus-(L+M) cardinal directions, so each Rec.709 primary must sit on its own side of white.
@@ -363,7 +360,7 @@ PT_CHECK(colour_opponent_separates_the_rec709_primaries, Fast, Exact) {
     ctx.plan(3);
     ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
     const auto axis = [&pool](const glm::vec3& rgb, int channel) {
-        HdrImage image{1, 1, {rgb.r, rgb.g, rgb.b, 1.0F}};
+        const HdrImage image{1, 1, pathtracer::gfx::kRgbChannels, {rgb.r, rgb.g, rgb.b}};
         return texelAt(pathtracer::debug::colourOpponentAov(image, pool), 0, 0, channel);
     };
     const float red = axis({1.0F, 0.0F, 0.0F}, 0);
@@ -441,16 +438,8 @@ PT_CHECK(snr_is_zero_where_the_ratio_is_undefined, Fast, Exact) {
     const HdrImage beauty = greyImage(kWidth, kHeight, std::vector<float>(kPixels, 0.75F));
     const std::vector<float> secondMoment(kPixels, 0.125F);
     const std::vector<float> converged(kPixels, 0.0F);
-    // Colour only: alpha is 1 by the broadcast convention, so admitting it here would let an all-ones response pass as zero.
     const auto allZero = [](const HdrImage& image) {
-        for (std::size_t pixel = 0; pixel < image.rgba.size() / 4; ++pixel) {
-            for (int channel = 0; channel < 3; ++channel) {
-                if (image.rgba[(pixel * 4) + static_cast<std::size_t>(channel)] != 0.0F) {
-                    return false;
-                }
-            }
-        }
-        return true;
+        return std::all_of(image.texels.begin(), image.texels.end(), [](float value) { return value == 0.0F; });
     };
     PT_EXPECT(ctx, allZero(pathtracer::debug::snrAov(beauty, nullptr, 64, pool)),
                   "an absent second moment did not read zero");
