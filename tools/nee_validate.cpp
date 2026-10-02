@@ -13,6 +13,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/epsilon.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
 #include "pathtracer/gfx/hdr_image.h"
 #include "check.h"
@@ -70,6 +71,7 @@ PT_CHECK(environment_pdf_consistency, Fast, Exact) {
     constexpr float kTolerance = 1e-3F;
     // Non-zero rotation: sampling rotates by +angle and querying by -angle, so a sign slip cancels at 0 and shows only here.
     constexpr float kRotation = 0.7F;
+    const glm::mat3 rotation(glm::rotate(glm::mat4(1.0F), kRotation, glm::vec3(0.0F, 1.0F, 0.0F)));
     constexpr std::array<pathtracer::gfx::ScalarType, 2> kTypes = {pathtracer::gfx::ScalarType::Float32,
                                                                pathtracer::gfx::ScalarType::Float16};
     ctx.plan(static_cast<int>(kTypes.size()));
@@ -81,8 +83,8 @@ PT_CHECK(environment_pdf_consistency, Fast, Exact) {
         float worstRelative = 0.0F;
         for (int i = 0; i < kSampleCount; ++i) {
             const EnvironmentMap::EnvSample sample =
-                env.importanceSampleDirection(glm::vec2(unit(rng), unit(rng)), pathtracer::scene::YRotation::of(kRotation));
-            const float queried = env.pdf(sample.direction, pathtracer::scene::YRotation::of(kRotation));
+                env.importanceSampleDirection(glm::vec2(unit(rng), unit(rng)), rotation);
+            const float queried = env.pdf(sample.direction, rotation);
             const float relative = std::fabs(queried - sample.pdf) / std::max(sample.pdf, 1e-6F);
             if (relative > worstRelative) {
                 worstRelative = relative;

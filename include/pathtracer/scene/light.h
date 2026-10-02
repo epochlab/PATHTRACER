@@ -76,7 +76,7 @@ public:
 
 private:
     const EnvironmentMap* environment_;
-    YRotation envRotation_;  // resolved once per LightSet, i.e. once per pass, rather than per environment query
+    glm::mat3 envRotation_;  // map to world about +Y, built once per LightSet, i.e. once per pass, rather than per environment query
     float envExposure_;
     const std::vector<QuadLight>& quads_;
 };
