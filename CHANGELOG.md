@@ -3,6 +3,59 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Function size: every first-party function inside the 60-line limit, and glm for the shading frame and environment rotation
+
+clang-tidy's `readability-function-size` (60 lines, `.clang-tidy`) flagged 14 functions in `src/`. All 14 are now inside it, plus
+`buildSphericalRectangle` and `readExrChannels`, which sat at the edge. `tracePath` and `renderPathTraced` stay whole for the GPU
+port and are the only two left. Every split moves whole statements, so no expression is re-associated, and output is unchanged
+apart from the environment rotation below. Evidence is in `results/function_size`.
+
+- refactor: `ShadingFrame` is `glm::mat3`, its columns tangent, bitangent and normal. `frame * v` is local to world and
+  `v * frame`, the transpose, is world to local. glm 1.0.3 evaluates both in the operand order `toWorld`/`toLocal` used, so every
+  AOV is bit-identical
+- refactor: the environment's Y rotation is one `glm::mat3` from `glm::rotate`, built once per `LightSet`. The inverse is the
+  row-vector product, its exact transpose. `YRotation` and `rotateAboutY` are removed
+- refactor: `computeLobeProbabilities` splits into `conductorAtWo`, `coatTerms`, `selectOpaqueLobes` and
+  `selectTransmissiveLobes`. `sampleBsdf` splits into `weighSample` and one function per strategy, with the sampler draw order
+  unchanged. `buildSphericalRectangle` splits into `sphericalRectangleFrame` and `sphericalRectangleAngles`
+- refactor: `loadProfileConfig` reads each block through its own parser, then runs `validCamera`/`validRender`/`validPathTracer`/
+  `validCounts`. Read and check order are unchanged, so every diagnostic is too. `readExrChannels` moves out `bindExrChannels` and
+  `allFinite`
+- refactor: `rootTransformOf` and `baseSettingsOf(profile, material, samplesPerPixel)` move to `material_binding`, replacing
+  `initializeApp`'s copies
+  - `HeadlessRenderer::open` loads its files through `loadSceneInputs`
+  - `render` validates, then accumulates, rasterizes and filters in private members
+  - `pt_render` decodes through `decodeRequest`
+- refactor: `driverLoop` traces through `tracePass` and folds, publishes and records through `finishPass`. The active request is
+  dereferenced once, under one NOLINT. `drawStageRows` writes each left pane through `appendStageCell`/`appendBurstCell`
+- refactor: main.cpp
+  - the immutable scene is one `AppScene` member, built by `loadAppScene`, as `HeadlessRenderer` holds it
+  - `pathTraceSettings` becomes `scene.baseSettings`, since nothing writes it after startup
+  - `totalPoints` is derived where it is shown
+  - session-constant `AppResources` fields take in-class initializers (C++ Core Guidelines C.48)
+  - `initializeApp`, `updateHud`, `renderFrame` and `main` delegate to `loadFilmBackCatalogue`, `makeDebugCamera`,
+    `printStartupSpec`, `CameraEdits`, `beginFrame`, `validStartup`, `configureBench` and `runApp`
+- behaviour: a startup failure now names either the scene load or OCIO, not one combined line. OCIO is created after the scene
+  loads, and the GL presentation objects are constructed with `AppResources`, after the BVH build
+- image: bit-identical everywhere at environment rotation 0, which is the headless, Python and viewer default
+  - 128/128 raw AOV dumps, all 32 AOVs on cornell and macbeth with the environment light off and on, plus a moved previous camera
+  - render_beauty PNG and EXR byte-identical; the viewer's `-bench` converged-image CRC is unchanged (3814828525)
+  - the first dashboard redraw from fixed inputs is byte-identical
+  - profile diagnostics are identical over 1129 malformed profiles (every single fault and every pair); `pt_render` errors are
+    identical over 14 malformed requests
+- image: at a nonzero HUD rotation, environment lookups move by rounding
+  - the old closed form `(v.x * c) + (v.z * s)` contracted to an FMA; glm's `mat3 * vec3` rounds each product separately, and
+    `glm::rotate`'s diagonal `c + (1 - c)` is 1 - 2^-24 at 46 of 360 integer angles
+  - rotated directions: 21% of components differ, 357/360 angles
+  - `LightSet`: Le relative change median 5e-7, max 6.5e-4; 0.04% of `pdfEnvironment` evaluations land in the neighbouring texel
+    of the piecewise-constant CDF; NEE pdfs unchanged
+  - 64-pass Beauty at 37, 90 and 211 degrees: the before/after RMSE is 1e-6 to 7e-5 of the seed-to-seed Monte Carlo RMSE, max abs
+    1.1e-4
+- measured, paired against `main` (4903001), 11 rounds: render_beauty `pass_ms` cornell 0.999x [0.970, 1.022], macbeth 0.975x
+  [0.900, 1.042], both unresolved; RSS 1.000x
+- test: no new checks. Each split is covered by the exact before/after comparisons above, the existing `bsdf`, `nee`,
+  `integrator`, `io`, `api` and `driver` checks, and pytest. `ctest` 195/195, pytest 32/32 with the OpenEXR module installed
+
 ## motionVector: geometric screen-space motion replaces Optic Flow
 
 Optic Flow estimated motion from Luminance pixels, so it was coarse, noise-driven, the prior wherever texture was missing, and
