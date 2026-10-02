@@ -91,17 +91,17 @@ PT_CHECK(aov_tables_are_total_and_consistent, Fast, Exact) {
     }
 }
 
-// The display names are the vocabulary every consumer spells an AOV in, so each must resolve, case- and separator-insensitively.
+// The camelCase names are the vocabulary every consumer spells an AOV in, so each must resolve, and only exactly.
 PT_CHECK(aov_names_round_trip, Fast, Exact) {
     ctx.plan(kAovCount + 5);
     for (int i = 0; i < kAovCount; ++i) {
         PT_EXPECT(ctx, pathtracer::debug::aovIdFromName(pathtracer::debug::kAovNames[i]) == static_cast<AovId>(i),
                       std::string("name does not resolve: ") + pathtracer::debug::kAovNames[i]);
     }
-    PT_EXPECT(ctx, pathtracer::debug::aovIdFromName("bounce-count") == AovId::BounceCount, "hyphen form");
-    PT_EXPECT(ctx, pathtracer::debug::aovIdFromName("BOUNCE_COUNT") == AovId::BounceCount, "upper snake form");
-    PT_EXPECT(ctx, pathtracer::debug::aovIdFromName("indirectspecular") == AovId::IndirectSpecular, "run-together form");
-    PT_EXPECT(ctx, pathtracer::debug::aovIdFromName("colour-opponent") == AovId::ColourOpponent, "two-word hyphen form");
+    PT_EXPECT(ctx, pathtracer::debug::aovIdFromName("bounceCount") == AovId::BounceCount, "camelCase form");
+    PT_EXPECT(ctx, pathtracer::debug::aovIdFromName("bounce-count") == AovId::Count, "hyphen form must not resolve");
+    PT_EXPECT(ctx, pathtracer::debug::aovIdFromName("BounceCount") == AovId::Count, "PascalCase form must not resolve");
+    PT_EXPECT(ctx, pathtracer::debug::aovIdFromName("Bounce Count") == AovId::Count, "spaced form must not resolve");
     PT_EXPECT(ctx, pathtracer::debug::aovIdFromName("not an aov") == AovId::Count, "unknown name must not resolve");
 }
 

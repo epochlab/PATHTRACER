@@ -540,7 +540,7 @@ PT_CHECK(profile_config_default_aov_is_in_range, Fast, Exact) {
     }
 }
 
-// opticFlow.source names any AOV by kAovNames, separators and case ignored, except Optic Flow itself; anything else is refused at load.
+// opticFlow.source names any AOV exactly as kAovNames spells it, except opticFlow itself; anything else is refused at load.
 PT_CHECK(profile_config_optic_flow_source, Fast, Exact) {
     using pathtracer::debug::AovId;
     struct Case {
@@ -548,9 +548,9 @@ PT_CHECK(profile_config_optic_flow_source, Fast, Exact) {
         AovId expected;         // Count = rejected
     };
     const std::vector<Case> cases = {
-        {"Luminance", AovId::Luminance}, {"luminance", AovId::Luminance}, {"Depth", AovId::Depth},
-        {"Beauty", AovId::Beauty},       {"colour-opponent", AovId::ColourOpponent}, {"OpticFlow", AovId::Count},
-        {"Optic Flow", AovId::Count},    {"NotAnAov", AovId::Count},     {nlohmann::json(nullptr), AovId::Count},
+        {"luminance", AovId::Luminance}, {"Luminance", AovId::Count}, {"depth", AovId::Depth},
+        {"beauty", AovId::Beauty},       {"colourOpponent", AovId::ColourOpponent}, {"colour-opponent", AovId::Count},
+        {"opticFlow", AovId::Count},     {"NotAnAov", AovId::Count},     {nlohmann::json(nullptr), AovId::Count},
         {1, AovId::Count},
     };
 

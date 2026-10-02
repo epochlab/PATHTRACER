@@ -50,17 +50,13 @@ enum class AovId : int {
     Count  // sentinel, == array size, not itself a selectable value
 };
 
-// Display name, index-parallel to AovId -- the array the HUD combo box binds to. The static_assert below gates that parallelism.
+// camelCase name, index-parallel to AovId (static_assert below): the one spelling HUD, CLI, profile.json and both APIs share.
 inline constexpr const char* kAovNames[] = {
-    "Beauty",       "Wireframe",      "Alpha",           "Depth",
-    "Lookahead",    "HSV",            "Luminance",       "Sobel",
-    "Gabor",        "DoG",            "WorldPos",        "UV",
-    "Colour Opponent", "Optic Flow",
-    "Normal",       "GeomNormal",     "Albedo",          "Metallic",
-    "Roughness",    "Tangent",        "ObjectID",        "AO",
-    "Fresnel",      "IOR",            "Bounce Count",    "SNR",
-    "Direct Diffuse", "Indirect Diffuse", "Direct Specular",
-    "Indirect Specular", "Refraction", "Shadow",
+    "beauty", "wireframe", "alpha", "depth", "lookahead", "HSV", "luminance", "sobel",
+    "gabor", "DoG", "worldPos", "UV", "colourOpponent", "opticFlow",
+    "normal", "geomNormal", "albedo", "metallic", "roughness", "tangent", "objectID", "AO",
+    "fresnel", "IOR", "bounceCount", "SNR",
+    "directDiffuse", "indirectDiffuse", "directSpecular", "indirectSpecular", "refraction", "shadow",
 };
 static_assert(sizeof(kAovNames) / sizeof(kAovNames[0]) == static_cast<int>(AovId::Count),
               "kAovNames must stay index-parallel with AovId");
@@ -116,7 +112,7 @@ struct AovDisplay {
     return aovSource(aov == AovId::OpticFlow ? opticFlowSource : aov) != AovSource::GBuffer;
 }
 
-// Case- and separator-insensitive lookup against kAovNames, so "bounce-count" and "bouncecount" match. AovId::Count doubles as "unknown".
+// Exact lookup against kAovNames, so "bounceCount" resolves and "Bounce Count" does not. AovId::Count doubles as "unknown".
 [[nodiscard]] AovId aovIdFromName(std::string_view name);
 
 }  // namespace pathtracer::debug

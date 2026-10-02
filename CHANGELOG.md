@@ -3,6 +3,15 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## camelCase AOV names, matched exactly
+
+- **breaking**: `kAovNames` is camelCase with acronyms kept upper case (`beauty`, `worldPos`, `indirectDiffuse`, `HSV`, `DoG`,
+  `objectID`), the one spelling the HUD, `--aov`, `-bench-aovs`, profile.json's `opticFlow.source`, `pt_aov_name`/`pt_aov_id`
+  and Python's `AOVS`/`aovs=` share. `aovIdFromName` is an exact match: `"Bounce Count"`, `"bounce-count"` and `"BounceCount"`
+  no longer resolve and fail with the valid names listed. Bench logs record the new names in `"aov"`, so records logged before
+  this no longer match earlier ones by AOV name
+- chore: the shipped profile's `opticFlow.source` is `"luminance"`
+
 ## Optic Flow: image motion between consecutive views of a profile-named source
 
 A new AOV, `Optic Flow`, measures apparent motion from the pixels of the AOV named by profile.json's `opticFlow.source`

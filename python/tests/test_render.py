@@ -30,18 +30,20 @@ def renderer() -> Renderer:
 
 def test_aov_table_is_populated() -> None:
     assert len(AOVS) == 32
-    names = ("Beauty", "Depth", "Lookahead", "Normal", "Sobel", "Luminance", "Gabor", "HSV", "DoG", "Colour Opponent", "Optic Flow", "SNR")
+    names = ("beauty", "depth", "lookahead", "normal", "sobel", "luminance", "gabor", "HSV", "DoG", "colourOpponent", "opticFlow", "SNR")
     for name in names:
         assert name in AOVS
 
 
-def test_aov_names_are_separator_insensitive() -> None:
-    assert aov_channels("bounce-count") == aov_channels("Bounce Count") == 1
-    assert aov_channels("indirect_specular") == 3
+def test_aov_names_are_exact() -> None:
+    assert aov_channels("bounceCount") == 1
+    for name in ("bounce-count", "Bounce Count", "BounceCount"):
+        with pytest.raises(ValueError, match="unknown AOV"):
+            aov_channels(name)
 
 
 def test_shapes_and_dtypes_match_the_declared_channels(renderer: Renderer) -> None:
-    names = ("beauty", "depth", "normal", "uv")
+    names = ("beauty", "depth", "normal", "UV")
     frame = renderer.render(aovs=names, width=32, height=24, samples=2)
     for name in names:
         array = frame[name]
@@ -96,23 +98,23 @@ def test_normals_are_unit_length_where_geometry_was_hit(renderer: Renderer) -> N
 
 def test_rasterizer_aovs_need_no_samples(renderer: Renderer) -> None:
     assert renderer.aov_needs_samples("beauty")
-    assert renderer.aov_needs_samples("sobel"), "filters read Beauty, so they do need light transport"
+    assert renderer.aov_needs_samples("sobel"), "filters read beauty, so they do need light transport"
     assert not renderer.aov_needs_samples("depth")
     assert not renderer.aov_needs_samples("normal")
-    assert renderer.aov_needs_samples("optic flow"), "the shipped profile's flow source is Luminance, a filter over Beauty"
+    assert renderer.aov_needs_samples("opticFlow"), "the shipped profile's flow source is luminance, a filter over beauty"
 
 
 def test_optic_flow_pairs_consecutive_views() -> None:
     """A fresh renderer, since flow carries state: the first view is the prior, a repeat is exactly still, a pan moves."""
     with Renderer(SCENE) as fresh:
         size = {"width": 96, "height": 64, "samples": 2, "seed": 4}
-        first = fresh.render(aovs=("optic flow",), **size)["optic flow"]
+        first = fresh.render(aovs=("opticFlow",), **size)["opticFlow"]
         assert (first[..., :2] == 0.0).all() and np.unique(first[..., 2]).size == 1, "the first view is not the prior"
-        repeat = fresh.render(aovs=("optic flow",), **size)["optic flow"]
+        repeat = fresh.render(aovs=("opticFlow",), **size)["opticFlow"]
         assert (repeat[..., :2] == 0.0).all(), "an identical view did not read exactly zero flow"
         assert (repeat[..., 2] <= first[..., 2]).all(), "a posterior sigma exceeded the prior"
         panned = dataclasses.replace(fresh.default_camera, yaw_degrees=fresh.default_camera.yaw_degrees + 0.5)
-        moved = fresh.render(aovs=("optic flow",), camera=panned, **size)["optic flow"]
+        moved = fresh.render(aovs=("opticFlow",), camera=panned, **size)["opticFlow"]
         assert np.isfinite(moved).all() and (moved[..., :2] != 0.0).any(), "a pan produced no flow"
 
 

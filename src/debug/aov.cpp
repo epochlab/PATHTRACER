@@ -4,12 +4,10 @@
 #include "pathtracer/debug/colormap.h"
 #include "pathtracer/debug/optic_flow.h"
 
-#include <cctype>
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <span>
-#include <string>
 #include <string_view>
 #include <vector>
 
@@ -384,27 +382,9 @@ std::span<const GBufferLane> gbufferLanes() {
     return lanes;
 }
 
-namespace {
-
-// Drops separators and folds case, so a CLI flag, a C string from a foreign runtime and a HUD label all reduce to the same key.
-[[nodiscard]] std::string normalizeAovName(std::string_view name) {
-    std::string out;
-    out.reserve(name.size());
-    for (const char c : name) {
-        if (c == ' ' || c == '-' || c == '_') {
-            continue;
-        }
-        out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-    }
-    return out;
-}
-
-}  // namespace
-
 AovId aovIdFromName(std::string_view name) {
-    const std::string wanted = normalizeAovName(name);
     for (int i = 0; i < static_cast<int>(AovId::Count); ++i) {
-        if (normalizeAovName(kAovNames[i]) == wanted) {
+        if (name == kAovNames[i]) {
             return static_cast<AovId>(i);
         }
     }
