@@ -7,6 +7,7 @@
 
 #include <glm/glm.hpp>
 
+#include "pathtracer/config/profile_config.h"
 #include "pathtracer/config/scene_config.h"
 #include "pathtracer/gfx/scalar_type.h"
 #include "pathtracer/scene/gltf_loader.h"
@@ -27,5 +28,12 @@ namespace pathtracer::scene {
 // Transforms authored quad lights into world space: origin as a point, edge0/edge1 as displacements. sceneTransform must be rigid.
 [[nodiscard]] std::vector<QuadLight> buildQuadLights(
     const std::vector<pathtracer::config::QuadLightConfig>& lights, const glm::mat4& sceneTransform);
+
+// scene.json's model placement: translate * Rz * Ry * Rx, the order every caller places the scene in.
+[[nodiscard]] glm::mat4 rootTransformOf(const pathtracer::config::SceneConfig& scene);
+
+// The profile's integrator limits and the scene material file's defaults; samplesPerPixel is the caller's, interactive or headless.
+[[nodiscard]] PathTraceSettings baseSettingsOf(const pathtracer::config::ProfileConfig& profile,
+                                               const pathtracer::config::MaterialConfig& material, int samplesPerPixel);
 
 }  // namespace pathtracer::scene

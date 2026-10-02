@@ -9,13 +9,6 @@ namespace pathtracer::scene {
 
 namespace {
 
-// Matches sky.frag's rotateAboutY. Takes the resolved trig, the angle being a pass constant rather than a per-ray one.
-glm::vec3 rotateAboutY(const glm::vec3& v, YRotation rotation) {
-    const float c = rotation.cosAngle;
-    const float s = rotation.sinAngle;
-    return {(v.x * c) + (v.z * s), v.y, (-v.x * s) + (v.z * c)};
-}
-
 // Rec.709 weights, kRec709LuminanceWeights, floored at 0: a negative texel makes the CDF non-monotonic, which invertCdf's search needs.
 float luminanceOf(const pathtracer::gfx::ImageTexture& image, int x, int y) {
     const glm::vec3 texel = image.texel(x, y);
@@ -35,8 +28,9 @@ struct EquirectTexel {
 };
 
 EquirectTexel equirectTexelOf(const pathtracer::gfx::ImageTexture& image, const glm::vec3& direction,
-                               YRotation rotation) {
-    const glm::vec3 rotated = rotateAboutY(direction, rotation.inverse());
+                               const glm::mat3& rotation) {
+    // Row-vector product: rotation's transpose, its exact inverse, taking the world direction into the map's frame.
+    const glm::vec3 rotated = direction * rotation;
     const float theta = std::acos(glm::clamp(rotated.y, -1.0F, 1.0F));
     const float phi = std::atan2(rotated.x, rotated.z);
     const float uCoord = (phi / (2.0F * glm::pi<float>())) + 0.5F;
@@ -104,8 +98,8 @@ EnvironmentMap::EnvironmentMap(pathtracer::gfx::ImageTexture image) : image_(std
     }
 }
 
-glm::vec3 EnvironmentMap::sampleDirection(const glm::vec3& direction, YRotation rotation) const {
-    const glm::vec3 rotated = rotateAboutY(direction, rotation.inverse());
+glm::vec3 EnvironmentMap::sampleDirection(const glm::vec3& direction, const glm::mat3& rotation) const {
+    const glm::vec3 rotated = direction * rotation;
     const float theta = std::acos(glm::clamp(rotated.y, -1.0F, 1.0F));
     const float phi = std::atan2(rotated.x, rotated.z);
     const glm::vec2 uv((phi / (2.0F * glm::pi<float>())) + 0.5F, theta / glm::pi<float>());
@@ -113,7 +107,7 @@ glm::vec3 EnvironmentMap::sampleDirection(const glm::vec3& direction, YRotation 
 }
 
 EnvironmentMap::EnvSample EnvironmentMap::importanceSampleDirection(glm::vec2 u,
-                                                                     YRotation rotation) const {
+                                                                     const glm::mat3& rotation) const {
     const int width = image_.width;
     const int height = image_.height;
 
@@ -129,7 +123,7 @@ EnvironmentMap::EnvSample EnvironmentMap::importanceSampleDirection(glm::vec2 u,
     const float phi = (uCoord - 0.5F) * 2.0F * glm::pi<float>();
     const float sinTheta = std::sin(theta);
     const glm::vec3 rotated(sinTheta * std::sin(phi), std::cos(theta), sinTheta * std::cos(phi));
-    const glm::vec3 direction = rotateAboutY(rotated, rotation);
+    const glm::vec3 direction = rotation * rotated;
 
     const float pdfV = (marginalCdf_[static_cast<std::size_t>(rowSample.index) + 1] -
                          marginalCdf_[static_cast<std::size_t>(rowSample.index)]) *
@@ -141,7 +135,7 @@ EnvironmentMap::EnvSample EnvironmentMap::importanceSampleDirection(glm::vec2 u,
     return {direction, std::max(pdfSolidAngle, 1e-8F)};
 }
 
-float EnvironmentMap::pdf(const glm::vec3& direction, YRotation rotation) const {
+float EnvironmentMap::pdf(const glm::vec3& direction, const glm::mat3& rotation) const {
     const int width = image_.width;
     const int height = image_.height;
     const EquirectTexel texel = equirectTexelOf(image_, direction, rotation);

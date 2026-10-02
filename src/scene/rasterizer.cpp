@@ -507,12 +507,12 @@ void shadePixel(RasterGBuffer& result, int x, int y, float viewZ, float origU, f
     writeTexel(result.lookahead, x, y, std::clamp(1.0F - (viewZ / settings.lookaheadDistance), 0.0F, 1.0F));
     writeTexel(result.worldPos, x, y, shading.position);
     writeTexel(result.uv, x, y, glm::fract(shading.uv));
-    writeTexel(result.normal, x, y, frame.normal);
+    writeTexel(result.normal, x, y, frame[2]);
     writeTexel(result.geomNormal, x, y, glm::normalize(shading.normal));
     writeTexel(result.albedo, x, y, params.baseColor);
     writeTexel(result.metallic, x, y, params.metallic);
     writeTexel(result.roughness, x, y, params.roughness);
-    writeTexel(result.tangent, x, y, frame.tangent);
+    writeTexel(result.tangent, x, y, frame[0]);
     writeTexel(result.objectId, x, y, falseColorForId(triangle.instanceIndex));
     writeTexel(result.alpha, x, y, 1.0F);
     writeTexel(result.wireframe, x, y, wire ? kWireframeColor : glm::vec3(0.0F));

@@ -73,9 +73,7 @@ ShadingFrame buildShadingFrame(const ShadingVertex& shading, const Material& mat
 
     const glm::vec3 normalSample = evaluate(material.normal, shading.uv);
     const glm::vec3 tangentSpaceNormal = glm::normalize((normalSample * 2.0F) - 1.0F);
-    const glm::vec3 mappedNormal = glm::normalize(
-        (tangentSpaceNormal.x * tangent) + (tangentSpaceNormal.y * bitangent) +
-        (tangentSpaceNormal.z * normal));
+    const glm::vec3 mappedNormal = glm::normalize(ShadingFrame(tangent, bitangent, normal) * tangentSpaceNormal);
 
     // Blinn 1978 bump mapping: adjacent-texel height differences tilt the normal. A constant height has zero gradient: no tilt.
     glm::vec3 bumpedNormal = mappedNormal;
@@ -94,7 +92,7 @@ ShadingFrame buildShadingFrame(const ShadingVertex& shading, const Material& mat
     const glm::vec3 finalTangent =
         glm::normalize(tangent - (glm::dot(tangent, bumpedNormal) * bumpedNormal));
     const glm::vec3 finalBitangent = glm::cross(bumpedNormal, finalTangent) * shading.tangent.w;
-    return ShadingFrame{finalTangent, finalBitangent, bumpedNormal};
+    return ShadingFrame(finalTangent, finalBitangent, bumpedNormal);
 }
 
 glm::vec3 geometricNormalOf(const ShadingTriangle& tri) {

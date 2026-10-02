@@ -65,6 +65,8 @@ private:
     // Split only to keep each part inside the one-screen function limit, by row group rather than column: the layout's own boundaries.
     void drawFrameHeader(const DashboardFrame& frame);
     void drawStageRows(const DashboardFrame& frame);
+    void appendStageCell(const char* name, double ms, float cpu);
+    void appendBurstCell(const char* name, int stage, int precision);
     void drawRayRows(const DashboardFrame& frame);
     void drawFooter(const DashboardFrame& frame);
 

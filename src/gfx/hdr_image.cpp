@@ -100,6 +100,45 @@ auto widenTexel(const std::vector<T>& texels, std::size_t idx) {
 glm::vec3 asVec3(float r) { return {r, 0.0F, 0.0F}; }
 glm::vec3 asVec3(const glm::vec3& rgb) { return rgb; }
 
+// Binds image's interleaved texels as file's frame buffer, R,G,B up to stride; false, logged, if one of them is absent.
+template <typename T>
+bool bindExrChannels(Imf::InputFile& file, const Imath::Box2i& dw, ExrPixels<T>& image, std::size_t stride, const std::string& path) {
+    // Interleaved straight into T: a Float16 read turns an over-range source into Inf, caught by allFinite.
+    char* base = reinterpret_cast<char*>(image.texels.data()) -
+                 ((static_cast<std::size_t>(dw.min.x) + (static_cast<std::size_t>(dw.min.y) * image.width)) * stride *
+                  sizeof(T));
+    const std::size_t xStride = stride * sizeof(T);
+    const std::size_t yStride = xStride * static_cast<std::size_t>(image.width);
+    Imf::FrameBuffer frameBuffer;
+    for (std::size_t c = 0; c < stride; ++c) {
+        // OpenEXR zero-fills an absent slice, so without this an RGB slot bound to a Y-only file would render black, silently.
+        if (file.header().channels().findChannel(kRgbPlanes[c]) == nullptr) {
+            std::cerr << "readExrChannels: " << path << " has no " << kRgbPlanes[c] << " channel\n";
+            return false;
+        }
+        frameBuffer.insert(kRgbPlanes[c], Imf::Slice(kExrPixelType<T>, base + (c * sizeof(T)), xStride, yStride));
+    }
+    file.setFrameBuffer(frameBuffer);
+    return true;
+}
+
+// Rejects any Inf/NaN texel, logged: a Float16 read also overflows a finite source above binary16's max to Inf.
+template <typename T>
+bool allFinite(const std::vector<T>& texels, const std::string& path) {
+    for (const T texel : texels) {
+        if (!std::isfinite(static_cast<float>(texel))) {
+            std::cerr << "readExrChannels: non-finite texel in " << path << " read as " << scalarTypeName(kScalarType<T>)
+                      << " (source Inf/NaN";
+            if constexpr (std::is_same_v<T, Half>) {
+                std::cerr << ", or a finite value above binary16's max " << kHalfMax;
+            }
+            std::cerr << ") -- rejecting rather than propagating garbage into importance sampling\n";
+            return false;
+        }
+    }
+    return true;
+}
+
 // Reads path's first `channels` of R,G,B interleaved as T. nullopt on I/O failure, an absent R/G/B, or a non-finite texel.
 template <typename T>
 std::optional<ExrPixels<T>> readExrChannels(const std::string& path, int channels) {
@@ -127,34 +166,12 @@ std::optional<ExrPixels<T>> readExrChannels(const std::string& path, int channel
         ExrPixels<T> image{width, height, {}};
         image.texels.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * stride, T(0));
 
-        // Interleaved straight into T: a Float16 read turns an over-range source into Inf, caught by the check below.
-        char* base = reinterpret_cast<char*>(image.texels.data()) -
-                     ((static_cast<std::size_t>(dw.min.x) + (static_cast<std::size_t>(dw.min.y) * width)) * stride *
-                      sizeof(T));
-        const std::size_t xStride = stride * sizeof(T);
-        const std::size_t yStride = xStride * static_cast<std::size_t>(width);
-        Imf::FrameBuffer frameBuffer;
-        for (std::size_t c = 0; c < stride; ++c) {
-            // OpenEXR zero-fills an absent slice, so without this an RGB slot bound to a Y-only file would render black, silently.
-            if (file.header().channels().findChannel(kRgbPlanes[c]) == nullptr) {
-                std::cerr << "readExrChannels: " << path << " has no " << kRgbPlanes[c] << " channel\n";
-                return std::nullopt;
-            }
-            frameBuffer.insert(kRgbPlanes[c], Imf::Slice(kExrPixelType<T>, base + (c * sizeof(T)), xStride, yStride));
+        if (!bindExrChannels(file, dw, image, stride, path)) {
+            return std::nullopt;
         }
-        file.setFrameBuffer(frameBuffer);
         file.readPixels(dw.min.y, dw.max.y);
-
-        for (const T texel : image.texels) {
-            if (!std::isfinite(static_cast<float>(texel))) {
-                std::cerr << "readExrChannels: non-finite texel in " << path << " read as " << scalarTypeName(kScalarType<T>)
-                          << " (source Inf/NaN";
-                if constexpr (std::is_same_v<T, Half>) {
-                    std::cerr << ", or a finite value above binary16's max " << kHalfMax;
-                }
-                std::cerr << ") -- rejecting rather than propagating garbage into importance sampling\n";
-                return std::nullopt;
-            }
+        if (!allFinite(image.texels, path)) {
+            return std::nullopt;
         }
         return image;
     } catch (const std::exception& e) {
