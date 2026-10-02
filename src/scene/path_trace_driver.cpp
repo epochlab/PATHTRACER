@@ -163,7 +163,6 @@ std::shared_ptr<PathTraceResult> PathTraceDriver::acquireFreeBuffer(int width, i
     return nullptr;
 }
 
-// Runs until destruction on jthread's stop token, picking up the latest request whenever its generation changes.
 pathtracer::debug::PassRecord PathTraceDriver::lastPassRecord() const {
     const std::lock_guard<std::mutex> lock(statsMutex_);
     return lastPass_;
@@ -191,6 +190,58 @@ void PathTraceDriver::publishPassRecord(std::uint64_t generation, int passIndex,
     lastPass_ = record;
 }
 
+// Driver-thread-only. Resets the pass counters, builds this pass's LightSet and traces one pass into `pass`; returns the trace time.
+double PathTraceDriver::tracePass(const Request& request, int sampleBase, std::uint64_t generation, PathTraceResult& pass) {
+    passStats_.reset();
+    // Built fresh each pass from this request's env state, holding references not copies, so the HUD toggle needs no invalidation path.
+    const LightSet lights(request.envLightEnabled ? &environmentMap_ : nullptr, request.envRotationRadians, request.envExposure,
+                          quadLights_);
+    const auto traceStart = std::chrono::steady_clock::now();
+    renderPathTraced(request.camera, accel_, shadingTriangles_, instances_,
+                     instanceLightIndex_, lights, request.width, request.height,
+                     request.showSky, request.settings, perInstanceSettings_,
+                     // The generation is the scramble seed: fixed per accumulation, changing exactly when the image restarts.
+                     static_cast<std::uint32_t>(generation), sampleBase, request.maxSamples,
+                     generation_, generation,
+                     threadPool_, passStats_, pass);
+    return millisecondsSince(traceStart);
+}
+
+// Driver-thread-only. Folds a completed pass into the running mean, reduces its over-range stats, then publishes it and its record.
+void PathTraceDriver::finishPass(const std::shared_ptr<PathTraceResult>& pass, std::shared_ptr<PathTraceResult>& currentMean,
+                                 int passIndex, std::uint64_t generation, double traceMs,
+                                 std::chrono::steady_clock::time_point passStart) {
+    // passIndex == 1 leaves the pass as rendered: the running mean of one sample is that sample, and no previous mean exists.
+    const auto accumulateStart = std::chrono::steady_clock::now();
+    if (passIndex > 1) {
+        accumulateMean(*pass, *currentMean, passIndex, threadPool_);
+    } else {
+        // One sample has no dispersion, so the second moment starts at exactly zero rather than at whatever the reused slot held.
+        std::fill(pass->beautyLuminanceM2.begin(), pass->beautyLuminanceM2.end(), 0.0F);
+    }
+    const double accumulateMs = millisecondsSince(accumulateStart);
+
+    // After the mean, before the publish: the statistics must describe the image about to go on screen.
+    const auto overRangeStart = std::chrono::steady_clock::now();
+    reduceOverRange(*pass, overRangeHistograms_, overRangePeaks_, threadPool_);
+    const double overRangeMs = millisecondsSince(overRangeStart);
+    pass->generation = generation;
+    pass->samples = passIndex;
+    currentMean = pass;
+
+    const auto publishStart = std::chrono::steady_clock::now();
+    {
+        const std::lock_guard<std::mutex> lock(resultMutex_);
+        result_ = currentMean;
+    }
+    const double publishMs = millisecondsSince(publishStart);
+
+    publishPassRecord(generation, passIndex, pass->beauty.width, pass->beauty.height, traceMs,
+                      accumulateMs, overRangeMs, publishMs, millisecondsSince(passStart),
+                      /*cancelled=*/false);
+}
+
+// Runs until destruction on jthread's stop token, picking up the latest request whenever its generation changes.
 void PathTraceDriver::driverLoop(std::stop_token stopToken) {
     // The pool slot holding the last published mean of the active generation: read as the previous mean, never written again.
     std::shared_ptr<PathTraceResult> currentMean;
@@ -221,22 +272,15 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
             accumulated = 0;
         }
 
-        // activeRequest is engaged for every line below: requestedGeneration goes non-zero only inside requestTrace(), under one lock.
-
-        // NOLINTBEGIN(bugprone-unchecked-optional-access)
-        if (activeRequest->width <= 0 || activeRequest->height <= 0) {
+        // Engaged: requestedGeneration goes non-zero only inside requestTrace(), under one lock.
+        const Request& request = *activeRequest;  // NOLINT(bugprone-unchecked-optional-access)
+        // A zero-size view, or converged: nothing changes until a new request or a suspend, both bumping the epoch this wait keys on.
+        if (request.width <= 0 || request.height <= 0 || (request.maxSamples > 0 && accumulated >= request.maxSamples)) {
             idleUntilWake(stopToken, wakeSeen);
             continue;
         }
 
-        // Converged: nothing changes until a new request or a suspend, both of which bump the epoch this wait keys on.
-        if (activeRequest->maxSamples > 0 && accumulated >= activeRequest->maxSamples) {
-            idleUntilWake(stopToken, wakeSeen);
-            continue;
-        }
-
-        const std::shared_ptr<PathTraceResult> pass =
-            acquireFreeBuffer(activeRequest->width, activeRequest->height);
+        const std::shared_ptr<PathTraceResult> pass = acquireFreeBuffer(request.width, request.height);
         if (pass == nullptr) {
             std::this_thread::sleep_for(kBufferRetryInterval);
             continue;  // every buffer still referenced by the render thread -- retry rather than allocate
@@ -246,21 +290,7 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
         const int sampleBase = accumulated;
         const int passIndex = sampleBase + 1;
         const auto passStart = std::chrono::steady_clock::now();
-        passStats_.reset();
-        // Built fresh each pass from this request's env state, holding references not copies, so the HUD toggle needs no invalidation path.
-        const LightSet lights(activeRequest->envLightEnabled ? &environmentMap_ : nullptr,
-                               activeRequest->envRotationRadians, activeRequest->envExposure,
-                               quadLights_);
-        const auto traceStart = std::chrono::steady_clock::now();
-        renderPathTraced(activeRequest->camera, accel_, shadingTriangles_, instances_,
-                          instanceLightIndex_, lights, activeRequest->width, activeRequest->height,
-                          activeRequest->showSky, activeRequest->settings, perInstanceSettings_,
-                          // The generation is the scramble seed: fixed per accumulation, changing exactly when the image restarts.
-                          static_cast<std::uint32_t>(activeGeneration), sampleBase, activeRequest->maxSamples,
-                          generation_, activeGeneration,
-                          threadPool_, passStats_, *pass);
-        // NOLINTEND(bugprone-unchecked-optional-access)
-        const double traceMs = millisecondsSince(traceStart);
+        const double traceMs = tracePass(request, sampleBase, activeGeneration, *pass);
 
         if (generation_.load(std::memory_order_relaxed) != activeGeneration) {
             // Published before the discard, not skipped: a camera drag cancels passes continuously, and their rays were still paid for.
@@ -269,36 +299,8 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
                                /*cancelled=*/true);
             continue;  // superseded mid-pass -- discard, next iteration picks up the new request
         }
-
-        // passIndex == 1 leaves the pass as rendered: the running mean of one sample is that sample, and no previous mean exists.
-        const auto accumulateStart = std::chrono::steady_clock::now();
-        if (passIndex > 1) {
-            accumulateMean(*pass, *currentMean, passIndex, threadPool_);
-        } else {
-            // One sample has no dispersion, so the second moment starts at exactly zero rather than at whatever the reused slot held.
-            std::fill(pass->beautyLuminanceM2.begin(), pass->beautyLuminanceM2.end(), 0.0F);
-        }
-        const double accumulateMs = millisecondsSince(accumulateStart);
-
-        // After the mean, before the publish: the statistics must describe the image about to go on screen.
-        const auto overRangeStart = std::chrono::steady_clock::now();
-        reduceOverRange(*pass, overRangeHistograms_, overRangePeaks_, threadPool_);
-        const double overRangeMs = millisecondsSince(overRangeStart);
-        pass->generation = activeGeneration;
-        pass->samples = passIndex;
-        currentMean = pass;
+        finishPass(pass, currentMean, passIndex, activeGeneration, traceMs, passStart);
         accumulated = passIndex;
-
-        const auto publishStart = std::chrono::steady_clock::now();
-        {
-            const std::lock_guard<std::mutex> lock(resultMutex_);
-            result_ = currentMean;
-        }
-        const double publishMs = millisecondsSince(publishStart);
-
-        publishPassRecord(activeGeneration, passIndex, pass->beauty.width, pass->beauty.height, traceMs,
-                           accumulateMs, overRangeMs, publishMs, millisecondsSince(passStart),
-                           /*cancelled=*/false);
     }
 }
 

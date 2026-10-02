@@ -249,72 +249,61 @@ void PerfDashboard::drawFrameHeader(const DashboardFrame& frame) {
     append("\x1b[2K------------------------------------------------------------------------------\n");
 }
 
+// A per-frame stage's left pane: its windowed cost, share of the CPU total and bar, up to the divider. The caller appends the right pane.
+void PerfDashboard::appendStageCell(const char* name, double ms, float cpu) {
+    const float pct = percentOf(static_cast<float>(ms), cpu);
+    Bar bar{};
+    formatBar(bar, static_cast<double>(pct) / 100.0);
+    append("\x1b[2K  %-15s%8.3f %5.1f %s |", name, ms, static_cast<double>(pct), bar.data());
+}
+
+// Bursty stages print their last real cost and how often they fire: a 150ms stall 1 frame in 88 averages to a harmless 1.7ms.
+void PerfDashboard::appendBurstCell(const char* name, int stage, int precision) {
+    std::array<char, 8> duty{};
+    formatDuty(duty, burstDutyFrames(stage));
+    append("\x1b[2K  %-15s%8.*f %5s %s |", name, precision, static_cast<double>(burstLastMs_[static_cast<std::size_t>(stage)]),
+           duty.data(), kBarBlank);
+}
+
 void PerfDashboard::drawStageRows(const DashboardFrame& frame) {
     const float cpu = cpuTotalMs();
     const auto& pass = frame.pass;
     const double passMs = pass.traceMs + pass.accumulateMs + pass.overRangeMs + pass.publishMs;
     const auto phasePct = [&](double ms) { return passMs > 0.0 ? (ms / passMs) * 100.0 : 0.0; };
     const auto mean = [&](float sum) { return static_cast<double>(windowMean(sum)); };
-    const auto pct = [&](float sum) { return static_cast<double>(percentOf(windowMean(sum), cpu)); };
     // presentMs and hudMs each measure a nested stage too, so the outer half's own cost is the difference -- arithmetic, not a probe.
     const double blitMs = std::max(mean(sums_.presentMs) - mean(sums_.uploadMs) - mean(sums_.filterMs), 0.0);
     const double hudBuildMs = std::max(mean(sums_.hudMs) - mean(sums_.hudRenderMs), 0.0);
-    // One buffer, rewritten per row: formatBar always overwrites and terminates, and no row's bar is read after its own append.
-    Bar bar{};
-    // Bursty stages print their last real cost and how often they fire: a 150ms stall 1 frame in 88 averages to a harmless 1.7ms.
-    std::array<char, 8> duty{};
-    const auto barFor = [&](float sum) {
-        formatBar(bar, static_cast<double>(percentOf(windowMean(sum), cpu)) / 100.0);
-    };
 
     append("\x1b[2K RENDER THREAD     cpu ms     %%            | PATH TRACE (driver)     ms      %%\n");
-    barFor(sums_.pollMs);
-    append("\x1b[2K  %-15s%8.3f %5.1f %s |  pass #%-4d gen %-6llu %4dx%-4d \n", "poll",
-            mean(sums_.pollMs), pct(sums_.pollMs), bar.data(), pass.passIndex,
-            static_cast<unsigned long long>(pass.generation), pass.width, pass.height);
-    barFor(sums_.cameraMs);
-    append("\x1b[2K  %-15s%8.3f %5.1f %s |  trace           %9.2f %6.1f\n", "camera",
-            mean(sums_.cameraMs), pct(sums_.cameraMs), bar.data(), pass.traceMs,
-            phasePct(pass.traceMs));
-    formatDuty(duty, burstDutyFrames(kBurstRaster));
-    append("\x1b[2K  %-15s%8.2f %5s %s |  accumulate      %9.2f %6.1f\n", "raster gbuffer",
-            static_cast<double>(burstLastMs_[kBurstRaster]), duty.data(), kBarBlank,
-            pass.accumulateMs, phasePct(pass.accumulateMs));
-    formatDuty(duty, burstDutyFrames(kBurstUpload));
-    append("\x1b[2K  %-15s%8.3f %5s %s |  over-range      %9.2f %6.1f\n", "tex upload",
-            static_cast<double>(burstLastMs_[kBurstUpload]), duty.data(), kBarBlank,
-            pass.overRangeMs, phasePct(pass.overRangeMs));
-    formatBar(bar, static_cast<double>(percentOf(static_cast<float>(blitMs), cpu)) / 100.0);
-    append("\x1b[2K  %-15s%8.3f %5.1f %s |  publish         %9.2f %6.1f\n", "present blit", blitMs,
-            static_cast<double>(percentOf(static_cast<float>(blitMs), cpu)), bar.data(),
-            pass.publishMs, phasePct(pass.publishMs));
-    barFor(sums_.histogramMs);
-    append("\x1b[2K  %-15s%8.3f %5.1f %s |  --------------------------------\n", "histogram",
-            mean(sums_.histogramMs), pct(sums_.histogramMs), bar.data());
-    barFor(sums_.overRangeMs);
-    append("\x1b[2K  %-15s%8.3f %5.1f %s |  tiles     %5llu / %-5llu %-6s\n", "over-range",
-            mean(sums_.overRangeMs), pct(sums_.overRangeMs), bar.data(),
-            static_cast<unsigned long long>(pass.tilesCompleted),
-            static_cast<unsigned long long>(pass.tilesCompleted + pass.tilesCancelled),
-            pass.cancelled ? "CANCEL" : "");
-    barFor(sums_.probeMs);
-    append("\x1b[2K  %-15s%8.3f %5.1f %s |  samples   %5d / %s\n", "pixel probe",
-            mean(sums_.probeMs), pct(sums_.probeMs), bar.data(), frame.accumulatedSamples,
-            frame.maxSamples > 0 ? "capped" : "unbounded");
-    formatBar(bar, static_cast<double>(percentOf(static_cast<float>(hudBuildMs), cpu)) / 100.0);
-    append("\x1b[2K  %-15s%8.3f %5.1f %s |  suspended %s\n", "hud build", hudBuildMs,
-            static_cast<double>(percentOf(static_cast<float>(hudBuildMs), cpu)), bar.data(),
-            frame.driverSuspended ? "yes" : "no");
-    formatDuty(duty, burstDutyFrames(kBurstFilter));
-    append("\x1b[2K  %-15s%8.2f %5s %s |\n", "aov filter",
-            static_cast<double>(burstLastMs_[kBurstFilter]), duty.data(), kBarBlank);
-    barFor(sums_.hudRenderMs);
-    append("\x1b[2K  %-15s%8.3f %5.1f %s |\n", "hud render", mean(sums_.hudRenderMs),
-            pct(sums_.hudRenderMs), bar.data());
-    barFor(sums_.fenceMs);
-    append("\x1b[2K  %-15s%8.3f %5.1f %s |\n", "gpu wait", mean(sums_.fenceMs), pct(sums_.fenceMs), bar.data());
-    barFor(sums_.paceMs);
-    append("\x1b[2K  %-15s%8.3f %5.1f %s |\n", "vsync wait", mean(sums_.paceMs), pct(sums_.paceMs), bar.data());
+    appendStageCell("poll", mean(sums_.pollMs), cpu);
+    append("  pass #%-4d gen %-6llu %4dx%-4d \n", pass.passIndex, static_cast<unsigned long long>(pass.generation), pass.width,
+           pass.height);
+    appendStageCell("camera", mean(sums_.cameraMs), cpu);
+    append("  trace           %9.2f %6.1f\n", pass.traceMs, phasePct(pass.traceMs));
+    appendBurstCell("raster gbuffer", kBurstRaster, 2);
+    append("  accumulate      %9.2f %6.1f\n", pass.accumulateMs, phasePct(pass.accumulateMs));
+    appendBurstCell("tex upload", kBurstUpload, 3);
+    append("  over-range      %9.2f %6.1f\n", pass.overRangeMs, phasePct(pass.overRangeMs));
+    appendStageCell("present blit", blitMs, cpu);
+    append("  publish         %9.2f %6.1f\n", pass.publishMs, phasePct(pass.publishMs));
+    appendStageCell("histogram", mean(sums_.histogramMs), cpu);
+    append("  --------------------------------\n");
+    appendStageCell("over-range", mean(sums_.overRangeMs), cpu);
+    append("  tiles     %5llu / %-5llu %-6s\n", static_cast<unsigned long long>(pass.tilesCompleted),
+           static_cast<unsigned long long>(pass.tilesCompleted + pass.tilesCancelled), pass.cancelled ? "CANCEL" : "");
+    appendStageCell("pixel probe", mean(sums_.probeMs), cpu);
+    append("  samples   %5d / %s\n", frame.accumulatedSamples, frame.maxSamples > 0 ? "capped" : "unbounded");
+    appendStageCell("hud build", hudBuildMs, cpu);
+    append("  suspended %s\n", frame.driverSuspended ? "yes" : "no");
+    appendBurstCell("aov filter", kBurstFilter, 2);
+    append("\n");
+    appendStageCell("hud render", mean(sums_.hudRenderMs), cpu);
+    append("\n");
+    appendStageCell("gpu wait", mean(sums_.fenceMs), cpu);
+    append("\n");
+    appendStageCell("vsync wait", mean(sums_.paceMs), cpu);
+    append("\n");
 }
 
 void PerfDashboard::drawRayRows(const DashboardFrame& frame) {

@@ -2,6 +2,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <memory>
@@ -72,6 +73,9 @@ private:
                             double traceMs, double accumulateMs, double overRangeMs,
                             double publishMs, double passMs, bool cancelled);
     std::shared_ptr<PathTraceResult> acquireFreeBuffer(int width, int height);
+    double tracePass(const Request& request, int sampleBase, std::uint64_t generation, PathTraceResult& pass);
+    void finishPass(const std::shared_ptr<PathTraceResult>& pass, std::shared_ptr<PathTraceResult>& currentMean, int passIndex,
+                    std::uint64_t generation, double traceMs, std::chrono::steady_clock::time_point passStart);
 
     const EmbreeAccel& accel_;
     const std::vector<ShadingTriangle>& shadingTriangles_;
