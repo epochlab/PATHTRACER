@@ -3,6 +3,38 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Quad light placement: position, rotation and size around a centred gimbal
+
+A quad light was authored as a corner `origin` plus two edge vectors, so cornell's panel read as offset by half its size
+(`origin [-0.15, 0.49, -0.15]`) while centred on `(0, 0.49, 0)`. A light now places a unit quad centred on its own origin with the
+same translate-then-Euler convention as the model root, so `position` is the panel's centre and perpendicular edges hold by
+construction. Evidence is in `results/quad_light_placement`.
+
+- **breaking**: `lights[]` keys `origin`, `edge0` and `edge1` are replaced by `position` (centre), `rotation` (degrees,
+  `Rz * Ry * Rx`, X first, as `model.rotation`) and `size` (`[w, h]`). At rest the quad lies in local XY and emits along local -Z.
+  World placement is `rootTransform * T(position) * Rz * Ry * Rx`. A file in the old form fails to load with a named error
+- feat: each light object has a closed key set, as `model` and `environment` already do, so a stale `edge0` or a misspelt
+  `twoSided` is rejected instead of being ignored
+- refactor: `placementTransform(position, rotation)` (`material_binding.cpp`) is the one `T * Rz * Ry * Rx` that `rootTransformOf`
+  and `buildQuadLights` share. `QuadLight` is unchanged: corner, edges and cached normal, so the sampler and BVH injection are untouched
+- refactor: the perpendicularity check and its `kMaxEdgeCosine` bound are gone. Edges are rotation columns scaled by `size`, so
+  `|cos|` is float rounding (measured 0), not authored precision. The zero-length check becomes `size > 0`, which also rejects a
+  negative extent, since mirroring the quad flips its emitting face
+- feat: `json_glm.h` parses `glm::vec2`
+- test: `quad_light_placement` (`integrator_validate`) checks the centre, the normal, `|edge0| = w`, `|edge1| = h` and edge
+  orthogonality at rest, under `Rx(-90)`, under `Rx(90)` then `Ry(90)` (which pins the Euler order: Y first would give -X, not +Y)
+  and under a moved scene root. It also checks that cornell's new light reproduces the retired corner and edges. Its tolerance is
+  Higham's `gamma_n` for 8 chained 4-term products, and the measured worst case is 5.96e-8 against 1.53e-5
+- test: `scene_config_rejects_malformed_input` gains a zero size, a negative size, the retired corner form and a stale `edge0`
+  beside a full placement. The skew row is removed, since skew can no longer be authored
+- note: break tests were run. Flipping edge1's sign (emits +Z) fails 5 of 5 assertions, swapping the Euler order fails the
+  order row, and dropping the scene root fails the moved-root row
+- note: cornell's `Rx(-90)` puts `cos(90 deg)` at its float value of -4.37e-8, so the panel is tilted by that many radians and its
+  corner moves by about 1e-8. The 32 AOVs at 512x288, 16 passes: 8 are byte-identical in EXR and 17 in PNG. Beauty moves by 1/255
+  in 10 pixels, and its EXR by at most 3.2e-5 absolute (4.9e-4 relative) through NEE samples that move by ulps. The G-buffer
+  moves only inside the panel's own pixels (rows 18-23), and only one pixel, a primary ray grazing the panel's corner, changes
+  beyond 1e-4. Beauty `pass_ms` B/A is 1.0085 [0.967, 1.029], not resolved, and peak RSS is unchanged
+
 ## Function size: every first-party function inside the 60-line limit, and glm for the shading frame and environment rotation
 
 clang-tidy's `readability-function-size` (60 lines, `.clang-tidy`) flagged 14 functions in `src/`. All 14 are now inside it, plus

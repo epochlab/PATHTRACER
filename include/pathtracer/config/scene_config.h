@@ -25,12 +25,12 @@ struct EnvironmentConfig {
     bool lightEnabled = true;
 };
 
-// Rectangular area light: color * intensity leaves cross(edge0, edge1). loadSceneConfig rejects skew edges or negative color/intensity.
+// Rectangular area light: a size.x by size.y quad centred on its local origin in the XY plane, color * intensity leaving along -Z.
 struct QuadLightConfig {
-    glm::vec3 origin;
-    glm::vec3 edge0;
-    glm::vec3 edge1;
-    glm::vec3 color;
+    glm::vec3 position;  // quad centre, before the model root transform
+    glm::vec3 rotation;  // degrees; Rz*Ry*Rx as ModelConfig::rotation, so X applies first
+    glm::vec2 size;  // width along local X, height along local Y; loadSceneConfig rejects non-positive extents
+    glm::vec3 color;  // loadSceneConfig rejects a negative color or intensity
     float intensity;
     bool twoSided = false;
 };
