@@ -4,6 +4,8 @@
 #include <array>
 #include <cfloat>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <numbers>
 #include <cstdio>
@@ -11,6 +13,8 @@
 #include <span>
 #include <string>
 #include <vector>
+
+#include <nlohmann/json.hpp>
 
 #include "check.h"
 #include "pathtracer/api/headless_renderer.h"
@@ -20,6 +24,7 @@
 #include "pathtracer/debug/scale_space.h"
 #include "pathtracer/debug/aov_routing.h"
 #include "pathtracer/scene/camera.h"
+#include "pathtracer/scene/rotation.h"
 #include "pathtracer/scene/thread_pool.h"
 
 namespace {
@@ -852,6 +857,189 @@ PT_CHECK(render_rejects_an_invalid_camera, Fast, Exact) {
               "a zero field of view was not rejected by name: " + error);
     PT_EXPECT(ctx, !render(camera, zeroFieldOfView) && error.starts_with("previousCamera: "),
               "an invalid previous camera was not rejected under its own name: " + error);
+}
+
+// Cornell's scene.json, parsed, for a check to re-author in another pose.
+[[nodiscard]] nlohmann::json cornellScene() {
+    std::ifstream file(std::filesystem::path(ASSET_ROOT_DIR) / "scenes" / "cornell.json");
+    return nlohmann::json::parse(file);
+}
+
+// An asset root whose scenes/posed.json is `scene`, every other directory linked to the real one, so the scene file is all that differs.
+[[nodiscard]] std::filesystem::path posedAssetRoot(const nlohmann::json& scene) {
+    const std::filesystem::path root = std::filesystem::temp_directory_path() / "engine_api_posed_assets";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root / "scenes");
+    for (const char* directory : {"config", "geometry", "materials", "textures"}) {
+        std::filesystem::create_directory_symlink(std::filesystem::path(ASSET_ROOT_DIR) / directory, root / directory);
+    }
+    std::ofstream(root / "scenes" / "posed.json") << scene.dump();
+    return root;
+}
+
+// A request's pose renders exactly what scene.json authored in that pose renders, and returning to the authored pose restores it.
+PT_CHECK(pose_override_matches_the_scene_authored_in_that_pose, Slow, Exact) {
+    ctx.plan(5);
+    const glm::vec3 rootRotation(10.0F, 35.0F, -5.0F);
+    const glm::vec3 lightRotation(-70.0F, 20.0F, 0.0F);
+    nlohmann::json authored = cornellScene();
+    authored["model"]["rotation"] = {rootRotation.x, rootRotation.y, rootRotation.z};
+    authored["lights"][0]["rotation"] = {lightRotation.x, lightRotation.y, lightRotation.z};
+    const std::filesystem::path posedRoot = posedAssetRoot(authored);
+    std::string error;
+    const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", error);
+    const auto posed = pathtracer::api::HeadlessRenderer::open(posedRoot.string(), "scenes/posed.json", error);
+    if (!renderer || !posed) {
+        for (int i = 0; i < 5; ++i) {
+            PT_EXPECT(ctx, false, "scene load failed: " + error);
+        }
+        std::filesystem::remove_all(posedRoot);
+        return;
+    }
+
+    const std::vector<AovId> aovs = {AovId::Beauty, AovId::Depth, AovId::Normal};
+    using Rotations = std::optional<std::vector<glm::vec3>>;
+    const auto render = [&](pathtracer::api::HeadlessRenderer& target, std::optional<glm::vec3> root, Rotations lights) {
+        const pathtracer::api::HeadlessRenderer::Request request{.camera = renderer->defaultCamera(),
+                                                                 .width = 32,
+                                                                 .height = 24,
+                                                                 .samples = 2,
+                                                                 .scrambleSeed = 5,
+                                                                 .aovs = aovs,
+                                                                 .rootRotationDegrees = root,
+                                                                 .lightRotationsDegrees = std::move(lights)};
+        std::vector<std::vector<float>> lanes;
+        if (target.render(request, error)) {
+            for (const AovId aov : aovs) {
+                lanes.push_back(target.lastImage(aov).texels);
+            }
+        }
+        return lanes;
+    };
+    std::vector<glm::vec3> authoredLights;
+    for (const pathtracer::config::QuadLightConfig& light : renderer->scene().lights) {
+        authoredLights.push_back(light.rotation);
+    }
+    const auto authoredPose = render(*renderer, std::nullopt, std::nullopt);
+    const auto explicitAuthored = render(*renderer, renderer->scene().model.rotation, authoredLights);
+    const auto overridden = render(*renderer, rootRotation, std::vector{lightRotation});
+    const auto reference = render(*posed, std::nullopt, std::nullopt);
+    const auto restored = render(*renderer, std::nullopt, std::nullopt);
+    std::filesystem::remove_all(posedRoot);
+
+    PT_EXPECT(ctx, !authoredPose.empty() && !overridden.empty() && !reference.empty(), "a render failed: " + error);
+    PT_EXPECT(ctx, explicitAuthored == authoredPose, "the authored pose given explicitly differs from no pose at all");
+    PT_EXPECT(ctx, overridden != authoredPose, "the pose changed nothing, so the comparison below is vacuous");
+    PT_EXPECT(ctx, overridden == reference, "the overridden pose differs from scene.json authored in that pose");
+    // A rebuild, then a rebuild back: the BVH and the bound materials must come back exactly, not merely close.
+    PT_EXPECT(ctx, restored == authoredPose, "returning to the authored pose did not reproduce it bit for bit");
+}
+
+// render() refuses a pose it cannot build, naming the field, and the refusal leaves the renderer serving the authored pose.
+PT_CHECK(render_rejects_an_invalid_pose, Fast, Exact) {
+    ctx.plan(5);
+    std::string error;
+    const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", error);
+    if (!renderer) {
+        for (int i = 0; i < 5; ++i) {
+            PT_EXPECT(ctx, false, "scene load failed: " + error);
+        }
+        return;
+    }
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    const auto render = [&](std::optional<glm::vec3> root, std::optional<std::vector<glm::vec3>> lights, glm::vec3 env) {
+        const pathtracer::api::HeadlessRenderer::Request request{.camera = renderer->defaultCamera(),
+                                                                 .width = 8,
+                                                                 .height = 8,
+                                                                 .aovs = {AovId::Depth},
+                                                                 .rootRotationDegrees = root,
+                                                                 .lightRotationsDegrees = std::move(lights),
+                                                                 .envRotationDegrees = env};
+        error.clear();
+        return renderer->render(request, error);
+    };
+    PT_EXPECT(ctx, !render(glm::vec3(0.0F, nan, 0.0F), std::nullopt, glm::vec3(0.0F)) && error == "root rotation is not finite",
+              "a NaN root rotation was not rejected by name: " + error);
+    PT_EXPECT(ctx, !render(std::nullopt, std::vector<glm::vec3>(2, glm::vec3(0.0F)), glm::vec3(0.0F)) &&
+                       error.starts_with("light rotations number 2"),
+              "two rotations for cornell's one light were not rejected by count: " + error);
+    PT_EXPECT(ctx, !render(std::nullopt, std::vector{glm::vec3(inf, 0.0F, 0.0F)}, glm::vec3(0.0F)) &&
+                       error == "a light rotation is not finite",
+              "an infinite light rotation was not rejected by name: " + error);
+    PT_EXPECT(ctx, !render(std::nullopt, std::nullopt, glm::vec3(0.0F, 0.0F, nan)) && error == "environment rotation is not finite",
+              "a NaN environment rotation was not rejected by name: " + error);
+    PT_EXPECT(ctx, render(std::nullopt, std::nullopt, glm::vec3(0.0F)), "the authored pose failed after the refusals: " + error);
+}
+
+// Turning model, lights, environment and camera by one rotation leaves the image: the four share one convention and one sense.
+PT_CHECK(turning_the_world_with_the_camera_leaves_the_image, Slow, Exact) {
+    ctx.plan(4);
+    std::string error;
+    const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", error);
+    if (!renderer) {
+        for (int i = 0; i < 4; ++i) {
+            PT_EXPECT(ctx, false, "scene load failed: " + error);
+        }
+        return;
+    }
+    // Cornell authors its root unrotated, so the turned root is the turn itself; the light, authored under the root, follows it.
+    const glm::vec3 turn(0.0F, 35.0F, 0.0F);
+    const pathtracer::scene::Camera& camera = renderer->defaultCamera();
+    // The lat-long sees every direction, so the comparison covers the whole environment and every surface around the eye.
+    const pathtracer::scene::Camera unturned =
+        withLens(camera, {pathtracer::scene::LensProjection::Omnidirectional});
+    const pathtracer::scene::Camera turned{pathtracer::scene::rotationXyz(turn) * camera.position(),
+                                           camera.yawDegrees() + turn.y, camera.pitchDegrees(), camera.filmBack(),
+                                           camera.focalLengthMm(), camera.nearClip(), camera.farClip(), camera.aperture(),
+                                           camera.shutterSeconds(), camera.iso(), unturned.lens()};
+    constexpr int kWidth = 64;
+    constexpr int kHeight = 32;
+    const auto render = [&](const pathtracer::scene::Camera& view, std::optional<glm::vec3> root, glm::vec3 env) {
+        const pathtracer::api::HeadlessRenderer::Request request{.camera = view,
+                                                                 .width = kWidth,
+                                                                 .height = kHeight,
+                                                                 .samples = 1,
+                                                                 .scrambleSeed = 3,
+                                                                 .aovs = {AovId::Beauty, AovId::Depth},
+                                                                 .showSky = true,
+                                                                 .rootRotationDegrees = root,
+                                                                 .envRotationDegrees = env};
+        std::pair<std::vector<float>, std::vector<float>> lanes;
+        if (renderer->render(request, error)) {
+            lanes = {renderer->lastImage(AovId::Beauty).texels, renderer->lastImage(AovId::Depth).texels};
+        }
+        return lanes;
+    };
+    const auto [beauty, depth] = render(unturned, std::nullopt, glm::vec3(0.0F));
+    const auto [turnedBeauty, turnedDepth] = render(turned, turn, turn);
+    const auto [worldOnlyBeauty, worldOnlyDepth] = render(unturned, turn, turn);
+    PT_EXPECT(ctx, !depth.empty() && !turnedDepth.empty() && !worldOnlyDepth.empty(), "a render failed: " + error);
+    PT_EXPECT(ctx, worldOnlyBeauty != beauty, "turning the world alone changed nothing, so the comparison below is vacuous");
+
+    // A convention slip moves the image by whole pixels. Rounding alone leaves depth a few ulp apart, and turns each ray by a few ulp.
+    constexpr float kDepthTolerance = 16.0F * std::numeric_limits<float>::epsilon();
+    // A few-ulp turn is ~1e-4 of a 2k lat-long texel; bilinear radiance moves that fraction of a texel step, under 1e-3 at the sun's edge.
+    constexpr float kSkyTolerance = 1e-3F;
+    float worstDepth = 0.0F;
+    float worstSky = 0.0F;
+    bool coverageAgrees = true;
+    for (std::size_t pixel = 0; pixel < depth.size(); ++pixel) {
+        coverageAgrees = coverageAgrees && ((depth[pixel] == 0.0F) == (turnedDepth[pixel] == 0.0F));
+        if (depth[pixel] > 0.0F) {
+            worstDepth = std::max(worstDepth, std::fabs(turnedDepth[pixel] - depth[pixel]) / depth[pixel]);
+            continue;
+        }
+        // A primary miss reads the environment alone, so the background pixels compare the environment's turn with the camera's.
+        for (std::size_t c = 0; c < 3; ++c) {
+            const float sky = beauty[(3 * pixel) + c];
+            worstSky = std::max(worstSky, std::fabs(turnedBeauty[(3 * pixel) + c] - sky) / std::max(sky, 1e-6F));
+        }
+    }
+    PT_EXPECT(ctx, coverageAgrees && worstDepth <= kDepthTolerance,
+              "turned depth differs: coverage " + std::string(coverageAgrees ? "agrees" : "differs") + ", worst relative " +
+                  std::to_string(worstDepth));
+    PT_EXPECT(ctx, worstSky <= kSkyTolerance, "turned sky radiance differs: worst relative " + std::to_string(worstSky));
 }
 
 PT_CHECK_MAIN("api")

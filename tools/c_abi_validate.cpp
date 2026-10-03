@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <limits>
 #include <bit>
 #include <cmath>
 #include <cstddef>
@@ -230,7 +231,10 @@ PT_CHECK(render_rejects_invalid_requests_without_writing, Slow, Exact) {
         const char* reasonFragment;
         void (*mutate)(PtRenderRequest&, std::vector<float*>&);
     };
-    const std::array<Case, 9> cases{{
+    // Static, so a captureless mutation can point the request at them; cornell has one light, so one triple is the full array.
+    static const std::array<float, 3> kNanRotation{0.0F, std::numeric_limits<float>::quiet_NaN(), 0.0F};
+    static const std::array<float, 3> kInfRotation{std::numeric_limits<float>::infinity(), 0.0F, 0.0F};
+    const std::array<Case, 12> cases{{
         {"aov_count 0", "no AOVs", [](PtRenderRequest& r, std::vector<float*>&) { r.aov_count = 0; }},
         {"null aovs", "no AOVs", [](PtRenderRequest& r, std::vector<float*>&) { r.aovs = nullptr; }},
         {"show_sky 2", "show_sky", [](PtRenderRequest& r, std::vector<float*>&) { r.show_sky = 2; }},
@@ -241,6 +245,12 @@ PT_CHECK(render_rejects_invalid_requests_without_writing, Slow, Exact) {
         {"null out[1]", "output buffer 1", [](PtRenderRequest&, std::vector<float*>& p) { p[1] = nullptr; }},
         {"width 0", "resolution", [](PtRenderRequest& r, std::vector<float*>&) { r.width = 0; }},
         {"samples 0", "samples", [](PtRenderRequest& r, std::vector<float*>&) { r.samples = 0; }},
+        {"NaN root rotation", "root rotation",
+         [](PtRenderRequest& r, std::vector<float*>&) { r.root_rotation_degrees = kNanRotation.data(); }},
+        {"infinite light rotation", "light rotation",
+         [](PtRenderRequest& r, std::vector<float*>&) { r.light_rotation_degrees = kInfRotation.data(); }},
+        {"NaN environment rotation", "environment rotation",
+         [](PtRenderRequest& r, std::vector<float*>&) { r.env_rotation_degrees[1] = std::numeric_limits<float>::quiet_NaN(); }},
     }};
     ctx.plan(static_cast<int>(cases.size()) + 2);
     const OpenRenderer renderer;
@@ -275,6 +285,50 @@ PT_CHECK(render_rejects_invalid_requests_without_writing, Slow, Exact) {
     PT_EXPECT(ctx, pt_render(renderer.handle, nullptr, pointers.data(), err.data(), kErrorCapacity) == PT_ERROR &&
                        pt_render(renderer.handle, &request, nullptr, err.data(), kErrorCapacity) == PT_ERROR && err[0] != '\0',
               "a null request or output array must fail with a reason");
+}
+
+// The authored pose reads back through the ABI, and passing it explicitly renders exactly what NULL renders; the environment turns.
+PT_CHECK(pose_defaults_round_trip_through_the_abi, Slow, Exact) {
+    ctx.plan(4);
+    const OpenRenderer renderer;
+    if (renderer.handle == nullptr) {
+        for (int i = 0; i < 4; ++i) {
+            PT_EXPECT(ctx, false, "scene load failed: " + renderer.error);
+        }
+        return;
+    }
+    const int lights = pt_renderer_light_count(renderer.handle);
+    std::array<float, 3> root{};
+    pt_renderer_default_root_rotation(renderer.handle, root.data());
+    GuardedBuffer lightRotations(3 * static_cast<std::size_t>(lights));
+    pt_renderer_default_light_rotations(renderer.handle, lightRotations.storage.data());
+    // cornell.json authors its root unrotated and its one ceiling light at [-90, 0, 0].
+    constexpr std::array<float, 3> kAuthoredRoot{0.0F, 0.0F, 0.0F};
+    constexpr std::array<float, 3> kAuthoredLight{-90.0F, 0.0F, 0.0F};
+    PT_EXPECT(ctx, lights == 1 && root == kAuthoredRoot && lightRotations.guardsIntact() &&
+                       std::equal(kAuthoredLight.begin(), kAuthoredLight.end(), lightRotations.storage.begin()),
+              "cornell's authored pose did not read back as one light, root [0, 0, 0] and light [-90, 0, 0]");
+
+    const std::vector<int> beauty{beautyId()};
+    const auto render = [&](const float* rootRotation, const float* lightRotation, float envYaw) {
+        std::vector<GuardedBuffer> outputs = makeOutputs(beauty);
+        const std::vector<float*> pointers = pointersTo(outputs);
+        PtRenderRequest request = makeRequest(renderer.handle, beauty, 1);
+        request.show_sky = 1;
+        request.root_rotation_degrees = rootRotation;
+        request.light_rotation_degrees = lightRotation;
+        request.env_rotation_degrees[1] = envYaw;
+        // The written extent only: the guard floats are a NaN pattern, which no float comparison calls equal to itself.
+        const GuardedBuffer& written = outputs.front();
+        return pt_render(renderer.handle, &request, pointers.data(), nullptr, 0) == PT_OK
+                   ? std::vector<float>(written.storage.begin(), written.storage.begin() + static_cast<std::ptrdiff_t>(written.extent))
+                   : std::vector<float>{};
+    };
+    const std::vector<float> authored = render(nullptr, nullptr, 0.0F);
+    PT_EXPECT(ctx, !authored.empty(), "the authored render failed");
+    PT_EXPECT(ctx, render(root.data(), lightRotations.storage.data(), 0.0F) == authored,
+              "the authored pose passed explicitly differs from NULL");
+    PT_EXPECT(ctx, render(nullptr, nullptr, 180.0F) != authored, "an environment turned half a turn changed nothing");
 }
 
 // The seed is the sampler's scramble: the same request reproduces bit for bit, and another seed draws another estimate.

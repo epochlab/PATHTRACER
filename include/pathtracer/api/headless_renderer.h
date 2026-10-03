@@ -43,6 +43,12 @@ public:
         std::optional<bool> envLightEnabled;
         // Whether a camera miss returns environment radiance; nullopt is kDefaultShowSky. Primary miss only, so it unlights nothing.
         std::optional<bool> showSky;
+        // Model root rotationXyz in degrees, lights included, replacing scene.json's model.rotation; nullopt keeps it. Rebuilds the BVH.
+        std::optional<glm::vec3> rootRotationDegrees;
+        // One rotationXyz per scene light, under the root, replacing each lights[i].rotation; nullopt keeps them. Rebuilds the BVH.
+        std::optional<std::vector<glm::vec3>> lightRotationsDegrees;
+        // rotationXyz of the environment map to world, background and lighting alike; zero is the map unrotated.
+        glm::vec3 envRotationDegrees{0.0F};
     };
 
     // Per-pass wall clock and ray counts for the most recent render(), so a benchmark measures the renderer rather than re-deriving it.
@@ -85,16 +91,32 @@ public:
     // Resolved scene state a caller may need to report rather than render with: a benchmark naming its settings.
     [[nodiscard]] const pathtracer::scene::PathTraceSettings& baseSettings() const { return baseSettings_; }
     [[nodiscard]] pathtracer::gfx::ScalarType textureType() const { return profile_.render.textureType; }
-    [[nodiscard]] bool defaultEnvLightEnabled() const { return defaultEnvLightEnabled_; }
+    [[nodiscard]] bool defaultEnvLightEnabled() const { return scene_.environment.lightEnabled; }
+    // The authored scene.json: its model.rotation and lights[i].rotation are the pose a request's nullopt keeps.
+    [[nodiscard]] const pathtracer::config::SceneConfig& scene() const { return scene_; }
 
 private:
-    HeadlessRenderer(pathtracer::config::ProfileConfig profile,
-                     pathtracer::scene::LoadedModel model, std::vector<pathtracer::scene::QuadLight> quadLights,
-                     std::vector<int> instanceLightIndex,
-                     std::vector<pathtracer::scene::PathTraceSettings> perInstanceSettings,
-                     pathtracer::scene::PathTraceSettings baseSettings, pathtracer::scene::EmbreeAccel accel,
-                     pathtracer::gfx::ImageTexture environmentImage, bool envLightEnabled,
+    // Everything the root and light rotations are baked into: the triangle soup, its BVH, the quads and the per-instance bounds.
+    struct Geometry {
+        pathtracer::scene::LoadedModel model;
+        std::vector<pathtracer::scene::QuadLight> quadLights;
+        std::vector<int> instanceLightIndex;  // parallel to model.instances, -1 where the instance emits nothing
+        std::vector<pathtracer::scene::AabbBounds> instanceBounds;
+        pathtracer::scene::EmbreeAccel accel;
+    };
+
+    HeadlessRenderer(std::string assetRoot, pathtracer::config::ProfileConfig profile, pathtracer::config::SceneConfig scene,
+                     Geometry geometry, std::vector<pathtracer::scene::PathTraceSettings> perInstanceSettings,
+                     pathtracer::scene::PathTraceSettings baseSettings, pathtracer::gfx::ImageTexture environmentImage,
                      const pathtracer::scene::Camera& defaultCamera);
+
+    // Loads the glTF under model's root, places lights under it and builds the BVH: open() and every pose change share it.
+    [[nodiscard]] static std::optional<Geometry> buildGeometry(const std::string& assetRoot,
+                                                               const pathtracer::config::ModelConfig& model,
+                                                               const std::vector<pathtracer::config::QuadLightConfig>& lights,
+                                                               std::string& error);
+    // Rebuilds geometry_ for the request's root and light rotations unless already built for them; false leaves it untouched.
+    [[nodiscard]] bool applyPose(const Request& request, std::string& error);
 
     // Sizes the reused path-traced and G-buffer buffers to this request, reallocating only on a resolution change.
     void resizeBuffers(int width, int height);
@@ -108,20 +130,16 @@ private:
     // Evaluates each distinct BeautyFilter AOV the request names once, over the accumulated Beauty.
     void evaluateFilters(const Request& request);
 
+    std::string assetRoot_;
     pathtracer::config::ProfileConfig profile_;
-    pathtracer::scene::LoadedModel model_;
-    std::vector<int> instanceLightIndex_;
+    pathtracer::config::SceneConfig scene_;
+    Geometry geometry_;
+    // The rotations geometry_ is built for, compared per request so an unchanged pose costs nothing.
+    glm::vec3 builtRootRotationDegrees_;
+    std::vector<glm::vec3> builtLightRotationsDegrees_;
     std::vector<pathtracer::scene::PathTraceSettings> perInstanceSettings_;
     pathtracer::scene::PathTraceSettings baseSettings_;
-    std::vector<pathtracer::scene::AabbBounds> instanceBounds_;
-    pathtracer::scene::EmbreeAccel accel_;
-    // Declaration order is load-bearing: lights_ captures &environmentMap_ and a reference to quadLights_.
     pathtracer::scene::EnvironmentMap environmentMap_;
-    std::vector<pathtracer::scene::QuadLight> quadLights_;
-    // Both light sets are built at load and chosen per request: LightSet stores only a pointer and a reference, so the off variant is free.
-    pathtracer::scene::LightSet lights_;
-    pathtracer::scene::LightSet lightsEnvOff_;
-    bool defaultEnvLightEnabled_ = true;
     pathtracer::scene::Camera defaultCamera_;
     pathtracer::scene::ThreadPool threadPool_;
 

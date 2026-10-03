@@ -271,7 +271,7 @@ pathtracer::scene::PathTraceResult renderPassPerInstance(
     // No test scene here authors an emitter -- every instance is ordinary geometry.
     const std::vector<int> instanceLightIndex(scene.instances.size(), -1);
     const std::vector<pathtracer::scene::QuadLight> noQuads;
-    const pathtracer::scene::LightSet lights(&env, /*envRotationRadians=*/0.0F, /*envExposure=*/1.0F, noQuads);
+    const pathtracer::scene::LightSet lights(&env, /*envRotationDegrees=*/glm::vec3(0.0F), /*envExposure=*/1.0F, noQuads);
     pathtracer::debug::PassStats stats;  // required by renderPathTraced; this tool checks radiance, not throughput
     pathtracer::scene::renderPathTraced(makeCamera(), accel, scene.shadingTriangles, scene.instances,
                                      instanceLightIndex, lights, kImageSize, kImageSize, showSky,
@@ -954,6 +954,8 @@ PT_CHECK(quad_light_placement, Fast, Exact) {
         {"ceiling, Rx(-90)", light({0.0F, 0.49F, 0.0F}, {-90.0F, 0.0F, 0.0F}, {0.3F, 0.3F}), identity, {0.0F, -1.0F, 0.0F}},
         // X before Y gives +Y; Y before X would give -X, so this row pins the Euler order.
         {"Rx(90) then Ry(90)", light({0.0F, 0.0F, 0.0F}, {90.0F, 90.0F, 0.0F}, {0.5F, 0.25F}), identity, {0.0F, 1.0F, 0.0F}},
+        // Ry(90) takes -Z to -X, then Rz(90) to -Y; Z before Y would give -X, so this row pins Y's and Z's sense and their order.
+        {"Ry(90) then Rz(90)", light({0.0F, 0.0F, 0.0F}, {0.0F, 90.0F, 90.0F}, {0.5F, 0.25F}), identity, {0.0F, -1.0F, 0.0F}},
         {"under a moved scene root", light({0.0F, 0.0F, 0.0F}, {0.0F, 0.0F, 0.0F}, {0.3F, 0.6F}), sceneMoved, {-1.0F, 0.0F, 0.0F}},
     };
     // Higham's gamma_n, n = 8 chained 4-term products, at coordinate magnitude <= 4; eps, not u = eps/2, also covers sin/cos's ulp.
@@ -1180,7 +1182,7 @@ pathtracer::scene::PathTraceResult renderPassWithLights(const TestScene& scene,
                                                      bool showSky) {
     const std::atomic<std::uint64_t> generation{1};
     pathtracer::scene::PathTraceResult result = pathtracer::scene::makePathTraceResult(kImageSize, kImageSize);
-    const pathtracer::scene::LightSet lights(env, /*envRotationRadians=*/0.0F, /*envExposure=*/1.0F, quads);
+    const pathtracer::scene::LightSet lights(env, /*envRotationDegrees=*/glm::vec3(0.0F), /*envExposure=*/1.0F, quads);
     const std::vector<PathTraceSettings> perInstanceSettings(scene.instances.size(), settings);
     pathtracer::debug::PassStats stats;  // required by renderPathTraced; this tool checks radiance, not throughput
     pathtracer::scene::renderPathTraced(makeCamera(), accel, scene.shadingTriangles, scene.instances,
@@ -1750,7 +1752,7 @@ PT_CHECK(omnidirectional_film_filter_reaches_across_the_seam, Fast, Exact) {
         const std::atomic<std::uint64_t> generation{1};
         pathtracer::scene::PathTraceResult result = pathtracer::scene::makePathTraceResult(kWidth, kHeight);
         const std::vector<pathtracer::scene::QuadLight> noQuads;
-        const pathtracer::scene::LightSet lights(&env, /*envRotationRadians=*/0.0F, /*envExposure=*/1.0F, noQuads);
+        const pathtracer::scene::LightSet lights(&env, /*envRotationDegrees=*/glm::vec3(0.0F), /*envExposure=*/1.0F, noQuads);
         pathtracer::debug::PassStats stats;
         pathtracer::scene::renderPathTraced(camera, *accel, {}, {}, {}, lights, kWidth, kHeight, /*showSky=*/true, settings, {}, 7U,
                                             /*sampleBase=*/0, settings.samplesPerPixel, generation, /*requestedGeneration=*/1U, pool,

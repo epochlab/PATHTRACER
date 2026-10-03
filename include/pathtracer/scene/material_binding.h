@@ -29,8 +29,8 @@ namespace pathtracer::scene {
 [[nodiscard]] std::vector<QuadLight> buildQuadLights(
     const std::vector<pathtracer::config::QuadLightConfig>& lights, const glm::mat4& sceneTransform);
 
-// scene.json's model placement: translate * Rz * Ry * Rx, the order every caller places the scene in.
-[[nodiscard]] glm::mat4 rootTransformOf(const pathtracer::config::SceneConfig& scene);
+// scene.json's model placement: translate * rotationXyz, the order every caller places the scene in.
+[[nodiscard]] glm::mat4 rootTransformOf(const pathtracer::config::ModelConfig& model);
 
 // The profile's integrator limits and the scene material file's defaults; samplesPerPixel is the caller's, interactive or headless.
 [[nodiscard]] PathTraceSettings baseSettingsOf(const pathtracer::config::ProfileConfig& profile,

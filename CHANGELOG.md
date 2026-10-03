@@ -3,6 +3,38 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Root, light and environment rotation through the C and Python APIs
+
+Scene JSON placed the model root and each light by XYZ degrees (`Rz * Ry * Rx`, X first), but nothing else could. The
+environment turned about Y only, from the viewer's slider, and headless fixed it at 0. All three are now per-request
+fields of both APIs, on the scene's one convention. Evidence is in `results/object_rotation`.
+
+- feat: `scene/rotation.h` holds `rotationXyz(degrees)`, the composition `placementTransform` already used, now shared by
+  the root, every light and the environment.
+- feat: the environment turns about all three axes. `LightSet` and `PathTraceDriver::Request` take
+  `envRotationDegrees` as a `vec3`. The viewer's Y slider passes `{0, d, 0}`, which is bitwise the old matrix at every value.
+- feat: `HeadlessRenderer::Request` takes `rootRotationDegrees`, `lightRotationsDegrees` (one per light, under the root)
+  and `envRotationDegrees`. `nullopt` keeps the authored pose.
+  - The pose is baked into the triangle soup and the BVH, so a request whose pose differs from the last one rebuilds them
+    through the same `buildGeometry` as `open()`. A posed render is therefore bit-identical to the scene authored in that
+    pose, and returning to a pose reproduces it.
+  - Bound materials carry over by instance, so no texture reloads. A failed rebuild leaves the previous scene in place.
+  - Cost: cornell's rebuild is 3.6 ms. An unchanged pose costs nothing. `motionVector` still measures camera motion only.
+  - The `LightSet` is built per request, which retires the two prebuilt sets and their declaration-order hazard.
+- feat!: C ABI 5. `PtRenderRequest` gains `root_rotation_degrees` and `light_rotation_degrees` (NULL keeps the authored
+  pose) and `env_rotation_degrees[3]` (zero is unrotated). `pt_renderer_light_count`, `pt_renderer_default_root_rotation`
+  and `pt_renderer_default_light_rotations` read the authored pose back.
+- feat: Python `Renderer.render(root_rotation=, light_rotations=, env_rotation=)` and `Renderer.default_root_rotation` /
+  `default_light_rotations`. Shapes are checked before the ABI, which reads raw triples.
+- refactor: `rootTransformOf` takes the `ModelConfig` it reads.
+- test: `pose_override_matches_the_scene_authored_in_that_pose` compares a request's pose with the scene file authored in
+  it, bit for bit, plus the round trip back. `turning_the_world_with_the_camera_leaves_the_image` turns root, environment
+  and camera by one rotation under the lat-long lens. Depth agrees to 8e-8 and sky radiance to 5e-5; an environment turned
+  the wrong way gives 180. `render_rejects_an_invalid_pose`, the C ABI's three new rejection rows and
+  `pose_defaults_round_trip_through_the_abi` cover the boundary. `quad_light_placement` gains a row that pins Y's and Z's
+  sense and their order. `environment_pdf_consistency` runs under an XYZ rotation.
+- image: none for an authored pose. 27/27 render_beauty EXRs are byte-identical to `main`.
+
 ## JSON float reads refuse float overflow
 
 The loaders read every number as `float`, and nlohmann's `get<float>()` narrows a finite double past `FLT_MAX`, such as

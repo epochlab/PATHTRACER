@@ -210,7 +210,7 @@ void PathTraceDriver::publishPassRecord(std::uint64_t generation, int passIndex,
 double PathTraceDriver::tracePass(const Request& request, int sampleBase, std::uint64_t generation, PathTraceResult& pass) {
     passStats_.reset();
     // Built fresh each pass from this request's env state, holding references not copies, so the HUD toggle needs no invalidation path.
-    const LightSet lights(request.envLightEnabled ? &environmentMap_ : nullptr, request.envRotationRadians, request.envExposure,
+    const LightSet lights(request.envLightEnabled ? &environmentMap_ : nullptr, request.envRotationDegrees, request.envExposure,
                           quadLights_);
     const auto traceStart = std::chrono::steady_clock::now();
     renderPathTraced(request.camera, accel_, shadingTriangles_, instances_,

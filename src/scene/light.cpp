@@ -6,7 +6,8 @@
 #include <limits>
 
 #include <glm/gtc/constants.hpp>
-#include <glm/gtc/matrix_transform.hpp>
+
+#include "pathtracer/scene/rotation.h"
 
 namespace pathtracer::scene {
 
@@ -109,10 +110,10 @@ glm::vec3 SphericalRectangle::sample(glm::vec2 u) const {
     return referencePoint + (xu * x) + (yv * y) + (z0 * z);
 }
 
-LightSet::LightSet(const EnvironmentMap* environment, float envRotationRadians, float envExposure,
+LightSet::LightSet(const EnvironmentMap* environment, const glm::vec3& envRotationDegrees, float envExposure,
                     const std::vector<QuadLight>& quads)
     : environment_(environment),
-      envRotation_(glm::rotate(glm::mat4(1.0F), envRotationRadians, glm::vec3(0.0F, 1.0F, 0.0F))),
+      envRotation_(rotationXyz(envRotationDegrees)),
       envExposure_(envExposure),
       quads_(quads) {}
 

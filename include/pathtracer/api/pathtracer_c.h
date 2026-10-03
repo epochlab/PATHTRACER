@@ -13,7 +13,7 @@ typedef struct PtRenderer PtRenderer;
 #define PT_OK 0
 #define PT_ERROR 1
 /* PtCamera is passed by value, so a caller built against a different layout must be caught rather than reading the fields as garbage. */
-#define PT_ABI_VERSION 4
+#define PT_ABI_VERSION 5
 /* Lens projections, PtCamera.lens_projection: the pinhole, Kannala & Brandt's polynomial fisheye, and the 360-degree lat-long. */
 #define PT_LENS_RECTILINEAR 0
 #define PT_LENS_FISHEYE_POLYNOMIAL 1
@@ -64,6 +64,13 @@ void pt_renderer_default_camera(const PtRenderer* renderer, PtCamera* out);
 int pt_renderer_default_width(const PtRenderer* renderer);
 int pt_renderer_default_height(const PtRenderer* renderer);
 
+/* Quad lights in the scene, 3 floats each in light_rotation_degrees. Every rotation is XYZ degrees as Rz*Ry*Rx, X first. */
+int pt_renderer_light_count(const PtRenderer* renderer);
+/* scene.json's authored model.rotation into out[3], the root pose a NULL root_rotation_degrees keeps. */
+void pt_renderer_default_root_rotation(const PtRenderer* renderer, float* out);
+/* scene.json's authored lights[i].rotation into out[3 * pt_renderer_light_count], in scene order. */
+void pt_renderer_default_light_rotations(const PtRenderer* renderer, float* out);
+
 typedef struct {
     PtCamera camera;
     /* The view motionVector measures motion from, either lens; NULL is camera itself, so motion reads exactly zero. */
@@ -80,6 +87,12 @@ typedef struct {
     int show_sky;
     /* Tri-state, PT_DEFAULT keeping the scene's authored environment.lightEnabled: whether the environment is a light at all. */
     int env_light_enabled;
+    /* NULL keeps the authored model.rotation, else 3 floats. The lights turn with the root; a changed pose rebuilds the BVH. */
+    const float* root_rotation_degrees;
+    /* NULL keeps every authored lights[i].rotation, else 3 * pt_renderer_light_count floats, each light under the root. */
+    const float* light_rotation_degrees;
+    /* The environment map to world, background and lighting alike; all zero is the map unrotated. */
+    float env_rotation_degrees[3];
 } PtRenderRequest;
 
 /* Renders every requested AOV. out parallels request->aovs at width * height * pt_aov_channels(aovs[i]) floats, row-major top-left. */

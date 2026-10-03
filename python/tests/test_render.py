@@ -380,3 +380,56 @@ def test_env_light_enabled_changes_the_lighting(renderer: Renderer) -> None:
     unlit = renderer.render(**common, env_light_enabled=False)["beauty"]
     assert not np.array_equal(lit, unlit)
     assert unlit.mean() < lit.mean()
+
+
+def test_default_pose_reads_back_the_authored_scene(renderer: Renderer) -> None:
+    """cornell.json authors its root unrotated and its one ceiling light at [-90, 0, 0]."""
+    assert renderer.default_root_rotation == (0.0, 0.0, 0.0)
+    assert renderer.default_light_rotations == ((-90.0, 0.0, 0.0),)
+
+
+def test_explicit_authored_pose_matches_none(renderer: Renderer) -> None:
+    """Passing the authored pose is the same request as passing None, so it must render the same floats."""
+    common = {"aovs": ("beauty", "depth"), "width": 32, "height": 18, "samples": 2, "seed": 1}
+    implicit = renderer.render(**common)
+    explicit = renderer.render(
+        **common, root_rotation=renderer.default_root_rotation, light_rotations=renderer.default_light_rotations
+    )
+    for name in common["aovs"]:
+        assert np.array_equal(implicit[name], explicit[name])
+
+
+def test_pose_changes_the_image_and_returning_restores_it(renderer: Renderer) -> None:
+    """A root or light pose rebuilds the scene; going back must reproduce the authored render bit for bit."""
+    common = {"aovs": ("beauty", "depth"), "width": 32, "height": 18, "samples": 2, "seed": 1}
+    authored = renderer.render(**common)
+    turned_root = renderer.render(**common, root_rotation=(0.0, 30.0, 0.0))
+    turned_light = renderer.render(**common, light_rotations=((-60.0, 0.0, 0.0),))
+    restored = renderer.render(**common)
+    assert not np.array_equal(authored["depth"], turned_root["depth"])
+    assert not np.array_equal(authored["beauty"], turned_light["beauty"])
+    for name in common["aovs"]:
+        assert np.array_equal(authored[name], restored[name])
+
+
+def test_env_rotation_turns_the_sky(renderer: Renderer) -> None:
+    """Half a turn about Y moves the background, which the camera sees only through the environment."""
+    common = {"aovs": ("beauty",), "width": 32, "height": 18, "samples": 1, "seed": 1, "show_sky": True}
+    assert not np.array_equal(renderer.render(**common)["beauty"], renderer.render(**common, env_rotation=(0, 180, 0))["beauty"])
+
+
+@pytest.mark.parametrize(
+    ("pose", "message"),
+    [
+        ({"root_rotation": (0.0, 1.0)}, "root_rotation must have shape"),
+        ({"light_rotations": ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0))}, "light_rotations must have shape"),
+        ({"env_rotation": (0.0, 0.0, 0.0, 0.0)}, "env_rotation must have shape"),
+        ({"root_rotation": (0.0, math.nan, 0.0)}, "root rotation is not finite"),
+        ({"light_rotations": ((math.inf, 0.0, 0.0),)}, "a light rotation is not finite"),
+        ({"env_rotation": (0.0, 0.0, math.nan)}, "environment rotation is not finite"),
+    ],
+)
+def test_invalid_pose_is_rejected_by_name(renderer: Renderer, pose: dict, message: str) -> None:
+    """A wrong shape is caught before the ABI, which reads raw triples; a non-finite angle by the renderer, by name."""
+    with pytest.raises((ValueError, RuntimeError), match=message):
+        renderer.render(aovs=("depth",), width=8, height=8, **pose)

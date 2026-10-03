@@ -149,10 +149,10 @@ Camera makeCamera() {
 }
 
 PathTraceDriver::Request makeRequest(int maxSamples, const Camera& camera) {
-    PathTraceDriver::Request request{camera, 0, 0, 0.0F, true, true, 1.0F, makeSettings(), 0};
+    PathTraceDriver::Request request{camera, 0, 0, glm::vec3(0.0F), true, true, 1.0F, makeSettings(), 0};
     request.width = kImageSize;
     request.height = kImageSize;
-    request.envRotationRadians = 0.0F;
+    request.envRotationDegrees = glm::vec3(0.0F);
     request.showSky = true;
     request.envLightEnabled = true;
     request.envExposure = 1.0F;
@@ -215,7 +215,7 @@ struct OracleMean {
 OracleMean oracleBatchMean(DriverFixture& fixture, const Camera& camera, int passes, std::uint32_t scrambleSeed) {
     constexpr double kUnitRoundoff = std::numeric_limits<float>::epsilon() / 2.0;
     constexpr double kGamma4 = (4.0 * kUnitRoundoff) / (1.0 - (4.0 * kUnitRoundoff));
-    const pathtracer::scene::LightSet lights(&fixture.environment, 0.0F, 1.0F, fixture.scene.quadLights);
+    const pathtracer::scene::LightSet lights(&fixture.environment, glm::vec3(0.0F), 1.0F, fixture.scene.quadLights);
     PathTraceResult pass = pathtracer::scene::makePathTraceResult(kImageSize, kImageSize);
     std::array<std::vector<double>, kLanes.size()> sum;
     OracleMean oracle;
@@ -778,7 +778,7 @@ PT_CHECK(render_is_invariant_to_tile_size, Slow, Exact) {
     PT_EXPECT(ctx, coarse != fine, sizes);
 
     const Camera camera = makeCamera();
-    const pathtracer::scene::LightSet lights(&fixture->environment, 0.0F, 1.0F, fixture->scene.quadLights);
+    const pathtracer::scene::LightSet lights(&fixture->environment, glm::vec3(0.0F), 1.0F, fixture->scene.quadLights);
     const std::atomic<std::uint64_t> generation{1};
     pathtracer::debug::PassStats stats;
     const auto renderWith = [&](unsigned int threads) {
@@ -813,7 +813,7 @@ PT_CHECK(render_is_invariant_to_thread_count, Slow, Exact) {
         return;
     }
     const Camera camera = makeCamera();
-    const pathtracer::scene::LightSet lights(&fixture->environment, 0.0F, 1.0F, fixture->scene.quadLights);
+    const pathtracer::scene::LightSet lights(&fixture->environment, glm::vec3(0.0F), 1.0F, fixture->scene.quadLights);
     const std::atomic<std::uint64_t> generation{1};
     pathtracer::debug::PassStats stats;
 
@@ -873,7 +873,7 @@ PT_CHECK(running_m2_matches_batch_variance, Slow, Exact) {
     const glm::dvec3 weights(pathtracer::debug::kRec709LuminanceWeights);
 
     // The same passes the driver ran, synchronously, with every per-texel luminance kept in double for an exact two-pass variance.
-    const pathtracer::scene::LightSet lights(&fixture->environment, 0.0F, 1.0F, fixture->scene.quadLights);
+    const pathtracer::scene::LightSet lights(&fixture->environment, glm::vec3(0.0F), 1.0F, fixture->scene.quadLights);
     PathTraceResult pass = pathtracer::scene::makePathTraceResult(kImageSize, kImageSize);
     const auto scrambleSeed = static_cast<std::uint32_t>(generation);
     const std::atomic<std::uint64_t> oracleGeneration{scrambleSeed};

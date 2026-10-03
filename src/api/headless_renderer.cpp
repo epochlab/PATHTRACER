@@ -3,9 +3,12 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <optional>
+#include <string>
 #include <utility>
+#include <vector>
 
 #include "pathtracer/debug/aov_filters.h"
 #include "pathtracer/debug/aov_routing.h"
@@ -91,8 +94,21 @@ struct SceneInputs {
     return std::any_of(aovs.begin(), aovs.end(), [source](AovId aov) { return pathtracer::debug::aovSource(aov) == source; });
 }
 
+[[nodiscard]] std::vector<glm::vec3> rotationsOf(const std::vector<pathtracer::config::QuadLightConfig>& lights) {
+    std::vector<glm::vec3> rotations;
+    rotations.reserve(lights.size());
+    for (const pathtracer::config::QuadLightConfig& light : lights) {
+        rotations.push_back(light.rotation);
+    }
+    return rotations;
+}
+
+[[nodiscard]] bool isFinite(const glm::vec3& v) {
+    return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+}
+
 // Rejects a request no producer can serve, before any buffer is touched; error names the first fault.
-[[nodiscard]] bool validRequest(const HeadlessRenderer::Request& request, std::string& error) {
+[[nodiscard]] bool validRequest(const HeadlessRenderer::Request& request, std::size_t lightCount, std::string& error) {
     if (request.width <= 0 || request.height <= 0) {
         error = "resolution must be positive";
         return false;
@@ -110,6 +126,26 @@ struct SceneInputs {
     }
     if (request.previousCamera.has_value() && !request.previousCamera->validate(error)) {
         error = "previousCamera: " + error;
+        return false;
+    }
+    if (request.rootRotationDegrees.has_value() && !isFinite(*request.rootRotationDegrees)) {
+        error = "root rotation is not finite";
+        return false;
+    }
+    if (request.lightRotationsDegrees.has_value()) {
+        const std::vector<glm::vec3>& rotations = *request.lightRotationsDegrees;
+        if (rotations.size() != lightCount) {
+            error = "light rotations number " + std::to_string(rotations.size()) + ", the scene has " + std::to_string(lightCount) +
+                    " lights";
+            return false;
+        }
+        if (!std::all_of(rotations.begin(), rotations.end(), isFinite)) {
+            error = "a light rotation is not finite";
+            return false;
+        }
+    }
+    if (!isFinite(request.envRotationDegrees)) {
+        error = "environment rotation is not finite";
         return false;
     }
     return true;
@@ -132,6 +168,30 @@ struct SceneInputs {
 
 }  // namespace
 
+std::optional<HeadlessRenderer::Geometry> HeadlessRenderer::buildGeometry(
+    const std::string& assetRoot, const pathtracer::config::ModelConfig& model,
+    const std::vector<pathtracer::config::QuadLightConfig>& lights, std::string& error) {
+    const glm::mat4 rootTransform = pathtracer::scene::rootTransformOf(model);
+    std::optional<pathtracer::scene::LoadedModel> loaded = pathtracer::scene::loadGltf(assetRoot + "/" + model.gltfPath, rootTransform);
+    if (!loaded) {
+        error = "failed to load glTF " + assetRoot + "/" + model.gltfPath;
+        return std::nullopt;
+    }
+    std::vector<int> instanceLightIndex(loaded->instances.size(), -1);
+    std::vector<pathtracer::scene::QuadLight> quadLights = pathtracer::scene::buildQuadLights(lights, rootTransform);
+    pathtracer::scene::appendQuadLights(*loaded, quadLights, instanceLightIndex);
+    // After appendQuadLights, so the light panels' own instances are bounded too.
+    std::vector<pathtracer::scene::AabbBounds> instanceBounds =
+        pathtracer::scene::computeInstanceBounds(loaded->shadingTriangles, static_cast<int>(loaded->instances.size()));
+    std::optional<pathtracer::scene::EmbreeAccel> accel = pathtracer::scene::EmbreeAccel::build(std::move(loaded->worldTriangles));
+    if (!accel) {
+        error = "Embree scene build failed";
+        return std::nullopt;
+    }
+    return Geometry{std::move(*loaded), std::move(quadLights), std::move(instanceLightIndex), std::move(instanceBounds),
+                    std::move(*accel)};
+}
+
 std::unique_ptr<HeadlessRenderer> HeadlessRenderer::open(const std::string& assetRoot,
                                                           const std::string& scenePath,
                                                           std::string& error) {
@@ -140,23 +200,15 @@ std::unique_ptr<HeadlessRenderer> HeadlessRenderer::open(const std::string& asse
         return nullptr;
     }
     const pathtracer::config::SceneConfig& scene = inputs->scene;
-    const glm::mat4 rootTransform = pathtracer::scene::rootTransformOf(scene);
-    std::optional<pathtracer::scene::LoadedModel> model =
-        pathtracer::scene::loadGltf(assetRoot + "/" + scene.model.gltfPath, rootTransform);
-    if (!model) {
-        error = "failed to load glTF " + assetRoot + "/" + scene.model.gltfPath;
+    std::optional<Geometry> geometry = buildGeometry(assetRoot, scene.model, scene.lights, error);
+    if (!geometry) {
         return nullptr;
     }
-    if (!pathtracer::scene::bindSceneTextures(model->instances, scene.textures, assetRoot,
+    if (!pathtracer::scene::bindSceneTextures(geometry->model.instances, scene.textures, assetRoot,
                                               inputs->profile.render.textureType)) {
         error = "failed to bind scene textures";
         return nullptr;
     }
-
-    std::vector<int> instanceLightIndex(model->instances.size(), -1);
-    std::vector<pathtracer::scene::QuadLight> quadLights =
-        pathtracer::scene::buildQuadLights(scene.lights, rootTransform);
-    pathtracer::scene::appendQuadLights(*model, quadLights, instanceLightIndex);
 
     std::optional<pathtracer::scene::Camera> camera = resolveCamera(assetRoot, inputs->profile, error);
     if (!camera) {
@@ -167,50 +219,62 @@ std::unique_ptr<HeadlessRenderer> HeadlessRenderer::open(const std::string& asse
     const pathtracer::scene::PathTraceSettings baseSettings =
         pathtracer::scene::baseSettingsOf(inputs->profile, inputs->material, /*samplesPerPixel=*/1);
     std::optional<std::vector<pathtracer::scene::PathTraceSettings>> perInstanceSettings =
-        pathtracer::scene::resolvePerInstanceSettings(baseSettings, model->instances,
+        pathtracer::scene::resolvePerInstanceSettings(baseSettings, geometry->model.instances,
                                                    scene.materialOverrides, assetRoot);
     if (!perInstanceSettings) {
         error = "failed to resolve per-instance material overrides";
         return nullptr;
     }
 
-    std::optional<pathtracer::scene::EmbreeAccel> accel =
-        pathtracer::scene::EmbreeAccel::build(std::move(model->worldTriangles));
-    if (!accel) {
-        error = "Embree scene build failed";
-        return nullptr;
-    }
-
     return std::unique_ptr<HeadlessRenderer>(new HeadlessRenderer(
-        std::move(inputs->profile), std::move(*model), std::move(quadLights), std::move(instanceLightIndex),
-        std::move(*perInstanceSettings), baseSettings, std::move(*accel), std::move(inputs->environmentImage),
-        scene.environment.lightEnabled, *camera));
+        assetRoot, std::move(inputs->profile), std::move(inputs->scene), std::move(*geometry), std::move(*perInstanceSettings),
+        baseSettings, std::move(inputs->environmentImage), *camera));
 }
 
-HeadlessRenderer::HeadlessRenderer(pathtracer::config::ProfileConfig profile,
-                                    pathtracer::scene::LoadedModel model,
-                                    std::vector<pathtracer::scene::QuadLight> quadLights,
-                                    std::vector<int> instanceLightIndex,
-                                    std::vector<pathtracer::scene::PathTraceSettings> perInstanceSettings,
-                                    pathtracer::scene::PathTraceSettings baseSettings,
-                                    pathtracer::scene::EmbreeAccel accel,
-                                    pathtracer::gfx::ImageTexture environmentImage, bool envLightEnabled,
-                                    const pathtracer::scene::Camera& defaultCamera)
-    : profile_(std::move(profile)),
-      model_(std::move(model)),
-      instanceLightIndex_(std::move(instanceLightIndex)),
+HeadlessRenderer::HeadlessRenderer(std::string assetRoot, pathtracer::config::ProfileConfig profile,
+                                   pathtracer::config::SceneConfig scene, Geometry geometry,
+                                   std::vector<pathtracer::scene::PathTraceSettings> perInstanceSettings,
+                                   pathtracer::scene::PathTraceSettings baseSettings,
+                                   pathtracer::gfx::ImageTexture environmentImage,
+                                   const pathtracer::scene::Camera& defaultCamera)
+    : assetRoot_(std::move(assetRoot)),
+      profile_(std::move(profile)),
+      scene_(std::move(scene)),
+      geometry_(std::move(geometry)),
+      builtRootRotationDegrees_(scene_.model.rotation),
+      builtLightRotationsDegrees_(rotationsOf(scene_.lights)),
       perInstanceSettings_(std::move(perInstanceSettings)),
       baseSettings_(baseSettings),
-      instanceBounds_(pathtracer::scene::computeInstanceBounds(model_.shadingTriangles, static_cast<int>(model_.instances.size()))),
-      accel_(std::move(accel)),
       environmentMap_(std::move(environmentImage)),
-      quadLights_(std::move(quadLights)),
-      lights_(&environmentMap_, /*envRotationRadians=*/0.0F, /*envExposure=*/1.0F, quadLights_),
-      lightsEnvOff_(nullptr, /*envRotationRadians=*/0.0F, /*envExposure=*/1.0F, quadLights_),
-      defaultEnvLightEnabled_(envLightEnabled),
       defaultCamera_(defaultCamera) {}
 
 HeadlessRenderer::~HeadlessRenderer() = default;
+
+bool HeadlessRenderer::applyPose(const Request& request, std::string& error) {
+    const glm::vec3 rootRotation = request.rootRotationDegrees.value_or(scene_.model.rotation);
+    std::vector<glm::vec3> lightRotations = request.lightRotationsDegrees.value_or(rotationsOf(scene_.lights));
+    if (rootRotation == builtRootRotationDegrees_ && lightRotations == builtLightRotationsDegrees_) {
+        return true;
+    }
+    pathtracer::config::ModelConfig model = scene_.model;
+    model.rotation = rootRotation;
+    std::vector<pathtracer::config::QuadLightConfig> lights = scene_.lights;
+    for (std::size_t i = 0; i < lights.size(); ++i) {
+        lights[i].rotation = lightRotations[i];
+    }
+    std::optional<Geometry> geometry = buildGeometry(assetRoot_, model, lights, error);
+    if (!geometry) {
+        return false;
+    }
+    // Same glTF and light count, so instances align one to one: the bound materials carry over rather than reloading every texture.
+    for (std::size_t i = 0; i < geometry->model.instances.size(); ++i) {
+        geometry->model.instances[i].material = std::move(geometry_.model.instances[i].material);
+    }
+    geometry_ = std::move(*geometry);
+    builtRootRotationDegrees_ = rootRotation;
+    builtLightRotationsDegrees_ = std::move(lightRotations);
+    return true;
+}
 
 void HeadlessRenderer::resizeBuffers(int width, int height) {
     if (bufferWidth_ == width && bufferHeight_ == height) {
@@ -260,7 +324,7 @@ bool HeadlessRenderer::render(const Request& request, std::span<float* const> ou
 }
 
 bool HeadlessRenderer::render(const Request& request, std::string& error) {
-    if (!validRequest(request, error)) {
+    if (!validRequest(request, scene_.lights.size(), error) || !applyPose(request, error)) {
         return false;
     }
     const bool wantsFilter = requestsSource(request.aovs, AovSource::BeautyFilter);
@@ -294,8 +358,10 @@ void HeadlessRenderer::accumulatePathTraced(const Request& request) {
     // A synchronous caller uses no cooperative cancellation, so generation stays where requestedGeneration asks and never goes stale.
     const std::atomic<std::uint64_t> generation{1};
     pathtracer::debug::PassStats stats;
-    const pathtracer::scene::LightSet& lights =
-        request.envLightEnabled.value_or(defaultEnvLightEnabled_) ? lights_ : lightsEnvOff_;
+    // Built per request, as the driver builds one per pass: LightSet holds a pointer and a reference, so it costs one matrix.
+    const bool envLightEnabled = request.envLightEnabled.value_or(scene_.environment.lightEnabled);
+    const pathtracer::scene::LightSet lights(envLightEnabled ? &environmentMap_ : nullptr, request.envRotationDegrees,
+                                             /*envExposure=*/1.0F, geometry_.quadLights);
     // Loop-invariant like `lights` above it: the background is a property of the request, not of the pass index.
     const bool showSky = request.showSky.value_or(pathtracer::scene::kDefaultShowSky);
     stats_.passMilliseconds.reserve(static_cast<std::size_t>(request.samples));
@@ -315,8 +381,8 @@ void HeadlessRenderer::accumulatePathTraced(const Request& request) {
         // Only the trace is timed: the accumulation below it is O(pixels) and identical across revisions.
         const auto passStart = std::chrono::steady_clock::now();
         // scrambleSeed fixed, sampleBase advancing: the pair that keeps accumulated samples stratified rather than N independent draws.
-        pathtracer::scene::renderPathTraced(request.camera, accel_, model_.shadingTriangles, model_.instances,
-                                         instanceLightIndex_, lights, request.width, request.height,
+        pathtracer::scene::renderPathTraced(request.camera, geometry_.accel, geometry_.model.shadingTriangles,
+                                         geometry_.model.instances, geometry_.instanceLightIndex, lights, request.width, request.height,
                                          showSky, baseSettings_, perInstanceSettings_,
                                          request.scrambleSeed, /*sampleBase=*/pass,
                                          /*sampleCount=*/request.samples, generation,
@@ -363,8 +429,9 @@ void HeadlessRenderer::accumulatePass(const Request& request, int pass,
 
 void HeadlessRenderer::renderGBufferLanes(const Request& request) {
     const auto gbufferStart = std::chrono::steady_clock::now();
-    pathtracer::scene::renderGBuffer(request.camera, request.previousCamera.value_or(request.camera), accel_,
-                                     model_.shadingTriangles, model_.instances, perInstanceSettings_, instanceBounds_,
+    pathtracer::scene::renderGBuffer(request.camera, request.previousCamera.value_or(request.camera), geometry_.accel,
+                                     geometry_.model.shadingTriangles, geometry_.model.instances, perInstanceSettings_,
+                                     geometry_.instanceBounds,
                                      request.width, request.height, threadPool_, gbuffer_);
     stats_.gbufferMilliseconds =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - gbufferStart).count();

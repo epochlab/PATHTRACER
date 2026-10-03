@@ -17,7 +17,7 @@ explicit ``.to(device)``.
 from __future__ import annotations
 
 import ctypes
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -40,6 +40,13 @@ def _aov_id(name: str) -> int:
     if identifier < 0:
         raise ValueError(f"unknown AOV {name!r}; known AOVs are: {', '.join(AOVS)}")
     return identifier
+
+
+def _rotation_array(rotation: Sequence[float] | Sequence[Sequence[float]], shape: tuple[int, ...], name: str) -> np.ndarray:
+    array = np.ascontiguousarray(rotation, dtype=np.float32)
+    if array.shape != shape:
+        raise ValueError(f"{name} must have shape {shape}, got {array.shape}")
+    return array
 
 
 def aov_channels(name: str) -> int:
@@ -226,6 +233,21 @@ class Renderer:
     def default_resolution(self) -> tuple[int, int]:
         return (_LIB.pt_renderer_default_width(self._handle), _LIB.pt_renderer_default_height(self._handle))
 
+    @property
+    def default_root_rotation(self) -> tuple[float, float, float]:
+        """scene.json's ``model.rotation`` in XYZ degrees: the pose ``render(root_rotation=None)`` keeps."""
+        out = (ctypes.c_float * 3)()
+        _LIB.pt_renderer_default_root_rotation(self._handle, out)
+        return (out[0], out[1], out[2])
+
+    @property
+    def default_light_rotations(self) -> tuple[tuple[float, float, float], ...]:
+        """Each scene.json ``lights[i].rotation`` in XYZ degrees, in scene order: one entry per light."""
+        count = _LIB.pt_renderer_light_count(self._handle)
+        out = (ctypes.c_float * (3 * count))()
+        _LIB.pt_renderer_default_light_rotations(self._handle, out)
+        return tuple((out[3 * i], out[3 * i + 1], out[3 * i + 2]) for i in range(count))
+
     def render(
         self,
         *,
@@ -238,6 +260,9 @@ class Renderer:
         previous_camera: Camera | None = None,
         show_sky: bool | None = None,
         env_light_enabled: bool | None = None,
+        root_rotation: Sequence[float] | None = None,
+        light_rotations: Sequence[Sequence[float]] | None = None,
+        env_rotation: Sequence[float] = (0.0, 0.0, 0.0),
     ) -> Mapping[str, np.ndarray]:
         """Renders the requested AOVs and returns them keyed by the names given.
 
@@ -257,7 +282,14 @@ class Renderer:
 
         ``previous_camera`` is the view ``motionVector`` measures from: ``(dx, dy)`` in pixels of this frame, the
         displacement ``x_now - x_previous`` of the point seen at each pixel centre, zero where the previous view has no
-        image of it. ``None`` is ``camera`` itself, so the motion is exactly zero.
+        image of it. ``None`` is ``camera`` itself, so the motion is exactly zero. Only the camera moves it, never a pose.
+
+        ``root_rotation``, ``light_rotations`` and ``env_rotation`` are XYZ degrees applied as ``Rz @ Ry @ Rx``, so X
+        first about fixed world axes: the convention of scene.json's ``rotation`` keys. ``root_rotation`` replaces
+        ``model.rotation`` and turns the lights with the model; ``light_rotations`` replaces each light's own, under the
+        root, one per entry of ``default_light_rotations``. ``None`` keeps the authored pose. A pose that differs from the
+        previous render's reloads the glTF and rebuilds the BVH, so batch renders by pose rather than alternating poses.
+        ``env_rotation`` turns the environment map, background and lighting alike; zero is the map unrotated.
 
         Returns arrays of shape ``(height, width, channels)``, float32, row 0 at the top.
         """
@@ -272,6 +304,14 @@ class Renderer:
         height = default_height if height is None else height
         if width < 1 or height < 1:
             raise ValueError(f"resolution must be positive, got {width}x{height}")
+
+        # Shape-checked here: the ABI reads 3 floats per pointer, and 3 per light, with no length to check against.
+        root = None if root_rotation is None else _rotation_array(root_rotation, (3,), "root_rotation")
+        lights = None
+        if light_rotations is not None:
+            count = _LIB.pt_renderer_light_count(self._handle)
+            lights = _rotation_array(light_rotations, (count, 3), "light_rotations")
+        env = _rotation_array(env_rotation, (3,), "env_rotation")
 
         identifiers = [_aov_id(name) for name in names]
         # numpy owns every byte, so nothing is freed across the ABI and the arrays outlive the call without a copy.
@@ -295,6 +335,11 @@ class Renderer:
         request.aov_count = len(identifiers)
         request.show_sky = _ffi.PT_DEFAULT if show_sky is None else int(show_sky)
         request.env_light_enabled = _ffi.PT_DEFAULT if env_light_enabled is None else int(env_light_enabled)
+        if root is not None:
+            request.root_rotation_degrees = root.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+        if lights is not None:
+            request.light_rotation_degrees = lights.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+        request.env_rotation_degrees = (ctypes.c_float * 3)(*env)
 
         error = _ffi.make_error_buffer()
         if _LIB.pt_render(self._handle, ctypes.byref(request), pointers, error, len(error)) != 0:
