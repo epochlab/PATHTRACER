@@ -543,7 +543,7 @@ PT_CHECK(hsv_inverts_to_rgb, Fast, Exact) {
 
 // The same camera through either lens, so a check can hold everything but the projection fixed.
 pathtracer::scene::Camera withLens(const pathtracer::scene::Camera& camera, pathtracer::scene::Lens lens) {
-    return pathtracer::scene::Camera{camera.position(), camera.yawDegrees(), camera.pitchDegrees(), camera.filmBack(),
+    return pathtracer::scene::Camera{camera.position(), camera.rotationDegrees(), camera.filmBack(),
                                      camera.focalLengthMm(), camera.nearClip(), camera.farClip(), camera.aperture(),
                                      camera.shutterSeconds(), camera.iso(), lens};
 }
@@ -804,7 +804,7 @@ PT_CHECK(motion_vector_follows_the_previous_camera, Fast, Exact) {
     }
     const pathtracer::scene::Camera& camera = renderer->defaultCamera();
     const auto posed = [&camera](float yawOffset, pathtracer::scene::Lens lens) {
-        return pathtracer::scene::Camera{camera.position(), camera.yawDegrees() + yawOffset, camera.pitchDegrees(), camera.filmBack(),
+        return pathtracer::scene::Camera{camera.position(), camera.rotationDegrees() + glm::vec3(0.0F, yawOffset, 0.0F), camera.filmBack(),
                                          camera.focalLengthMm(), camera.nearClip(), camera.farClip(), camera.aperture(),
                                          camera.shutterSeconds(), camera.iso(), lens};
     };
@@ -819,7 +819,7 @@ PT_CHECK(motion_vector_follows_the_previous_camera, Fast, Exact) {
     };
     PT_EXPECT(ctx, allZero(motion(std::nullopt)), "no previous camera did not read exactly zero motion: " + error);
     PT_EXPECT(ctx, allZero(motion(camera)), "the camera as its own previous view did not read exactly zero motion: " + error);
-    // Yaw grows to the left (camera.cpp's Euler forward), so the previous view at yaw - 0.5 sees the scene shifted right since.
+    // A positive turn about +Y is to the left (right-handed, -Z forward), so the previous view at y - 0.5 sees the scene shifted right.
     const std::vector<float> turned = motion(posed(-0.5F, camera.lens()));
     bool rightward = !turned.empty();
     for (std::size_t i = 0; i < turned.size(); i += 2) {
@@ -984,13 +984,15 @@ PT_CHECK(turning_the_world_with_the_camera_leaves_the_image, Slow, Exact) {
         return;
     }
     // Cornell authors its root unrotated, so the turned root is the turn itself; the light, authored under the root, follows it.
-    const glm::vec3 turn(0.0F, 35.0F, 0.0F);
+    const glm::vec3 turn(20.0F, 35.0F, -15.0F);
+    const glm::mat3 turnMatrix = pathtracer::scene::rotationXyz(turn);
     const pathtracer::scene::Camera& camera = renderer->defaultCamera();
     // The lat-long sees every direction, so the comparison covers the whole environment and every surface around the eye.
     const pathtracer::scene::Camera unturned =
         withLens(camera, {pathtracer::scene::LensProjection::Omnidirectional});
-    const pathtracer::scene::Camera turned{pathtracer::scene::rotationXyz(turn) * camera.position(),
-                                           camera.yawDegrees() + turn.y, camera.pitchDegrees(), camera.filmBack(),
+    // The camera turns on the left of its own rotation, as the world does, and goes back to Euler through the controller's inverse.
+    const glm::vec3 turnedRotation = pathtracer::scene::eulerXyzDegrees(turnMatrix * pathtracer::scene::rotationXyz(camera.rotationDegrees()));
+    const pathtracer::scene::Camera turned{turnMatrix * camera.position(), turnedRotation, camera.filmBack(),
                                            camera.focalLengthMm(), camera.nearClip(), camera.farClip(), camera.aperture(),
                                            camera.shutterSeconds(), camera.iso(), unturned.lens()};
     constexpr int kWidth = 64;

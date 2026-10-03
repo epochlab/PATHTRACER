@@ -144,7 +144,7 @@ std::unique_ptr<DriverFixture> makeFixture() {
 }
 
 Camera makeCamera() {
-    return Camera(glm::vec3(0.0F, 0.0F, 5.0F), 0.0F, 0.0F, Camera::FilmBack{36.0F, 24.0F}, 50.0F, 0.01F, 1000.0F,
+    return Camera(glm::vec3(0.0F, 0.0F, 5.0F), glm::vec3(0.0F), Camera::FilmBack{36.0F, 24.0F}, 50.0F, 0.01F, 1000.0F,
                    2.8F, 1.0F / 125.0F, 100.0F);
 }
 
@@ -539,7 +539,7 @@ PT_CHECK(new_request_restarts_accumulation, Slow, Exact) {
     }
 
     // A different camera: a genuinely different image, which must not be averaged into the first.
-    const Camera moved(glm::vec3(0.5F, 0.25F, 5.0F), 10.0F, -5.0F, Camera::FilmBack{36.0F, 24.0F}, 50.0F, 0.01F,
+    const Camera moved(glm::vec3(0.5F, 0.25F, 5.0F), glm::vec3(-5.0F, 10.0F, 0.0F), Camera::FilmBack{36.0F, 24.0F}, 50.0F, 0.01F,
                         1000.0F, 2.8F, 1.0F / 125.0F, 100.0F);
     const std::uint64_t second = fixture->driver->requestTrace(makeRequest(4, moved));
     // Keyed on the second generation: the first's result already holds 4 samples, so a count alone would pass unrestarted.

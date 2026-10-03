@@ -924,7 +924,7 @@ PT_CHECK(json_float_reads_refuse_float_overflow, Fast, Exact) {
          {"/diffuseColour/2"}},
         {"loadProfileConfig", nlohmann::json::parse(shippedProfile),
          [](const std::string& path) { return pathtracer::config::loadProfileConfig(path).has_value(); },
-         {"/camera/position/0", "/camera/yawDegrees", "/camera/pitchDegrees", "/camera/focalLengthMm", "/camera/nearClip",
+         {"/camera/position/0", "/camera/rotation/0", "/camera/rotation/2", "/camera/focalLengthMm", "/camera/nearClip",
           "/camera/farClip", "/camera/aperture", "/camera/shutterSeconds", "/camera/iso", "/camera/lens/radialCoefficients/3",
           "/camera/lens/maxFieldOfViewDegrees", "/controls/flySpeedMetersPerSecond", "/controls/orbitSensitivityDegPerPixel",
           "/render/renderScale", "/render/interactiveRenderScale", "/pathTracer/aoMaxDistance", "/pathTracer/lookaheadDistance"}},

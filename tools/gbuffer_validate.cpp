@@ -169,25 +169,25 @@ std::unique_ptr<Fixture> makeClusterFixture(const tools::check::Context& ctx) {
 }
 
 Camera straightOnCamera() {
-    return Camera(glm::vec3(0.0F), 0.0F, 0.0F, kFilmBack, 35.0F, 0.1F, 100.0F, 2.8F, 1.0F / 125.0F, 100.0F);
+    return Camera(glm::vec3(0.0F), glm::vec3(0.0F), kFilmBack, 35.0F, 0.1F, 100.0F, 2.8F, 1.0F / 125.0F, 100.0F);
 }
 
 // The angled pose: off every axis and inside the cluster's depth span, so a frame holds both hits and misses.
-Camera angledCamera(glm::vec3 offset = glm::vec3(0.0F), float yawOffset = 0.0F, float pitchOffset = 0.0F, float focalMm = 35.0F) {
-    return Camera(glm::vec3(3.0F, 2.0F, 1.0F) + offset, 20.0F + yawOffset, -10.0F + pitchOffset, kFilmBack, focalMm, 0.1F,
+Camera angledCamera(glm::vec3 offset = glm::vec3(0.0F), glm::vec3 rotationOffset = glm::vec3(0.0F), float focalMm = 35.0F) {
+    return Camera(glm::vec3(3.0F, 2.0F, 1.0F) + offset, glm::vec3(-10.0F, 20.0F, 0.0F) + rotationOffset, kFilmBack, focalMm, 0.1F,
                   100.0F, 2.8F, 1.0F / 125.0F, 100.0F);
 }
 
 // An equidistant fisheye inside the cluster: at 220 degrees it images triangles behind its own optical plane, where planar z < 0.
-Camera fisheyeCamera(float fieldOfViewDegrees, glm::vec3 offset = glm::vec3(0.0F), float yawOffset = 0.0F) {
-    return Camera(glm::vec3(0.5F, -0.5F, -8.0F) + offset, 15.0F + yawOffset, 5.0F, kFilmBack, 8.0F, 0.1F, 100.0F, 2.8F,
-                  1.0F / 125.0F, 100.0F, Lens{LensProjection::FisheyePolynomial, {}, fieldOfViewDegrees});
+Camera fisheyeCamera(float fieldOfViewDegrees, glm::vec3 offset = glm::vec3(0.0F), glm::vec3 rotationOffset = glm::vec3(0.0F)) {
+    return Camera(glm::vec3(0.5F, -0.5F, -8.0F) + offset, glm::vec3(5.0F, 15.0F, 0.0F) + rotationOffset, kFilmBack, 8.0F, 0.1F,
+                  100.0F, 2.8F, 1.0F / 125.0F, 100.0F, Lens{LensProjection::FisheyePolynomial, {}, fieldOfViewDegrees});
 }
 
 // The lat-long from the same spot: it sees the whole cluster around it, and behind it the environment through the seam.
-Camera omnidirectionalCamera(glm::vec3 offset = glm::vec3(0.0F), float yawOffset = 0.0F) {
-    return Camera(glm::vec3(0.5F, -0.5F, -8.0F) + offset, 15.0F + yawOffset, 5.0F, kFilmBack, 8.0F, 0.1F, 100.0F, 2.8F,
-                  1.0F / 125.0F, 100.0F, Lens{LensProjection::Omnidirectional});
+Camera omnidirectionalCamera(glm::vec3 offset = glm::vec3(0.0F), glm::vec3 rotationOffset = glm::vec3(0.0F)) {
+    return Camera(glm::vec3(0.5F, -0.5F, -8.0F) + offset, glm::vec3(5.0F, 15.0F, 0.0F) + rotationOffset, kFilmBack, 8.0F, 0.1F,
+                  100.0F, 2.8F, 1.0F / 125.0F, 100.0F, Lens{LensProjection::Omnidirectional});
 }
 
 // Smallest singular value of the per-pixel direction map: radians per pixel along its least-stretched axis.
@@ -317,7 +317,7 @@ PT_CHECK(gbuffer_pose_angled, Fast, Exact) {
 // Near clip 5.0 puts it mid-cluster, so the ray's tMin skips surfaces closer than it.
 PT_CHECK(gbuffer_pose_near_clip, Fast, Exact) {
     runPose(ctx, "nearClip",
-            Camera(glm::vec3(0.0F), 5.0F, 5.0F, kFilmBack, 35.0F, 5.0F, 100.0F, 2.8F, 1.0F / 125.0F, 100.0F), false);
+            Camera(glm::vec3(0.0F), glm::vec3(5.0F, 5.0F, 0.0F), kFilmBack, 35.0F, 5.0F, 100.0F, 2.8F, 1.0F / 125.0F, 100.0F), false);
 }
 
 // A 180-degree circle wider than the gate's height: the corners lie outside it and must read as background.
@@ -791,17 +791,15 @@ PT_CHECK(watertight_closed_mesh, Fast, Exact) {
     expectWatertight("straightOn", straightOnCamera(), *regular);
     const std::unique_ptr<Fixture> jittered = makeFixture(makeClosedCube(kCells, kHalfExtent, kJitter, rng), 1);
     // A 360-degree fisheye images every direction, so a single frame sweeps the whole enclosing surface.
-    const Camera allRound(glm::vec3(0.0F), 0.0F, 0.0F, kFilmBack, 4.0F, 0.1F, 100.0F, 2.8F, 1.0F / 125.0F, 100.0F,
+    const Camera allRound(glm::vec3(0.0F), glm::vec3(0.0F), kFilmBack, 4.0F, 0.1F, 100.0F, 2.8F, 1.0F / 125.0F, 100.0F,
                           Lens{LensProjection::FisheyePolynomial, {}, 360.0F});
     expectWatertight("fisheye360", allRound, *jittered);
-    std::uniform_real_distribution<float> yaw(0.0F, 360.0F);
-    std::uniform_real_distribution<float> pitch(-85.0F, 85.0F);
+    // Every axis over a whole turn: no orientation is singular now, so the poles and every roll are poses like any other.
+    std::uniform_real_distribution<float> angle(-180.0F, 180.0F);
     for (int i = 0; i < kSeededPoses; ++i) {
-        const float poseYaw = yaw(rng);
-        const float posePitch = pitch(rng);
-        expectWatertight("yaw " + std::to_string(poseYaw) + " pitch " + std::to_string(posePitch),
-                         Camera(glm::vec3(0.0F), poseYaw, posePitch, kFilmBack, 35.0F, 0.1F, 100.0F, 2.8F, 1.0F / 125.0F, 100.0F),
-                         *jittered);
+        const glm::vec3 rotation(angle(rng), angle(rng), angle(rng));
+        expectWatertight("rotation " + std::to_string(rotation.x) + " " + std::to_string(rotation.y) + " " + std::to_string(rotation.z),
+                         Camera(glm::vec3(0.0F), rotation, kFilmBack, 35.0F, 0.1F, 100.0F, 2.8F, 1.0F / 125.0F, 100.0F), *jittered);
     }
 }
 
@@ -1042,18 +1040,22 @@ double worstMotionError(const GBuffer& g, const Camera& camera, const Camera& pr
 PT_CHECK(motion_vector_matches_the_oracle, Fast, Exact) {
     const std::unique_ptr<Fixture> fixture = makeClusterFixture(ctx);
     const Lens equidistant{LensProjection::FisheyePolynomial, {}, 180.0F};
-    const std::array<std::tuple<const char*, Camera, Camera>, 11> cases{{
-        {"pinhole rotation", angledCamera(), angledCamera(glm::vec3(0.0F), 3.0F, -2.0F)},
+    const std::array<std::tuple<const char*, Camera, Camera>, 14> cases{{
+        {"pinhole rotation", angledCamera(), angledCamera(glm::vec3(0.0F), glm::vec3(-2.0F, 3.0F, 0.0F))},
+        {"pinhole roll", angledCamera(), angledCamera(glm::vec3(0.0F), glm::vec3(0.0F, 0.0F, 3.0F))},
         {"pinhole translation", angledCamera(), angledCamera(glm::vec3(0.3F, -0.2F, 0.5F))},
-        {"pinhole rotation+translation", angledCamera(), angledCamera(glm::vec3(-0.4F, 0.1F, 0.25F), -4.0F, 1.5F)},
-        {"pinhole zoom", angledCamera(), angledCamera(glm::vec3(0.0F), 0.0F, 0.0F, 50.0F)},
+        {"pinhole rotation+translation", angledCamera(), angledCamera(glm::vec3(-0.4F, 0.1F, 0.25F), glm::vec3(1.5F, -4.0F, 2.0F))},
+        {"pinhole zoom", angledCamera(), angledCamera(glm::vec3(0.0F), glm::vec3(0.0F), 50.0F)},
         {"pinhole from an equidistant fisheye", angledCamera(),
-         Camera(glm::vec3(3.0F, 2.0F, 1.0F), 20.0F, -10.0F, kFilmBack, 8.0F, 0.1F, 100.0F, 2.8F, 1.0F / 125.0F, 100.0F, equidistant)},
-        {"fisheye rotation", fisheyeCamera(220.0F), fisheyeCamera(220.0F, glm::vec3(0.0F), 4.0F)},
+         Camera(glm::vec3(3.0F, 2.0F, 1.0F), glm::vec3(-10.0F, 20.0F, 0.0F), kFilmBack, 8.0F, 0.1F, 100.0F, 2.8F, 1.0F / 125.0F, 100.0F,
+                equidistant)},
+        {"fisheye rotation", fisheyeCamera(220.0F), fisheyeCamera(220.0F, glm::vec3(0.0F), glm::vec3(0.0F, 4.0F, 0.0F))},
+        {"fisheye roll", fisheyeCamera(220.0F), fisheyeCamera(220.0F, glm::vec3(0.0F), glm::vec3(0.0F, 0.0F, 4.0F))},
         {"fisheye translation", fisheyeCamera(220.0F), fisheyeCamera(220.0F, glm::vec3(0.2F, 0.1F, -0.3F))},
         {"fisheye from a pinhole", fisheyeCamera(220.0F),
-         Camera(glm::vec3(0.5F, -0.5F, -8.0F), 15.0F, 5.0F, kFilmBack, 35.0F, 0.1F, 100.0F, 2.8F, 1.0F / 125.0F, 100.0F)},
-        {"lat-long rotation", omnidirectionalCamera(), omnidirectionalCamera(glm::vec3(0.0F), 4.0F)},
+         Camera(glm::vec3(0.5F, -0.5F, -8.0F), glm::vec3(5.0F, 15.0F, 0.0F), kFilmBack, 35.0F, 0.1F, 100.0F, 2.8F, 1.0F / 125.0F, 100.0F)},
+        {"lat-long rotation", omnidirectionalCamera(), omnidirectionalCamera(glm::vec3(0.0F), glm::vec3(0.0F, 4.0F, 0.0F))},
+        {"lat-long roll", omnidirectionalCamera(), omnidirectionalCamera(glm::vec3(0.0F), glm::vec3(0.0F, 0.0F, 4.0F))},
         {"lat-long translation", omnidirectionalCamera(), omnidirectionalCamera(glm::vec3(0.2F, 0.1F, -0.3F))},
         {"lat-long from a fisheye", omnidirectionalCamera(), fisheyeCamera(220.0F)},
     }};
@@ -1071,9 +1073,10 @@ PT_CHECK(motion_vector_takes_the_short_way_across_the_seam, Fast, Exact) {
     ctx.plan(3);
     constexpr float kYawStepDegrees = 4.0F;
     const Lens latLong{LensProjection::Omnidirectional};
-    const Camera camera(glm::vec3(0.5F, -0.5F, -8.0F), 15.0F, 0.0F, kFilmBack, 8.0F, 0.1F, 100.0F, 2.8F, 1.0F / 125.0F, 100.0F, latLong);
-    const Camera previous(glm::vec3(0.5F, -0.5F, -8.0F), 15.0F - kYawStepDegrees, 0.0F, kFilmBack, 8.0F, 0.1F, 100.0F, 2.8F,
-                          1.0F / 125.0F, 100.0F, latLong);
+    const Camera camera(glm::vec3(0.5F, -0.5F, -8.0F), glm::vec3(0.0F, 15.0F, 0.0F), kFilmBack, 8.0F, 0.1F, 100.0F, 2.8F, 1.0F / 125.0F,
+                        100.0F, latLong);
+    const Camera previous(glm::vec3(0.5F, -0.5F, -8.0F), glm::vec3(0.0F, 15.0F - kYawStepDegrees, 0.0F), kFilmBack, 8.0F, 0.1F, 100.0F,
+                          2.8F, 1.0F / 125.0F, 100.0F, latLong);
     const GBuffer g = fixture->render(camera, previous);
     // Turning left by the step moves a fixed direction right by step / 360 of the width; float yaw and atan2 round to 16 ulps of a turn.
     const double expected = static_cast<double>(kYawStepDegrees) / 360.0 * kWidth;
@@ -1118,7 +1121,7 @@ PT_CHECK(motion_vector_holds_the_sky_still_under_translation, Fast, Exact) {
 PT_CHECK(motion_vector_is_zero_where_the_previous_view_has_no_image, Fast, Exact) {
     const std::unique_ptr<Fixture> fixture = makeClusterFixture(ctx);
     ctx.plan(1);
-    const Camera previous(glm::vec3(0.0F), 180.0F, 0.0F, kFilmBack, 35.0F, 0.1F, 100.0F, 2.8F, 1.0F / 125.0F, 100.0F);
+    const Camera previous(glm::vec3(0.0F), glm::vec3(0.0F, 180.0F, 0.0F), kFilmBack, 35.0F, 0.1F, 100.0F, 2.8F, 1.0F / 125.0F, 100.0F);
     const int nonZero = nonZeroMotion(fixture->render(straightOnCamera(), previous));
     PT_EXPECT(ctx, nonZero == 0, std::to_string(nonZero) + " pixels were given motion from a view that cannot see them");
 }

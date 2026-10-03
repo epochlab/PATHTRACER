@@ -10,7 +10,7 @@
 
 namespace pathtracer::scene {
 
-// Pose, lens and exposure, immutable once constructed. Right-handed, +Y up, -Z forward; yaw/pitch Euler, pitch bounded by validate().
+// Pose, lens and exposure, immutable once constructed. Right-handed, +Y up, -Z forward at rest, turned by rotationXyz like the scene.
 class Camera {
 public:
     // Sensor gate size in mm ({36.0F, 24.0F} for 35mm full-frame), paired with focal length to derive vertical FOV.
@@ -25,8 +25,8 @@ public:
         FilmBack filmBack;
     };
 
-    // Authored in degrees, more ergonomic at call sites, stored as radians because every consumer is trigonometric.
-    Camera(const glm::vec3& position, float yawDegrees, float pitchDegrees, FilmBack filmBack,
+    // rotationDegrees is XYZ degrees as scene.json's rotation keys: X then Y then Z about world axes, so z = 0 is yaw y over pitch x.
+    Camera(const glm::vec3& position, const glm::vec3& rotationDegrees, FilmBack filmBack,
            float focalLengthMm, float nearClip, float farClip, float aperture,
            float shutterSeconds, float iso, Lens lens = Lens{});
 
@@ -38,11 +38,10 @@ public:
 
     [[nodiscard]] glm::vec3 position() const { return position_; }
 
-    // Orientation in the degrees it was authored in, completing the accessors that return every constructor argument as given.
-    [[nodiscard]] float yawDegrees() const { return glm::degrees(yawRadians_); }
-    [[nodiscard]] float pitchDegrees() const { return glm::degrees(pitchRadians_); }
+    // Orientation as authored, completing the accessors that return every constructor argument as given.
+    [[nodiscard]] glm::vec3 rotationDegrees() const { return rotationDegrees_; }
 
-    // Unit-length view direction derived from yaw/pitch.
+    // Unit-length view direction, rotationXyz applied to -Z.
     [[nodiscard]] glm::vec3 forward() const;
     [[nodiscard]] FilmBack filmBack() const { return filmBack_; }
     [[nodiscard]] float focalLengthMm() const { return focalLengthMm_; }
@@ -80,7 +79,7 @@ public:
     // Ray for ndc in [-1,1] (+Y up), tMin/tMax nearClip()/farClip(); nullopt outside a fisheye's circle. The lat-long is 2-periodic in x.
     [[nodiscard]] std::optional<Ray> primaryRay(float ndcX, float ndcY, float aspect) const;
 
-    // Same ray from a basis the caller already built; the aspect-taking overload rebuilds two sin, two cos, an atan and a tan every call.
+    // Same ray from a basis the caller already built; the aspect-taking overload rebuilds the rotation's three sines and cosines per call.
     [[nodiscard]] std::optional<Ray> primaryRay(const ViewBasis& basis, float ndcX, float ndcY) const;
 
     // A primary ray and its exact differential (Igehy 1999): columns d(dir)/d(ndcX), d(dir)/d(ndcY) of the unit direction.
@@ -119,8 +118,7 @@ public:
 
 private:
     glm::vec3 position_;
-    float yawRadians_;
-    float pitchRadians_;
+    glm::vec3 rotationDegrees_;
     FilmBack filmBack_;
     float focalLengthMm_;
     float nearClip_;

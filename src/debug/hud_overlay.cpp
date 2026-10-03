@@ -346,7 +346,8 @@ void drawCameraSection(const HudFrameData& frame, float& focalLengthMm, float& a
     ImGui::TextColored(kCyan, "Camera");
     const glm::vec3 camPos = frame.camera.position();
     ImGui::Text("pos  x %.2f  y %.2f  z %.2f", camPos.x, camPos.y, camPos.z);
-    ImGui::Text("rot  x %.1f  y %.1f", frame.cameraPitchDegrees, frame.cameraYawDegrees);
+    const glm::vec3 camRot = frame.camera.rotationDegrees();
+    ImGui::Text("rot  x %.1f  y %.1f  z %.1f", camRot.x, camRot.y, camRot.z);
     const pathtracer::scene::Camera::FilmBack filmBack = frame.camera.filmBack();
     // heightMm > 0 is guaranteed by loadFilmBackPresets's boundary validation, so this division is well-defined.
     ImGui::Text("Filmback  %.2f x %.2f mm  (%.2f:1)", filmBack.widthMm, filmBack.heightMm,

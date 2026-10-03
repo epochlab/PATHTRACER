@@ -13,7 +13,7 @@ typedef struct PtRenderer PtRenderer;
 #define PT_OK 0
 #define PT_ERROR 1
 /* PtCamera is passed by value, so a caller built against a different layout must be caught rather than reading the fields as garbage. */
-#define PT_ABI_VERSION 5
+#define PT_ABI_VERSION 6
 /* Lens projections, PtCamera.lens_projection: the pinhole, Kannala & Brandt's polynomial fisheye, and the 360-degree lat-long. */
 #define PT_LENS_RECTILINEAR 0
 #define PT_LENS_FISHEYE_POLYNOMIAL 1
@@ -41,8 +41,7 @@ int pt_abi_version(void);
 /* Pose, lens and exposure; aperture/shutter_seconds/iso set EV only (no depth of field). pt_render names any field out of range. */
 typedef struct {
     float position[3]; /* finite */
-    float yaw_degrees; /* finite */
-    float pitch_degrees; /* strictly inside (-90, 90) */
+    float rotation_degrees[3]; /* finite; XYZ degrees as Rz*Ry*Rx, scene.json's convention, so -Z forward at rest */
     float film_back_mm[2]; /* sensor gate width, height; finite, > 0 */
     float focal_length_mm; /* finite, > 0 */
     /* 0 < near_clip < far_clip, near_clip finite; far_clip may be +inf, the unbounded ray. */

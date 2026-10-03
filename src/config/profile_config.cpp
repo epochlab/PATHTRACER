@@ -111,8 +111,7 @@ std::optional<RenderConfig> parseRenderOutput(const nlohmann::json& render, cons
 std::optional<CameraConfig> parseCamera(const nlohmann::json& camera, const std::string& path) {
     CameraConfig config{
         camera.at("position").get<glm::vec3>(),
-        toFloat(camera.at("yawDegrees")),
-        toFloat(camera.at("pitchDegrees")),
+        camera.at("rotation").get<glm::vec3>(),
         camera.at("filmBackPreset").get<std::string>(),
         toFloat(camera.at("focalLengthMm")),
         toFloat(camera.at("nearClip")),

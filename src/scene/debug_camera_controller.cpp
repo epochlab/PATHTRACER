@@ -1,12 +1,9 @@
 #include "pathtracer/scene/debug_camera_controller.h"
 
-#include <cmath>
-
 #include <GLFW/glfw3.h>
 
-#include <glm/gtc/matrix_transform.hpp>
-
 #include "pathtracer/platform/window.h"
+#include "pathtracer/scene/rotation.h"
 
 namespace pathtracer::scene {
 
@@ -16,19 +13,17 @@ constexpr glm::vec3 kWorldUp{0.0F, 1.0F, 0.0F};
 
 }  // namespace
 
-DebugCameraController::DebugCameraController(const glm::vec3& position, float yawDegrees,
-                                              float pitchDegrees, Camera::FilmBack filmBack,
+DebugCameraController::DebugCameraController(const glm::vec3& position, const glm::vec3& rotationDegrees,
+                                              Camera::FilmBack filmBack,
                                               float focalLengthMm, float nearClip, float farClip,
                                               float aperture, float shutterSeconds, float iso, Lens lens,
                                               float flySpeedMetersPerSecond,
                                               float orbitSensitivityDegPerPixel)
     : position_(position),
-      yawDegrees_(yawDegrees),
-      pitchDegrees_(pitchDegrees),
+      orientation_(glm::quat_cast(rotationXyz(rotationDegrees))),
       focalLengthMm_(focalLengthMm),
       defaultPosition_(position),
-      defaultYawDegrees_(yawDegrees),
-      defaultPitchDegrees_(pitchDegrees),
+      defaultOrientation_(orientation_),
       filmBack_(filmBack),
       nearClip_(nearClip),
       farClip_(farClip),
@@ -43,7 +38,7 @@ DebugCameraController::DebugCameraController(const glm::vec3& position, float ya
       orbitSensitivityDegPerPixel_(orbitSensitivityDegPerPixel) {}
 
 Camera DebugCameraController::snapshot() const {
-    return Camera(position_, yawDegrees_, pitchDegrees_, filmBack_, focalLengthMm_, nearClip_,
+    return Camera(position_, eulerXyzDegrees(glm::mat3_cast(orientation_)), filmBack_, focalLengthMm_, nearClip_,
                   farClip_, aperture_, shutterSeconds_, iso_, lens_);
 }
 
@@ -53,9 +48,10 @@ void DebugCameraController::applyFlyInput(const pathtracer::platform::Window& wi
         return;
     }
 
-    // right is horizontal even when forward is pitched up/down: cross((fx,fy,fz), (0,1,0)) = (-fz, 0, fx), no y component.
-    const glm::vec3 forward = snapshot().forward();
-    const glm::vec3 right = glm::normalize(glm::cross(forward, kWorldUp));
+    // The view's own axes, so a rolled or inverted camera flies where it looks; Q/E stay on world up, the one axis independent of view.
+    const glm::mat3 axes = glm::mat3_cast(orientation_);
+    const glm::vec3 forward = -axes[2];
+    const glm::vec3 right = axes[0];
     const float distance = flySpeedMetersPerSecond_ * dtSeconds;
 
     if (window.isKeyDown(GLFW_KEY_W)) {
@@ -88,32 +84,13 @@ void DebugCameraController::applyOrbitDelta(float dxPixels, float dyPixels) {
         return;
     }
 
-    glm::vec3 offset = position_ - pivot_;
-
-    const float yawDeltaDegrees = -dxPixels * orbitSensitivityDegPerPixel_;
-    offset = glm::vec3(glm::rotate(glm::mat4(1.0F), glm::radians(yawDeltaDegrees), kWorldUp) *
-                        glm::vec4(offset, 0.0F));
-
-    // The outer guard only stops cross(kWorldUp, offset) degenerating into a NaN at the pole; acceptance is re-checked below.
-    const float offsetLength = glm::length(offset);
-    if (offsetLength > 1e-5F && std::abs(offset.y / offsetLength) < 0.999F) {
-        const float pitchDeltaDegrees = -dyPixels * orbitSensitivityDegPerPixel_;
-        const glm::vec3 right = glm::normalize(glm::cross(kWorldUp, offset));
-        const glm::vec3 candidate = glm::vec3(
-            glm::rotate(glm::mat4(1.0F), glm::radians(pitchDeltaDegrees), right) *
-            glm::vec4(offset, 0.0F));
-        if (std::abs(candidate.y / offsetLength) < 0.99F) {
-            offset = candidate;
-        }
-    }
-
-    position_ = pivot_ + offset;
-
-    // Re-derive yaw and pitch from the new look direction, the inverse of forwardFromEuler, so WASD fly resumes seamlessly.
-    const glm::vec3 lookDir = glm::normalize(pivot_ - position_);
-    yawDegrees_ = glm::degrees(std::atan2(-lookDir.x, -lookDir.z));
-    pitchDegrees_ = glm::clamp(glm::degrees(std::asin(glm::clamp(lookDir.y, -1.0F, 1.0F))),
-                                -89.0F, 89.0F);
+    // Yaw multiplies on the left, about world up; pitch on the right, about the view's own X. Neither has a pole, so nothing is clamped.
+    const glm::quat yaw = glm::angleAxis(glm::radians(-dxPixels * orbitSensitivityDegPerPixel_), kWorldUp);
+    const glm::quat pitch = glm::angleAxis(glm::radians(-dyPixels * orbitSensitivityDegPerPixel_), glm::vec3(1.0F, 0.0F, 0.0F));
+    const glm::quat turned = glm::normalize(yaw * orientation_ * pitch);
+    // The same rigid turn carries the eye about the pivot, so a pivot on the view axis stays on it and the image orbits, not pans.
+    position_ = pivot_ + ((turned * glm::inverse(orientation_)) * (position_ - pivot_));
+    orientation_ = turned;
 }
 
 void DebugCameraController::endOrbit() {
@@ -122,8 +99,7 @@ void DebugCameraController::endOrbit() {
 
 void DebugCameraController::resetToDefault() {
     position_ = defaultPosition_;
-    yawDegrees_ = defaultYawDegrees_;
-    pitchDegrees_ = defaultPitchDegrees_;
+    orientation_ = defaultOrientation_;
 }
 
 }  // namespace pathtracer::scene

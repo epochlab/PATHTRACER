@@ -75,8 +75,7 @@ const char* lutName(pathtracer::gfx::OcioDisplayTransform::Lut lut) {
 // Camera geometry, every renderGBuffer input that can change: factored so the two producers compare the same fields.
 struct ViewInputState {
     glm::vec3 cameraPosition{0.0F};
-    float cameraYawDegrees = 0.0F;
-    float cameraPitchDegrees = 0.0F;
+    glm::vec3 cameraRotationDegrees{0.0F};
     float focalLengthMm = 0.0F;
     // The only FilmBack component feeding the render; widthMm is display-only, so tracking it would retrace for no visible effect.
     float filmBackHeightMm = 0.0F;
@@ -88,7 +87,7 @@ struct ViewInputState {
 
 // One definition for the current and previous views, so the G-buffer trigger compares the two on identical fields.
 ViewInputState viewInputState(const pathtracer::scene::Camera& camera) {
-    return ViewInputState{camera.position(), camera.yawDegrees(), camera.pitchDegrees(), camera.focalLengthMm(),
+    return ViewInputState{camera.position(), camera.rotationDegrees(), camera.focalLengthMm(),
                           camera.filmBack().heightMm, camera.lens().projection};
 }
 
@@ -331,7 +330,7 @@ std::optional<FilmBackCatalogue> loadFilmBackCatalogue(const pathtracer::config:
 pathtracer::scene::DebugCameraController makeDebugCamera(const pathtracer::config::ProfileConfig& profileConfig,
                                                          const pathtracer::scene::Camera::FilmBack& filmBack) {
     const pathtracer::config::CameraConfig& camera = profileConfig.camera;
-    return {camera.position, camera.yawDegrees, camera.pitchDegrees, filmBack, camera.focalLengthMm, camera.nearClip,
+    return {camera.position, camera.rotation, filmBack, camera.focalLengthMm, camera.nearClip,
             camera.farClip, camera.aperture, camera.shutterSeconds, camera.iso, camera.lens,
             profileConfig.controls.flySpeedMetersPerSecond, profileConfig.controls.orbitSensitivityDegPerPixel};
 }
@@ -876,8 +875,6 @@ void updateHud(AppResources& app, const pathtracer::platform::Window& window,
         lutName(app.ocioTransform.activeLut()),
         sceneStats,
         camera,
-        app.debugCamera.yawDegrees(),
-        app.debugCamera.pitchDegrees(),
         app.debugCamera.isOrbiting(),
         app.histogram,
         pathTracedStatus,
@@ -1030,8 +1027,7 @@ nlohmann::json benchConfig(const AppResources& app, const BenchCapture& bench) {
             {"ao_max_distance", app.scene.baseSettings.aoMaxDistance},
             {"aov", pathtracer::debug::kAovNames[app.aov]},
             {"camera", {{"position", {camera.position().x, camera.position().y, camera.position().z}},
-                        {"yaw", app.debugCamera.yawDegrees()},
-                        {"pitch", app.debugCamera.pitchDegrees()},
+                        {"rotation_deg", {camera.rotationDegrees().x, camera.rotationDegrees().y, camera.rotationDegrees().z}},
                         {"focal_mm", app.debugCamera.focalLengthMm()},
                         {"film_height_mm", app.debugCamera.filmBack().heightMm},
                         {"lens", pathtracer::scene::kLensProjectionNames[static_cast<int>(

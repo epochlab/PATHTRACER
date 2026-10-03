@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <numbers>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -10,23 +9,15 @@
 #include <glm/gtc/constants.hpp>
 
 #include "pathtracer/scene/lat_long.h"
+#include "pathtracer/scene/rotation.h"
 
 namespace pathtracer::scene {
 
 namespace {
 
-constexpr glm::vec3 kWorldUp{0.0F, 1.0F, 0.0F};
-
 // isfinite first: inf > 0 holds, and a NaN fails both, so every caller's rejection covers it.
 bool finitePositive(float value) {
     return std::isfinite(value) && value > 0.0F;
-}
-
-// Right-handed Euler forward vector, parameterised so yaw=0, pitch=0 points down -Z without the usual -90-degree yaw offset.
-glm::vec3 forwardFromEuler(float yawRadians, float pitchRadians) {
-    const float cosPitch = std::cos(pitchRadians);
-    return glm::normalize(glm::vec3(-std::sin(yawRadians) * cosPitch, std::sin(pitchRadians),
-                                     -std::cos(yawRadians) * cosPitch));
 }
 
 // A sensor point in polar form with the direction the lens images onto it: the one inverse solve a ray and its differential share.
@@ -129,12 +120,11 @@ std::optional<glm::vec2> omnidirectionalProjection(const Camera::ViewBasis& basi
 
 }  // namespace
 
-Camera::Camera(const glm::vec3& position, float yawDegrees, float pitchDegrees, FilmBack filmBack,
+Camera::Camera(const glm::vec3& position, const glm::vec3& rotationDegrees, FilmBack filmBack,
                float focalLengthMm, float nearClip, float farClip, float aperture,
                float shutterSeconds, float iso, Lens lens)
     : position_(position),
-      yawRadians_(glm::radians(yawDegrees)),
-      pitchRadians_(glm::radians(pitchDegrees)),
+      rotationDegrees_(rotationDegrees),
       filmBack_(filmBack),
       focalLengthMm_(focalLengthMm),
       nearClip_(nearClip),
@@ -148,11 +138,10 @@ bool Camera::validate(std::string& error) const {
     std::ostringstream reason;
     if (!(std::isfinite(position_.x) && std::isfinite(position_.y) && std::isfinite(position_.z))) {
         reason << "position (" << position_.x << ", " << position_.y << ", " << position_.z << ") is not finite";
-    } else if (!std::isfinite(yawRadians_)) {
-        reason << "yaw " << yawDegrees() << " degrees is not finite";
-    // right ~ cos(pitch): gimbal lock at +/-90, aliased to yaw + 180 past it. float(pi/2) is the first float past pi/2, so < is exact.
-    } else if (!(std::abs(pitchRadians_) < 0.5F * std::numbers::pi_v<float>)) {
-        reason << "pitch " << pitchDegrees() << " degrees is not strictly inside (-90, 90)";
+    // Any finite triple is a rotation: the basis is the matrix's columns, so no angle is singular and none needs a range.
+    } else if (!(std::isfinite(rotationDegrees_.x) && std::isfinite(rotationDegrees_.y) && std::isfinite(rotationDegrees_.z))) {
+        reason << "rotation (" << rotationDegrees_.x << ", " << rotationDegrees_.y << ", " << rotationDegrees_.z
+               << ") degrees is not finite";
     } else if (!validFilmBack(filmBack_)) {
         reason << "film back " << filmBack_.widthMm << " x " << filmBack_.heightMm << " mm is not finite and positive";
     } else if (!finitePositive(focalLengthMm_)) {
@@ -191,7 +180,7 @@ bool Camera::validFilmBack(FilmBack filmBack) {
 }
 
 glm::vec3 Camera::forward() const {
-    return forwardFromEuler(yawRadians_, pitchRadians_);
+    return -rotationXyz(rotationDegrees_)[2];
 }
 
 float Camera::verticalFovRadians() const {
@@ -217,9 +206,11 @@ float Camera::verticalAngularExtentRadians() const {
 }
 
 Camera::ViewBasis Camera::viewBasis(float aspect) const {
-    const glm::vec3 fwd = forwardFromEuler(yawRadians_, pitchRadians_);
-    const glm::vec3 right = glm::normalize(glm::cross(fwd, kWorldUp));
-    const glm::vec3 up = glm::cross(right, fwd);
+    // The camera frame's axes are the rotation's columns: right +X, up +Y, forward -Z, orthonormal whatever the angles, roll included.
+    const glm::mat3 rotation = rotationXyz(rotationDegrees_);
+    const glm::vec3 fwd = -rotation[2];
+    const glm::vec3 right = rotation[0];
+    const glm::vec3 up = rotation[1];
     // Sensor width from the gate height and the render aspect, as the pinhole vfov is: widthMm stays display-only, so pixels stay square.
     const float halfHeightMm = 0.5F * filmBack_.heightMm;
     const float halfWidthMm = halfHeightMm * aspect;
