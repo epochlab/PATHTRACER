@@ -3,6 +3,7 @@
 #include <cmath>
 
 #include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
 
 #include "pathtracer/scene/camera.h"
 
@@ -15,8 +16,8 @@ namespace pathtracer::scene {
 // Mutable fly/orbit state producing a fresh immutable Camera each frame via snapshot(); this holds the debug rig that drives it.
 class DebugCameraController {
 public:
-    // position/yaw/pitch are the initial pose and what resetToDefault() restores; the lens parameters pass through to every snapshot().
-    DebugCameraController(const glm::vec3& position, float yawDegrees, float pitchDegrees,
+    // position/rotation are the initial pose and what resetToDefault() restores; the lens parameters pass through to every snapshot().
+    DebugCameraController(const glm::vec3& position, const glm::vec3& rotationDegrees,
                            Camera::FilmBack filmBack, float focalLengthMm, float nearClip,
                            float farClip, float aperture, float shutterSeconds, float iso, Lens lens,
                            float flySpeedMetersPerSecond, float orbitSensitivityDegPerPixel);
@@ -24,12 +25,12 @@ public:
     // Builds an immutable Camera from the current pose. Call once per frame: this is the only point where a Camera value exists.
     [[nodiscard]] Camera snapshot() const;
 
-    // Polls WASD/QE and moves position_ in the horizontal view plane or along world up, scaled by dtSeconds. No-op while orbiting.
+    // Polls WASD/QE: along the view's forward and right, Q/E along world up, scaled by dtSeconds. No-op while orbiting.
     void applyFlyInput(const pathtracer::platform::Window& window, float dtSeconds);
 
     void beginOrbit(const glm::vec3& pivot);
 
-    // dxPixels/dyPixels are this frame's cursor delta; tumbles position_ around pivot_, yaw about world up, pitch about local right.
+    // This frame's cursor delta turns the rig rigidly about pivot_: yaw about world up, pitch about the view's right. Roll survives.
     void applyOrbitDelta(float dxPixels, float dyPixels);
 
     void endOrbit();
@@ -37,8 +38,6 @@ public:
 
     void resetToDefault();
 
-    [[nodiscard]] float yawDegrees() const { return yawDegrees_; }
-    [[nodiscard]] float pitchDegrees() const { return pitchDegrees_; }
     [[nodiscard]] float focalLengthMm() const { return focalLengthMm_; }
     [[nodiscard]] Camera::FilmBack filmBack() const { return filmBack_; }
     [[nodiscard]] float aperture() const { return aperture_; }
@@ -64,13 +63,12 @@ public:
 
 private:
     glm::vec3 position_;
-    float yawDegrees_;
-    float pitchDegrees_;
+    // The master orientation, unit and renormalised per turn: Euler angles are derived from it, never accumulated, so no angle is singular.
+    glm::quat orientation_;
     float focalLengthMm_;
 
     const glm::vec3 defaultPosition_;
-    const float defaultYawDegrees_;
-    const float defaultPitchDegrees_;
+    const glm::quat defaultOrientation_;
 
     Camera::FilmBack filmBack_;
     const float nearClip_;

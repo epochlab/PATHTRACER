@@ -3,6 +3,48 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Camera XYZ rotation: roll, and no pole
+
+The camera was a yaw and a pitch about a fixed world up. It could not roll, and its basis `cross(forward, up)` was
+singular at the poles, so pitch had to stay strictly inside (-90, 90) and the orbit clamped at 89. The camera now turns by
+the scene's own XYZ rotation (`Rz * Ry * Rx`, X first), through profile JSON, the C ABI, Python and the orbit
+controller. Evidence is in `results/camera_rotation`.
+
+- feat!: `Camera(position, rotationDegrees, ...)` replaces `(position, yawDegrees, pitchDegrees, ...)`. The basis is the
+  rotation's columns: right +X, up +Y, forward -Z.
+  - It is orthonormal for every finite triple, so validation needs only finiteness. The pitch bound, `forwardFromEuler`
+    and the world-up cross product are gone.
+  - z = 0 is the retired camera exactly: x is pitch, y is yaw. Old poses port as `[pitch, yaw, 0]`.
+- feat!: **`profile.json` `camera.rotation: [x, y, z]`** replaces `yawDegrees` and `pitchDegrees`, as scene.json names
+  its rotations. There is no compatibility shim.
+- feat!: **C ABI 6.** `PtCamera.rotation_degrees[3]` replaces `yaw_degrees` and `pitch_degrees`. Python's
+  `Camera.rotation_degrees` replaces `yaw_degrees` and `pitch_degrees`, and its docstring states the convention.
+- feat: the orbit controller holds a unit quaternion, renormalised per turn, and derives Euler angles only for `snapshot()`.
+  - A drag turns the rig rigidly about the pivot: yaw multiplies on the left about world up, pitch on the right about the
+    view's own X. The pivot stays on the view axis, roll is carried round, and the rig passes over the pole.
+  - The 0.99/0.999 pole rejections and the 89-degree clamp are gone.
+  - Fly input moves along the view's own forward and right; Q/E stay on world up.
+- feat: `scene/rotation.h` `eulerXyzDegrees`, `rotationXyz`'s inverse by glm's `extractEulerAngleZYX` (Day 2014). It still
+  recomposes the matrix at y = +/-90. `+ 0` canonicalises its `-0` at rest. `pathtracer_core` defines
+  `GLM_ENABLE_EXPERIMENTAL` for it.
+- chore: the HUD prints `rot x y z` from the camera itself. The bench log's camera records `rotation_deg [x, y, z]` in
+  place of `yaw` and `pitch`.
+- test:
+  - `camera_validate`:
+    - `rotation_basis_is_orthonormal_for_every_pose`, including the poles.
+    - `rotation_without_roll_is_the_retired_yaw_pitch_basis`, to 8 eps.
+    - `rotation_passes_the_pole_and_rolls`.
+    - `euler_extraction_recomposes_the_rotation`.
+    - `orbit_turns_the_rig_rigidly_about_the_pivot`: over the pole, roll kept, opposite drags undo, 1000 turns stay
+      orthonormal, reset. It links the controller, and GLFW without a window.
+    - `pitch_domain_is_exactly_the_unaliased_basis` is deleted with the domain it tested.
+  - `turning_the_world_with_the_camera_leaves_the_image` now turns root, environment and camera by a full XYZ rotation.
+    Depth agrees to 1.6e-7 and sky to 1.4e-4.
+  - The watertight check draws its 8 poses over every axis, a whole turn each. Motion vectors gain a roll row per lens.
+  - Python checks the lat-long against an independent `Rz @ Ry @ Rx` at a pitched, yawed and rolled pose.
+- image: none at the authored pose. 27/27 render_beauty EXRs are byte-identical to `main`. Other `(yaw, pitch)` poses
+  render at `[pitch, yaw, 0]` to within rounding: beauty RMSE 5e-5 against Monte Carlo noise of 9e-2, depth 7.6e-7.
+
 ## Root, light and environment rotation through the C and Python APIs
 
 Scene JSON placed the model root and each light by XYZ degrees (`Rz * Ry * Rx`, X first), but nothing else could. The

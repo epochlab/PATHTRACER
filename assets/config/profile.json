@@ -1,8 +1,7 @@
 {
     "camera": {
         "position": [0.0, 0.0, 6.0],
-        "yawDegrees": 0.0,
-        "pitchDegrees": 0.0,
+        "rotation": [0.0, 0.0, 0.0],
         "filmBackPreset": "ARRI Alexa XT (16:9)",
         "focalLengthMm": 70.0,
         "nearClip": 0.01,

@@ -80,7 +80,7 @@ struct SceneInputs {
         return std::nullopt;
     }
     const pathtracer::config::CameraConfig& config = profile.camera;
-    pathtracer::scene::Camera camera(config.position, config.yawDegrees, config.pitchDegrees, preset->filmBack,
+    pathtracer::scene::Camera camera(config.position, config.rotation, preset->filmBack,
                                      config.focalLengthMm, config.nearClip, config.farClip, config.aperture,
                                      config.shutterSeconds, config.iso, config.lens);
     if (!camera.validate(error)) {

@@ -62,9 +62,8 @@ void writeError(char* err, int errCap, const std::string& message) {
     }
     lens.maxFieldOfViewDegrees = camera.fisheye_field_of_view_degrees;
     return pathtracer::scene::Camera{
-        glm::vec3(camera.position[0], camera.position[1], camera.position[2]),
-        camera.yaw_degrees,
-        camera.pitch_degrees,
+        glm::make_vec3(camera.position),
+        glm::make_vec3(camera.rotation_degrees),
         pathtracer::scene::Camera::FilmBack{camera.film_back_mm[0], camera.film_back_mm[1]},
         camera.focal_length_mm,
         camera.near_clip,
@@ -213,8 +212,8 @@ void pt_renderer_default_camera(const PtRenderer* renderer, PtCamera* out) {
     out->position[0] = position.x;
     out->position[1] = position.y;
     out->position[2] = position.z;
-    out->yaw_degrees = camera.yawDegrees();
-    out->pitch_degrees = camera.pitchDegrees();
+    const glm::vec3 rotation = camera.rotationDegrees();
+    std::copy_n(glm::value_ptr(rotation), 3, out->rotation_degrees);
     out->film_back_mm[0] = filmBack.widthMm;
     out->film_back_mm[1] = filmBack.heightMm;
     out->focal_length_mm = camera.focalLengthMm();

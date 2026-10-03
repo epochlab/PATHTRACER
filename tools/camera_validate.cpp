@@ -18,7 +18,9 @@
 #include "check.h"
 #include "stats.h"
 #include "pathtracer/scene/camera.h"
+#include "pathtracer/scene/debug_camera_controller.h"
 #include "pathtracer/scene/lens.h"
+#include "pathtracer/scene/rotation.h"
 
 namespace {
 
@@ -58,8 +60,7 @@ constexpr std::array<float, 4> kOrthographicTaylor{-1.0F / 6.0F, 1.0F / 120.0F, 
 // The constructor's arguments as one value with valid defaults, so a validation row varies exactly one of them.
 struct CameraArgs {
     glm::vec3 position{0.0F};
-    float yawDegrees = 0.0F;
-    float pitchDegrees = 0.0F;
+    glm::vec3 rotationDegrees{0.0F};
     Camera::FilmBack filmBack = kFullFrame;
     float focalLengthMm = 35.0F;
     float nearClip = 0.01F;
@@ -70,7 +71,7 @@ struct CameraArgs {
     Lens lens{};
 
     [[nodiscard]] Camera build() const {
-        return Camera{position, yawDegrees, pitchDegrees, filmBack, focalLengthMm, nearClip, farClip, aperture,
+        return Camera{position, rotationDegrees, filmBack, focalLengthMm, nearClip, farClip, aperture,
                       shutterSeconds, iso, lens};
     }
 };
@@ -369,7 +370,8 @@ PT_CHECK(fisheye_image_circle_bounds_the_frame, Fast, Exact) {
 
 // ndc is longitude pi*x and latitude pi*y/2 on the camera frame: the axes land on forward, behind, right and the poles.
 PT_CHECK(omnidirectional_primary_rays_match_the_closed_form, Fast, Exact) {
-    const Camera camera{glm::vec3(0.0F), 37.0F, -21.0F, kFullFrame, 35.0F, 0.01F, 100.0F, 2.8F, 0.008F, 400.0F, kOmnidirectional};
+    const Camera camera{glm::vec3(0.0F), glm::vec3(-21.0F, 37.0F, 0.0F), kFullFrame, 35.0F, 0.01F, 100.0F, 2.8F, 0.008F, 400.0F,
+                        kOmnidirectional};
     const Camera::ViewBasis basis = camera.viewBasis(2.0F);
     const glm::vec3 diagonal = glm::normalize(basis.right + basis.up);
     const std::array<std::pair<glm::vec2, glm::vec3>, 8> cases{{{{0.0F, 0.0F}, basis.forward},
@@ -394,7 +396,8 @@ PT_CHECK(omnidirectional_primary_rays_match_the_closed_form, Fast, Exact) {
 // The film halo casts past the seam: ndcX and ndcX +/- 2 are one longitude, so they must be one ray to the arguments' rounding.
 PT_CHECK(omnidirectional_rays_are_periodic_in_longitude, Fast, Exact) {
     ctx.plan(1);
-    const Camera camera{glm::vec3(0.0F), 37.0F, -21.0F, kFullFrame, 35.0F, 0.01F, 100.0F, 2.8F, 0.008F, 400.0F, kOmnidirectional};
+    const Camera camera{glm::vec3(0.0F), glm::vec3(-21.0F, 37.0F, 0.0F), kFullFrame, 35.0F, 0.01F, 100.0F, 2.8F, 0.008F, 400.0F,
+                        kOmnidirectional};
     const Camera::ViewBasis basis = camera.viewBasis(2.0F);
     constexpr int kGrid = 33;
     int mismatches = 0;
@@ -415,7 +418,8 @@ PT_CHECK(omnidirectional_rays_are_periodic_in_longitude, Fast, Exact) {
 // dOmega = sin(colatitude) dcolatitude dlongitude (Snyder 1987): the differential's columns are orthogonal with area (pi^2/2) sin.
 PT_CHECK(omnidirectional_differential_area_is_the_solid_angle_jacobian, Fast, Exact) {
     ctx.plan(2);
-    const Camera camera{glm::vec3(0.0F), 37.0F, -21.0F, kFullFrame, 35.0F, 0.01F, 100.0F, 2.8F, 0.008F, 400.0F, kOmnidirectional};
+    const Camera camera{glm::vec3(0.0F), glm::vec3(-21.0F, 37.0F, 0.0F), kFullFrame, 35.0F, 0.01F, 100.0F, 2.8F, 0.008F, 400.0F,
+                        kOmnidirectional};
     const Camera::ViewBasis basis = camera.viewBasis(2.0F);
     constexpr int kGrid = 33;
     int areaMismatches = 0;
@@ -529,7 +533,7 @@ PT_CHECK(project_inverts_primary_rays, Fast, Exact) {
     ctx.plan((4 * static_cast<int>(lenses.size())) + 1);
     for (const auto& [name, lens] : lenses) {
         // Posed off every axis, so the basis rows are all exercised; at the origin, p - w * position is exact for both w.
-        const Camera camera{glm::vec3(0.0F), 37.0F, -21.0F, kFullFrame, 10.0F, 0.01F, 100.0F, 2.8F, 0.008F, 400.0F, lens};
+        const Camera camera{glm::vec3(0.0F), glm::vec3(-21.0F, 37.0F, 0.0F), kFullFrame, 10.0F, 0.01F, 100.0F, 2.8F, 0.008F, 400.0F, lens};
         const Camera::ViewBasis basis = camera.viewBasis(kAspect);
         int imaged = 0;
         int mismatches = 0;
@@ -577,7 +581,7 @@ PT_CHECK(project_inverts_primary_rays, Fast, Exact) {
         PT_EXPECT(ctx, behindExpected, std::string(name) + ": the direction straight behind the camera was imaged wrongly");
     }
     // The eye itself is the one point the lat-long cannot image: it has no direction.
-    const Camera omnidirectional{glm::vec3(1.0F, 2.0F, 3.0F), 0.0F, 0.0F, kFullFrame, 10.0F, 0.01F, 100.0F, 2.8F, 0.008F, 400.0F,
+    const Camera omnidirectional{glm::vec3(1.0F, 2.0F, 3.0F), glm::vec3(0.0F), kFullFrame, 10.0F, 0.01F, 100.0F, 2.8F, 0.008F, 400.0F,
                                  kOmnidirectional};
     PT_EXPECT(ctx, !omnidirectional.project(omnidirectional.viewBasis(kAspect), glm::vec4(1.0F, 2.0F, 3.0F, 1.0F)).has_value(),
               "the eye itself was given a lat-long image point");
@@ -653,7 +657,7 @@ PT_CHECK(primary_ray_differential_matches_central_differences, Fast, Exact) {
     constexpr double kStep = 1e-6;
     constexpr int kGrid = 33;
     for (const auto& [name, lens] : lenses) {
-        const Camera camera{glm::vec3(0.0F), 37.0F, -21.0F, kFullFrame, 10.0F, 0.01F, 100.0F, 2.8F, 0.008F, 400.0F, lens};
+        const Camera camera{glm::vec3(0.0F), glm::vec3(-21.0F, 37.0F, 0.0F), kFullFrame, 10.0F, 0.01F, 100.0F, 2.8F, 0.008F, 400.0F, lens};
         const Camera::ViewBasis basis = camera.viewBasis(kAspect);
         // The lat-long's trig arguments reach pi, so its closed form rounds relative to pi rather than to 1.
         const float closedForm = latLongBudget(lens.projection == LensProjection::Omnidirectional ? std::numbers::pi_v<float> : 1.0F);
@@ -727,15 +731,15 @@ PT_CHECK(camera_validate_rejects_each_invalid_parameter, Fast, Exact) {
         {"the base camera", CameraArgs{}, true},
         {"position x NaN", with([&](CameraArgs& a) { a.position.x = kNaN; }), false},
         {"position z inf", with([&](CameraArgs& a) { a.position.z = kInf; }), false},
-        {"yaw NaN", with([&](CameraArgs& a) { a.yawDegrees = kNaN; }), false},
-        {"yaw inf", with([&](CameraArgs& a) { a.yawDegrees = kInf; }), false},
-        {"yaw 720, periodic", with([](CameraArgs& a) { a.yawDegrees = 720.0F; }), true},
-        {"pitch 89.9", with([](CameraArgs& a) { a.pitchDegrees = 89.9F; }), true},
-        {"pitch -89.9", with([](CameraArgs& a) { a.pitchDegrees = -89.9F; }), true},
-        {"pitch 90", with([](CameraArgs& a) { a.pitchDegrees = 90.0F; }), false},
-        {"pitch -90", with([](CameraArgs& a) { a.pitchDegrees = -90.0F; }), false},
-        {"pitch 100", with([](CameraArgs& a) { a.pitchDegrees = 100.0F; }), false},
-        {"pitch NaN", with([&](CameraArgs& a) { a.pitchDegrees = kNaN; }), false},
+        {"rotation x NaN", with([&](CameraArgs& a) { a.rotationDegrees.x = kNaN; }), false},
+        {"rotation y inf", with([&](CameraArgs& a) { a.rotationDegrees.y = kInf; }), false},
+        {"rotation z NaN", with([&](CameraArgs& a) { a.rotationDegrees.z = kNaN; }), false},
+        {"rotation y 720, periodic", with([](CameraArgs& a) { a.rotationDegrees.y = 720.0F; }), true},
+        // The retired yaw/pitch basis was singular here; a rotation's columns are not, so every one of these is a pose.
+        {"rotation x 90, straight up", with([](CameraArgs& a) { a.rotationDegrees.x = 90.0F; }), true},
+        {"rotation x -90, straight down", with([](CameraArgs& a) { a.rotationDegrees.x = -90.0F; }), true},
+        {"rotation x 100, over the top", with([](CameraArgs& a) { a.rotationDegrees.x = 100.0F; }), true},
+        {"rotation z 180, upside down", with([](CameraArgs& a) { a.rotationDegrees.z = 180.0F; }), true},
         {"film back width 0", with([](CameraArgs& a) { a.filmBack.widthMm = 0.0F; }), false},
         {"film back height -24", with([](CameraArgs& a) { a.filmBack.heightMm = -24.0F; }), false},
         {"film back height inf", with([&](CameraArgs& a) { a.filmBack.heightMm = kInf; }), false},
@@ -785,39 +789,175 @@ PT_CHECK(camera_validate_rejects_each_invalid_parameter, Fast, Exact) {
     }
 }
 
-// The pitch bound is the basis's own domain, not a chosen margin: accepted exactly where right agrees with the yaw's horizontal right.
-PT_CHECK(pitch_domain_is_exactly_the_unaliased_basis, Fast, Exact) {
-    constexpr int kSteps = 64;
-    constexpr std::array<float, 3> kYaws{0.0F, 37.0F, -150.0F};
-    ctx.plan(static_cast<int>(kYaws.size()) * 2);
-    for (const float yaw : kYaws) {
-        const glm::vec3 yawRight(std::cos(glm::radians(yaw)), 0.0F, -std::sin(glm::radians(yaw)));
-        for (const float pole : {90.0F, -90.0F}) {
-            int mismatches = 0;
-            int accepted = 0;
-            // Floats straddling the pole: those whose radians round to or past pi/2 flip cos(pitch), and with it right.
-            float pitch = pole;
-            for (int i = 0; i < kSteps; ++i) {
-                pitch = std::nextafter(pitch, 0.0F);
-            }
-            for (int i = 0; i < 2 * kSteps; ++i, pitch = std::nextafter(pitch, 2.0F * pole)) {
-                CameraArgs args;
-                args.yawDegrees = yaw;
-                args.pitchDegrees = pitch;
-                const Camera camera = args.build();
-                const Camera::ViewBasis basis = camera.viewBasis(kAspect);
-                // A NaN right, the pole's 0/0, fails the comparison too.
-                const bool upright = glm::dot(basis.right, yawRight) > 0.0F;
-                std::string error;
-                const bool valid = camera.validate(error);
-                accepted += valid ? 1 : 0;
-                mismatches += valid != upright ? 1 : 0;
-            }
-            PT_EXPECT(ctx, mismatches == 0 && accepted > 0 && accepted < 2 * kSteps,
-                      "yaw " + std::to_string(yaw) + " pole " + std::to_string(pole) + ": " + std::to_string(mismatches) +
-                          " pitches where validate disagrees with the basis, " + std::to_string(accepted) + " accepted");
+// The basis is the rotation's columns, right +X, up +Y, forward -Z: orthonormal and right-handed for every finite triple.
+PT_CHECK(rotation_basis_is_orthonormal_for_every_pose, Fast, Exact) {
+    constexpr int kPoses = 256;
+    // Six roundings of products of unit-magnitude terms, rotationXyz's two 3x3 products; eps, not u, also covers sin/cos's ulp.
+    constexpr float kTolerance = 8.0F * std::numeric_limits<float>::epsilon();
+    std::mt19937 rng(static_cast<std::mt19937::result_type>(ctx.seed()));
+    std::uniform_real_distribution<float> angle(-360.0F, 360.0F);
+    std::vector<glm::vec3> poses = {{90.0F, 0.0F, 0.0F}, {-90.0F, 30.0F, 0.0F}, {0.0F, 90.0F, 45.0F}, {0.0F, -90.0F, -120.0F}};
+    while (poses.size() < kPoses) {
+        poses.emplace_back(angle(rng), angle(rng), angle(rng));
+    }
+    ctx.plan(1);
+    float worst = 0.0F;
+    glm::vec3 worstPose(0.0F);
+    for (const glm::vec3& pose : poses) {
+        const Camera::ViewBasis basis = CameraArgs{.rotationDegrees = pose}.build().viewBasis(kAspect);
+        const float error = std::max({std::fabs(glm::dot(basis.right, basis.up)), std::fabs(glm::dot(basis.up, basis.forward)),
+                                      std::fabs(glm::dot(basis.forward, basis.right)), std::fabs(glm::length(basis.right) - 1.0F),
+                                      std::fabs(glm::length(basis.up) - 1.0F), std::fabs(glm::length(basis.forward) - 1.0F),
+                                      glm::length(glm::cross(basis.right, basis.up) + basis.forward)});
+        if (error > worst) {
+            worst = error;
+            worstPose = pose;
         }
     }
+    PT_EXPECT(ctx, worst <= kTolerance,
+              "worst orthonormality error " + std::to_string(worst) + " at (" + std::to_string(worstPose.x) + ", " +
+                  std::to_string(worstPose.y) + ", " + std::to_string(worstPose.z) + ")");
+}
+
+// z = 0 is the retired yaw/pitch camera exactly: x is pitch, y is yaw, so profiles and callers port as [pitch, yaw, 0].
+PT_CHECK(rotation_without_roll_is_the_retired_yaw_pitch_basis, Fast, Exact) {
+    constexpr std::array<glm::vec2, 5> kYawPitch{{{0.0F, 0.0F}, {37.0F, -21.0F}, {-150.0F, 60.0F}, {180.0F, 0.0F}, {90.0F, -89.0F}}};
+    constexpr float kTolerance = 8.0F * std::numeric_limits<float>::epsilon();
+    ctx.plan(static_cast<int>(kYawPitch.size()));
+    for (const glm::vec2& yawPitch : kYawPitch) {
+        const float yaw = glm::radians(yawPitch.x);
+        const float pitch = glm::radians(yawPitch.y);
+        // The retired camera's own closed forms: forward from yaw and pitch, right horizontal, up their cross product.
+        const glm::vec3 forward(-std::sin(yaw) * std::cos(pitch), std::sin(pitch), -std::cos(yaw) * std::cos(pitch));
+        const glm::vec3 right(std::cos(yaw), 0.0F, -std::sin(yaw));
+        const glm::vec3 up = glm::cross(right, forward);
+        const Camera::ViewBasis basis = CameraArgs{.rotationDegrees = {yawPitch.y, yawPitch.x, 0.0F}}.build().viewBasis(kAspect);
+        const float error = std::max({glm::length(basis.forward - forward), glm::length(basis.right - right), glm::length(basis.up - up)});
+        PT_EXPECT(ctx, error <= kTolerance,
+                  "yaw " + std::to_string(yawPitch.x) + " pitch " + std::to_string(yawPitch.y) + ": basis error " + std::to_string(error));
+    }
+}
+
+// Through the retired pole the frame turns smoothly: right is X's image, which pitch never moves, and roll turns right and up only.
+PT_CHECK(rotation_passes_the_pole_and_rolls, Fast, Exact) {
+    constexpr float kTolerance = 8.0F * std::numeric_limits<float>::epsilon();
+    ctx.plan(2);
+    const glm::vec3 yawRight(std::cos(glm::radians(37.0F)), 0.0F, -std::sin(glm::radians(37.0F)));
+    float worstRight = 0.0F;
+    for (float pitch = 85.0F; pitch <= 95.0F; pitch += 0.25F) {
+        const Camera::ViewBasis basis = CameraArgs{.rotationDegrees = {pitch, 37.0F, 0.0F}}.build().viewBasis(kAspect);
+        worstRight = std::max(worstRight, glm::length(basis.right - yawRight));
+    }
+    PT_EXPECT(ctx, worstRight <= kTolerance, "right moved while pitching through 90 degrees: " + std::to_string(worstRight));
+    // Rz(90) takes X to +Y and Y to -X, and leaves -Z where it was.
+    const Camera::ViewBasis rolled = CameraArgs{.rotationDegrees = {0.0F, 0.0F, 90.0F}}.build().viewBasis(kAspect);
+    const float rollError = std::max({glm::length(rolled.right - glm::vec3(0.0F, 1.0F, 0.0F)),
+                                      glm::length(rolled.up - glm::vec3(-1.0F, 0.0F, 0.0F)),
+                                      glm::length(rolled.forward - glm::vec3(0.0F, 0.0F, -1.0F))});
+    PT_EXPECT(ctx, rollError <= kTolerance, "a 90-degree roll did not turn right to +Y and up to -X: " + std::to_string(rollError));
+}
+
+// eulerXyzDegrees inverts rotationXyz to the matrix, the y = +/-90 lock included, so the orbit controller can hand any pose to Camera.
+PT_CHECK(euler_extraction_recomposes_the_rotation, Fast, Exact) {
+    constexpr int kPoses = 256;
+    // Two compositions and one extraction, each a few ulps of unit-magnitude entries; atan2 is correctly rounded to within 1 ulp.
+    constexpr float kTolerance = 32.0F * std::numeric_limits<float>::epsilon();
+    std::mt19937 rng(static_cast<std::mt19937::result_type>(ctx.seed()));
+    std::uniform_real_distribution<float> angle(-360.0F, 360.0F);
+    std::vector<glm::vec3> poses = {{0.0F, 90.0F, 0.0F}, {30.0F, 90.0F, -60.0F}, {10.0F, -90.0F, 20.0F}, {0.0F, 180.0F, 0.0F}};
+    while (poses.size() < kPoses) {
+        poses.emplace_back(angle(rng), angle(rng), angle(rng));
+    }
+    ctx.plan(2);
+    float worst = 0.0F;
+    bool inRange = true;
+    for (const glm::vec3& pose : poses) {
+        const glm::mat3 rotation = pathtracer::scene::rotationXyz(pose);
+        const glm::vec3 extracted = pathtracer::scene::eulerXyzDegrees(rotation);
+        const glm::mat3 recomposed = pathtracer::scene::rotationXyz(extracted);
+        for (int column = 0; column < 3; ++column) {
+            worst = std::max(worst, glm::length(recomposed[column] - rotation[column]));
+        }
+        inRange = inRange && std::fabs(extracted.y) <= 90.0F && std::fabs(extracted.x) <= 180.0F && std::fabs(extracted.z) <= 180.0F;
+    }
+    PT_EXPECT(ctx, worst <= kTolerance, "worst recomposition error " + std::to_string(worst));
+    PT_EXPECT(ctx, inRange, "an extracted angle fell outside y in [-90, 90], x and z in [-180, 180]");
+}
+
+// The viewer's orbit rig at cornell's eye: 6 m from the origin, looking down -Z at it, a quarter degree per pixel.
+pathtracer::scene::DebugCameraController makeOrbitRig(const glm::vec3& rotationDegrees) {
+    return {glm::vec3(0.0F, 0.0F, 6.0F), rotationDegrees, kFullFrame, 35.0F, 0.01F, 100.0F, 2.8F, 0.008F, 400.0F, Lens{}, 1.0F, 0.25F};
+}
+
+// Orbit turns the rig rigidly about its pivot: the pivot stays on the view axis, the pole is passed, roll is kept, and it inverts.
+PT_CHECK(orbit_turns_the_rig_rigidly_about_the_pivot, Fast, Exact) {
+    constexpr float kDegreesPerPixel = 0.25F;
+    // Each turn rounds a unit quaternion product a few ulps; 64 turns of 6 m give the distance bound, scaled by the arm.
+    constexpr float kTolerance = 64.0F * 8.0F * std::numeric_limits<float>::epsilon();
+    const glm::vec3 pivot(0.0F);
+    ctx.plan(6);
+
+    // Four 30-degree drags carry the eye over the pole to Rx(-120) of where it started, where the old rig clamped at 89 degrees.
+    pathtracer::scene::DebugCameraController pitched = makeOrbitRig(glm::vec3(0.0F));
+    pitched.beginOrbit(pivot);
+    for (int i = 0; i < 4; ++i) {
+        pitched.applyOrbitDelta(0.0F, 30.0F / kDegreesPerPixel);
+    }
+    const Camera overTheTop = pitched.snapshot();
+    const glm::vec3 expected = pathtracer::scene::rotationXyz(glm::vec3(-120.0F, 0.0F, 0.0F)) * glm::vec3(0.0F, 0.0F, 6.0F);
+    PT_EXPECT(ctx, glm::length(overTheTop.position() - expected) <= 6.0F * kTolerance,
+              "four 30-degree drags did not carry the eye 120 degrees over the pole");
+    PT_EXPECT(ctx, glm::length(glm::cross(overTheTop.forward(), glm::normalize(pivot - overTheTop.position()))) <= kTolerance,
+              "the pivot left the view axis while pitching over the pole");
+
+    // A yaw drag of a rolled rig is world Ry on the left of its rotation, so the roll is carried round, not levelled.
+    pathtracer::scene::DebugCameraController rolledRig = makeOrbitRig(glm::vec3(0.0F, 0.0F, 30.0F));
+    rolledRig.beginOrbit(pivot);
+    rolledRig.applyOrbitDelta(-40.0F / kDegreesPerPixel, 0.0F);
+    const glm::mat3 expectedRolled =
+        pathtracer::scene::rotationXyz(glm::vec3(0.0F, 40.0F, 0.0F)) * pathtracer::scene::rotationXyz(glm::vec3(0.0F, 0.0F, 30.0F));
+    const glm::mat3 rolled = pathtracer::scene::rotationXyz(rolledRig.snapshot().rotationDegrees());
+    float rollError = 0.0F;
+    for (int column = 0; column < 3; ++column) {
+        rollError = std::max(rollError, glm::length(rolled[column] - expectedRolled[column]));
+    }
+    PT_EXPECT(ctx, rollError <= kTolerance, "a yaw orbit did not carry the 30-degree roll round: error " + std::to_string(rollError));
+
+    // Yaw on the left and pitch on the right undo in reverse order, so opposite drags return the rig to where it began.
+    pathtracer::scene::DebugCameraController rig = makeOrbitRig(glm::vec3(-10.0F, 25.0F, 5.0F));
+    const Camera start = rig.snapshot();
+    const glm::vec3 lookedAt = start.position() + (6.0F * start.forward());
+    rig.beginOrbit(lookedAt);
+    std::mt19937 rng(static_cast<std::mt19937::result_type>(ctx.seed()));
+    std::uniform_real_distribution<float> drag(-200.0F, 200.0F);
+    std::vector<glm::vec2> drags(32);
+    for (glm::vec2& d : drags) {
+        d = {drag(rng), drag(rng)};
+        rig.applyOrbitDelta(d.x, d.y);
+    }
+    const float pivotDistance = glm::length(lookedAt - rig.snapshot().position());
+    for (auto d = drags.rbegin(); d != drags.rend(); ++d) {
+        rig.applyOrbitDelta(-d->x, -d->y);
+    }
+    const Camera back = rig.snapshot();
+    PT_EXPECT(ctx, std::fabs(pivotDistance - 6.0F) <= 6.0F * kTolerance,
+              "orbiting changed the distance to the pivot: " + std::to_string(pivotDistance));
+    PT_EXPECT(ctx,
+              glm::length(back.position() - start.position()) <= 6.0F * kTolerance &&
+                  glm::length(back.forward() - start.forward()) <= kTolerance,
+              "opposite drags in reverse did not return the rig to its start");
+
+    // Many turns keep the frame a rotation, since the quaternion is renormalised per turn; reset restores the authored pose.
+    for (int i = 0; i < 1000; ++i) {
+        rig.applyOrbitDelta(drag(rng), drag(rng));
+    }
+    rig.endOrbit();
+    const Camera::ViewBasis basis = rig.snapshot().viewBasis(kAspect);
+    const float drift = std::max({std::fabs(glm::length(basis.right) - 1.0F), std::fabs(glm::dot(basis.right, basis.up)),
+                                  glm::length(glm::cross(basis.right, basis.up) + basis.forward)});
+    rig.resetToDefault();
+    PT_EXPECT(ctx, drift <= kTolerance && rig.snapshot().position() == start.position() && rig.snapshot().forward() == start.forward(),
+              "1000 turns drifted the frame by " + std::to_string(drift) + ", or reset did not restore the authored pose");
 }
 
 // The pinhole half-height is h/2f itself: tan(atan(h/2f)) saturates at small f, where atan rounds to a float at pi/2.

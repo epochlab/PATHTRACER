@@ -23,6 +23,15 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SCENE = "scenes/cornell.json"
 
 
+def _rotation_xyz(degrees: tuple[float, float, float]) -> np.ndarray:
+    """Rz @ Ry @ Rx in float64, written from the axis rotations themselves as the docstring states them."""
+    x, y, z = (math.radians(angle) for angle in degrees)
+    rx = np.array([[1.0, 0.0, 0.0], [0.0, math.cos(x), -math.sin(x)], [0.0, math.sin(x), math.cos(x)]])
+    ry = np.array([[math.cos(y), 0.0, math.sin(y)], [0.0, 1.0, 0.0], [-math.sin(y), 0.0, math.cos(y)]])
+    rz = np.array([[math.cos(z), -math.sin(z), 0.0], [math.sin(z), math.cos(z), 0.0], [0.0, 0.0, 1.0]])
+    return rz @ ry @ rx
+
+
 @pytest.fixture(scope="module")
 def renderer() -> Renderer:
     with Renderer(SCENE) as instance:
@@ -140,7 +149,7 @@ def test_multi_aov_request_matches_single_requests(renderer: Renderer) -> None:
 
 def test_camera_override_changes_the_image(renderer: Renderer) -> None:
     default = renderer.default_camera
-    moved = dataclasses.replace(default, yaw_degrees=default.yaw_degrees + 25.0)
+    moved = dataclasses.replace(default, rotation_degrees=(0.0, 25.0, 0.0))
     size = {"width": 32, "height": 32, "samples": 2}
     assert not np.array_equal(
         renderer.render(aovs=("depth",), **size)["depth"],
@@ -149,13 +158,13 @@ def test_camera_override_changes_the_image(renderer: Renderer) -> None:
 
 
 def test_motion_vector_follows_the_previous_camera(renderer: Renderer) -> None:
-    """Zero without a previous view; a turn to the left (yaw grows leftward) since the previous view moves every pixel right."""
+    """Zero without a previous view; a turn to the left (positive y) since the previous view moves every pixel right."""
     default = renderer.default_camera
     size = {"width": 32, "height": 24}
     still = renderer.render(aovs=("motionVector",), **size)["motionVector"]
     assert still.shape == (24, 32, 2)
     assert (still == 0.0).all(), "no previous camera did not read exactly zero motion"
-    previous = dataclasses.replace(default, yaw_degrees=default.yaw_degrees - 0.5)
+    previous = dataclasses.replace(default, rotation_degrees=(0.0, -0.5, 0.0))
     turned = renderer.render(aovs=("motionVector",), previous_camera=previous, **size)["motionVector"]
     assert (turned[..., 0] > 0.0).all(), "a turn to the left did not move every pixel to the right"
 
@@ -184,16 +193,14 @@ def test_fisheye_gbuffer_depth_is_the_ray_distance(renderer: Renderer) -> None:
 
 def test_omnidirectional_pixels_are_the_documented_longitude_and_latitude(renderer: Renderer) -> None:
     """Each hit's direction from the eye lands at its own pixel centre under Camera's lat-long formula, so the docstring is the code."""
-    camera = dataclasses.replace(renderer.default_camera, lens="omnidirectional")
+    # Pitched, yawed and rolled at once, so the frame is the documented Rz @ Ry @ Rx and not merely the identity.
+    camera = dataclasses.replace(renderer.default_camera, lens="omnidirectional", rotation_degrees=(20.0, 30.0, 40.0))
     width, height = 64, 32
     frame = renderer.render(aovs=("worldPos", "alpha"), camera=camera, width=width, height=height)
     hit = frame["alpha"][..., 0] > 0.0
     assert hit.any(), "the lat-long should see the scene"
-    yaw, pitch = math.radians(camera.yaw_degrees), math.radians(camera.pitch_degrees)
-    forward = np.array([-math.sin(yaw) * math.cos(pitch), math.sin(pitch), -math.cos(yaw) * math.cos(pitch)])
-    right = np.cross(forward, [0.0, 1.0, 0.0])
-    right /= np.linalg.norm(right)
-    up = np.cross(right, forward)
+    rotation = _rotation_xyz(camera.rotation_degrees)
+    right, up, forward = rotation[:, 0], rotation[:, 1], -rotation[:, 2]
     view = frame["worldPos"][hit].astype(np.float64) - np.asarray(camera.position)
     longitude = np.arctan2(view @ right, view @ forward)
     colatitude = np.arctan2(np.hypot(view @ right, view @ forward), view @ up)
@@ -216,7 +223,7 @@ def test_unknown_lens_is_rejected_before_the_abi(renderer: Renderer) -> None:
     [
         ({"near_clip": 0.0}, "clips"),
         ({"far_clip": 0.01}, "clips"),
-        ({"pitch_degrees": 90.0}, "pitch"),
+        ({"rotation_degrees": (0.0, math.nan, 0.0)}, "rotation"),
         ({"focal_length_mm": 0.0}, "focal length"),
         ({"position": (math.nan, 0.0, 6.0)}, "position"),
         ({"film_back_mm": (36.0, math.inf)}, "film back"),

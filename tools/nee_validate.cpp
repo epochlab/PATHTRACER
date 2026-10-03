@@ -231,7 +231,7 @@ PT_CHECK(environment_lat_long_is_unmirrored, Fast, Exact) {
     const EnvironmentMap env(
         tools::fixtures::makeImageTexture(kWidth, kHeight, kChannels, rgb, pathtracer::gfx::ScalarType::Float32));
     // Yaw 180 faces +Z, the map's centre column; a quarter frame either side stays well inside one half of the map.
-    const pathtracer::scene::Camera camera(glm::vec3(0.0F), 180.0F, 0.0F, {36.0F, 24.0F}, 35.0F, 0.1F, 100.0F, 2.8F,
+    const pathtracer::scene::Camera camera(glm::vec3(0.0F), glm::vec3(0.0F, 180.0F, 0.0F), {36.0F, 24.0F}, 35.0F, 0.1F, 100.0F, 2.8F,
                                            0.01F, 100.0F);
     const pathtracer::scene::Camera::ViewBasis basis = camera.viewBasis(1.5F);
     const glm::vec3 seenRight = env.sampleDirection(camera.primaryRay(basis, 0.5F, 0.0F)->dir);
@@ -260,8 +260,8 @@ PT_CHECK(omnidirectional_camera_reads_the_environment_texel_for_texel, Fast, Exa
         tools::fixtures::makeImageTexture(kWidth, kHeight, kChannels, rgb, pathtracer::gfx::ScalarType::Float32);
     const EnvironmentMap env(image);
     // Yaw 180 faces +Z with -X on the right and +Y up: the map's (right, up, forward), so pixel (x, y) and texel (x, y) share (u, v).
-    const pathtracer::scene::Camera camera(glm::vec3(0.0F), 180.0F, 0.0F, {36.0F, 24.0F}, 35.0F, 0.1F, 100.0F, 2.8F, 0.01F, 100.0F,
-                                           pathtracer::scene::Lens{pathtracer::scene::LensProjection::Omnidirectional});
+    const pathtracer::scene::Camera camera(glm::vec3(0.0F), glm::vec3(0.0F, 180.0F, 0.0F), {36.0F, 24.0F}, 35.0F, 0.1F, 100.0F, 2.8F,
+                                           0.01F, 100.0F, pathtracer::scene::Lens{pathtracer::scene::LensProjection::Omnidirectional});
     const pathtracer::scene::Camera::ViewBasis basis = camera.viewBasis(2.0F);
     // The (u, v) round trip carries 16 ulps of its pi-scaled angles; longitude's is amplified by 1/sin(colatitude) toward a pole.
     constexpr float kRoundTripUlps = 16.0F;

@@ -53,8 +53,6 @@ struct HudFrameData {
     const char* lutName;
     SceneStats sceneStats;
     const pathtracer::scene::Camera& camera;
-    float cameraYawDegrees;
-    float cameraPitchDegrees;
     bool cameraOrbiting;
     const Histogram& histogram;
     const PathTracedStatus& pathTraced;

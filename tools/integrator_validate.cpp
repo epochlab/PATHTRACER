@@ -236,7 +236,7 @@ PathTraceSettings makeSettings(int maxBounces, int rrStartBounce, float metallic
 }
 
 Camera makeCamera() {
-    return Camera(glm::vec3(0.0F, 0.0F, 5.0F), 0.0F, 0.0F, Camera::FilmBack{36.0F, 24.0F},
+    return Camera(glm::vec3(0.0F, 0.0F, 5.0F), glm::vec3(0.0F), Camera::FilmBack{36.0F, 24.0F},
                    kFocalLengthMm, 0.01F, 1000.0F, 2.8F, 1.0F / 125.0F, 100.0F);
 }
 
@@ -1736,8 +1736,8 @@ PT_CHECK(omnidirectional_film_filter_reaches_across_the_seam, Fast, Exact) {
     PathTraceSettings settings;
     settings.samplesPerPixel = 16;
     // Yaw 180 faces +Z with -X on the right, the map's own frame, so the image's u is the map's u.
-    const Camera camera(glm::vec3(0.0F), 180.0F, 0.0F, Camera::FilmBack{36.0F, 24.0F}, kFocalLengthMm, 0.01F, 1000.0F, 2.8F,
-                        1.0F / 125.0F, 100.0F, pathtracer::scene::Lens{pathtracer::scene::LensProjection::Omnidirectional});
+    const Camera camera(glm::vec3(0.0F), glm::vec3(0.0F, 180.0F, 0.0F), Camera::FilmBack{36.0F, 24.0F}, kFocalLengthMm, 0.01F, 1000.0F,
+                        2.8F, 1.0F / 125.0F, 100.0F, pathtracer::scene::Lens{pathtracer::scene::LensProjection::Omnidirectional});
     ctx.plan(6);
     for (const int litColumn : {kWidth - 1, 0}) {
         std::vector<float> rgb(static_cast<std::size_t>(kEnvWidth) * kEnvHeight * pathtracer::gfx::kRgbChannels, 0.0F);

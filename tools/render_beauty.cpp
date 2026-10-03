@@ -412,12 +412,12 @@ int main(int argc, char** argv) {
     // Fixed camera from profile.json, no controller: what makes two runs comparable is that neither can have been nudged.
     const bool fisheye = options.fisheyeFocalLengthMm > 0.0F;
     const pathtracer::scene::Camera camera = fisheye || options.omnidirectional ? [&] {
-        // Rebuilt only here: the degrees accessors round-trip the pose, which is not bit-exact, so the default path keeps the original.
+        // Rebuilt only for a lens flag; every accessor returns its constructor argument as given, so the pose carries over exactly.
         const pathtracer::scene::Camera& authored = renderer->defaultCamera();
         pathtracer::scene::Lens lens = authored.lens();
         lens.projection =
             fisheye ? pathtracer::scene::LensProjection::FisheyePolynomial : pathtracer::scene::LensProjection::Omnidirectional;
-        return pathtracer::scene::Camera{authored.position(), authored.yawDegrees(), authored.pitchDegrees(), authored.filmBack(),
+        return pathtracer::scene::Camera{authored.position(), authored.rotationDegrees(), authored.filmBack(),
                                          fisheye ? options.fisheyeFocalLengthMm : authored.focalLengthMm(), authored.nearClip(),
                                          authored.farClip(), authored.aperture(), authored.shutterSeconds(),
                                          authored.iso(), lens};

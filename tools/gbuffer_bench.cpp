@@ -167,7 +167,7 @@ int main(int argc, char** argv) {
     }
 
     const Camera::FilmBack filmBack{36.0F, 24.0F};
-    const Camera camera(glm::vec3(0.0F), 0.0F, 0.0F, filmBack, 35.0F, 0.1F, 100.0F, 2.8F, 1.0F / 125.0F,
+    const Camera camera(glm::vec3(0.0F), glm::vec3(0.0F), filmBack, 35.0F, 0.1F, 100.0F, 2.8F, 1.0F / 125.0F,
                          100.0F);
 
     const std::vector<ShadingTriangle> shadingTriangles = makeLayeredTriangles(*options, camera);

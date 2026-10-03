@@ -14,8 +14,7 @@ namespace pathtracer::config {
 
 struct CameraConfig {
     glm::vec3 position;
-    float yawDegrees;
-    float pitchDegrees;
+    glm::vec3 rotation;  // degrees; Rz*Ry*Rx as scene.json's rotation keys, so X applies first
 
     // Resolved against assets/config/sensor.json by name at startup; loadProfileConfig cannot validate it, not loading that file.
     std::string defaultFilmBackPresetName;

@@ -127,17 +127,19 @@ class Camera:
     Every AOV renders under every lens; G-buffer ``depth`` is the distance along the primary ray, the one depth a fisheye past
     90 degrees or the lat-long still defines.
 
-    ``render`` raises ``RuntimeError`` naming the first invalid field: a non-finite pose, ``pitch_degrees`` outside
-    ``(-90, 90)``, clips other than ``0 < near_clip < far_clip`` (``far_clip`` may be ``math.inf``), or any other scalar
-    that is not finite and positive.
+    ``rotation_degrees`` is XYZ degrees applied as ``Rz @ Ry @ Rx``, X first about fixed world axes, as scene.json's
+    ``rotation`` keys: at rest the camera looks down -Z with +Y up, ``x`` pitches, ``y`` yaws to the left and ``z`` rolls. Any
+    finite triple is a pose, straight up and upside down included.
+
+    ``render`` raises ``RuntimeError`` naming the first invalid field: a non-finite pose, clips other than
+    ``0 < near_clip < far_clip`` (``far_clip`` may be ``math.inf``), or any other scalar that is not finite and positive.
 
     Immutable, so an override is a ``dataclasses.replace`` of ``Renderer.default_camera`` rather than a mutation
     that could leak between renders.
     """
 
     position: tuple[float, float, float]
-    yaw_degrees: float
-    pitch_degrees: float
+    rotation_degrees: tuple[float, float, float]
     film_back_mm: tuple[float, float]
     focal_length_mm: float
     near_clip: float
@@ -153,8 +155,7 @@ class Camera:
     def _from_struct(cls, struct: _ffi.PtCamera) -> Camera:
         return cls(
             position=(struct.position[0], struct.position[1], struct.position[2]),
-            yaw_degrees=struct.yaw_degrees,
-            pitch_degrees=struct.pitch_degrees,
+            rotation_degrees=(struct.rotation_degrees[0], struct.rotation_degrees[1], struct.rotation_degrees[2]),
             film_back_mm=(struct.film_back_mm[0], struct.film_back_mm[1]),
             focal_length_mm=struct.focal_length_mm,
             near_clip=struct.near_clip,
@@ -170,8 +171,7 @@ class Camera:
     def _to_struct(self) -> _ffi.PtCamera:
         struct = _ffi.PtCamera()
         struct.position = (ctypes.c_float * 3)(*self.position)
-        struct.yaw_degrees = self.yaw_degrees
-        struct.pitch_degrees = self.pitch_degrees
+        struct.rotation_degrees = (ctypes.c_float * 3)(*self.rotation_degrees)
         struct.film_back_mm = (ctypes.c_float * 2)(*self.film_back_mm)
         struct.focal_length_mm = self.focal_length_mm
         struct.near_clip = self.near_clip

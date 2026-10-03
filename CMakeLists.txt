@@ -170,6 +170,8 @@ target_include_directories(pathtracer_core PUBLIC include ${JSON_DIR})
 target_include_directories(pathtracer_core PRIVATE ${CGLTF_DIR} ${MIKKTSPACE_DIR} ${PATHTRACER_GENERATED_DIR})
 add_dependencies(pathtracer_core pathtracer_git_sha)
 target_compile_definitions(pathtracer_core PRIVATE ${PATHTRACER_PROVENANCE_DEFINITIONS})
+# glm gates gtx behind this; scene/rotation.h needs gtx/euler_angles' extractEulerAngleZYX, the inverse of its Rz * Ry * Rx.
+target_compile_definitions(pathtracer_core PUBLIC GLM_ENABLE_EXPERIMENTAL)
 pathtracer_target_defaults(pathtracer_core NATIVE IPO TIDY)
 target_link_libraries(pathtracer_core PUBLIC glm::glm embree OpenEXR::OpenEXR Imath::Imath
                        OpenColorIO::OpenColorIO ZLIB::ZLIB)
@@ -280,6 +282,9 @@ endforeach()
 # integrator_validate and io_validate resolve real assets/ files against named instances -- the materialOverrides path.
 target_compile_definitions(integrator_validate PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
 target_compile_definitions(io_validate PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
+# camera_validate drives the viewer's orbit controller too; its fly input reads a Window, so that TU and GLFW link without a window.
+target_sources(camera_validate PRIVATE src/scene/debug_camera_controller.cpp src/platform/window.cpp)
+target_link_libraries(camera_validate PRIVATE glfw)
 
 # CIE 1931 module and the measured-metal fit, checked end to end against the Fresnel the renderer shades chrome.json with.
 add_executable(colour_validate tools/colour_validate.cpp
