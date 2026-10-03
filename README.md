@@ -23,8 +23,6 @@ cmake --build build
 ./build/pathtracer [-scene path/to/scene.json] [-stats] [-bench log.jsonl] [-bench-aovs beauty,normal,...] [-size WxH] [-max-samples N]
 ```
 
-`-bench` runs at 512x256 and 16 samples unless `-size` or `-max-samples` say otherwise; `gbuffer_bench` and `render_beauty` default to the same size.
-
 ## Controls
 
 | Input | Action |
@@ -55,5 +53,4 @@ frame = renderer.render(aovs=("beauty", "depth", "normal"), width=128, height=64
 
 frame["beauty"]   # (64, 128, 3) float32, linear Rec.709 radiance
 frame["depth"]    # (64, 128, 1) float32, camera-space Z
-frame["normal"]   # (64, 128, 3) float32, normal-mapped shading normal
 ```
