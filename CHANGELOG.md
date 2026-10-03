@@ -3,6 +3,27 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Display texture upload: PBO staging, with the alternatives measured
+
+The display texture re-uploads on every published pass. The render thread packed RGB float into an RGBA half vector, then
+`glTexSubImage2D` copied it from client memory. Three candidates were built and measured against the pinning tip
+(`de129ca`). Evidence is in `results/display_upload`.
+
+- perf: `Texture::upload` packs directly into a mapped `GL_PIXEL_UNPACK_BUFFER`, orphaned on each map with
+  `GL_MAP_INVALIDATE_BUFFER_BIT` (Hrabcak & Masserann, *OpenGL Insights* ch. 28, 2012), and `glTexSubImage2D` reads from offset 0.
+  The staging vectors and one full-frame client copy are gone. A failed map, or an unmap returning `GL_FALSE`, is reported, and
+  the texture keeps its previous texels. The buffer is reallocated only on a shape change and counted by the GPU memory tracker.
+- measured: `upload_ms` **0.556x [0.547, 0.573]** at 512x256 (11 rounds) and **0.633x [0.527, 0.749]**, 3.04 -> 1.98 ms, at
+  2048x1152 (7 rounds). `present_gpu_ms` is 1.009x at both sizes (resolved only at 512x256, where the transfer moves to the
+  GPU side). `frame_ms` and `pass_ms` are unresolved.
+- rejected: packing on the trace workers, inside `accumulateMean`'s row loop. It cut `upload_ms` to 1.19 ms but raised
+  `pass_accumulate_ms` 1.052x [1.033, 1.086]: the work moves rather than disappears. It would also cost 18.9 MB per pool slot
+  and couple the driver to the displayed lane, for an unchanged `frame_ms`.
+- rejected: uploading only rewritten tiles. Between consecutive means (n = 1..512), no 32x32 tile is bit-identical in float16,
+  even when 50-84% of texels are, so nothing would be skipped.
+- image: the display texture read back with `glGetTexImage` is bit-identical to the baseline for 8 AOVs covering 1-3 channels
+  and the pre-mapped, filter and G-buffer paths, at `displayBitDepth` 16 and 32. `ctest` 214/214.
+
 ## Buffer pinning: value cache keys and a 3-slot pool
 
 The viewer's display texture and filter cache held `shared_ptr` refs to published results, only to use them as cache keys.
