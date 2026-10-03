@@ -3,6 +3,26 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Buffer pinning: value cache keys and a 3-slot pool
+
+The viewer's display texture and filter cache held `shared_ptr` refs to published results, only to use them as cache keys.
+After a filter AOV was left, its ref pinned one of the driver's 4 pool slots indefinitely. Evidence is in
+`results/buffer_pinning`.
+
+- fix: `DisplayedAovSource` is a value key `{image, generation, samples}` with a defaulted `==`, and it is also the record of
+  what the display texture holds (`pathTraceDisplayed`, replacing three members and a strong ref). A published mean keys on
+  `(generation, samples)`, unique per publish; G-buffer lanes on the G-buffer generation; filter AOVs on the cache revision.
+  `FilterCache::owner` is gone, because `(generation, samples)` already identified the pass.
+- perf: the reader now holds one result at a time, so `bufferPool_` is `kDriverHeldBuffers` (2: the mean folded from, the
+  pass written) + `kReaderHeldBuffers` (1) = 3 slots. That frees one 24-float-per-texel slot, 226 MB at 2048x1152.
+  `latestResult()` documents that holding two results can stall the driver.
+- measured: against the real driver with per-frame snapshots, a 3-slot pool runs at 4-slot throughput (72-73 passes/s at
+  256x128). With the old stale pin held across a new accumulation, it would drop to 44 passes/s, so the 4th slot only
+  absorbed the pin. The viewer bench (11 rounds, 512x256, 32 spp) leaves `pass_ms`, `frame_ms`, `upload_ms` and peak RSS
+  unresolved, with identical output in every run. A bench cannot move the camera, so it never reaches the pinned state.
+- test: `published_results_are_not_overwritten` states its premise (three slots, one reader pin). A pool of 2 stalls it.
+  `ctest` all green.
+
 ## Viewer benchmark sizing: `-size`, `-max-samples`, and no lost pass records
 
 A viewer `-bench` at the authored 2048x1152 and 64 samples takes about 93 s per run, so a 7-round A/B took about 22 minutes. The
