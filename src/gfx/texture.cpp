@@ -2,9 +2,10 @@
 
 #include <array>
 #include <cstddef>
+#include <cstring>
+#include <iostream>
 #include <type_traits>
 #include <utility>
-#include <vector>
 
 #include <GL/glew.h>
 
@@ -58,27 +59,26 @@ void packTexels(const float* texels, std::size_t pixels, T* out) {
     }
 }
 
-// The texels in the texture's own type and lane count, so the driver copies them rather than converting; `texels` itself if they are.
+// Writes the texels to `out` in the texture's own type and lane count, so the driver transfers them rather than converting.
 template <typename T>
-const T* stage(const float* texels, std::size_t pixels, int channels, std::vector<T>& staging) {
+void stage(const float* texels, std::size_t pixels, int channels, T* out) {
     if constexpr (std::is_same_v<T, float>) {
         if (storedLanes(channels) == channels) {
-            return texels;
+            std::memcpy(out, texels, pixels * static_cast<std::size_t>(channels) * sizeof(float));
+            return;
         }
     }
-    staging.resize(pixels * static_cast<std::size_t>(storedLanes(channels)));
     switch (channels) {
         case 1:
-            packTexels<T, 1, 1>(texels, pixels, staging.data());
+            packTexels<T, 1, 1>(texels, pixels, out);
             break;
         case 2:
-            packTexels<T, 2, 2>(texels, pixels, staging.data());
+            packTexels<T, 2, 2>(texels, pixels, out);
             break;
         default:
-            packTexels<T, 3, 4>(texels, pixels, staging.data());
+            packTexels<T, 3, 4>(texels, pixels, out);
             break;
     }
-    return staging.data();
 }
 
 // HdrImage::rgb's expansion done by the sampler: R broadcasts for a scalar, an absent blue reads 0, alpha reads 1.
@@ -91,42 +91,50 @@ std::array<GLint, 4> glSwizzle(int channels) {
 
 }  // namespace
 
-Texture::Texture(unsigned int id, ScalarType format) : id_(id), format_(format) {}
+Texture::Texture(unsigned int id, unsigned int pixelBuffer, ScalarType format) : id_(id), pixelBuffer_(pixelBuffer), format_(format) {}
 
 Texture::~Texture() {
     if (id_ != 0) {
-        pathtracer::debug::trackGpuFree(byteSize_);
+        pathtracer::debug::trackGpuFree(byteSize_ + pixelBufferBytes_);
         glDeleteTextures(1, &id_);
+        glDeleteBuffers(1, &pixelBuffer_);
     }
 }
 
 Texture::Texture(Texture&& other) noexcept
     : id_(std::exchange(other.id_, 0)),
+      pixelBuffer_(std::exchange(other.pixelBuffer_, 0)),
       format_(other.format_),
       width_(std::exchange(other.width_, 0)),
       height_(std::exchange(other.height_, 0)),
       channels_(std::exchange(other.channels_, 0)),
-      byteSize_(std::exchange(other.byteSize_, 0)) {}
+      byteSize_(std::exchange(other.byteSize_, 0)),
+      pixelBufferBytes_(std::exchange(other.pixelBufferBytes_, 0)) {}
 
 Texture& Texture::operator=(Texture&& other) noexcept {
     if (this != &other) {
         if (id_ != 0) {
-            pathtracer::debug::trackGpuFree(byteSize_);
+            pathtracer::debug::trackGpuFree(byteSize_ + pixelBufferBytes_);
             glDeleteTextures(1, &id_);
+            glDeleteBuffers(1, &pixelBuffer_);
         }
         id_ = std::exchange(other.id_, 0);
+        pixelBuffer_ = std::exchange(other.pixelBuffer_, 0);
         format_ = other.format_;
         width_ = std::exchange(other.width_, 0);
         height_ = std::exchange(other.height_, 0);
         channels_ = std::exchange(other.channels_, 0);
         byteSize_ = std::exchange(other.byteSize_, 0);
+        pixelBufferBytes_ = std::exchange(other.pixelBufferBytes_, 0);
     }
     return *this;
 }
 
 Texture Texture::createFromFloatPixels(int width, int height, int channels, const float* texels, ScalarType format) {
     unsigned int id = 0;
+    unsigned int pixelBuffer = 0;
     GL_CALL(glGenTextures(1, &id));
+    GL_CALL(glGenBuffers(1, &pixelBuffer));
     GL_CALL(glBindTexture(GL_TEXTURE_2D, id));
 
     GL_CALL(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
@@ -136,7 +144,7 @@ Texture Texture::createFromFloatPixels(int width, int height, int channels, cons
     // Magnification shows traced pixels as blocks rather than interpolating values never traced, so the probe matches what is on screen.
     GL_CALL(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST));
 
-    Texture texture(id, format);
+    Texture texture(id, pixelBuffer, format);
     texture.upload(width, height, channels, texels);
     GL_CALL(glBindTexture(GL_TEXTURE_2D, 0));
     return texture;
@@ -145,18 +153,45 @@ Texture Texture::createFromFloatPixels(int width, int height, int channels, cons
 // Not wrapped in GL_CALL on the in-place path: it runs every frame the image changes and glGetError is a driver sync point.
 void Texture::upload(int width, int height, int channels, const float* texels) {
     const std::size_t pixels = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
-    const void* source = format_ == ScalarType::Float16 ? static_cast<const void*>(stage(texels, pixels, channels, halfStaging_))
-                                                        : static_cast<const void*>(stage(texels, pixels, channels, floatStaging_));
+    const std::size_t bytes = pixels * static_cast<std::size_t>(storedLanes(channels)) * scalarBytes(format_);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pixelBuffer_);
+    if (bytes != pixelBufferBytes_) {
+        GL_CALL(glBufferData(GL_PIXEL_UNPACK_BUFFER, static_cast<GLsizeiptr>(bytes), nullptr, GL_STREAM_DRAW));
+        pathtracer::debug::trackGpuFree(pixelBufferBytes_);
+        pixelBufferBytes_ = bytes;
+        pathtracer::debug::trackGpuAlloc(pixelBufferBytes_);
+    }
+    // Invalidation orphans the store a previous transfer may still read (Hrabcak & Masserann 2012), so the map never waits on it.
+    void* mapped = glMapBufferRange(GL_PIXEL_UNPACK_BUFFER, 0, static_cast<GLsizeiptr>(bytes),
+                                    GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT);
+    if (mapped == nullptr) {
+        std::cerr << "Texture::upload: mapping the " << bytes << "-byte pixel buffer failed; the texture keeps its previous texels\n";
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+        return;
+    }
+    if (format_ == ScalarType::Float16) {
+        stage(texels, pixels, channels, static_cast<Half*>(mapped));
+    } else {
+        stage(texels, pixels, channels, static_cast<float*>(mapped));
+    }
+    // GL_FALSE: the store was corrupted while mapped (e.g. a display change), so its contents are undefined and must not be uploaded.
+    if (glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER) == GL_FALSE) {
+        std::cerr << "Texture::upload: the pixel buffer was lost while mapped; the texture keeps its previous texels\n";
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+        return;
+    }
     // Rows are tightly packed, and an R16F row of odd width is not a multiple of the default 4-byte alignment.
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     if (width == width_ && height == height_ && channels == channels_) {
         glBindTexture(GL_TEXTURE_2D, id_);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, glPixelFormat(channels), glComponentType(format_), source);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, glPixelFormat(channels), glComponentType(format_), nullptr);
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
         return;
     }
     GL_CALL(glBindTexture(GL_TEXTURE_2D, id_));
     GL_CALL(glTexImage2D(GL_TEXTURE_2D, 0, glInternalFormat(channels, format_), width, height, 0, glPixelFormat(channels),
-                         glComponentType(format_), source));
+                         glComponentType(format_), nullptr));
+    GL_CALL(glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0));
     GL_CALL(glTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_RGBA, glSwizzle(channels).data()));
     width_ = width;
     height_ = height;
