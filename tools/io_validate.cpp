@@ -1095,6 +1095,90 @@ PT_CHECK(gltf_points_and_lines_are_skipped_not_fatal, Fast, Exact) {
               "a file holding only points loaded as if it had a surface");
 }
 
+// glTF 2.0 3.9.3: tangent-space +x is +u and +y is image-up, i.e. -v; makeQuad maps +u to +x and image-up to +y, so T = +x, w = +1.
+PT_CHECK(gltf_generated_tangent_follows_the_gltf_convention, Fast, Exact) {
+    GltfPrimitive quad = makeQuad();
+    quad.tangents.clear();
+    GltfPrimitive flipped = quad;
+    for (glm::vec2& uv : flipped.uvs) {
+        uv.x = 1.0F - uv.x;  // u now runs along -x, a mirrored chart: T = -x and the frame turns left-handed, w = -1
+    }
+    // Identity, a mirrored node (T = M * +x = -x and w = sign(det M) = -1), and the mirrored chart.
+    const std::optional<pathtracer::scene::LoadedModel> plain = pathtracer::scene::loadGltf(
+        writeGltf("engine_io_validate_generated", {quad}, {glm::vec3(1.0F), glm::vec3(-1.0F, 1.0F, 1.0F)}).string());
+    const std::optional<pathtracer::scene::LoadedModel> chart = pathtracer::scene::loadGltf(
+        writeGltf("engine_io_validate_generated_flipped", {flipped}, {glm::vec3(1.0F)}).string());
+    constexpr int kCorners = 6;
+    ctx.plan(2 + (3 * kCorners));
+    PT_EXPECT(ctx, plain && plain->shadingTriangles.size() == 4, "the untangented quad did not load under both nodes");
+    PT_EXPECT(ctx, chart && chart->shadingTriangles.size() == 2, "the mirrored-chart quad did not load");
+    // Exact up to two normalizations (MikkTSpace's, then the loader's after transforming), each within 2 ulp of unit length.
+    const auto expect = [&](const pathtracer::scene::ShadingTriangle& tri, const glm::vec4& expected) {
+        for (const pathtracer::scene::ShadingVertex* vertex : {&tri.v0, &tri.v1, &tri.v2}) {
+            const glm::vec4 delta = glm::abs(vertex->tangent - expected);
+            PT_EXPECT(ctx, std::max({delta.x, delta.y, delta.z}) <= 4.0F * std::numeric_limits<float>::epsilon() && delta.w == 0.0F,
+                      "a generated tangent is not the analytic +u direction with the glTF handedness");
+        }
+    };
+    for (std::size_t i = 0; plain && i < plain->shadingTriangles.size(); ++i) {
+        const pathtracer::scene::ShadingTriangle& tri = plain->shadingTriangles[i];
+        expect(tri, tri.instanceIndex == 0 ? glm::vec4(1.0F, 0.0F, 0.0F, 1.0F) : glm::vec4(-1.0F, 0.0F, 0.0F, -1.0F));
+    }
+    for (std::size_t i = 0; chart && i < chart->shadingTriangles.size(); ++i) {
+        expect(chart->shadingTriangles[i], glm::vec4(-1.0F, 0.0F, 0.0F, -1.0F));
+    }
+}
+
+// The stump's TANGENT came from its exporter's MikkTSpace; regenerating it from the same mesh must agree in handedness everywhere.
+PT_CHECK(gltf_generated_tangents_agree_with_authored_mikktspace, Fast, Exact) {
+    ctx.plan(4);
+    const std::filesystem::path source = std::filesystem::path(ASSET_ROOT_DIR) / "geometry/broken_stump_rkswd_raw/rkswd_tier_2.gltf";
+    nlohmann::json gltf = nlohmann::json::parse(std::ifstream(source));
+    for (nlohmann::json& mesh : gltf.at("meshes")) {
+        for (nlohmann::json& primitive : mesh.at("primitives")) {
+            primitive.at("attributes").erase("TANGENT");
+        }
+    }
+    // cgltf resolves a buffer uri against the .gltf's own directory, so the stripped copy sits beside a copy of the .bin.
+    const std::string binName = gltf.at("buffers").at(0).at("uri").get<std::string>();
+    std::filesystem::copy_file(source.parent_path() / binName, scratchPath(binName.c_str()), std::filesystem::copy_options::overwrite_existing);
+    const std::filesystem::path stripped = scratchPath("engine_io_validate_stump_untangented.gltf");
+    std::ofstream(stripped) << gltf.dump();
+
+    const std::optional<pathtracer::scene::LoadedModel> authored = pathtracer::scene::loadGltf(source.string());
+    const std::optional<pathtracer::scene::LoadedModel> generated = pathtracer::scene::loadGltf(stripped.string());
+    PT_EXPECT(ctx, authored && generated && authored->shadingTriangles.size() == generated->shadingTriangles.size(),
+              "the authored and stripped stump did not load to the same triangle count");
+    if (!authored || !generated || authored->shadingTriangles.size() != generated->shadingTriangles.size()) {
+        return;
+    }
+    // A zero-UV-area face has no tangent of its own; MikkTSpace hands it a neighbour's, so its corners are not compared.
+    int compared = 0;
+    int handednessMismatches = 0;
+    int opposedTangents = 0;
+    float maxAngle = 0.0F;
+    for (std::size_t i = 0; i < authored->shadingTriangles.size(); ++i) {
+        const pathtracer::scene::ShadingTriangle& a = authored->shadingTriangles[i];
+        const pathtracer::scene::ShadingTriangle& g = generated->shadingTriangles[i];
+        const glm::vec2 e1 = a.v1.uv - a.v0.uv;
+        const glm::vec2 e2 = a.v2.uv - a.v0.uv;
+        if ((e1.x * e2.y) - (e1.y * e2.x) == 0.0F) {
+            continue;
+        }
+        for (const auto& [va, vg] : {std::pair{&a.v0, &g.v0}, std::pair{&a.v1, &g.v1}, std::pair{&a.v2, &g.v2}}) {
+            const float cosine = glm::dot(glm::vec3(va->tangent), glm::vec3(vg->tangent));
+            ++compared;
+            handednessMismatches += va->tangent.w != vg->tangent.w ? 1 : 0;
+            opposedTangents += cosine <= 0.0F ? 1 : 0;
+            maxAngle = std::max(maxAngle, std::acos(std::clamp(cosine, -1.0F, 1.0F)));
+        }
+    }
+    std::cout << "  stump: " << compared << " corners compared, max tangent angle " << glm::degrees(maxAngle) << " deg\n";
+    PT_EXPECT(ctx, compared > 0, "no stump corner had a non-degenerate UV face to compare");
+    PT_EXPECT(ctx, handednessMismatches == 0, "a generated tangent's handedness disagrees with the exporter's MikkTSpace");
+    PT_EXPECT(ctx, opposedTangents == 0, "a generated tangent points away from the exporter's MikkTSpace tangent");
+}
+
 }  // namespace
 
 PT_CHECK_MAIN("io")
