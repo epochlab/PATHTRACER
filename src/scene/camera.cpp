@@ -2,13 +2,21 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numbers>
 #include <optional>
+#include <sstream>
+#include <string>
 
 namespace pathtracer::scene {
 
 namespace {
 
 constexpr glm::vec3 kWorldUp{0.0F, 1.0F, 0.0F};
+
+// isfinite first: inf > 0 holds, and a NaN fails both, so every caller's rejection covers it.
+bool finitePositive(float value) {
+    return std::isfinite(value) && value > 0.0F;
+}
 
 // Right-handed Euler forward vector, parameterised so yaw=0, pitch=0 points down -Z without the usual -90-degree yaw offset.
 glm::vec3 forwardFromEuler(float yawRadians, float pitchRadians) {
@@ -101,6 +109,52 @@ Camera::Camera(const glm::vec3& position, float yawDegrees, float pitchDegrees, 
       iso_(iso),
       lens_(lens) {}
 
+bool Camera::validate(std::string& error) const {
+    std::ostringstream reason;
+    if (!(std::isfinite(position_.x) && std::isfinite(position_.y) && std::isfinite(position_.z))) {
+        reason << "position (" << position_.x << ", " << position_.y << ", " << position_.z << ") is not finite";
+    } else if (!std::isfinite(yawRadians_)) {
+        reason << "yaw " << yawDegrees() << " degrees is not finite";
+    // right ~ cos(pitch): gimbal lock at +/-90, aliased to yaw + 180 past it. float(pi/2) is the first float past pi/2, so < is exact.
+    } else if (!(std::abs(pitchRadians_) < 0.5F * std::numbers::pi_v<float>)) {
+        reason << "pitch " << pitchDegrees() << " degrees is not strictly inside (-90, 90)";
+    } else if (!validFilmBack(filmBack_)) {
+        reason << "film back " << filmBack_.widthMm << " x " << filmBack_.heightMm << " mm is not finite and positive";
+    } else if (!finitePositive(focalLengthMm_)) {
+        reason << "focal length " << focalLengthMm_ << " mm is not finite and positive";
+    // viewBasis's pinhole half-height h/2f, which pinholeMatrix divides by: finite inputs can still overflow or underflow it.
+    } else if (!finitePositive((0.5F * filmBack_.heightMm) / focalLengthMm_)) {
+        reason << "film back height " << filmBack_.heightMm << " mm over focal length " << focalLengthMm_
+               << " mm leaves no finite positive view-plane extent";
+    // The ray interval [near, far]; far may be +inf, the unbounded ray.
+    } else if (!finitePositive(nearClip_) || !(nearClip_ < farClip_)) {
+        reason << "clips near " << nearClip_ << ", far " << farClip_ << " do not satisfy 0 < near < far with near finite";
+    } else if (!finitePositive(aperture_)) {
+        reason << "aperture f/" << aperture_ << " is not finite and positive";
+    } else if (!finitePositive(shutterSeconds_)) {
+        reason << "shutter " << shutterSeconds_ << " s is not finite and positive";
+    } else if (!finitePositive(iso_)) {
+        reason << "ISO " << iso_ << " is not finite and positive";
+    // aperture^2 / shutter * 100 / iso overflows or underflows at finite extremes; the display gain is 2^-ev.
+    } else if (!std::isfinite(ev100())) {
+        reason << "exposure f/" << aperture_ << ", " << shutterSeconds_ << " s, ISO " << iso_ << " has no finite EV100";
+    // Checked whichever projection is active: the HUD switches projection at runtime over the same polynomial.
+    } else if (!(lens_.maxFieldOfViewDegrees > 0.0F && lens_.maxFieldOfViewDegrees <= 360.0F)) {
+        reason << "fisheye field of view " << lens_.maxFieldOfViewDegrees << " degrees is outside (0, 360]";
+    } else if (!kannalaBrandtIsInvertible(lens_.radialCoefficients, maxThetaRadians(lens_))) {
+        reason << "fisheye coefficients give an r(theta) that is not provably monotone over the field of view";
+    }
+    if (reason.tellp() == 0) {
+        return true;
+    }
+    error = reason.str();
+    return false;
+}
+
+bool Camera::validFilmBack(FilmBack filmBack) {
+    return finitePositive(filmBack.widthMm) && finitePositive(filmBack.heightMm);
+}
+
 glm::vec3 Camera::forward() const {
     return forwardFromEuler(yawRadians_, pitchRadians_);
 }
@@ -123,11 +177,12 @@ Camera::ViewBasis Camera::viewBasis(float aspect) const {
     const glm::vec3 fwd = forwardFromEuler(yawRadians_, pitchRadians_);
     const glm::vec3 right = glm::normalize(glm::cross(fwd, kWorldUp));
     const glm::vec3 up = glm::cross(right, fwd);
-    const float halfHeight = std::tan(verticalFovRadians() * 0.5F);
-    const float halfWidth = halfHeight * aspect;
     // Sensor width from the gate height and the render aspect, as the pinhole vfov is: widthMm stays display-only, so pixels stay square.
     const float halfHeightMm = 0.5F * filmBack_.heightMm;
     const float halfWidthMm = halfHeightMm * aspect;
+    // tan(vfov/2) by similar triangles, exact; tan(atan(x)) caps or turns negative at small f, where atan rounds to pi/2.
+    const float halfHeight = halfHeightMm / focalLengthMm_;
+    const float halfWidth = halfHeight * aspect;
     const float maxTheta = maxThetaRadians(lens_);
     // r_max = f * theta_d(thetaMax): the authored focal length and the gate alone decide whether the circle falls inside the frame.
     const float maxRadiusMm = focalLengthMm_ * kannalaBrandtRadius(lens_.radialCoefficients, maxTheta);

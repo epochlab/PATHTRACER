@@ -431,6 +431,10 @@ std::optional<AppResources> initializeApp(const pathtracer::config::SceneConfig&
     pathtracer::scene::DebugCameraController debugCamera =
         makeDebugCamera(profileConfig, filmBacks->presets[static_cast<std::size_t>(filmBacks->defaultIndex)].filmBack);
     const pathtracer::scene::Camera initialCamera = debugCamera.snapshot();
+    if (std::string error; !initialCamera.validate(error)) {
+        std::cerr << "main: profile.json camera: " << error << ", aborting startup\n";
+        return std::nullopt;
+    }
     std::optional<AppScene> scene = loadAppScene(sceneConfig, profileConfig);
     if (!scene) {
         return std::nullopt;

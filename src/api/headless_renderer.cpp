@@ -75,10 +75,15 @@ struct SceneInputs {
                 "\" not found in sensor.json";
         return std::nullopt;
     }
-    const pathtracer::config::CameraConfig& camera = profile.camera;
-    return pathtracer::scene::Camera(camera.position, camera.yawDegrees, camera.pitchDegrees, preset->filmBack,
-                                  camera.focalLengthMm, camera.nearClip, camera.farClip, camera.aperture,
-                                  camera.shutterSeconds, camera.iso, camera.lens);
+    const pathtracer::config::CameraConfig& config = profile.camera;
+    pathtracer::scene::Camera camera(config.position, config.yawDegrees, config.pitchDegrees, preset->filmBack,
+                                     config.focalLengthMm, config.nearClip, config.farClip, config.aperture,
+                                     config.shutterSeconds, config.iso, config.lens);
+    if (!camera.validate(error)) {
+        error = "profile.json camera: " + error;
+        return std::nullopt;
+    }
+    return camera;
 }
 
 [[nodiscard]] bool requestsSource(const std::vector<AovId>& aovs, AovSource source) {
@@ -97,6 +102,13 @@ struct SceneInputs {
     }
     if (request.aovs.empty()) {
         error = "no AOVs requested";
+        return false;
+    }
+    if (!request.camera.validate(error)) {
+        return false;
+    }
+    if (request.previousCamera.has_value() && !request.previousCamera->validate(error)) {
+        error = "previousCamera: " + error;
         return false;
     }
     return true;

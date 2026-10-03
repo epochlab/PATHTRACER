@@ -31,7 +31,7 @@ std::optional<pathtracer::gfx::ScalarType> parseBitDepth(const nlohmann::json& b
     return bitDepth.is_number_integer() ? pathtracer::gfx::scalarTypeFromBitDepth(bitDepth.get<int>()) : std::nullopt;
 }
 
-// Camera lens block: projection, Kannala-Brandt k1..k4 and field of view, rejected unless r(theta) is invertible over it.
+// Camera lens block: projection, Kannala-Brandt k1..k4 and field of view. Ranges are Camera::validate's, run once the camera is assembled.
 std::optional<pathtracer::scene::Lens> parseLens(const nlohmann::json& lens, const std::string& path) {
     const std::string projection = lens.at("projection").get<std::string>();
     pathtracer::scene::Lens parsed;
@@ -54,17 +54,6 @@ std::optional<pathtracer::scene::Lens> parseLens(const nlohmann::json& lens, con
         parsed.radialCoefficients[i] = coefficients[i].get<float>();
     }
     parsed.maxFieldOfViewDegrees = lens.at("maxFieldOfViewDegrees").get<float>();
-    // Half of it is thetaMax, the polynomial's domain: at or below zero the lens images nothing, past 360 the circle wraps twice.
-    if (parsed.maxFieldOfViewDegrees <= 0.0F || parsed.maxFieldOfViewDegrees > 360.0F) {
-        std::cerr << "loadProfileConfig: " << path << " has a lens.maxFieldOfViewDegrees outside (0, 360]\n";
-        return std::nullopt;
-    }
-    // A non-monotone r(theta) has no unique inverse, so primaryRay could not recover the angle a sensor radius came from.
-    if (!pathtracer::scene::kannalaBrandtIsInvertible(parsed.radialCoefficients, maxThetaRadians(parsed))) {
-        std::cerr << "loadProfileConfig: " << path
-                  << " has lens.radialCoefficients whose r(theta) is not provably monotone over the field of view\n";
-        return std::nullopt;
-    }
     return parsed;
 }
 
@@ -116,7 +105,7 @@ std::optional<RenderConfig> parseRenderOutput(const nlohmann::json& render, cons
     return RenderConfig{width, height, 0.0F, 0.0F, 0, *defaultLut, false, *displayFormat, *textureType};
 }
 
-// The camera block in field order, then its lens. Ranges are validCamera's, run once every block has been read.
+// The camera block in field order, then its lens. Ranges need the film back, so Camera::validate runs where sensor.json supplies it.
 std::optional<CameraConfig> parseCamera(const nlohmann::json& camera, const std::string& path) {
     CameraConfig config{
         camera.at("position").get<glm::vec3>(),
@@ -137,16 +126,6 @@ std::optional<CameraConfig> parseCamera(const nlohmann::json& camera, const std:
     }
     config.lens = *lens;
     return config;
-}
-
-// Denominators in verticalFovRadians() and ev100(): a non-positive value gives inf or NaN, not a wrong-but-finite render.
-bool validCamera(const CameraConfig& camera, const std::string& path) {
-    if (camera.focalLengthMm <= 0.0F || camera.aperture <= 0.0F || camera.shutterSeconds <= 0.0F || camera.iso <= 0.0F) {
-        std::cerr << "loadProfileConfig: " << path
-                   << " has a non-positive focalLengthMm/aperture/shutterSeconds/iso\n";
-        return false;
-    }
-    return true;
 }
 
 bool validRender(const RenderConfig& render, const std::string& path) {
@@ -224,7 +203,7 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
             pathTracer.at("lookaheadDistance").get<float>(),
         };
 
-        if (!validCamera(*cameraConfig, path) || !validRender(*renderConfig, path) ||
+        if (!validRender(*renderConfig, path) ||
             !validPathTracer(pathTracerConfig, path) || !validCounts(*renderConfig, pathTracerConfig, path)) {
             return std::nullopt;
         }
@@ -251,15 +230,15 @@ std::optional<std::vector<pathtracer::scene::Camera::FilmBackPreset>> loadFilmBa
         presets.reserve(j.size());
         for (const nlohmann::json& presetJson : j) {
             std::string name = presetJson.at("name").get<std::string>();
-            const float widthMm = presetJson.at("widthMm").get<float>();
-            const float heightMm = presetJson.at("heightMm").get<float>();
-            // Physical sensor dimensions feeding verticalFovRadians() and the HUD aspect as denominators: non-positive is inf or NaN.
-            if (widthMm <= 0.0F || heightMm <= 0.0F) {
-                std::cerr << "loadFilmBackPresets: " << path << " has a non-positive filmBack for \""
+            const pathtracer::scene::Camera::FilmBack filmBack{presetJson.at("widthMm").get<float>(),
+                                                               presetJson.at("heightMm").get<float>()};
+            // Each preset checked alone: the HUD can swap any of them into the camera, not just profile.json's.
+            if (!pathtracer::scene::Camera::validFilmBack(filmBack)) {
+                std::cerr << "loadFilmBackPresets: " << path << " has a non-finite or non-positive filmBack for \""
                            << name << "\"\n";
                 return std::nullopt;
             }
-            presets.push_back({std::move(name), pathtracer::scene::Camera::FilmBack{widthMm, heightMm}});
+            presets.push_back({std::move(name), filmBack});
         }
         return presets;
     } catch (const nlohmann::json::exception& e) {

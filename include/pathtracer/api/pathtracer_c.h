@@ -37,16 +37,17 @@ int pt_aov_needs_samples(int aov);
 /* PT_ABI_VERSION this library was built with: a caller compares it to its own header's and refuses to call on a mismatch. */
 int pt_abi_version(void);
 
-/* Pose, lens and exposure. aperture/shutter_seconds/iso set exposure value ONLY: no projection here has depth of field. */
+/* Pose, lens and exposure; aperture/shutter_seconds/iso set EV only (no depth of field). pt_render names any field out of range. */
 typedef struct {
-    float position[3];
-    float yaw_degrees;
-    float pitch_degrees;
-    float film_back_mm[2]; /* sensor gate width, height */
-    float focal_length_mm;
+    float position[3]; /* finite */
+    float yaw_degrees; /* finite */
+    float pitch_degrees; /* strictly inside (-90, 90) */
+    float film_back_mm[2]; /* sensor gate width, height; finite, > 0 */
+    float focal_length_mm; /* finite, > 0 */
+    /* 0 < near_clip < far_clip, near_clip finite; far_clip may be +inf, the unbounded ray. */
     float near_clip;
     float far_clip;
-    float aperture;
+    float aperture; /* f-number; aperture, shutter_seconds and iso each finite, > 0, with a finite EV100 */
     float shutter_seconds;
     float iso;
     /* PT_LENS_*. Every AOV renders under either projection; G-buffer depth is distance along the primary ray. */

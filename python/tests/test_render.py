@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 import subprocess
 import time
 from pathlib import Path
@@ -185,6 +186,39 @@ def test_unknown_lens_is_rejected_before_the_abi(renderer: Renderer) -> None:
     with pytest.raises(ValueError, match="pinhole"):
         renderer.render(aovs=("beauty",), camera=dataclasses.replace(renderer.default_camera, lens="pinhole"),
                         width=8, height=8, samples=1)
+
+
+@pytest.mark.parametrize(
+    ("fields", "reason"),
+    [
+        ({"near_clip": 0.0}, "clips"),
+        ({"far_clip": 0.01}, "clips"),
+        ({"pitch_degrees": 90.0}, "pitch"),
+        ({"focal_length_mm": 0.0}, "focal length"),
+        ({"position": (math.nan, 0.0, 6.0)}, "position"),
+        ({"film_back_mm": (36.0, math.inf)}, "film back"),
+        ({"iso": math.nan}, "ISO"),
+        ({"aperture": 1e30}, "EV100"),
+        ({"fisheye_field_of_view_degrees": 400.0}, "field of view"),
+    ],
+)
+def test_invalid_camera_is_rejected_by_name(renderer: Renderer, fields: dict, reason: str) -> None:
+    camera = dataclasses.replace(renderer.default_camera, **fields)
+    with pytest.raises(RuntimeError, match=reason):
+        renderer.render(aovs=("depth",), camera=camera, width=8, height=8)
+
+
+def test_invalid_previous_camera_is_rejected_by_name(renderer: Renderer) -> None:
+    previous = dataclasses.replace(renderer.default_camera, near_clip=0.0)
+    with pytest.raises(RuntimeError, match="previousCamera: clips"):
+        renderer.render(aovs=("motionVector",), previous_camera=previous, width=8, height=8)
+
+
+def test_unbounded_far_clip_renders(renderer: Renderer) -> None:
+    camera = dataclasses.replace(renderer.default_camera, far_clip=math.inf)
+    size = {"width": 16, "height": 16}
+    assert np.array_equal(renderer.render(aovs=("depth",), camera=camera, **size)["depth"],
+                          renderer.render(aovs=("depth",), **size)["depth"])
 
 
 def test_default_camera_reports_the_profile_lens(renderer: Renderer) -> None:

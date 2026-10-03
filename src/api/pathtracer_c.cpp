@@ -41,7 +41,7 @@ void writeError(char* err, int errCap, const std::string& message) {
     return false;
 }
 
-// Validating because the lens fields are a boundary: an unknown projection or a non-invertible polynomial has no defensible coercion.
+// Decode only: an unknown projection has no enum value to coerce to; every range is Camera::validate's, run by HeadlessRenderer::render.
 [[nodiscard]] std::optional<pathtracer::scene::Camera> toCamera(const PtCamera& camera, std::string& error) {
     pathtracer::scene::Lens lens;
     if (camera.lens_projection == PT_LENS_RECTILINEAR) {
@@ -57,15 +57,6 @@ void writeError(char* err, int errCap, const std::string& message) {
         lens.radialCoefficients[i] = camera.fisheye_coefficients[i];
     }
     lens.maxFieldOfViewDegrees = camera.fisheye_field_of_view_degrees;
-    if (lens.maxFieldOfViewDegrees <= 0.0F || lens.maxFieldOfViewDegrees > 360.0F) {
-        error = "fisheye_field_of_view_degrees must lie in (0, 360], got " +
-                std::to_string(lens.maxFieldOfViewDegrees);
-        return std::nullopt;
-    }
-    if (!pathtracer::scene::kannalaBrandtIsInvertible(lens.radialCoefficients, maxThetaRadians(lens))) {
-        error = "fisheye_coefficients give an r(theta) that is not provably monotone over the field of view";
-        return std::nullopt;
-    }
     return pathtracer::scene::Camera{
         glm::vec3(camera.position[0], camera.position[1], camera.position[2]),
         camera.yaw_degrees,
@@ -80,7 +71,7 @@ void writeError(char* err, int errCap, const std::string& message) {
         lens};
 }
 
-// The request across the boundary, each field checked in ABI order; error names the first bad one, matching what callers parse.
+// The request decoded in ABI order, error naming the first bad field; camera ranges follow in render(), after every decode.
 [[nodiscard]] std::optional<HeadlessRenderer::Request> decodeRequest(const PtRenderRequest& request, float* const* out,
                                                                      std::string& error) {
     if (request.aovs == nullptr || request.aov_count <= 0) {

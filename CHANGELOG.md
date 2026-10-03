@@ -3,6 +3,37 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Camera validation: every parameter, at every boundary
+
+The C ABI checked only the lens, so pose, focal length, aperture, shutter, ISO, film back and clips went through unchecked.
+`profile.json` checked four of them with `<= 0`, which lets `inf` through, and no path checked the clips or pitch. A camera's
+invariants are now defined once and checked wherever a camera is built from outside input. Evidence is in
+`results/camera_validation`.
+
+- feat: `Camera::validate(error)` holds every rule, and its error names the first bad field and its value:
+  - position and yaw must be finite
+  - pitch must lie strictly inside (-90, 90). The yaw/pitch basis is undefined at the pole (gimbal lock), and past it a pitch is
+    an alias for yaw + 180. `float(pi/2)` is the first float past pi/2, so a strict `<` is exact and no margin is needed.
+  - film back, focal length, aperture, shutter and ISO must each be finite and positive
+  - `0 < near < far` with near finite; far may be `+inf`, the unbounded ray
+  - the pinhole half-height `h/2f` and `ev100()` must be finite, because finite extremes can overflow them
+  - the lens field of view must lie in (0, 360] and the polynomial must be provably monotone, under either projection
+- feat: the checks run at four places:
+  - `HeadlessRenderer::render`, for the camera and the previous camera. This is the boundary for C++ callers and for `pt_render`,
+    and Python raises `RuntimeError` with the reason.
+  - `HeadlessRenderer::open`, for the profile camera
+  - viewer startup, which aborts with the reason
+  - `loadFilmBackPresets`, which checks each preset with `Camera::validFilmBack`, because the HUD can switch to any of them
+- **breaking**: a camera these rules reject is now refused where it used to render. Examples: `near_clip` 0 or negative,
+  `far_clip <= near_clip`, pitch of ±90 or beyond, a NaN or infinite pose, a zero film back, a zero or NaN exposure scalar.
+- fix: `viewBasis` computes the pinhole half-height as `h/2f` directly instead of `tan(atan(h/2f))`. At small focal lengths the
+  round trip saturates where atan rounds to a float at pi/2. On this libm the half-height then caps at 1.3e7 (off by more than 1%
+  below f = 7e-5 mm); a correctly rounded atan makes it negative instead, which inverts the frame. Across the HUD's 6-300 mm range
+  and every `sensor.json` gate, 13% of combinations change by up to 8 ulp of the half-height.
+- refactor: the lens range checks duplicated in `toCamera` and `parseLens`, and `profile_config`'s `validCamera`, are removed.
+  `toCamera` now only decodes.
+- note: rendering is unchanged for the shipped camera. All 192 AOV PNG/EXR files and the viewer captures are byte-identical.
+
 ## Camera reset during an orbit releases the cursor
 
 An orbit is two pieces of state: the controller's orbit flag and the window's disabled cursor. The LMB release cleared both, but
