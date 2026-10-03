@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <iostream>
 #include <limits>
 #include <numbers>
 #include <optional>
@@ -494,6 +495,103 @@ PT_CHECK(project_refuses_points_outside_the_lens_domain, Fast, Exact) {
     const Camera::ViewBasis fullBasis = full.viewBasis(kAspect);
     PT_EXPECT(ctx, !full.project(fullBasis, glm::vec4(-fullBasis.forward, 0.0F)).has_value(),
               "the axis behind a 360-degree lens, imaged as the whole rim, was given one point");
+}
+
+namespace {
+
+// theta_d''(theta) = 6 k1 theta + 20 k2 theta^3 + 42 k3 theta^5 + 72 k4 theta^7, in double: the reference's curvature term.
+double radiusCurvature(const std::array<float, 4>& k, double theta) {
+    const double u = theta * theta;
+    return theta * ((6.0 * k[0]) + (u * ((20.0 * k[1]) + (u * ((42.0 * k[2]) + (u * 72.0 * k[3]))))));
+}
+
+double radiusDouble(const std::array<float, 4>& k, double theta) {
+    const double u = theta * theta;
+    return theta * (1.0 + (u * (k[0] + (u * (k[1] + (u * (k[2] + (u * k[3]))))))));
+}
+
+// primaryRay's direction re-derived in double: the pinhole closed form, or bisection on theta_d to the last double bit.
+glm::dvec3 directionDouble(const Camera::ViewBasis& basis, double ndcX, double ndcY) {
+    const glm::dvec3 forward(basis.forward);
+    const glm::dvec3 right(basis.right);
+    const glm::dvec3 up(basis.up);
+    if (basis.lens.projection == LensProjection::Rectilinear) {
+        return glm::normalize(forward + (ndcX * basis.halfWidth * right) + (ndcY * basis.halfHeight * up));
+    }
+    const double xMm = ndcX * basis.halfWidthMm;
+    const double yMm = ndcY * basis.halfHeightMm;
+    const double radius = std::hypot(xMm, yMm) / basis.focalLengthMm;
+    double lo = 0.0;
+    double hi = basis.maxThetaRadians;
+    for (int i = 0; i < 128; ++i) {
+        const double mid = 0.5 * (lo + hi);
+        (radiusDouble(basis.lens.radialCoefficients, mid) < radius ? lo : hi) = mid;
+    }
+    const double theta = 0.5 * (lo + hi);
+    return (std::cos(theta) * forward) + (std::sin(theta) * ((xMm * right) + (yMm * up)) / std::hypot(xMm, yMm));
+}
+
+}  // namespace
+
+// The closed form against central differences of the double direction: h = 1e-6 leaves O(h^2) and O(1e-16 / h) far below float.
+PT_CHECK(primary_ray_differential_matches_central_differences, Fast, Exact) {
+    const std::array<std::pair<const char*, Lens>, 3> lenses{{{"rectilinear", Lens{}},
+                                                              {"equidistant 220", fisheye(std::array<float, 4>{}, 220.0F)},
+                                                              {"equisolid fisheye", fisheye(kEquisolidTaylor, 180.0F)}}};
+    ctx.plan(2 * static_cast<int>(lenses.size()));
+    constexpr double kStep = 1e-6;
+    constexpr int kGrid = 33;
+    for (const auto& [name, lens] : lenses) {
+        const Camera camera{glm::vec3(0.0F), 37.0F, -21.0F, kFullFrame, 10.0F, 0.01F, 100.0F, 2.8F, 0.008F, 400.0F, lens};
+        const Camera::ViewBasis basis = camera.viewBasis(kAspect);
+        int imaged = 0;
+        int mismatches = 0;
+        double worst = 0.0;
+        for (int iy = 0; iy < kGrid; ++iy) {
+            for (int ix = 0; ix < kGrid; ++ix) {
+                // Off-grid by a half step, so the exact optical axis, where the azimuth is undefined, is approached but not hit.
+                const float ndcX = (((static_cast<float>(ix) + 0.5F) / static_cast<float>(kGrid)) * 2.0F) - 1.0F;
+                const float ndcY = (((static_cast<float>(iy) + 0.5F) / static_cast<float>(kGrid)) * 2.0F) - 1.0F;
+                const std::optional<Camera::RayDifferential> differential = camera.primaryRayDifferential(basis, ndcX, ndcY);
+                const std::optional<Ray> ray = camera.primaryRay(basis, ndcX, ndcY);
+                if (differential.has_value() != ray.has_value()) {
+                    ++mismatches;
+                    continue;
+                }
+                // A stencil straddling the rim samples past the image circle, where the direction has no derivative.
+                const auto step = static_cast<float>(kStep);
+                if (!ray || !camera.primaryRay(basis, ndcX + step, ndcY + step) || !camera.primaryRay(basis, ndcX - step, ndcY - step)) {
+                    continue;
+                }
+                ++imaged;
+                mismatches += differential->ray.dir == ray->dir ? 0 : 1;
+                const glm::dvec3 dx =
+                    (directionDouble(basis, ndcX + kStep, ndcY) - directionDouble(basis, ndcX - kStep, ndcY)) / (2.0 * kStep);
+                const glm::dvec3 dy =
+                    (directionDouble(basis, ndcX, ndcY + kStep) - directionDouble(basis, ndcX, ndcY - kStep)) / (2.0 * kStep);
+                const double scale = std::sqrt(glm::dot(dx, dx) + glm::dot(dy, dy));
+                const glm::dvec3 errorX = glm::dvec3(differential->dirPerNdc[0]) - dx;
+                const glm::dvec3 errorY = glm::dvec3(differential->dirPerNdc[1]) - dy;
+                const double error = std::sqrt(glm::dot(errorX, errorX) + glm::dot(errorY, errorY));
+                // Float rounding of the closed form, plus the inverse's theta error times the rate the rates change with theta.
+                const float theta = angleBetween(ray->dir, basis.forward);
+                const double thetaRate = lens.projection == LensProjection::Rectilinear
+                                             ? 0.0
+                                             : 1.0 + (1.0 / theta) +
+                                                   (std::abs(radiusCurvature(lens.radialCoefficients, theta)) /
+                                                    kannalaBrandtRadiusSlope(lens.radialCoefficients, theta));
+                const double thetaError = lens.projection == LensProjection::Rectilinear
+                                              ? 0.0
+                                              : thetaTolerance(lens.radialCoefficients, theta, basis.maxThetaRadians);
+                const double budget = scale * ((kClosedFormUlps * kEps) + (thetaError * thetaRate));
+                worst = std::max(worst, error / budget);
+                mismatches += error > budget ? 1 : 0;
+            }
+        }
+        std::cout << "camera_validate: differential " << name << " -- " << imaged << " imaged, worst " << worst << " of budget\n";
+        PT_EXPECT(ctx, imaged > 0, std::string(name) + ": no ndc sample on the grid was imaged");
+        PT_EXPECT(ctx, mismatches == 0, std::string(name) + ": " + std::to_string(mismatches) + " differentials departed from the stencil");
+    }
 }
 
 PT_CHECK_MAIN("camera_validate")
