@@ -75,7 +75,7 @@ typedef struct {
     unsigned int seed;
     const int* aovs;
     int aov_count;
-    /* Tri-state, PT_DEFAULT for the current default: environment radiance on a camera miss. Primary miss only, so it unlights nothing. */
+    /* Tri-state, PT_DEFAULT hides the sky: whether a camera miss returns environment radiance. Primary miss only; it unlights nothing. */
     int show_sky;
     /* Tri-state, PT_DEFAULT keeping the scene's authored environment.lightEnabled: whether the environment is a light at all. */
     int env_light_enabled;

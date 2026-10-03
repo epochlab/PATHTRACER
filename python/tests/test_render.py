@@ -336,11 +336,11 @@ def test_show_sky_blackens_only_the_background(renderer: Renderer) -> None:
     assert np.array_equal(sky[interior], without[interior])
 
 
-def test_show_sky_default_is_unchanged(renderer: Renderer) -> None:
-    """The default must stay sky-on, or every existing headless caller silently changes output."""
+def test_show_sky_default_hides_the_sky(renderer: Renderer) -> None:
+    """The default hides the sky, as the viewer does, so headless and viewer agree on one background."""
     common = {"aovs": ("beauty",), "width": 32, "height": 18, "samples": 2, "seed": 1}
     assert np.array_equal(renderer.render(**common)["beauty"],
-                          renderer.render(**common, show_sky=True)["beauty"])
+                          renderer.render(**common, show_sky=False)["beauty"])
 
 
 def test_optional_flags_reject_a_non_tristate(renderer: Renderer) -> None:

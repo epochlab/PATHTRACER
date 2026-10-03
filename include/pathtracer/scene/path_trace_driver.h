@@ -32,7 +32,7 @@ public:
         int width = 0;
         int height = 0;
         float envRotationRadians = 0.0F;
-        bool showSky = true;
+        bool showSky = kDefaultShowSky;
         // Whether the environment is in the light set at all (NEE, MIS, miss radiance); showSky gates only the camera ray's own miss.
         bool envLightEnabled = true;
         float envExposure = 1.0F;

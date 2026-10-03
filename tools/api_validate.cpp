@@ -677,8 +677,8 @@ PT_CHECK(show_sky_changes_only_the_background, Slow, Exact) {
         return;
     }
 
-    // nullopt must keep the sky on, or every existing headless caller silently changes output.
-    PT_EXPECT(ctx, defaulted == sky, "the default must match showSky=true");
+    // nullopt is the shared default, which hides the sky as the viewer does.
+    PT_EXPECT(ctx, defaulted == without, "the default must match showSky=false");
 
     // The top-left corner sits outside the box, where a primary ray misses; the centre is box interior the camera hits.
     const auto texel = [](int x, int y) { return ((static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x)) * 3; };
