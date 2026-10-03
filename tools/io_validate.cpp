@@ -471,13 +471,15 @@ PT_CHECK(profile_config_camera_lens, Fast, Exact) {
     struct Case {
         std::string name;
         nlohmann::json lens;
-        bool accepted;
+        std::optional<pathtracer::scene::LensProjection> projection;  // nullopt where the load must be refused
     };
     const nlohmann::json rectilinear = {{"projection", "rectilinear"},
                                       {"maxFieldOfViewDegrees", 180.0},
                                       {"radialCoefficients", {0.0, 0.0, 0.0, 0.0}}};
     nlohmann::json fisheye = rectilinear;
     fisheye["projection"] = "fisheyePolynomial";
+    nlohmann::json omnidirectional = rectilinear;
+    omnidirectional["projection"] = "omnidirectional";
     nlohmann::json threeCoefficients = rectilinear;
     threeCoefficients["radialCoefficients"] = {0.0, 0.0, 0.0};
     nlohmann::json unknownProjection = rectilinear;
@@ -486,11 +488,12 @@ PT_CHECK(profile_config_camera_lens, Fast, Exact) {
     missingProjection.erase("projection");
 
     const std::vector<Case> cases = {
-        {"rectilinear with a zero polynomial", rectilinear, true},
-        {"fisheyePolynomial with an equidistant polynomial", fisheye, true},
-        {"an unknown projection name", unknownProjection, false},
-        {"no projection at all", missingProjection, false},
-        {"three coefficients instead of four", threeCoefficients, false},
+        {"rectilinear with a zero polynomial", rectilinear, pathtracer::scene::LensProjection::Rectilinear},
+        {"fisheyePolynomial with an equidistant polynomial", fisheye, pathtracer::scene::LensProjection::FisheyePolynomial},
+        {"omnidirectional", omnidirectional, pathtracer::scene::LensProjection::Omnidirectional},
+        {"an unknown projection name", unknownProjection, std::nullopt},
+        {"no projection at all", missingProjection, std::nullopt},
+        {"three coefficients instead of four", threeCoefficients, std::nullopt},
     };
 
     const std::filesystem::path shippedPath = std::filesystem::path(ASSET_ROOT_DIR) / "config" / "profile.json";
@@ -505,9 +508,11 @@ PT_CHECK(profile_config_camera_lens, Fast, Exact) {
             pathtracer::config::loadProfileConfig(path.string());
         std::filesystem::remove(path);
         char detail[224];
-        std::snprintf(detail, sizeof(detail), "loadProfileConfig %s %s",
-                      testCase.accepted ? "rejected" : "accepted", testCase.name.c_str());
-        PT_EXPECT(ctx, loaded.has_value() == testCase.accepted, detail);
+        std::snprintf(detail, sizeof(detail), "loadProfileConfig %s %s", testCase.projection ? "mis-read or rejected" : "accepted",
+                      testCase.name.c_str());
+        const std::optional<pathtracer::scene::LensProjection> projection =
+            loaded ? std::optional(loaded->camera.lens.projection) : std::nullopt;
+        PT_EXPECT(ctx, projection == testCase.projection, detail);
     }
 }
 

@@ -7,6 +7,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <numbers>
 #include <optional>
 #include <random>
 #include <string>
@@ -183,6 +184,12 @@ Camera fisheyeCamera(float fieldOfViewDegrees, glm::vec3 offset = glm::vec3(0.0F
                   1.0F / 125.0F, 100.0F, Lens{LensProjection::FisheyePolynomial, {}, fieldOfViewDegrees});
 }
 
+// The lat-long from the same spot: it sees the whole cluster around it, and behind it the environment through the seam.
+Camera omnidirectionalCamera(glm::vec3 offset = glm::vec3(0.0F), float yawOffset = 0.0F) {
+    return Camera(glm::vec3(0.5F, -0.5F, -8.0F) + offset, 15.0F + yawOffset, 5.0F, kFilmBack, 8.0F, 0.1F, 100.0F, 2.8F,
+                  1.0F / 125.0F, 100.0F, Lens{LensProjection::Omnidirectional});
+}
+
 // Smallest singular value of the per-pixel direction map: radians per pixel along its least-stretched axis.
 float minDirPerPixel(const glm::mat2x3& dirPerPixel) {
     const float a = glm::dot(dirPerPixel[0], dirPerPixel[0]);
@@ -321,6 +328,11 @@ PT_CHECK(gbuffer_pose_fisheye_180, Fast, Exact) {
 // Past 180 degrees the lens sees behind its optical plane: depth stays positive because it is the ray distance.
 PT_CHECK(gbuffer_pose_fisheye_220, Fast, Exact) {
     runPose(ctx, "fisheye220", fisheyeCamera(220.0F), true);
+}
+
+// Every pixel is imaged and the pole rows' differentials are the most anisotropic of any lens, so reprojection is tested hardest there.
+PT_CHECK(gbuffer_pose_omnidirectional, Fast, Exact) {
+    runPose(ctx, "omnidirectional", omnidirectionalCamera(), false);
 }
 
 bool isBoxColorOf(glm::vec3 c, int instanceIndex) {
@@ -886,16 +898,46 @@ std::optional<glm::dvec2> equidistantNdc(const Camera& camera, const glm::dvec4&
     return radiusMm * glm::normalize(lateral) / glm::dvec2(basis.halfWidthMm, basis.halfHeightMm);
 }
 
-std::optional<glm::dvec2> oracleNdc(const Camera& camera, const glm::dvec4& point) {
-    return camera.lens().projection == LensProjection::FisheyePolynomial ? equidistantNdc(camera, point) : pinholeNdc(camera, point);
+// Double-precision lat-long: longitude pi x and latitude pi y / 2 on the camera frame, by atan2 alone, independent of lat_long.h.
+std::optional<glm::dvec2> latLongNdc(const Camera& camera, const glm::dvec4& point) {
+    const Camera::ViewBasis basis = camera.viewBasis(kAspect);
+    const glm::dvec3 view = glm::dvec3(point) - (point.w * glm::dvec3(camera.position()));
+    if (view == glm::dvec3(0.0)) {
+        return std::nullopt;
+    }
+    const double right = glm::dot(view, glm::dvec3(basis.right));
+    const double forward = glm::dot(view, glm::dvec3(basis.forward));
+    const double latitude = std::atan2(glm::dot(view, glm::dvec3(basis.up)), std::hypot(right, forward));
+    return glm::dvec2(std::atan2(right, forward) / std::numbers::pi, latitude / (0.5 * std::numbers::pi));
 }
 
-// The projection's relative condition number: the pinhole divides by a depth formed by cancellation, |view| / |depth|; atan2 is 1.
-double projectionCondition(const Camera& camera, const glm::dvec4& point) {
-    if (camera.lens().projection == LensProjection::FisheyePolynomial) {
-        return 1.0;
+std::optional<glm::dvec2> oracleNdc(const Camera& camera, const glm::dvec4& point) {
+    switch (camera.lens().projection) {
+        case LensProjection::FisheyePolynomial:
+            return equidistantNdc(camera, point);
+        case LensProjection::Omnidirectional:
+            return latLongNdc(camera, point);
+        case LensProjection::Rectilinear:
+        case LensProjection::Count:
+            break;
     }
+    return pinholeNdc(camera, point);
+}
+
+// Relative condition number: the pinhole divides by a depth formed by cancellation, |view| / |depth|; the fisheye's atan2 is 1.
+double projectionCondition(const Camera& camera, const glm::dvec4& point) {
     const glm::dvec3 view = glm::dvec3(point) - (point.w * glm::dvec3(camera.position()));
+    switch (camera.lens().projection) {
+        case LensProjection::FisheyePolynomial:
+            return 1.0;
+        // Longitude is atan2 of the horizontal components, whose length is |view| sin(colatitude): it degrades as 1/sin at a pole.
+        case LensProjection::Omnidirectional:
+            return glm::length(view) / std::hypot(glm::dot(view, glm::dvec3(camera.viewBasis(kAspect).right)),
+                                                  glm::dot(view, glm::dvec3(camera.forward())));
+        case LensProjection::Rectilinear:
+        case LensProjection::Count:
+            break;
+    }
     return glm::length(view) / std::abs(glm::dot(view, glm::dvec3(camera.forward())));
 }
 

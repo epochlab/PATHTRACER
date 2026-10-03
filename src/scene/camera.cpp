@@ -7,6 +7,10 @@
 #include <sstream>
 #include <string>
 
+#include <glm/gtc/constants.hpp>
+
+#include "pathtracer/scene/lat_long.h"
+
 namespace pathtracer::scene {
 
 namespace {
@@ -92,6 +96,37 @@ std::optional<glm::vec2> fisheyeProjection(const Camera::ViewBasis& basis, const
     return (radiusMm / lateralLength) * lateral / glm::vec2(basis.halfWidthMm, basis.halfHeightMm);
 }
 
+// The omnidirectional image is the lat-long chart on the camera frame: ndc (0, 0) is forward, +x the camera's right, the top row up.
+glm::vec2 omnidirectionalUv(float ndcX, float ndcY) {
+    return {0.5F * (ndcX + 1.0F), 0.5F * (1.0F - ndcY)};
+}
+
+glm::vec3 omnidirectionalDirection(const Camera::ViewBasis& basis, float ndcX, float ndcY) {
+    const glm::vec3 local = latLongDirection(omnidirectionalUv(ndcX, ndcY));
+    return (local.x * basis.right) + (local.y * basis.up) + (local.z * basis.forward);
+}
+
+// d(longitude)/d(ndcX) = pi and d(colatitude)/d(ndcY) = -pi/2; the x column is pi sin(colatitude), zero only on the pole rows' edges.
+glm::mat2x3 omnidirectionalDirPerNdc(const Camera::ViewBasis& basis, float ndcX, float ndcY) {
+    const glm::vec2 uv = omnidirectionalUv(ndcX, ndcY);
+    const float longitude = (uv.x - 0.5F) * glm::two_pi<float>();
+    const float colatitude = uv.y * glm::pi<float>();
+    const float sinColatitude = std::sin(colatitude);
+    const glm::vec3 horizontal = (std::sin(longitude) * basis.right) + (std::cos(longitude) * basis.forward);
+    const glm::vec3 east = (std::cos(longitude) * basis.right) - (std::sin(longitude) * basis.forward);
+    return glm::mat2x3(east * (glm::pi<float>() * sinColatitude),
+                       ((std::cos(colatitude) * horizontal) - (sinColatitude * basis.up)) * (-0.5F * glm::pi<float>()));
+}
+
+// Every direction has an image; only the eye itself, the zero vector, has none. A pole's whole row images it, atan2 picks column 0.
+std::optional<glm::vec2> omnidirectionalProjection(const Camera::ViewBasis& basis, const glm::vec3& view) {
+    if (view == glm::vec3(0.0F)) {
+        return std::nullopt;
+    }
+    const glm::vec2 uv = latLongUv(glm::vec3(glm::dot(view, basis.right), glm::dot(view, basis.up), glm::dot(view, basis.forward)));
+    return glm::vec2((2.0F * uv.x) - 1.0F, 1.0F - (2.0F * uv.y));
+}
+
 }  // namespace
 
 Camera::Camera(const glm::vec3& position, float yawDegrees, float pitchDegrees, FilmBack filmBack,
@@ -164,13 +199,21 @@ float Camera::verticalFovRadians() const {
 }
 
 float Camera::verticalAngularExtentRadians() const {
-    if (lens_.projection == LensProjection::Rectilinear) {
-        return verticalFovRadians();
+    switch (lens_.projection) {
+        case LensProjection::FisheyePolynomial: {
+            // The angle imaged at the top of the gate, or the circle's edge where the circle falls inside it: the frame's real extent.
+            const float thetaMax = maxThetaRadians(lens_);
+            const float halfHeightRadii = (0.5F * filmBack_.heightMm) / focalLengthMm_;
+            return 2.0F * kannalaBrandtTheta(lens_.radialCoefficients, halfHeightRadii, thetaMax);
+        }
+        case LensProjection::Omnidirectional:
+            return glm::pi<float>();
+        // No default arm: -Werror then makes an unrouted new projection a compile error. Count is never a lens.
+        case LensProjection::Rectilinear:
+        case LensProjection::Count:
+            break;
     }
-    // The angle imaged at the top of the gate, or the circle's edge where the circle falls inside it: the frame's real vertical extent.
-    const float thetaMax = maxThetaRadians(lens_);
-    const float halfHeightRadii = (0.5F * filmBack_.heightMm) / focalLengthMm_;
-    return 2.0F * kannalaBrandtTheta(lens_.radialCoefficients, halfHeightRadii, thetaMax);
+    return verticalFovRadians();
 }
 
 Camera::ViewBasis Camera::viewBasis(float aspect) const {
@@ -195,9 +238,17 @@ std::optional<Ray> Camera::primaryRay(float ndcX, float ndcY, float aspect) cons
 }
 
 std::optional<Ray> Camera::primaryRay(const ViewBasis& basis, float ndcX, float ndcY) const {
-    if (basis.lens.projection == LensProjection::FisheyePolynomial) {
-        const std::optional<FisheyeSample> sample = fisheyeSample(basis, ndcX, ndcY);
-        return sample ? std::optional(Ray{position_, sample->dir, nearClip_, farClip_}) : std::nullopt;
+    switch (basis.lens.projection) {
+        case LensProjection::FisheyePolynomial: {
+            const std::optional<FisheyeSample> sample = fisheyeSample(basis, ndcX, ndcY);
+            return sample ? std::optional(Ray{position_, sample->dir, nearClip_, farClip_}) : std::nullopt;
+        }
+        case LensProjection::Omnidirectional:
+            return Ray{position_, omnidirectionalDirection(basis, ndcX, ndcY), nearClip_, farClip_};
+        // No default arm: -Werror then makes an unrouted new projection a compile error. Count is never a lens.
+        case LensProjection::Rectilinear:
+        case LensProjection::Count:
+            break;
     }
     const glm::vec3 dir = glm::normalize(basis.forward + (ndcX * basis.halfWidth * basis.right) +
                                           (ndcY * basis.halfHeight * basis.up));
@@ -206,12 +257,21 @@ std::optional<Ray> Camera::primaryRay(const ViewBasis& basis, float ndcX, float 
 
 std::optional<Camera::RayDifferential> Camera::primaryRayDifferential(const ViewBasis& basis, float ndcX,
                                                                       float ndcY) const {
-    if (basis.lens.projection == LensProjection::FisheyePolynomial) {
-        const std::optional<FisheyeSample> sample = fisheyeSample(basis, ndcX, ndcY);
-        if (!sample) {
-            return std::nullopt;
+    switch (basis.lens.projection) {
+        case LensProjection::FisheyePolynomial: {
+            const std::optional<FisheyeSample> sample = fisheyeSample(basis, ndcX, ndcY);
+            if (!sample) {
+                return std::nullopt;
+            }
+            return RayDifferential{Ray{position_, sample->dir, nearClip_, farClip_}, fisheyeDirPerNdc(basis, *sample)};
         }
-        return RayDifferential{Ray{position_, sample->dir, nearClip_, farClip_}, fisheyeDirPerNdc(basis, *sample)};
+        case LensProjection::Omnidirectional:
+            return RayDifferential{Ray{position_, omnidirectionalDirection(basis, ndcX, ndcY), nearClip_, farClip_},
+                                   omnidirectionalDirPerNdc(basis, ndcX, ndcY)};
+        // No default arm: -Werror then makes an unrouted new projection a compile error. Count is never a lens.
+        case LensProjection::Rectilinear:
+        case LensProjection::Count:
+            break;
     }
     // The unnormalised pinhole direction is affine in ndc; normalising projects its rate off the ray: (I - d d^T) v / |v|.
     const glm::vec3 unnormalised =
@@ -231,8 +291,15 @@ Camera::PinholeMatrix Camera::pinholeMatrix(const ViewBasis& basis) const {
 }
 
 std::optional<glm::vec2> Camera::project(const ViewBasis& basis, const glm::vec4& point) const {
-    if (basis.lens.projection == LensProjection::FisheyePolynomial) {
-        return fisheyeProjection(basis, glm::vec3(point) - (point.w * position_));
+    switch (basis.lens.projection) {
+        case LensProjection::FisheyePolynomial:
+            return fisheyeProjection(basis, glm::vec3(point) - (point.w * position_));
+        case LensProjection::Omnidirectional:
+            return omnidirectionalProjection(basis, glm::vec3(point) - (point.w * position_));
+        // No default arm: -Werror then makes an unrouted new projection a compile error. Count is never a lens.
+        case LensProjection::Rectilinear:
+        case LensProjection::Count:
+            break;
     }
     return project(pinholeMatrix(basis), point);
 }

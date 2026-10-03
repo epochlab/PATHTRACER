@@ -48,8 +48,10 @@ void writeError(char* err, int errCap, const std::string& message) {
         lens.projection = pathtracer::scene::LensProjection::Rectilinear;
     } else if (camera.lens_projection == PT_LENS_FISHEYE_POLYNOMIAL) {
         lens.projection = pathtracer::scene::LensProjection::FisheyePolynomial;
+    } else if (camera.lens_projection == PT_LENS_OMNIDIRECTIONAL) {
+        lens.projection = pathtracer::scene::LensProjection::Omnidirectional;
     } else {
-        error = "lens_projection must be PT_LENS_RECTILINEAR or PT_LENS_FISHEYE_POLYNOMIAL, got " +
+        error = "lens_projection must be PT_LENS_RECTILINEAR, PT_LENS_FISHEYE_POLYNOMIAL or PT_LENS_OMNIDIRECTIONAL, got " +
                 std::to_string(camera.lens_projection);
         return std::nullopt;
     }
@@ -204,7 +206,8 @@ void pt_renderer_default_camera(const PtRenderer* renderer, PtCamera* out) {
     const pathtracer::scene::Lens lens = camera.lens();
     // The outbound write is a cast, so the ABI's constants and the enum are asserted equal rather than re-mapped by hand.
     static_assert(static_cast<int>(pathtracer::scene::LensProjection::Rectilinear) == PT_LENS_RECTILINEAR &&
-                      static_cast<int>(pathtracer::scene::LensProjection::FisheyePolynomial) == PT_LENS_FISHEYE_POLYNOMIAL,
+                      static_cast<int>(pathtracer::scene::LensProjection::FisheyePolynomial) == PT_LENS_FISHEYE_POLYNOMIAL &&
+                      static_cast<int>(pathtracer::scene::LensProjection::Omnidirectional) == PT_LENS_OMNIDIRECTIONAL,
                   "PT_LENS_* must stay index-parallel with LensProjection");
     out->lens_projection = static_cast<int>(lens.projection);
     for (std::size_t i = 0; i < lens.radialCoefficients.size(); ++i) {

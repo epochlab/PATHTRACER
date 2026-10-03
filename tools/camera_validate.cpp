@@ -1,4 +1,4 @@
-// Correctness gate for the camera's projections: the rectilinear pinhole's closed form and the Kannala-Brandt polynomial fisheye.
+// Correctness gate for the camera's projections: the rectilinear pinhole, the Kannala-Brandt polynomial fisheye and the lat-long.
 
 #include <algorithm>
 #include <array>
@@ -81,6 +81,13 @@ Camera makeCamera(float focalLengthMm, Lens lens) {
 
 Lens fisheye(const std::array<float, 4>& coefficients, float fieldOfViewDegrees) {
     return Lens{LensProjection::FisheyePolynomial, coefficients, fieldOfViewDegrees};
+}
+
+constexpr Lens kOmnidirectional{LensProjection::Omnidirectional};
+
+// Rounding budget of a lat-long direction whose trig arguments reach `angle`: the closed form's ulps, scaled by the argument's magnitude.
+float latLongBudget(float angle) {
+    return kClosedFormUlps * kEps * std::max(angle, 1.0F);
 }
 
 // Forward-error budget on the inverse: the bracket it stops at, plus theta_d's own evaluation error divided through by the local slope.
@@ -360,6 +367,77 @@ PT_CHECK(fisheye_image_circle_bounds_the_frame, Fast, Exact) {
               std::to_string(nonMonotoneAzimuths) + " imaged samples followed an unimaged one across a row");
 }
 
+// ndc is longitude pi*x and latitude pi*y/2 on the camera frame: the axes land on forward, behind, right and the poles.
+PT_CHECK(omnidirectional_primary_rays_match_the_closed_form, Fast, Exact) {
+    const Camera camera{glm::vec3(0.0F), 37.0F, -21.0F, kFullFrame, 35.0F, 0.01F, 100.0F, 2.8F, 0.008F, 400.0F, kOmnidirectional};
+    const Camera::ViewBasis basis = camera.viewBasis(2.0F);
+    const glm::vec3 diagonal = glm::normalize(basis.right + basis.up);
+    const std::array<std::pair<glm::vec2, glm::vec3>, 8> cases{{{{0.0F, 0.0F}, basis.forward},
+                                                                 {{1.0F, 0.0F}, -basis.forward},
+                                                                 {{-1.0F, 0.0F}, -basis.forward},
+                                                                 {{0.5F, 0.0F}, basis.right},
+                                                                 {{-0.5F, 0.0F}, -basis.right},
+                                                                 {{0.0F, 1.0F}, basis.up},
+                                                                 {{0.0F, -1.0F}, -basis.up},
+                                                                 {{0.5F, 0.5F}, diagonal}}};
+    ctx.plan(static_cast<int>(cases.size()) + 1);
+    for (const auto& [ndc, expected] : cases) {
+        const std::optional<Ray> ray = camera.primaryRay(basis, ndc.x, ndc.y);
+        const float angle = ray ? angleBetween(ray->dir, expected) : std::numbers::pi_v<float>;
+        PT_EXPECT(ctx, ray.has_value() && angle <= latLongBudget(std::numbers::pi_v<float>),
+                  "ndc (" + std::to_string(ndc.x) + ", " + std::to_string(ndc.y) + ") is " + std::to_string(angle) + " rad off");
+    }
+    PT_EXPECT(ctx, camera.verticalAngularExtentRadians() == std::numbers::pi_v<float>,
+              "the lat-long's vertical extent must be pi, pole to pole, whatever the gate and focal length");
+}
+
+// The film halo casts past the seam: ndcX and ndcX +/- 2 are one longitude, so they must be one ray to the arguments' rounding.
+PT_CHECK(omnidirectional_rays_are_periodic_in_longitude, Fast, Exact) {
+    ctx.plan(1);
+    const Camera camera{glm::vec3(0.0F), 37.0F, -21.0F, kFullFrame, 35.0F, 0.01F, 100.0F, 2.8F, 0.008F, 400.0F, kOmnidirectional};
+    const Camera::ViewBasis basis = camera.viewBasis(2.0F);
+    constexpr int kGrid = 33;
+    int mismatches = 0;
+    for (int iy = 0; iy < kGrid; ++iy) {
+        for (int ix = 0; ix < kGrid; ++ix) {
+            const float ndcX = ((static_cast<float>(ix) / static_cast<float>(kGrid - 1)) * 2.0F) - 1.0F;
+            const float ndcY = ((static_cast<float>(iy) / static_cast<float>(kGrid - 1)) * 2.0F) - 1.0F;
+            const glm::vec3 dir = camera.primaryRay(basis, ndcX, ndcY)->dir;
+            for (const float turn : {-2.0F, 2.0F}) {
+                const glm::vec3 wrapped = camera.primaryRay(basis, ndcX + turn, ndcY)->dir;
+                mismatches += angleBetween(dir, wrapped) > latLongBudget(3.0F * std::numbers::pi_v<float>) ? 1 : 0;
+            }
+        }
+    }
+    PT_EXPECT(ctx, mismatches == 0, std::to_string(mismatches) + " rays one turn apart departed from each other");
+}
+
+// dOmega = sin(colatitude) dcolatitude dlongitude (Snyder 1987): the differential's columns are orthogonal with area (pi^2/2) sin.
+PT_CHECK(omnidirectional_differential_area_is_the_solid_angle_jacobian, Fast, Exact) {
+    ctx.plan(2);
+    const Camera camera{glm::vec3(0.0F), 37.0F, -21.0F, kFullFrame, 35.0F, 0.01F, 100.0F, 2.8F, 0.008F, 400.0F, kOmnidirectional};
+    const Camera::ViewBasis basis = camera.viewBasis(2.0F);
+    constexpr int kGrid = 33;
+    int areaMismatches = 0;
+    int skewed = 0;
+    for (int iy = 0; iy < kGrid; ++iy) {
+        for (int ix = 0; ix < kGrid; ++ix) {
+            // Pixel-centre-like samples, never on a pole row's edge, where the x column is exactly zero.
+            const float ndcX = (((static_cast<float>(ix) + 0.5F) / static_cast<float>(kGrid)) * 2.0F) - 1.0F;
+            const float ndcY = (((static_cast<float>(iy) + 0.5F) / static_cast<float>(kGrid)) * 2.0F) - 1.0F;
+            const glm::mat2x3 jacobian = camera.primaryRayDifferential(basis, ndcX, ndcY)->dirPerNdc;
+            const double colatitude = 0.5 * std::numbers::pi * (1.0 - static_cast<double>(ndcY));
+            const double expected = 0.5 * std::numbers::pi * std::numbers::pi * std::sin(colatitude);
+            const double area = glm::length(glm::cross(glm::dvec3(jacobian[0]), glm::dvec3(jacobian[1])));
+            const double scale = glm::length(glm::dvec3(jacobian[0])) * glm::length(glm::dvec3(jacobian[1]));
+            areaMismatches += std::abs(area - expected) > latLongBudget(std::numbers::pi_v<float>) * expected ? 1 : 0;
+            skewed += std::abs(glm::dot(glm::dvec3(jacobian[0]), glm::dvec3(jacobian[1]))) > latLongBudget(1.0F) * scale ? 1 : 0;
+        }
+    }
+    PT_EXPECT(ctx, areaMismatches == 0, std::to_string(areaMismatches) + " differentials departed from the solid-angle Jacobian");
+    PT_EXPECT(ctx, skewed == 0, std::to_string(skewed) + " differentials had non-orthogonal meridian and parallel columns");
+}
+
 // The HUD's FOV readout: the angle at the top of the gate, saturating at thetaMax once the circle falls inside it.
 PT_CHECK(fisheye_vertical_extent_saturates_at_the_image_circle, Fast, Exact) {
     ctx.plan(3);
@@ -446,9 +524,9 @@ PT_CHECK(fisheye_theta_distribution_matches_the_area_jacobian, Slow, Statistical
 
 // project is primaryRay's inverse: re-casting at the projected ndc recovers the direction, for points at any depth and at infinity.
 PT_CHECK(project_inverts_primary_rays, Fast, Exact) {
-    ctx.plan(8);
-    const std::array<std::pair<const char*, Lens>, 2> lenses{
-        {{"rectilinear", Lens{}}, {"equisolid fisheye", fisheye(kEquisolidTaylor, 180.0F)}}};
+    const std::array<std::pair<const char*, Lens>, 3> lenses{
+        {{"rectilinear", Lens{}}, {"equisolid fisheye", fisheye(kEquisolidTaylor, 180.0F)}, {"omnidirectional", kOmnidirectional}}};
+    ctx.plan((4 * static_cast<int>(lenses.size())) + 1);
     for (const auto& [name, lens] : lenses) {
         // Posed off every axis, so the basis rows are all exercised; at the origin, p - w * position is exact for both w.
         const Camera camera{glm::vec3(0.0F), 37.0F, -21.0F, kFullFrame, 10.0F, 0.01F, 100.0F, 2.8F, 0.008F, 400.0F, lens};
@@ -469,7 +547,7 @@ PT_CHECK(project_inverts_primary_rays, Fast, Exact) {
                 ++imaged;
                 const float theta = angleBetween(ray->dir, basis.forward);
                 // One forward and one inverse projection: the lens's own inverse budget on top of the closed form's rounding.
-                const float budget = (lens.projection == LensProjection::Rectilinear
+                const float budget = (lens.projection != LensProjection::FisheyePolynomial
                                           ? 0.0F
                                           : thetaTolerance(lens.radialCoefficients, theta, basis.maxThetaRadians)) +
                                      (2.0F * kClosedFormUlps * kEps * std::max(theta, 1.0F));
@@ -490,10 +568,19 @@ PT_CHECK(project_inverts_primary_rays, Fast, Exact) {
         PT_EXPECT(ctx, unprojected == 0, std::string(name) + ": " + std::to_string(unprojected) + " imaged points did not project back");
         PT_EXPECT(ctx, mismatches == 0,
                   std::string(name) + ": " + std::to_string(mismatches) + " round trips departed from the cast direction");
-        // Straight behind: no pinhole image, and theta = pi lies past a 180-degree circle's thetaMax.
-        PT_EXPECT(ctx, !camera.project(basis, glm::vec4(-basis.forward, 0.0F)).has_value(),
-                  std::string(name) + ": a direction straight behind the camera was given an image point");
+        // Straight behind: no pinhole image, theta = pi lies past a 180-degree circle's thetaMax, and the lat-long images it on its seam.
+        const std::optional<glm::vec2> behind = camera.project(basis, glm::vec4(-basis.forward, 0.0F));
+        const bool behindExpected = lens.projection == LensProjection::Omnidirectional
+                                        ? behind && std::abs(std::abs(behind->x) - 1.0F) <= latLongBudget(1.0F) &&
+                                              std::abs(behind->y) <= latLongBudget(1.0F)
+                                        : !behind;
+        PT_EXPECT(ctx, behindExpected, std::string(name) + ": the direction straight behind the camera was imaged wrongly");
     }
+    // The eye itself is the one point the lat-long cannot image: it has no direction.
+    const Camera omnidirectional{glm::vec3(1.0F, 2.0F, 3.0F), 0.0F, 0.0F, kFullFrame, 10.0F, 0.01F, 100.0F, 2.8F, 0.008F, 400.0F,
+                                 kOmnidirectional};
+    PT_EXPECT(ctx, !omnidirectional.project(omnidirectional.viewBasis(kAspect), glm::vec4(1.0F, 2.0F, 3.0F, 1.0F)).has_value(),
+              "the eye itself was given a lat-long image point");
 }
 
 // Domain edges: a fisheye images nothing past thetaMax; behind a 360-degree lens the on-axis azimuth, hence the point, is undefined.
@@ -528,13 +615,18 @@ double radiusDouble(const std::array<float, 4>& k, double theta) {
     return theta * (1.0 + (u * (k[0] + (u * (k[1] + (u * (k[2] + (u * k[3]))))))));
 }
 
-// primaryRay's direction re-derived in double: the pinhole closed form, or bisection on theta_d to the last double bit.
+// primaryRay's direction re-derived in double: the pinhole and lat-long closed forms, or bisection on theta_d to the last bit.
 glm::dvec3 directionDouble(const Camera::ViewBasis& basis, double ndcX, double ndcY) {
     const glm::dvec3 forward(basis.forward);
     const glm::dvec3 right(basis.right);
     const glm::dvec3 up(basis.up);
     if (basis.lens.projection == LensProjection::Rectilinear) {
         return glm::normalize(forward + (ndcX * basis.halfWidth * right) + (ndcY * basis.halfHeight * up));
+    }
+    if (basis.lens.projection == LensProjection::Omnidirectional) {
+        const double longitude = std::numbers::pi * ndcX;
+        const double latitude = 0.5 * std::numbers::pi * ndcY;
+        return (std::cos(latitude) * ((std::sin(longitude) * right) + (std::cos(longitude) * forward))) + (std::sin(latitude) * up);
     }
     const double xMm = ndcX * basis.halfWidthMm;
     const double yMm = ndcY * basis.halfHeightMm;
@@ -553,15 +645,18 @@ glm::dvec3 directionDouble(const Camera::ViewBasis& basis, double ndcX, double n
 
 // The closed form against central differences of the double direction: h = 1e-6 leaves O(h^2) and O(1e-16 / h) far below float.
 PT_CHECK(primary_ray_differential_matches_central_differences, Fast, Exact) {
-    const std::array<std::pair<const char*, Lens>, 3> lenses{{{"rectilinear", Lens{}},
+    const std::array<std::pair<const char*, Lens>, 4> lenses{{{"rectilinear", Lens{}},
                                                               {"equidistant 220", fisheye(std::array<float, 4>{}, 220.0F)},
-                                                              {"equisolid fisheye", fisheye(kEquisolidTaylor, 180.0F)}}};
+                                                              {"equisolid fisheye", fisheye(kEquisolidTaylor, 180.0F)},
+                                                              {"omnidirectional", kOmnidirectional}}};
     ctx.plan(2 * static_cast<int>(lenses.size()));
     constexpr double kStep = 1e-6;
     constexpr int kGrid = 33;
     for (const auto& [name, lens] : lenses) {
         const Camera camera{glm::vec3(0.0F), 37.0F, -21.0F, kFullFrame, 10.0F, 0.01F, 100.0F, 2.8F, 0.008F, 400.0F, lens};
         const Camera::ViewBasis basis = camera.viewBasis(kAspect);
+        // The lat-long's trig arguments reach pi, so its closed form rounds relative to pi rather than to 1.
+        const float closedForm = latLongBudget(lens.projection == LensProjection::Omnidirectional ? std::numbers::pi_v<float> : 1.0F);
         int imaged = 0;
         int mismatches = 0;
         double worst = 0.0;
@@ -593,15 +688,15 @@ PT_CHECK(primary_ray_differential_matches_central_differences, Fast, Exact) {
                 const double error = std::sqrt(glm::dot(errorX, errorX) + glm::dot(errorY, errorY));
                 // Float rounding of the closed form, plus the inverse's theta error times the rate the rates change with theta.
                 const float theta = angleBetween(ray->dir, basis.forward);
-                const double thetaRate = lens.projection == LensProjection::Rectilinear
+                const double thetaRate = lens.projection != LensProjection::FisheyePolynomial
                                              ? 0.0
                                              : 1.0 + (1.0 / theta) +
                                                    (std::abs(radiusCurvature(lens.radialCoefficients, theta)) /
                                                     kannalaBrandtRadiusSlope(lens.radialCoefficients, theta));
-                const double thetaError = lens.projection == LensProjection::Rectilinear
+                const double thetaError = lens.projection != LensProjection::FisheyePolynomial
                                               ? 0.0
                                               : thetaTolerance(lens.radialCoefficients, theta, basis.maxThetaRadians);
-                const double budget = scale * ((kClosedFormUlps * kEps) + (thetaError * thetaRate));
+                const double budget = scale * (closedForm + (thetaError * thetaRate));
                 worst = std::max(worst, error / budget);
                 mismatches += error > budget ? 1 : 0;
             }
@@ -676,6 +771,7 @@ PT_CHECK(camera_validate_rejects_each_invalid_parameter, Fast, Exact) {
         {"field of view 360.5", with([](CameraArgs& a) { a.lens.maxFieldOfViewDegrees = 360.5F; }), false},
         {"field of view NaN", with([&](CameraArgs& a) { a.lens.maxFieldOfViewDegrees = kNaN; }), false},
         {"fisheye, equidistant", with([](CameraArgs& a) { a.lens = fisheye({}, 180.0F); }), true},
+        {"omnidirectional", with([](CameraArgs& a) { a.lens.projection = LensProjection::Omnidirectional; }), true},
         {"non-monotone polynomial under rectilinear", with([&](CameraArgs& a) { a.lens.radialCoefficients = nonMonotone; }), false},
         {"non-monotone polynomial under fisheye", with([&](CameraArgs& a) { a.lens = fisheye(nonMonotone, 180.0F); }), false},
     };

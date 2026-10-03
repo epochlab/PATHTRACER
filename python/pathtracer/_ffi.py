@@ -23,6 +23,7 @@ PT_ABI_VERSION = 4
 # PtCamera.lens_projection, PT_LENS_* in pathtracer_c.h. Index-parallel with LENS_PROJECTIONS in __init__.py.
 PT_LENS_RECTILINEAR = 0
 PT_LENS_FISHEYE_POLYNOMIAL = 1
+PT_LENS_OMNIDIRECTIONAL = 2
 
 
 class PtCamera(ctypes.Structure):
