@@ -3,6 +3,20 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Camera reset during an orbit releases the cursor
+
+An orbit is two pieces of state: the controller's orbit flag and the window's disabled cursor. The LMB release cleared both, but
+`resetToDefault()` cleared only the flag. Pressing `0` mid-orbit therefore left the cursor hidden and its motion detached from the
+pointer, and the later release saw no orbit and never unlocked it. Evidence is in `results/reset_during_orbit`.
+
+- fix: `endOrbit(window, app)` (`main.cpp`) is the one place the orbit flag and the cursor lock are cleared. The LMB release and
+  the `0` key both call it, so the reset first ends any orbit in progress, whose pivot was picked from the pose being discarded
+- fix: `resetToDefault()` restores only the pose, so the controller cannot end an orbit without the window releasing its cursor
+- fix: a side effect of the stale lock is also gone. Because GLFW ignores a `DISABLED` to `DISABLED` change, the next orbit kept the
+  restore point from the first one, and its release warped the pointer back to where that earlier drag began
+- note: rendering is unchanged. All 192 AOV PNG/EXR files are byte-identical before and after, `libpathtracer_c` is byte-identical,
+  and the viewer's converged Beauty CRC and ray counts match
+
 ## Primary-ray G-buffer: every AOV under every lens, the rasterizer removed
 
 The 15 G-buffer AOVs came from a scan converter that projects by a perspective divide, so a fisheye refused them all. Each pixel
