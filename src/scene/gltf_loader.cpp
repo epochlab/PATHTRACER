@@ -1,11 +1,15 @@
 #include "pathtracer/scene/gltf_loader.h"
 
 #include <cgltf.h>
+#include <mikktspace.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <iostream>
+#include <numeric>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <glm/gtc/matrix_inverse.hpp>
@@ -46,10 +50,10 @@ void appendWorldTriangles(const std::vector<Vertex>& vertices,
     }
 }
 
-// Parallel to appendWorldTriangles: normal via inverse-transpose, tangent via transform directly.
+// Parallel to appendWorldTriangles: normal via inverse-transpose, tangent via transform directly, handedness = sign(det M).
 void appendShadingTriangles(const std::vector<Vertex>& vertices,
                              const std::vector<unsigned int>& indices, const glm::mat4& transform,
-                             int instanceIndex, std::vector<ShadingTriangle>& outShadingTriangles) {
+                             float handedness, int instanceIndex, std::vector<ShadingTriangle>& outShadingTriangles) {
     const glm::mat3 linear(transform);
     const glm::mat3 normalMatrix = glm::inverseTranspose(linear);
     const auto toWorldVertex = [&](unsigned int index) {
@@ -58,7 +62,8 @@ void appendShadingTriangles(const std::vector<Vertex>& vertices,
             glm::vec3(transform * glm::vec4(v.position, 1.0F)),
             glm::normalize(normalMatrix * v.normal),
             v.uv,
-            glm::vec4(glm::normalize(linear * glm::vec3(v.tangent)), v.tangent.w),
+            // sign det[M^-T N, MT, MB] = sign(det M): cross(N',T') tracks M*B only once w takes the determinant's sign.
+            glm::vec4(glm::normalize(linear * glm::vec3(v.tangent)), v.tangent.w * handedness),
             v.colour,
         };
     };
@@ -76,11 +81,11 @@ struct RequiredAccessors {
     const cgltf_accessor* position;
     const cgltf_accessor* normal;
     const cgltf_accessor* uv;
-    const cgltf_accessor* tangent;
-    const cgltf_accessor* color;  // COLOR_0, optional -- nullptr means "no vertex colour"
+    const cgltf_accessor* tangent;  // optional -- nullptr means "generate MikkTSpace tangents"
+    const cgltf_accessor* color;    // COLOR_0, optional -- nullptr means "no vertex colour"
 };
 
-// Locates the required accessors plus an optional COLOR_0; nullopt for a missing or sparse one, which cgltf cannot report failing.
+// Locates the required accessors plus optional TANGENT and COLOR_0; nullopt for a missing or sparse one, which cgltf cannot report failing.
 std::optional<RequiredAccessors> findAttributeAccessors(const cgltf_primitive& prim) {
     RequiredAccessors acc{nullptr, nullptr, nullptr, nullptr, nullptr};
     for (cgltf_size ai = 0; ai < prim.attributes_count; ++ai) {
@@ -97,13 +102,12 @@ std::optional<RequiredAccessors> findAttributeAccessors(const cgltf_primitive& p
             acc.color = attr.data;
         }
     }
-    if (acc.position == nullptr || acc.normal == nullptr || acc.uv == nullptr ||
-        acc.tangent == nullptr) {
-        std::cerr << "loadGltf: primitive missing position/normal/uv/tangent\n";
+    if (acc.position == nullptr || acc.normal == nullptr || acc.uv == nullptr) {
+        std::cerr << "loadGltf: primitive missing position/normal/uv\n";
         return std::nullopt;
     }
     if (acc.position->is_sparse || acc.normal->is_sparse || acc.uv->is_sparse ||
-        acc.tangent->is_sparse || (acc.color != nullptr && acc.color->is_sparse)) {
+        (acc.tangent != nullptr && acc.tangent->is_sparse) || (acc.color != nullptr && acc.color->is_sparse)) {
         std::cerr << "loadGltf: sparse accessors are not supported\n";
         return std::nullopt;
     }
@@ -118,7 +122,9 @@ std::vector<Vertex> readVertices(const RequiredAccessors& acc) {
         cgltf_accessor_read_float(acc.normal, vi, &v.normal.x, 3);
         // No V flip: glTF's v=0-at-top already matches loadExr's row-0-at-top convention.
         cgltf_accessor_read_float(acc.uv, vi, &v.uv.x, 2);
-        cgltf_accessor_read_float(acc.tangent, vi, &v.tangent.x, 4);
+        if (acc.tangent != nullptr) {
+            cgltf_accessor_read_float(acc.tangent, vi, &v.tangent.x, 4);
+        }
         if (acc.color != nullptr) {
         // COLOR_0 may be VEC3 or VEC4 and cgltf defaults no 4th component, so the read is sized to the accessor; alpha is dropped.
             float raw[4] = {1.0F, 1.0F, 1.0F, 1.0F};
@@ -131,11 +137,12 @@ std::vector<Vertex> readVertices(const RequiredAccessors& acc) {
     return vertices;
 }
 
-// Rejects a missing or sparse index accessor for the same reason: cgltf cannot signal that failure through its return value.
-std::optional<std::vector<unsigned int>> readIndices(const cgltf_accessor* indicesAcc) {
+// Rejects a sparse index accessor for the same reason; a missing one means the implied 0..vertexCount-1 (glTF 2.0 3.7.2.1).
+std::optional<std::vector<unsigned int>> readIndices(const cgltf_accessor* indicesAcc, cgltf_size vertexCount) {
     if (indicesAcc == nullptr) {
-        std::cerr << "loadGltf: primitive has no index accessor\n";
-        return std::nullopt;
+        std::vector<unsigned int> indices(vertexCount);
+        std::iota(indices.begin(), indices.end(), 0U);
+        return indices;
     }
     if (indicesAcc->is_sparse) {
         std::cerr << "loadGltf: sparse accessors are not supported\n";
@@ -148,27 +155,99 @@ std::optional<std::vector<unsigned int>> readIndices(const cgltf_accessor* indic
     return indices;
 }
 
-// Builds one MeshInstance from a triangle primitive, failing with nullopt rather than defaulting geometry it cannot read.
+// The corner a MikkTSpace callback names: the context's user data is the unwelded corner list, three corners per face.
+Vertex& cornerOf(const SMikkTSpaceContext* context, int face, int vert) {
+    auto& corners = *static_cast<std::vector<Vertex>*>(context->m_pUserData);
+    return corners[(3 * static_cast<std::size_t>(face)) + static_cast<std::size_t>(vert)];
+}
+
+// MikkTSpace (Mikkelsen 2008), the reference bakers use; it welds by value itself and returns one tangent per corner, so corners unweld.
+bool generateTangents(std::vector<Vertex>& vertices, std::vector<unsigned int>& indices) {
+    std::vector<Vertex> corners(indices.size());
+    std::transform(indices.begin(), indices.end(), corners.begin(), [&](unsigned int index) { return vertices[index]; });
+    std::iota(indices.begin(), indices.end(), 0U);
+
+    SMikkTSpaceInterface callbacks{};
+    callbacks.m_getNumFaces = [](const SMikkTSpaceContext* context) {
+        return static_cast<int>(static_cast<std::vector<Vertex>*>(context->m_pUserData)->size() / 3);
+    };
+    callbacks.m_getNumVerticesOfFace = [](const SMikkTSpaceContext* /*context*/, int /*face*/) { return 3; };
+    callbacks.m_getPosition = [](const SMikkTSpaceContext* context, float out[], int face, int vert) {
+        std::copy_n(&cornerOf(context, face, vert).position.x, 3, out);
+    };
+    callbacks.m_getNormal = [](const SMikkTSpaceContext* context, float out[], int face, int vert) {
+        std::copy_n(&cornerOf(context, face, vert).normal.x, 3, out);
+    };
+    callbacks.m_getTexCoord = [](const SMikkTSpaceContext* context, float out[], int face, int vert) {
+        std::copy_n(&cornerOf(context, face, vert).uv.x, 2, out);
+    };
+    // glTF v runs down the image while tangent-space +y is image-up (glTF 2.0 3.9.3), so glTF's w is MikkTSpace's sign negated.
+    callbacks.m_setTSpaceBasic = [](const SMikkTSpaceContext* context, const float tangent[], float sign, int face, int vert) {
+        cornerOf(context, face, vert).tangent = glm::vec4(tangent[0], tangent[1], tangent[2], -sign);
+    };
+    const SMikkTSpaceContext context{&callbacks, &corners};
+    if (genTangSpaceDefault(&context) == 0) {
+        std::cerr << "loadGltf: MikkTSpace tangent generation failed\n";
+        return false;
+    }
+    vertices = std::move(corners);
+    return true;
+}
+
+// Expands a strip or fan to a list in glTF 2.0 3.7.2.1's per-triangle vertex order, which is what fixes each face's winding.
+std::vector<unsigned int> toTriangleList(std::vector<unsigned int> indices, cgltf_primitive_type type) {
+    if (type == cgltf_primitive_type_triangles) {
+        return indices;
+    }
+    const std::size_t triangleCount = indices.size() < 3 ? 0 : indices.size() - 2;
+    std::vector<unsigned int> list;
+    list.reserve(3 * triangleCount);
+    if (type == cgltf_primitive_type_triangle_strip) {
+        for (std::size_t i = 0; i < triangleCount; ++i) {
+            list.insert(list.end(), {indices[i], indices[i + 1 + (i % 2)], indices[i + 2 - (i % 2)]});
+        }
+    } else {
+        for (std::size_t i = 0; i < triangleCount; ++i) {
+            list.insert(list.end(), {indices[i + 1], indices[i + 2], indices[0]});
+        }
+    }
+    return list;
+}
+
+// True for the triangle topologies; points and lines have no area, so no ray can hit them and they carry no surface.
+bool isSurface(cgltf_primitive_type type) {
+    return type == cgltf_primitive_type_triangles || type == cgltf_primitive_type_triangle_strip ||
+           type == cgltf_primitive_type_triangle_fan;
+}
+
+// Builds one MeshInstance from a triangle-topology primitive, failing with nullopt rather than defaulting geometry it cannot read.
 std::optional<MeshInstance> loadPrimitive(const cgltf_primitive& prim, const glm::mat4& transform, int instanceIndex,
                                            const std::string& name,
                                            std::vector<Triangle>& outWorldTriangles,
                                            std::vector<ShadingTriangle>& outShadingTriangles) {
-    if (prim.type != cgltf_primitive_type_triangles) {
-        std::cerr << "loadGltf: skipping non-triangle primitive\n";
-        return std::nullopt;
-    }
-
     const std::optional<RequiredAccessors> acc = findAttributeAccessors(prim);
     if (!acc.has_value()) {
         return std::nullopt;
     }
-    const std::optional<std::vector<unsigned int>> indices = readIndices(prim.indices);
-    if (!indices.has_value()) {
+    std::optional<std::vector<unsigned int>> stream = readIndices(prim.indices, acc->position->count);
+    if (!stream.has_value()) {
         return std::nullopt;
     }
-    const std::vector<Vertex> vertices = readVertices(*acc);
-    appendWorldTriangles(vertices, *indices, transform, outWorldTriangles);
-    appendShadingTriangles(vertices, *indices, transform, instanceIndex, outShadingTriangles);
+    std::vector<unsigned int> indices = toTriangleList(std::move(*stream), prim.type);
+    std::vector<Vertex> vertices = readVertices(*acc);
+    // Object space and authored winding, as a baker sees the mesh: MikkTSpace reads orientation from each face's UV-area sign.
+    if (acc->tangent == nullptr && !generateTangents(vertices, indices)) {
+        return std::nullopt;
+    }
+    // glTF 2.0 3.7.2.1: a negative global determinant makes faces clockwise; re-wind so cross(e1,e2) keeps facing the normal.
+    const float handedness = glm::determinant(glm::mat3(transform)) < 0.0F ? -1.0F : 1.0F;
+    if (handedness < 0.0F) {
+        for (std::size_t i = 0; i + 2 < indices.size(); i += 3) {
+            std::swap(indices[i + 1], indices[i + 2]);
+        }
+    }
+    appendWorldTriangles(vertices, indices, transform, outWorldTriangles);
+    appendShadingTriangles(vertices, indices, transform, handedness, instanceIndex, outShadingTriangles);
 
     // Geometry only: every slot starts at its neutral default, and bindSceneTextures binds the scene JSON's maps by node name.
     return MeshInstance{
@@ -199,10 +278,14 @@ bool walkNodes(cgltf_node* const* nodes, cgltf_size count, const glm::mat4& pare
         if (node->mesh != nullptr) {
             const std::string name = node->name != nullptr ? node->name : "";
             for (cgltf_size pi = 0; pi < node->mesh->primitives_count; ++pi) {
+                const cgltf_primitive& prim = node->mesh->primitives[pi];
+                if (!isSurface(prim.type)) {
+                    std::cerr << "loadGltf: skipping a point or line primitive on node '" << name << "'\n";
+                    continue;
+                }
                 const int instanceIndex = static_cast<int>(instances.size());  // index this primitive's MeshInstance will get
                 std::optional<MeshInstance> instance =
-                    loadPrimitive(node->mesh->primitives[pi], world, instanceIndex, name, worldTriangles,
-                                  shadingTriangles);
+                    loadPrimitive(prim, world, instanceIndex, name, worldTriangles, shadingTriangles);
                 if (!instance.has_value()) {
                     return false;
                 }

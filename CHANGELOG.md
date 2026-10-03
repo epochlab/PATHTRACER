@@ -3,6 +3,56 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Geometry loader: mirrored transforms, generated tangents, every triangle topology
+
+Three loader gaps are closed:
+- A node with a negative determinant (a mirror) was loaded without re-winding its triangles, so the face normal pointed against
+  the shading normal.
+- A primitive without TANGENT failed the whole load.
+- A point, line, strip or fan primitive failed the whole load, although the log said "skipping".
+
+Evidence is in `results/geometry_loader`.
+
+- fix: under a negative global determinant, the loader swaps v1 and v2 of every triangle (glTF 2.0 3.7.2.1) and multiplies
+  `tangent.w` by `sign(det M)`, because sign det[M^-T N, M T, M B] = sign(det M).
+  - Before, on a mirrored instance, NEE's `nearSide` test (`geoCos > 0 && shadingCos > 0`) never passed on the lit side. The
+    light-leak rejection and every ray-origin offset also picked the wrong side, and the normal map's bitangent was inverted.
+  - Mirrored cornell, environment off, measured against the horizontal flip of cornell: beauty mean |d| was 4.4x the two-seed
+    noise floor with mean radiance at 0.23x; it is now 0.99x the floor with mean radiance at 1.001x.
+  - Mirrored stump, with scene rotation zeroed so the mirror is the world x mirror, measured against the exact flip in the
+    G-buffer: the normal lane was off by a mean of 11.6 deg (max 148 deg) and is now off by a mean of 0.001 deg. The residual is
+    pixel-centre rounding of at most 1 ulp in UV, amplified by the 4K normal and bump maps; `geomNormal` matches exactly.
+- feat: a primitive without TANGENT gets MikkTSpace tangents (Mikkelsen 2008). The reference implementation is vendored as the
+  `third_party/mikktspace` submodule (zlib).
+  - Generation runs in object space on the authored winding, before the mirror re-wind, as a baker sees the mesh.
+  - It stores `w = -sign`, because glTF v runs down the image while tangent-space +y is image-up (glTF 2.0 3.9.3).
+  - On the stump, regenerated tangents match the exporter's MikkTSpace handedness on all 61683 corners, with a max per-corner
+    angle of 0.44 deg (the exporter ran MikkTSpace on quads). In the image, beauty moves by 1.9e-6 of its mean.
+  - Cost: loading the 20561-triangle stump takes 31.9 ms instead of 1.9 ms. It is single-threaded and paid only by primitives
+    that lack TANGENT.
+- feat: TRIANGLE_STRIP and TRIANGLE_FAN expand to lists in the spec's per-triangle vertex order. POINTS and LINE* primitives,
+  which have no area, are skipped with a log line. A primitive without an index accessor uses the implied 0..count-1. Macbeth
+  rebuilt as a fan plus a strip, with a point and a line primitive added, renders its normal, geomNormal, tangent and shadow lanes
+  bit-identical to the shipped list; beauty and directDiffuse differ only by rounding (max 1.4e-6).
+- chore: `tools/gltf_tangent` is removed. It patched missing tangents in with a UV-unaware basis, which the loader now replaces.
+- chore: the tangents it had written into cornell and macbeth are deleted (their accessors, views and trailing buffer bytes), so
+  both now load with MikkTSpace tangents.
+  - macbeth: all 32 AOVs are byte-identical, because MikkTSpace gives the same +x tangent on its axis-aligned charts.
+  - cornell: only the tangent lane changes deterministically; every other G-buffer lane and shadow is byte-identical. The
+    path-traced lanes change only their Monte Carlo realization, because the isotropic BSDFs sample in the rotated frame:
+    - every lane differs per pixel by less than its two-seed noise floor
+    - beauty's image mean moves by z = +1.25 and every radiance lobe by |z| <= 1.1, so no bias
+  - Loading cornell takes 2.32 ms instead of 0.275 ms.
+- test: five `io_validate` checks, built on a glTF fixture writer:
+  - `gltf_mirrored_transform_keeps_geometric_and_shading_normals_agreed`
+  - `gltf_strip_and_fan_triangulate_with_consistent_winding`
+  - `gltf_points_and_lines_are_skipped_not_fatal`
+  - `gltf_generated_tangent_follows_the_gltf_convention`
+  - `gltf_generated_tangents_agree_with_authored_mikktspace`
+  Each fails under the matching mutation (see `results/geometry_loader/break_tests.txt`).
+- Shipped scenes are unaffected: all 32 AOVs on cornell, macbeth and stump are byte-identical before and after. Render
+  `pass_ms` B/A = 1.0217 [0.9932, 1.0634], not resolved.
+
 ## Accumulation arithmetic: one running mean for the viewer and headless
 
 The viewer averaged passes with an incremental running mean. Headless summed them in float and divided once at the end. Both

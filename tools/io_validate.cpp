@@ -1,4 +1,4 @@
-// Correctness gate for the engine's file boundaries: the EXR round trip and the JSON scene, profile and bench-log parsers.
+// Correctness gate for the engine's file boundaries: the EXR round trip, the glTF loader and the JSON scene, profile and bench-log parsers.
 
 #include <algorithm>
 #include <array>
@@ -32,6 +32,9 @@
 #include "pathtracer/debug/bench_log.h"
 #include "pathtracer/gfx/hdr_image.h"
 #include "pathtracer/gfx/texture.h"
+#include "pathtracer/scene/gbuffer_shading.h"
+#include "pathtracer/scene/gltf_loader.h"
+#include "pathtracer/scene/shading_scene.h"
 
 namespace {
 
@@ -924,6 +927,256 @@ PT_CHECK(float_crc32_matches_reference, Fast, Exact) {
     const std::vector<float> mixed{1.0F, -2.5F, 0.1F};
     PT_EXPECT(ctx, pathtracer::debug::floatCrc32(zero) == 0x2144DF1CU, "CRC-32 of four zero bytes is not 0x2144DF1C");
     PT_EXPECT(ctx, pathtracer::debug::floatCrc32(mixed) == 2706677804U, "CRC-32 of {1, -2.5, 0.1} disagrees with zlib.crc32");
+}
+
+// One glTF primitive's fixture data, written verbatim so each check states the exact attributes it exercises; empty means absent.
+struct GltfPrimitive {
+    std::vector<glm::vec3> positions;
+    std::vector<glm::vec3> normals;
+    std::vector<glm::vec2> uvs;
+    std::vector<glm::vec4> tangents;
+    std::vector<unsigned int> indices;
+    int mode = 4;  // glTF primitive.mode: 0 POINTS, 1 LINES, 4 TRIANGLES, 5 TRIANGLE_STRIP, 6 TRIANGLE_FAN
+};
+
+// Writes a one-mesh .gltf and its .bin to scratch, the mesh instanced by one node per entry of nodeScales; returns the .gltf path.
+std::filesystem::path writeGltf(const std::string& stem, const std::vector<GltfPrimitive>& prims,
+                                const std::vector<glm::vec3>& nodeScales) {
+    std::vector<unsigned char> bin;
+    nlohmann::json bufferViews = nlohmann::json::array();
+    nlohmann::json accessors = nlohmann::json::array();
+    const auto addAccessor = [&](const auto& values, int componentType, const char* type) {
+        const auto* first = reinterpret_cast<const unsigned char*>(values.data());
+        const std::size_t bytes = values.size() * sizeof(values[0]);
+        bufferViews.push_back({{"buffer", 0}, {"byteOffset", bin.size()}, {"byteLength", bytes}});
+        bin.insert(bin.end(), first, first + bytes);
+        accessors.push_back({{"bufferView", bufferViews.size() - 1}, {"componentType", componentType}, {"count", values.size()}, {"type", type}});
+        return accessors.size() - 1;
+    };
+    constexpr int kFloat = 5126;
+    constexpr int kUnsignedInt = 5125;
+    nlohmann::json primitives = nlohmann::json::array();
+    for (const GltfPrimitive& prim : prims) {
+        nlohmann::json primitive = {{"mode", prim.mode}, {"attributes", {{"POSITION", addAccessor(prim.positions, kFloat, "VEC3")}}}};
+        if (!prim.normals.empty()) {
+            primitive["attributes"]["NORMAL"] = addAccessor(prim.normals, kFloat, "VEC3");
+        }
+        if (!prim.uvs.empty()) {
+            primitive["attributes"]["TEXCOORD_0"] = addAccessor(prim.uvs, kFloat, "VEC2");
+        }
+        if (!prim.tangents.empty()) {
+            primitive["attributes"]["TANGENT"] = addAccessor(prim.tangents, kFloat, "VEC4");
+        }
+        if (!prim.indices.empty()) {
+            primitive["indices"] = addAccessor(prim.indices, kUnsignedInt, "SCALAR");
+        }
+        primitives.push_back(primitive);
+    }
+    nlohmann::json nodes = nlohmann::json::array();
+    nlohmann::json sceneNodes = nlohmann::json::array();
+    for (const glm::vec3& scale : nodeScales) {
+        sceneNodes.push_back(nodes.size());
+        nodes.push_back({{"mesh", 0}, {"scale", {scale.x, scale.y, scale.z}}});
+    }
+    const std::string binName = stem + ".bin";
+    const nlohmann::json gltf = {{"asset", {{"version", "2.0"}}},
+                                 {"scene", 0},
+                                 {"scenes", {{{"nodes", sceneNodes}}}},
+                                 {"nodes", nodes},
+                                 {"meshes", {{{"primitives", primitives}}}},
+                                 {"accessors", accessors},
+                                 {"bufferViews", bufferViews},
+                                 {"buffers", {{{"uri", binName}, {"byteLength", bin.size()}}}}};
+    std::ofstream(scratchPath(binName.c_str()), std::ios::binary)
+        .write(reinterpret_cast<const char*>(bin.data()), static_cast<std::streamsize>(bin.size()));
+    const std::filesystem::path path = scratchPath((stem + ".gltf").c_str());
+    std::ofstream(path) << gltf.dump();
+    return path;
+}
+
+// Unit quad in z=0 facing +z, wound counter-clockwise from +z, with p = (u, 1-v): +x is +u and +y is image-up.
+GltfPrimitive makeQuad() {
+    const glm::vec3 up(0.0F, 0.0F, 1.0F);
+    return GltfPrimitive{{{0.0F, 0.0F, 0.0F}, {1.0F, 0.0F, 0.0F}, {1.0F, 1.0F, 0.0F}, {0.0F, 1.0F, 0.0F}},
+                         {up, up, up, up},
+                         {{0.0F, 1.0F}, {1.0F, 1.0F}, {1.0F, 0.0F}, {0.0F, 0.0F}},
+                         std::vector<glm::vec4>(4, glm::vec4(1.0F, 0.0F, 0.0F, 1.0F)),
+                         {0, 1, 2, 0, 2, 3}};
+}
+
+// glTF 2.0 3.7.2.1: winding follows the determinant, so a mirrored node must keep its face normal on the shading normal's side.
+PT_CHECK(gltf_mirrored_transform_keeps_geometric_and_shading_normals_agreed, Fast, Exact) {
+    // Identity, a single-axis mirror and a non-uniform mirror: the handedness rule is sign(det M), not orthogonality.
+    const std::vector<glm::vec3> scales = {{1.0F, 1.0F, 1.0F}, {-1.0F, 1.0F, 1.0F}, {2.0F, -0.5F, 3.0F}};
+    const std::optional<pathtracer::scene::LoadedModel> model =
+        pathtracer::scene::loadGltf(writeGltf("engine_io_validate_mirror", {makeQuad()}, scales).string());
+    constexpr int kTrianglesPerQuad = 2;
+    ctx.plan(1 + (static_cast<int>(scales.size()) * kTrianglesPerQuad * 2));
+    PT_EXPECT(ctx, model && model->shadingTriangles.size() == scales.size() * kTrianglesPerQuad, "the fixture did not load as one quad per node");
+    if (!model) {
+        return;
+    }
+    for (const pathtracer::scene::ShadingTriangle& tri : model->shadingTriangles) {
+        const glm::mat3 linear(model->instances[static_cast<std::size_t>(tri.instanceIndex)].transform);
+        const pathtracer::scene::ShadingVertex shading = pathtracer::scene::interpolateShading(tri, 1.0F / 3.0F, 1.0F / 3.0F);
+        PT_EXPECT(ctx, glm::dot(pathtracer::scene::geometricNormalOf(tri), shading.normal) > 0.0F,
+                  "the geometric normal opposes the shading normal");
+        // The authored bitangent is cross(+z, +x) * 1 = +y; a vector field maps by M, so the world bitangent must point along M * y.
+        const glm::vec3 bitangent = glm::cross(shading.normal, glm::vec3(shading.tangent)) * shading.tangent.w;
+        PT_EXPECT(ctx, glm::dot(bitangent, linear * glm::vec3(0.0F, 1.0F, 0.0F)) > 0.0F, "the world bitangent opposes M * B");
+    }
+}
+
+// A planar primitive in z=0 with every attribute present and normals +z, so only topology and winding vary between rows.
+GltfPrimitive planar(const std::vector<glm::vec2>& xy, std::vector<unsigned int> indices, int mode) {
+    GltfPrimitive prim;
+    for (const glm::vec2& p : xy) {
+        prim.positions.emplace_back(p, 0.0F);
+        prim.normals.emplace_back(0.0F, 0.0F, 1.0F);
+        prim.uvs.push_back(p);
+        prim.tangents.emplace_back(1.0F, 0.0F, 0.0F, 1.0F);
+    }
+    prim.indices = std::move(indices);
+    prim.mode = mode;
+    return prim;
+}
+
+// glTF 2.0 3.7.2.1: strip faces alternate vertex order and fans pivot on v0, so every face of a consistently wound ribbon faces +z.
+PT_CHECK(gltf_strip_and_fan_triangulate_with_consistent_winding, Fast, Exact) {
+    constexpr int kTriangles = 4;
+    constexpr int kFan = 6;
+    // Zigzag ribbon, first face counter-clockwise from +z: a strip that does not alternate vertex order flips every odd face.
+    const std::vector<glm::vec2> ribbon = {{0.0F, 1.0F}, {0.0F, 0.0F}, {1.0F, 1.0F}, {1.0F, 0.0F}, {2.0F, 1.0F}, {2.0F, 0.0F}};
+    // Fan centre then five rim points counter-clockwise from +z.
+    const std::vector<glm::vec2> fan = {{0.0F, 0.0F}, {1.0F, 0.0F}, {1.0F, 1.0F}, {0.0F, 1.0F}, {-1.0F, 1.0F}, {-1.0F, 0.0F}};
+    // The quad's indexed list against its non-indexed expansion: identical faces in identical order, bit for bit.
+    const std::vector<glm::vec2> quad = {{0.0F, 0.0F}, {1.0F, 0.0F}, {1.0F, 1.0F}, {0.0F, 1.0F}};
+    const std::vector<glm::vec2> quadExpanded = {quad[0], quad[1], quad[2], quad[0], quad[2], quad[3]};
+    const std::optional<pathtracer::scene::LoadedModel> strip = pathtracer::scene::loadGltf(
+        writeGltf("engine_io_validate_strip", {planar(ribbon, {0, 1, 2, 3, 4, 5}, 5)}, {glm::vec3(1.0F)}).string());
+    const std::optional<pathtracer::scene::LoadedModel> fanned = pathtracer::scene::loadGltf(
+        writeGltf("engine_io_validate_fan", {planar(fan, {}, 6)}, {glm::vec3(1.0F)}).string());
+    const std::optional<pathtracer::scene::LoadedModel> indexed = pathtracer::scene::loadGltf(
+        writeGltf("engine_io_validate_indexed", {planar(quad, {0, 1, 2, 0, 2, 3}, 4)}, {glm::vec3(1.0F)}).string());
+    const std::optional<pathtracer::scene::LoadedModel> unindexed = pathtracer::scene::loadGltf(
+        writeGltf("engine_io_validate_unindexed", {planar(quadExpanded, {}, 4)}, {glm::vec3(1.0F)}).string());
+    ctx.plan(4 + kTriangles + kFan - 2);
+    PT_EXPECT(ctx, strip && strip->worldTriangles.size() == kTriangles, "a 6-vertex strip did not give 4 triangles");
+    PT_EXPECT(ctx, fanned && fanned->worldTriangles.size() == kFan - 2, "a non-indexed 6-vertex fan did not give 4 triangles");
+    for (const std::optional<pathtracer::scene::LoadedModel>* model : {&strip, &fanned}) {
+        for (std::size_t i = 0; *model && i < (*model)->shadingTriangles.size(); ++i) {
+            PT_EXPECT(ctx, pathtracer::scene::geometricNormalOf((*model)->shadingTriangles[i]).z > 0.0F, "a face is wound clockwise from +z");
+        }
+    }
+    const auto samePositions = [](const pathtracer::scene::Triangle& a, const pathtracer::scene::Triangle& b) {
+        return a.v0 == b.v0 && a.v1 == b.v1 && a.v2 == b.v2;
+    };
+    PT_EXPECT(ctx, indexed && unindexed && indexed->worldTriangles.size() == 2 && unindexed->worldTriangles.size() == 2,
+              "the indexed or non-indexed quad did not give 2 triangles");
+    PT_EXPECT(ctx, indexed && unindexed && indexed->worldTriangles.size() == unindexed->worldTriangles.size() &&
+                       std::equal(indexed->worldTriangles.begin(), indexed->worldTriangles.end(), unindexed->worldTriangles.begin(), samePositions),
+              "the non-indexed quad's faces differ from the indexed quad's");
+}
+
+// Points and lines have no area: they are skipped with the rest of the file kept, and a file holding nothing else still fails.
+PT_CHECK(gltf_points_and_lines_are_skipped_not_fatal, Fast, Exact) {
+    ctx.plan(3);
+    GltfPrimitive points;
+    points.positions = {{0.0F, 0.0F, 0.0F}, {1.0F, 0.0F, 0.0F}};
+    points.mode = 0;
+    GltfPrimitive lines = points;
+    lines.mode = 1;
+    const std::optional<pathtracer::scene::LoadedModel> mixed = pathtracer::scene::loadGltf(
+        writeGltf("engine_io_validate_mixed_topology", {points, makeQuad(), lines}, {glm::vec3(1.0F)}).string());
+    PT_EXPECT(ctx, mixed.has_value(), "a point and a line primitive beside a triangle primitive failed the load");
+    PT_EXPECT(ctx, mixed && mixed->instances.size() == 1 && mixed->worldTriangles.size() == 2,
+              "the triangle primitive alone did not survive as one instance of 2 triangles");
+    PT_EXPECT(ctx, !pathtracer::scene::loadGltf(writeGltf("engine_io_validate_points_only", {points}, {glm::vec3(1.0F)}).string()),
+              "a file holding only points loaded as if it had a surface");
+}
+
+// glTF 2.0 3.9.3: tangent-space +x is +u and +y is image-up, i.e. -v; makeQuad maps +u to +x and image-up to +y, so T = +x, w = +1.
+PT_CHECK(gltf_generated_tangent_follows_the_gltf_convention, Fast, Exact) {
+    GltfPrimitive quad = makeQuad();
+    quad.tangents.clear();
+    GltfPrimitive flipped = quad;
+    for (glm::vec2& uv : flipped.uvs) {
+        uv.x = 1.0F - uv.x;  // u now runs along -x, a mirrored chart: T = -x and the frame turns left-handed, w = -1
+    }
+    // Identity, a mirrored node (T = M * +x = -x and w = sign(det M) = -1), and the mirrored chart.
+    const std::optional<pathtracer::scene::LoadedModel> plain = pathtracer::scene::loadGltf(
+        writeGltf("engine_io_validate_generated", {quad}, {glm::vec3(1.0F), glm::vec3(-1.0F, 1.0F, 1.0F)}).string());
+    const std::optional<pathtracer::scene::LoadedModel> chart = pathtracer::scene::loadGltf(
+        writeGltf("engine_io_validate_generated_flipped", {flipped}, {glm::vec3(1.0F)}).string());
+    constexpr int kCorners = 6;
+    ctx.plan(2 + (3 * kCorners));
+    PT_EXPECT(ctx, plain && plain->shadingTriangles.size() == 4, "the untangented quad did not load under both nodes");
+    PT_EXPECT(ctx, chart && chart->shadingTriangles.size() == 2, "the mirrored-chart quad did not load");
+    // Exact up to two normalizations (MikkTSpace's, then the loader's after transforming), each within 2 ulp of unit length.
+    const auto expect = [&](const pathtracer::scene::ShadingTriangle& tri, const glm::vec4& expected) {
+        for (const pathtracer::scene::ShadingVertex* vertex : {&tri.v0, &tri.v1, &tri.v2}) {
+            const glm::vec4 delta = glm::abs(vertex->tangent - expected);
+            PT_EXPECT(ctx, std::max({delta.x, delta.y, delta.z}) <= 4.0F * std::numeric_limits<float>::epsilon() && delta.w == 0.0F,
+                      "a generated tangent is not the analytic +u direction with the glTF handedness");
+        }
+    };
+    for (std::size_t i = 0; plain && i < plain->shadingTriangles.size(); ++i) {
+        const pathtracer::scene::ShadingTriangle& tri = plain->shadingTriangles[i];
+        expect(tri, tri.instanceIndex == 0 ? glm::vec4(1.0F, 0.0F, 0.0F, 1.0F) : glm::vec4(-1.0F, 0.0F, 0.0F, -1.0F));
+    }
+    for (std::size_t i = 0; chart && i < chart->shadingTriangles.size(); ++i) {
+        expect(chart->shadingTriangles[i], glm::vec4(-1.0F, 0.0F, 0.0F, -1.0F));
+    }
+}
+
+// The stump's TANGENT came from its exporter's MikkTSpace; regenerating it from the same mesh must agree in handedness everywhere.
+PT_CHECK(gltf_generated_tangents_agree_with_authored_mikktspace, Fast, Exact) {
+    ctx.plan(4);
+    const std::filesystem::path source = std::filesystem::path(ASSET_ROOT_DIR) / "geometry/broken_stump_rkswd_raw/rkswd_tier_2.gltf";
+    nlohmann::json gltf = nlohmann::json::parse(std::ifstream(source));
+    for (nlohmann::json& mesh : gltf.at("meshes")) {
+        for (nlohmann::json& primitive : mesh.at("primitives")) {
+            primitive.at("attributes").erase("TANGENT");
+        }
+    }
+    // cgltf resolves a buffer uri against the .gltf's own directory, so the stripped copy sits beside a copy of the .bin.
+    const std::string binName = gltf.at("buffers").at(0).at("uri").get<std::string>();
+    std::filesystem::copy_file(source.parent_path() / binName, scratchPath(binName.c_str()), std::filesystem::copy_options::overwrite_existing);
+    const std::filesystem::path stripped = scratchPath("engine_io_validate_stump_untangented.gltf");
+    std::ofstream(stripped) << gltf.dump();
+
+    const std::optional<pathtracer::scene::LoadedModel> authored = pathtracer::scene::loadGltf(source.string());
+    const std::optional<pathtracer::scene::LoadedModel> generated = pathtracer::scene::loadGltf(stripped.string());
+    PT_EXPECT(ctx, authored && generated && authored->shadingTriangles.size() == generated->shadingTriangles.size(),
+              "the authored and stripped stump did not load to the same triangle count");
+    if (!authored || !generated || authored->shadingTriangles.size() != generated->shadingTriangles.size()) {
+        return;
+    }
+    // A zero-UV-area face has no tangent of its own; MikkTSpace hands it a neighbour's, so its corners are not compared.
+    int compared = 0;
+    int handednessMismatches = 0;
+    int opposedTangents = 0;
+    float maxAngle = 0.0F;
+    for (std::size_t i = 0; i < authored->shadingTriangles.size(); ++i) {
+        const pathtracer::scene::ShadingTriangle& a = authored->shadingTriangles[i];
+        const pathtracer::scene::ShadingTriangle& g = generated->shadingTriangles[i];
+        const glm::vec2 e1 = a.v1.uv - a.v0.uv;
+        const glm::vec2 e2 = a.v2.uv - a.v0.uv;
+        if ((e1.x * e2.y) - (e1.y * e2.x) == 0.0F) {
+            continue;
+        }
+        for (const auto& [va, vg] : {std::pair{&a.v0, &g.v0}, std::pair{&a.v1, &g.v1}, std::pair{&a.v2, &g.v2}}) {
+            const float cosine = glm::dot(glm::vec3(va->tangent), glm::vec3(vg->tangent));
+            ++compared;
+            handednessMismatches += va->tangent.w != vg->tangent.w ? 1 : 0;
+            opposedTangents += cosine <= 0.0F ? 1 : 0;
+            maxAngle = std::max(maxAngle, std::acos(std::clamp(cosine, -1.0F, 1.0F)));
+        }
+    }
+    std::cout << "  stump: " << compared << " corners compared, max tangent angle " << glm::degrees(maxAngle) << " deg\n";
+    PT_EXPECT(ctx, compared > 0, "no stump corner had a non-degenerate UV face to compare");
+    PT_EXPECT(ctx, handednessMismatches == 0, "a generated tangent's handedness disagrees with the exporter's MikkTSpace");
+    PT_EXPECT(ctx, opposedTangents == 0, "a generated tangent points away from the exporter's MikkTSpace tangent");
 }
 
 }  // namespace

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(Pathtracer LANGUAGES CXX OBJCXX)
+project(Pathtracer LANGUAGES C CXX OBJCXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -104,12 +104,19 @@ set(IMGUI_SOURCES
     ${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp)
 
 set(CGLTF_DIR ${CMAKE_SOURCE_DIR}/third_party/cgltf)
+set(MIKKTSPACE_DIR ${CMAKE_SOURCE_DIR}/third_party/mikktspace)
+if(NOT EXISTS ${MIKKTSPACE_DIR}/mikktspace.c)
+    message(FATAL_ERROR "third_party/mikktspace is empty, run: git submodule update --init")
+endif()
 set(JSON_DIR ${CMAKE_SOURCE_DIR}/third_party)
 
 # Vendored, not ours to fix. OBJECT libraries since CXX_CLANG_TIDY is target-level only; kept separate so headless targets skip imgui.
 add_library(vendored_cgltf OBJECT src/scene/cgltf_impl.cpp)
 target_include_directories(vendored_cgltf PRIVATE ${CGLTF_DIR})
 target_compile_options(vendored_cgltf PRIVATE -w)
+
+add_library(vendored_mikktspace OBJECT ${MIKKTSPACE_DIR}/mikktspace.c)
+target_compile_options(vendored_mikktspace PRIVATE -w)
 
 add_library(vendored_imgui OBJECT ${IMGUI_SOURCES})
 target_include_directories(vendored_imgui PRIVATE ${IMGUI_DIR} ${IMGUI_DIR}/backends)
@@ -156,10 +163,11 @@ add_library(pathtracer_core STATIC
     src/scene/thread_pool.cpp
     src/api/headless_renderer.cpp
     $<TARGET_OBJECTS:pathtracer_cie>
-    $<TARGET_OBJECTS:vendored_cgltf>)
-# include/ and the json headers are PUBLIC because every consumer includes them; cgltf and the SHA header are implementation details.
+    $<TARGET_OBJECTS:vendored_cgltf>
+    $<TARGET_OBJECTS:vendored_mikktspace>)
+# include/ and the json headers are PUBLIC because every consumer includes them; cgltf, MikkTSpace and the SHA header are internal.
 target_include_directories(pathtracer_core PUBLIC include ${JSON_DIR})
-target_include_directories(pathtracer_core PRIVATE ${CGLTF_DIR} ${PATHTRACER_GENERATED_DIR})
+target_include_directories(pathtracer_core PRIVATE ${CGLTF_DIR} ${MIKKTSPACE_DIR} ${PATHTRACER_GENERATED_DIR})
 add_dependencies(pathtracer_core pathtracer_git_sha)
 target_compile_definitions(pathtracer_core PRIVATE ${PATHTRACER_PROVENANCE_DEFINITIONS})
 pathtracer_target_defaults(pathtracer_core NATIVE IPO TIDY)
@@ -210,12 +218,6 @@ target_link_libraries(test_pattern PRIVATE OpenEXR::OpenEXR Imath::Imath)
 add_executable(downsample tools/downsample.cpp)
 pathtracer_target_defaults(downsample)
 target_link_libraries(downsample PRIVATE OpenEXR::OpenEXR Imath::Imath)
-
-# One-off asset-prep for Houdini glTF exports: synthesizes a TANGENT accessor where one is missing, in place, patching the rest.
-add_executable(gltf_tangent tools/gltf_tangent.cpp)
-target_include_directories(gltf_tangent PRIVATE ${JSON_DIR})
-pathtracer_target_defaults(gltf_tangent)
-target_link_libraries(gltf_tangent PRIVATE glm::glm)
 
 # Offline generator for blue_noise_mask.inc: it produces a committed artifact rather than checking one, so it stays out of ctest.
 add_executable(bluenoise_mask tools/bluenoise_mask.cpp)
