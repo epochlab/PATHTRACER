@@ -3,6 +3,27 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## C ABI coverage: a validator that calls only the exported ABI
+
+`api_validate` drives `HeadlessRenderer` in C++, so nothing in `ctest` crossed the C ABI that Python and other foreign
+callers bind to. Evidence is in `results/c_abi_validate`.
+
+- test: `c_abi_validate` links only the shared `pathtracer_c` and includes only `pathtracer_c.h`. It has 9 checks:
+  - the library's `pt_abi_version` matches the `PT_ABI_VERSION` a C caller compiles
+  - the AOV table round-trips, and out-of-range or unknown queries return their sentinels
+  - `err_cap` truncates, NUL-terminates and never writes past
+  - a request for every AOV writes exactly `w*h*channels` finite floats, checked with NaN-payload guards
+  - 8 malformed requests return `PT_ERROR` naming the field and write nothing; null renderer, request or output return
+    `PT_ERROR` with a reason
+  - a fixed seed reproduces bit for bit and another seed differs
+  - `pt_display_encode` writes exactly `w*h*3` bytes, clamps exactly at both ends, and rejects null or empty input
+  - every handle query accepts NULL
+- test: `tools/c_abi_header.c` compiles the header as strict ISO C11 (`-pedantic-errors`). Its `ptHeaderAbiVersion` is the
+  C side of the version check.
+- note: 6 of 7 mutations are caught. The survivor drops the encode's zero-extent check; OCIO and the allocation still raise,
+  and the error is caught as `PT_ERROR`, so it is not observable at the boundary. `ctest` 222/222.
+- note: Python tests under `ctest` and packaging are deferred to the Python phase.
+
 ## Sky default: hidden in the viewer and headless alike
 
 The viewer hid the sky by default and headless showed it, so the same scene, camera and seed gave two backgrounds depending
