@@ -3,6 +3,23 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Sky default: hidden in the viewer and headless alike
+
+The viewer hid the sky by default and headless showed it, so the same scene, camera and seed gave two backgrounds depending
+on the caller. Both now hide it, from one definition. Evidence is in `results/sky_default`.
+
+- fix!: `kDefaultShowSky = false` (`path_tracer.h`) is the default for `PathTraceDriver::Request::showSky`, the viewer's HUD
+  checkbox and `HeadlessRenderer::Request::showSky` when unset. Through the C ABI (`show_sky = PT_DEFAULT`) and Python
+  (`show_sky=None`), a camera miss now returns black. `PT_ABI_VERSION` stays 4, because no layout changed.
+- image: only primary-miss radiance is removed. On cornell and macbeth at 512x288, every changed texel is within the 2 px
+  sample reach (0.5 px jitter + 1.5 px Blackman-Harris radius) of a pixel-centre miss, and every texel beyond it is
+  bit-identical. Stump also changes 51 texels further out, through sub-pixel gaps that the pixel-centre alpha cannot see. No
+  texel gains radiance in any scene. `render_beauty` takes the headless default, so its default captures now have black
+  backgrounds.
+- test: `api_validate` `show_sky_changes_only_the_background` asserts the default equals `showSky=false`. pytest
+  `test_show_sky_default_hides_the_sky` replaces `test_show_sky_default_is_unchanged`. `ctest` all green, pytest 42 passed,
+  1 skipped.
+
 ## Geometry loader: mirrored transforms, generated tangents, every triangle topology
 
 Three loader gaps are closed:

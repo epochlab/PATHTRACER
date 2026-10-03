@@ -223,8 +223,8 @@ struct AppResources {
     int channelView = 0;
     pathtracer::gfx::OcioDisplayTransform::Lut userLut;
     pathtracer::debug::FramingOverlayState framingState{};
-    // "Show/Hide Background" HDRI-section checkbox -- off by default; only takes visible effect for the Beauty AOV, see presentFrame.
-    bool showSky = false;
+    // "Show/Hide Background" HDRI-section checkbox, starting at the shared default; visible only in the Beauty AOV, see presentFrame.
+    bool showSky = pathtracer::scene::kDefaultShowSky;
     // Whether the environment is in LightSet at all, unlike showSky. Off is what makes the classic Goral 1984 Cornell reachable.
     bool envLightEnabled;  // the scene's own authored default, not a separate runtime one -- the HUD checkbox edits this in place
     // HDR environment Y rotation in degrees, affecting background and lighting alike, rotated at query time rather than re-baked.

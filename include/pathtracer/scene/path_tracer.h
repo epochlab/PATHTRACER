@@ -124,6 +124,9 @@ struct PathTraceResult {
 // All 10 images at their aovChannels counts and the second-moment lane, zeroed at width x height: renderPathTraced's `out`.
 [[nodiscard]] PathTraceResult makePathTraceResult(int width, int height);
 
+// Whether a primary ray that misses returns environment radiance when nothing overrides it; viewer, driver and headless share it.
+inline constexpr bool kDefaultShowSky = false;
+
 // Blocking multithreaded path trace: BSDF bounces, NEE with MIS, RR; a worker drops its tile when generation != requestedGeneration.
 void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                        const std::vector<ShadingTriangle>& shadingTriangles,

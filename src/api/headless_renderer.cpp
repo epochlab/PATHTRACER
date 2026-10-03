@@ -297,7 +297,7 @@ void HeadlessRenderer::accumulatePathTraced(const Request& request) {
     const pathtracer::scene::LightSet& lights =
         request.envLightEnabled.value_or(defaultEnvLightEnabled_) ? lights_ : lightsEnvOff_;
     // Loop-invariant like `lights` above it: the background is a property of the request, not of the pass index.
-    const bool showSky = request.showSky.value_or(true);
+    const bool showSky = request.showSky.value_or(pathtracer::scene::kDefaultShowSky);
     stats_.passMilliseconds.reserve(static_cast<std::size_t>(request.samples));
     // Resolved once: the lane set is fixed for this request, and pathTracedLane is a switch the row loop would otherwise re-run.
     std::vector<const std::vector<float>*> laneSources;

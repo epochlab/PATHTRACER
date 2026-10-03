@@ -243,8 +243,7 @@ class Renderer:
 
         ``show_sky`` decides whether a camera ray that hits nothing returns environment radiance. It gates the
         primary miss only -- indirect bounces and next-event estimation sample the environment either way -- so
-        turning it off blackens the background without unlighting the scene. ``None`` keeps the headless default of
-        showing it; the viewer's own default is off.
+        turning it off blackens the background without unlighting the scene. ``None`` hides it, as the viewer does.
 
         ``env_light_enabled`` decides whether the environment is in the light set at all, which does change the
         lighting. ``None`` keeps the scene's authored ``environment.lightEnabled``.
