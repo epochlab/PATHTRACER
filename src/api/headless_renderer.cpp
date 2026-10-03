@@ -374,7 +374,8 @@ void HeadlessRenderer::renderGBufferLanes(const Request& request) {
 void HeadlessRenderer::evaluateFilters(const Request& request) {
     const auto filterStart = std::chrono::steady_clock::now();
     const pathtracer::gfx::HdrImage& beauty = lastImage(AovId::Beauty);
-    const pathtracer::debug::FilterInput filterInput{beauty, beautyLuminanceM2_.data(), request.samples};
+    const pathtracer::debug::FilterInput filterInput{beauty, beautyLuminanceM2_.data(), request.samples,
+                                                     pathtracer::scene::wrapsHorizontally(request.camera.lens().projection)};
     for (const AovId aov : request.aovs) {
         if (pathtracer::debug::aovSource(aov) != AovSource::BeautyFilter ||
             std::find(filteredAovs_.begin(), filteredAovs_.end(), aov) != filteredAovs_.end()) {

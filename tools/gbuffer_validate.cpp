@@ -7,6 +7,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <numbers>
 #include <optional>
 #include <random>
 #include <string>
@@ -183,6 +184,12 @@ Camera fisheyeCamera(float fieldOfViewDegrees, glm::vec3 offset = glm::vec3(0.0F
                   1.0F / 125.0F, 100.0F, Lens{LensProjection::FisheyePolynomial, {}, fieldOfViewDegrees});
 }
 
+// The lat-long from the same spot: it sees the whole cluster around it, and behind it the environment through the seam.
+Camera omnidirectionalCamera(glm::vec3 offset = glm::vec3(0.0F), float yawOffset = 0.0F) {
+    return Camera(glm::vec3(0.5F, -0.5F, -8.0F) + offset, 15.0F + yawOffset, 5.0F, kFilmBack, 8.0F, 0.1F, 100.0F, 2.8F,
+                  1.0F / 125.0F, 100.0F, Lens{LensProjection::Omnidirectional});
+}
+
 // Smallest singular value of the per-pixel direction map: radians per pixel along its least-stretched axis.
 float minDirPerPixel(const glm::mat2x3& dirPerPixel) {
     const float a = glm::dot(dirPerPixel[0], dirPerPixel[0]);
@@ -323,6 +330,11 @@ PT_CHECK(gbuffer_pose_fisheye_220, Fast, Exact) {
     runPose(ctx, "fisheye220", fisheyeCamera(220.0F), true);
 }
 
+// Every pixel is imaged and the pole rows' differentials are the most anisotropic of any lens, so reprojection is tested hardest there.
+PT_CHECK(gbuffer_pose_omnidirectional, Fast, Exact) {
+    runPose(ctx, "omnidirectional", omnidirectionalCamera(), false);
+}
+
 bool isBoxColorOf(glm::vec3 c, int instanceIndex) {
     return c == falseColorForId(instanceIndex);
 }
@@ -339,13 +351,25 @@ struct ProjectedSample {
 
 std::vector<ProjectedSample> projectSegment(const Camera& camera, const Camera::ViewBasis& basis, glm::vec3 a, glm::vec3 b) {
     std::vector<ProjectedSample> samples(kEdgeSamples + 1);
+    std::optional<double> previousX;
     for (int i = 0; i <= kEdgeSamples; ++i) {
         const glm::vec3 point = glm::mix(a, b, static_cast<float>(i) / static_cast<float>(kEdgeSamples));
         const std::optional<glm::vec2> ndc = camera.project(basis, glm::vec4(point, 1.0F));
-        samples[static_cast<std::size_t>(i)] = {ndc ? std::optional(ndcToPixel(glm::dvec2(*ndc))) : std::nullopt,
-                                                glm::length(glm::dvec3(point - camera.position()))};
+        std::optional<glm::dvec2> pixel = ndc ? std::optional(ndcToPixel(glm::dvec2(*ndc))) : std::nullopt;
+        // On a lat-long, each sample joins its predecessor the short way round, so the polyline lives on the universal cover.
+        if (pixel && previousX && wrapsHorizontally(basis.lens.projection)) {
+            pixel->x = *previousX + std::remainder(pixel->x - *previousX, static_cast<double>(kWidth));
+        }
+        previousX = pixel ? std::optional(pixel->x) : std::nullopt;
+        samples[static_cast<std::size_t>(i)] = {pixel, glm::length(glm::dvec3(point - camera.position()))};
     }
     return samples;
+}
+
+// The x offsets a pixel stands for: on a lat-long, its copies one turn either side meet any unwrapped polyline that winds past the seam.
+std::vector<double> periodicShiftsPx(const Camera::ViewBasis& basis) {
+    const auto turn = static_cast<double>(kWidth);
+    return wrapsHorizontally(basis.lens.projection) ? std::vector<double>{-turn, 0.0, turn} : std::vector<double>{0.0};
 }
 
 // Exact pixel distance from p to the polyline's chords whose nearer end lies within [rangeMin, rangeMax], infinity if none does.
@@ -407,6 +431,7 @@ LineCounts checkWireframeDistances(const Camera& camera, tools::check::Context& 
     fixture->instanceBounds.clear();
     const GBuffer g = fixture->render(camera, camera);
     const Camera::ViewBasis basis = camera.viewBasis(kAspect);
+    const std::vector<double> shifts = periodicShiftsPx(basis);
     std::vector<std::array<std::vector<ProjectedSample>, 3>> edges(fixture->shadingTriangles.size());
     LineCounts counts;
     for (int y = 0; y < kHeight; ++y) {
@@ -428,7 +453,9 @@ LineCounts checkWireframeDistances(const Camera& camera, tools::check::Context& 
             const double unbounded = std::numeric_limits<double>::infinity();
             double exactPx = unbounded;
             for (const std::vector<ProjectedSample>& edge : edges[index]) {
-                exactPx = std::min(exactPx, polylineDistancePx(edge, p, 0.0, unbounded));
+                for (const double shift : shifts) {
+                    exactPx = std::min(exactPx, polylineDistancePx(edge, p + glm::dvec2(shift, 0.0), 0.0, unbounded));
+                }
             }
             classify(counts, isWireframeColor(texelAt(g.wireframe, x, y)), exactPx, modelBand(camera, basis, x, y));
         }
@@ -444,11 +471,12 @@ void expectLines(tools::check::Context& ctx, const std::string& name, const Line
 }
 
 PT_CHECK(wireframe_matches_the_exact_edge_distance, Fast, Exact) {
-    ctx.plan(8);
+    ctx.plan(10);
     expectLines(ctx, "wireframe straightOn", checkWireframeDistances(straightOnCamera(), ctx));
     expectLines(ctx, "wireframe angled", checkWireframeDistances(angledCamera(), ctx));
     expectLines(ctx, "wireframe fisheye180", checkWireframeDistances(fisheyeCamera(180.0F), ctx));
     expectLines(ctx, "wireframe fisheye220", checkWireframeDistances(fisheyeCamera(220.0F), ctx));
+    expectLines(ctx, "wireframe omnidirectional", checkWireframeDistances(omnidirectionalCamera(), ctx));
 }
 
 // A single tiny (non-degenerate) triangle near `center` -- plants a known point into its instance's bounds without a real visible surface.
@@ -510,11 +538,15 @@ LineCounts checkBoxDistances(const Camera& camera, const AabbBounds& box, std::v
         }
         bounds.emplace_back(lo - glm::dvec2(kLineThicknessPx), hi + glm::dvec2(kLineThicknessPx));
     }
-    const auto nearestPx = [&edges, &bounds](glm::dvec2 p, double rangeMin, double rangeMax) {
+    const std::vector<double> shifts = periodicShiftsPx(basis);
+    const auto nearestPx = [&edges, &bounds, &shifts](glm::dvec2 p, double rangeMin, double rangeMax) {
         double best = std::numeric_limits<double>::infinity();
         for (std::size_t e = 0; e < edges.size(); ++e) {
-            if (glm::all(glm::greaterThanEqual(p, bounds[e].first)) && glm::all(glm::lessThanEqual(p, bounds[e].second))) {
-                best = std::min(best, polylineDistancePx(edges[e], p, rangeMin, rangeMax));
+            for (const double shift : shifts) {
+                const glm::dvec2 q = p + glm::dvec2(shift, 0.0);
+                if (glm::all(glm::greaterThanEqual(q, bounds[e].first)) && glm::all(glm::lessThanEqual(q, bounds[e].second))) {
+                    best = std::min(best, polylineDistancePx(edges[e], q, rangeMin, rangeMax));
+                }
             }
         }
         return best;
@@ -555,15 +587,18 @@ std::vector<ShadingTriangle> obliqueOccluder() {
             ShadingTriangle{vertex(-20.0F, -20.0F), vertex(20.0F, 20.0F), vertex(-20.0F, 20.0F), 0}};
 }
 
-// Outside the box, inside it (edges crossing behind the eye image as half-lines), through a 220-degree fisheye, and half occluded.
+// Outside the box, inside it (edges crossing behind the eye image as half-lines), through a fisheye and a lat-long, and half occluded.
 PT_CHECK(box_edges_match_the_exact_edge_distance, Fast, Exact) {
-    ctx.plan(8);
+    ctx.plan(10);
     const AabbBounds outside{glm::vec3(-2.0F, -1.5F, -12.0F), glm::vec3(2.5F, 1.0F, -6.0F)};
     expectLines(ctx, "box outside", checkBoxDistances(angledCamera(), outside, {}));
     expectLines(ctx, "box around the eye",
                 checkBoxDistances(straightOnCamera(), {glm::vec3(-1.0F, -0.5F, -6.0F), glm::vec3(0.8F, 1.0F, 3.0F)}, {}));
     expectLines(ctx, "box around a fisheye",
                 checkBoxDistances(fisheyeCamera(220.0F), {glm::vec3(-3.0F, -4.0F, -12.0F), glm::vec3(4.0F, 2.0F, -5.0F)}, {}));
+    // The eye inside the box, so its edges wrap the whole sphere, through the seam and past both poles' rows.
+    expectLines(ctx, "box around a lat-long",
+                checkBoxDistances(omnidirectionalCamera(), {glm::vec3(-3.0F, -4.0F, -12.0F), glm::vec3(4.0F, 2.0F, -5.0F)}, {}));
     expectLines(ctx, "box cut by an oblique plane", checkBoxDistances(straightOnCamera(), outside, obliqueOccluder()));
 }
 
@@ -886,16 +921,46 @@ std::optional<glm::dvec2> equidistantNdc(const Camera& camera, const glm::dvec4&
     return radiusMm * glm::normalize(lateral) / glm::dvec2(basis.halfWidthMm, basis.halfHeightMm);
 }
 
-std::optional<glm::dvec2> oracleNdc(const Camera& camera, const glm::dvec4& point) {
-    return camera.lens().projection == LensProjection::FisheyePolynomial ? equidistantNdc(camera, point) : pinholeNdc(camera, point);
+// Double-precision lat-long: longitude pi x and latitude pi y / 2 on the camera frame, by atan2 alone, independent of lat_long.h.
+std::optional<glm::dvec2> latLongNdc(const Camera& camera, const glm::dvec4& point) {
+    const Camera::ViewBasis basis = camera.viewBasis(kAspect);
+    const glm::dvec3 view = glm::dvec3(point) - (point.w * glm::dvec3(camera.position()));
+    if (view == glm::dvec3(0.0)) {
+        return std::nullopt;
+    }
+    const double right = glm::dot(view, glm::dvec3(basis.right));
+    const double forward = glm::dot(view, glm::dvec3(basis.forward));
+    const double latitude = std::atan2(glm::dot(view, glm::dvec3(basis.up)), std::hypot(right, forward));
+    return glm::dvec2(std::atan2(right, forward) / std::numbers::pi, latitude / (0.5 * std::numbers::pi));
 }
 
-// The projection's relative condition number: the pinhole divides by a depth formed by cancellation, |view| / |depth|; atan2 is 1.
-double projectionCondition(const Camera& camera, const glm::dvec4& point) {
-    if (camera.lens().projection == LensProjection::FisheyePolynomial) {
-        return 1.0;
+std::optional<glm::dvec2> oracleNdc(const Camera& camera, const glm::dvec4& point) {
+    switch (camera.lens().projection) {
+        case LensProjection::FisheyePolynomial:
+            return equidistantNdc(camera, point);
+        case LensProjection::Omnidirectional:
+            return latLongNdc(camera, point);
+        case LensProjection::Rectilinear:
+        case LensProjection::Count:
+            break;
     }
+    return pinholeNdc(camera, point);
+}
+
+// Relative condition number: the pinhole divides by a depth formed by cancellation, |view| / |depth|; the fisheye's atan2 is 1.
+double projectionCondition(const Camera& camera, const glm::dvec4& point) {
     const glm::dvec3 view = glm::dvec3(point) - (point.w * glm::dvec3(camera.position()));
+    switch (camera.lens().projection) {
+        case LensProjection::FisheyePolynomial:
+            return 1.0;
+        // Longitude is atan2 of the horizontal components, whose length is |view| sin(colatitude): it degrades as 1/sin at a pole.
+        case LensProjection::Omnidirectional:
+            return glm::length(view) / std::hypot(glm::dot(view, glm::dvec3(camera.viewBasis(kAspect).right)),
+                                                  glm::dot(view, glm::dvec3(camera.forward())));
+        case LensProjection::Rectilinear:
+        case LensProjection::Count:
+            break;
+    }
     return glm::length(view) / std::abs(glm::dot(view, glm::dvec3(camera.forward())));
 }
 
@@ -924,7 +989,12 @@ OracleMotion oracleMotion(const GBuffer& g, const Camera& camera, const Camera& 
     const auto magnitude = [](glm::dvec2 v) { return std::max({1.0, std::abs(v.x), std::abs(v.y)}); };
     const double budget = unitBudgetPx * ((magnitude(*now) * projectionCondition(camera, point)) +
                                           (magnitude(*before) * projectionCondition(previous, point)));
-    return {(*now - *before) * glm::dvec2(0.5 * kWidth, -0.5 * kHeight), budget};
+    glm::dvec2 motion = *now - *before;
+    // Both views lat-long: ndc x lives on a circle of circumference 2, and the motion is the shorter arc of it.
+    if (wrapsHorizontally(camera.lens().projection) && wrapsHorizontally(previous.lens().projection)) {
+        motion.x = std::remainder(motion.x, 2.0);
+    }
+    return {motion * glm::dvec2(0.5 * kWidth, -0.5 * kHeight), budget};
 }
 
 glm::vec2 motionAt(const GBuffer& g, int x, int y) {
@@ -944,8 +1014,8 @@ int nonZeroMotion(const GBuffer& g) {
 // Same camera both sides: one projection of one point twice, so every pixel, hit or miss, reads zero bitwise rather than nearly.
 PT_CHECK(motion_vector_is_exactly_zero_for_an_unmoved_camera, Fast, Exact) {
     const std::unique_ptr<Fixture> fixture = makeClusterFixture(ctx);
-    ctx.plan(6);
-    for (const Camera& camera : {angledCamera(), fisheyeCamera(220.0F)}) {
+    ctx.plan(9);
+    for (const Camera& camera : {angledCamera(), fisheyeCamera(220.0F), omnidirectionalCamera()}) {
         const GBuffer g = fixture->render(camera, camera);
         const int misses = uncoveredPixels(g);
         PT_EXPECT(ctx, misses > 0, "the pose shows no environment, so the w = 0 path went unexercised");
@@ -972,7 +1042,7 @@ double worstMotionError(const GBuffer& g, const Camera& camera, const Camera& pr
 PT_CHECK(motion_vector_matches_the_oracle, Fast, Exact) {
     const std::unique_ptr<Fixture> fixture = makeClusterFixture(ctx);
     const Lens equidistant{LensProjection::FisheyePolynomial, {}, 180.0F};
-    const std::array<std::tuple<const char*, Camera, Camera>, 8> cases{{
+    const std::array<std::tuple<const char*, Camera, Camera>, 11> cases{{
         {"pinhole rotation", angledCamera(), angledCamera(glm::vec3(0.0F), 3.0F, -2.0F)},
         {"pinhole translation", angledCamera(), angledCamera(glm::vec3(0.3F, -0.2F, 0.5F))},
         {"pinhole rotation+translation", angledCamera(), angledCamera(glm::vec3(-0.4F, 0.1F, 0.25F), -4.0F, 1.5F)},
@@ -983,6 +1053,9 @@ PT_CHECK(motion_vector_matches_the_oracle, Fast, Exact) {
         {"fisheye translation", fisheyeCamera(220.0F), fisheyeCamera(220.0F, glm::vec3(0.2F, 0.1F, -0.3F))},
         {"fisheye from a pinhole", fisheyeCamera(220.0F),
          Camera(glm::vec3(0.5F, -0.5F, -8.0F), 15.0F, 5.0F, kFilmBack, 35.0F, 0.1F, 100.0F, 2.8F, 1.0F / 125.0F, 100.0F)},
+        {"lat-long rotation", omnidirectionalCamera(), omnidirectionalCamera(glm::vec3(0.0F), 4.0F)},
+        {"lat-long translation", omnidirectionalCamera(), omnidirectionalCamera(glm::vec3(0.2F, 0.1F, -0.3F))},
+        {"lat-long from a fisheye", omnidirectionalCamera(), fisheyeCamera(220.0F)},
     }};
     ctx.plan(static_cast<int>(cases.size()));
     for (const auto& [name, camera, previous] : cases) {
@@ -990,6 +1063,35 @@ PT_CHECK(motion_vector_matches_the_oracle, Fast, Exact) {
         std::cout << "gbuffer_validate: motion " << name << " -- worst " << worst << " of budget\n";
         PT_EXPECT(ctx, worst <= 1.0, std::string(name) + ": worst motion error " + std::to_string(worst) + " of budget");
     }
+}
+
+// A level camera's yaw shifts every lat-long direction by one longitude, so each miss moves by the same pixels, the seam included.
+PT_CHECK(motion_vector_takes_the_short_way_across_the_seam, Fast, Exact) {
+    const std::unique_ptr<Fixture> fixture = makeClusterFixture(ctx);
+    ctx.plan(3);
+    constexpr float kYawStepDegrees = 4.0F;
+    const Lens latLong{LensProjection::Omnidirectional};
+    const Camera camera(glm::vec3(0.5F, -0.5F, -8.0F), 15.0F, 0.0F, kFilmBack, 8.0F, 0.1F, 100.0F, 2.8F, 1.0F / 125.0F, 100.0F, latLong);
+    const Camera previous(glm::vec3(0.5F, -0.5F, -8.0F), 15.0F - kYawStepDegrees, 0.0F, kFilmBack, 8.0F, 0.1F, 100.0F, 2.8F,
+                          1.0F / 125.0F, 100.0F, latLong);
+    const GBuffer g = fixture->render(camera, previous);
+    // Turning left by the step moves a fixed direction right by step / 360 of the width; float yaw and atan2 round to 16 ulps of a turn.
+    const double expected = static_cast<double>(kYawStepDegrees) / 360.0 * kWidth;
+    const double budget = kClosedFormUlps * kEps * kWidth;
+    int seamMisses = 0;
+    int departures = 0;
+    for (int y = 0; y < kHeight; ++y) {
+        for (int x = 0; x < kWidth; ++x) {
+            if (texelAt(g.alpha, x, y).x > 0.5F) {
+                continue;
+            }
+            seamMisses += x < expected + 1.0 ? 1 : 0;
+            departures += std::abs(static_cast<double>(motionAt(g, x, y).x) - expected) > budget ? 1 : 0;
+        }
+    }
+    PT_EXPECT(ctx, seamMisses > 0, "no environment pixel lay where its previous image was across the seam");
+    PT_EXPECT(ctx, departures == 0, std::to_string(departures) + " environment pixels moved other than by the yaw step");
+    PT_EXPECT(ctx, g.wrapsHorizontally, "the G-buffer does not record that its lens wraps, so its display would clamp at the seam");
 }
 
 // Translation leaves the plane at infinity fixed (w = 0 drops the camera centre), so every miss reads zero bitwise while hits move.

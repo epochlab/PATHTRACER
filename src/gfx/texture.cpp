@@ -109,7 +109,8 @@ Texture::Texture(Texture&& other) noexcept
       height_(std::exchange(other.height_, 0)),
       channels_(std::exchange(other.channels_, 0)),
       byteSize_(std::exchange(other.byteSize_, 0)),
-      pixelBufferBytes_(std::exchange(other.pixelBufferBytes_, 0)) {}
+      pixelBufferBytes_(std::exchange(other.pixelBufferBytes_, 0)),
+      wrapsHorizontally_(std::exchange(other.wrapsHorizontally_, false)) {}
 
 Texture& Texture::operator=(Texture&& other) noexcept {
     if (this != &other) {
@@ -126,6 +127,7 @@ Texture& Texture::operator=(Texture&& other) noexcept {
         channels_ = std::exchange(other.channels_, 0);
         byteSize_ = std::exchange(other.byteSize_, 0);
         pixelBufferBytes_ = std::exchange(other.pixelBufferBytes_, 0);
+        wrapsHorizontally_ = std::exchange(other.wrapsHorizontally_, false);
     }
     return *this;
 }
@@ -206,6 +208,17 @@ void Texture::upload(int width, int height, int channels, const float* texels) {
 void Texture::bind(unsigned int unit) const {
     glActiveTexture(GL_TEXTURE0 + unit);
     glBindTexture(GL_TEXTURE_2D, id_);
+}
+
+void Texture::setWrapsHorizontally(bool wrapsHorizontally) {
+    // Called on every new pass, so the GL calls and their glGetError syncs run only on the rare change of lens.
+    if (wrapsHorizontally == wrapsHorizontally_) {
+        return;
+    }
+    wrapsHorizontally_ = wrapsHorizontally;
+    GL_CALL(glBindTexture(GL_TEXTURE_2D, id_));
+    GL_CALL(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrapsHorizontally ? GL_REPEAT : GL_CLAMP_TO_EDGE));
+    GL_CALL(glBindTexture(GL_TEXTURE_2D, 0));
 }
 
 }  // namespace pathtracer::gfx

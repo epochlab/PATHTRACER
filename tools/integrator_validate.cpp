@@ -1721,4 +1721,53 @@ PT_CHECK(ambient_occlusion_distance_bound, Slow, Statistical) {
 
 }  // namespace
 
+// Radiance only inside one end column, 1/8 px clear of its edges: the column across the seam is lit if, and only if, the filter wraps.
+PT_CHECK(omnidirectional_film_filter_reaches_across_the_seam, Fast, Exact) {
+    constexpr int kWidth = 16;
+    constexpr int kHeight = 8;
+    // Four env texels per image column: the band is the middle two, so its bilinear support is the column's interior 3/4.
+    constexpr int kTexelsPerColumn = 4;
+    constexpr int kEnvWidth = kTexelsPerColumn * kWidth;
+    constexpr int kEnvHeight = 4;
+    std::optional<EmbreeAccel> accel = EmbreeAccel::build({});
+    pathtracer::scene::ThreadPool pool;
+    PathTraceSettings settings;
+    settings.samplesPerPixel = 16;
+    // Yaw 180 faces +Z with -X on the right, the map's own frame, so the image's u is the map's u.
+    const Camera camera(glm::vec3(0.0F), 180.0F, 0.0F, Camera::FilmBack{36.0F, 24.0F}, kFocalLengthMm, 0.01F, 1000.0F, 2.8F,
+                        1.0F / 125.0F, 100.0F, pathtracer::scene::Lens{pathtracer::scene::LensProjection::Omnidirectional});
+    ctx.plan(6);
+    for (const int litColumn : {kWidth - 1, 0}) {
+        std::vector<float> rgb(static_cast<std::size_t>(kEnvWidth) * kEnvHeight * pathtracer::gfx::kRgbChannels, 0.0F);
+        for (int y = 0; y < kEnvHeight; ++y) {
+            for (int x = (litColumn * kTexelsPerColumn) + 1; x < ((litColumn + 1) * kTexelsPerColumn) - 1; ++x) {
+                const std::size_t texel = ((static_cast<std::size_t>(y) * kEnvWidth) + static_cast<std::size_t>(x)) * 3;
+                rgb[texel] = rgb[texel + 1] = rgb[texel + 2] = 1.0F;
+            }
+        }
+        const EnvironmentMap env(tools::fixtures::makeImageTexture(kEnvWidth, kEnvHeight, pathtracer::gfx::kRgbChannels, rgb,
+                                                                   pathtracer::gfx::ScalarType::Float32));
+        const std::atomic<std::uint64_t> generation{1};
+        pathtracer::scene::PathTraceResult result = pathtracer::scene::makePathTraceResult(kWidth, kHeight);
+        const std::vector<pathtracer::scene::QuadLight> noQuads;
+        const pathtracer::scene::LightSet lights(&env, /*envRotationRadians=*/0.0F, /*envExposure=*/1.0F, noQuads);
+        pathtracer::debug::PassStats stats;
+        pathtracer::scene::renderPathTraced(camera, *accel, {}, {}, {}, lights, kWidth, kHeight, /*showSky=*/true, settings, {}, 7U,
+                                            /*sampleBase=*/0, settings.samplesPerPixel, generation, /*requestedGeneration=*/1U, pool,
+                                            stats, result);
+        // The column across the seam, within the filter's 1.5 px of the band, and the next one in, beyond it.
+        const int seamSide = litColumn == 0 ? kWidth - 1 : 0;
+        const int inward = litColumn == 0 ? kWidth - 2 : 1;
+        bool lit = true;
+        bool dark = true;
+        for (int y = 0; y < kHeight; ++y) {
+            lit = lit && result.beauty.rgb((static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(seamSide)).x > 0.0F;
+            dark = dark && result.beauty.rgb((static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(inward)).x == 0.0F;
+        }
+        PT_EXPECT(ctx, lit, "column " + std::to_string(seamSide) + " got nothing across the seam from " + std::to_string(litColumn));
+        PT_EXPECT(ctx, dark, "column " + std::to_string(inward) + ", past the filter's reach of the band, was lit");
+        PT_EXPECT(ctx, result.wrapsHorizontally, "the result does not record that its lens wraps, so its filters and display would clamp");
+    }
+}
+
 PT_CHECK_MAIN("integrator")

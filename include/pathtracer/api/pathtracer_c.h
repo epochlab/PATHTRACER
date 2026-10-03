@@ -14,9 +14,10 @@ typedef struct PtRenderer PtRenderer;
 #define PT_ERROR 1
 /* PtCamera is passed by value, so a caller built against a different layout must be caught rather than reading the fields as garbage. */
 #define PT_ABI_VERSION 4
-/* Lens projections, PtCamera.lens_projection: rectilinear is the pinhole, fisheye is Kannala & Brandt's polynomial. */
+/* Lens projections, PtCamera.lens_projection: the pinhole, Kannala & Brandt's polynomial fisheye, and the 360-degree lat-long. */
 #define PT_LENS_RECTILINEAR 0
 #define PT_LENS_FISHEYE_POLYNOMIAL 1
+#define PT_LENS_OMNIDIRECTIONAL 2
 /* Tri-state sentinel for the optional request fields: defer to the default rather than forcing on or off. Any other value is rejected. */
 #define PT_DEFAULT (-1)
 

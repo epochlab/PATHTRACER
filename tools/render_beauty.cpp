@@ -65,6 +65,8 @@ struct Options {
     std::string benchLogPath;
     // Positive: profile.json's polynomial fisheye at this focal length, so a capture can place the image circle inside the gate.
     float fisheyeFocalLengthMm = 0.0F;
+    // profile.json's camera through the 360-degree lat-long lens, which reads no focal length or gate.
+    bool omnidirectional = false;
 };
 
 // All AOVs are reachable now HeadlessRenderer drives the G-buffer and filters; names come from pathtracer/debug/aov.h, not restated here.
@@ -277,7 +279,8 @@ bool appendTimingRecord(const Options& options, int argc, char** argv, int width
                    {"rr_start_bounce", settings.russianRouletteStartBounce},
                    {"ao_max_distance", settings.aoMaxDistance},
                    {"texture_type", pathtracer::gfx::scalarTypeName(textureType)},
-                   {"fisheye_focal_length_mm", options.fisheyeFocalLengthMm}},
+                   {"fisheye_focal_length_mm", options.fisheyeFocalLengthMm},
+                   {"omnidirectional", options.omnidirectional}},
         .samples = {milliseconds.empty() ? std::pair<std::string, std::vector<double>>{"gbuffer_ms", {gbufferMs}}
                                           : std::pair<std::string, std::vector<double>>{"pass_ms", milliseconds}},
         .work = {{"rays", {{"primary", rays.primary}, {"bounce", rays.bounce}, {"ao", rays.ao}, {"shadow", rays.shadow}}},
@@ -348,6 +351,8 @@ bool parseArgs(int argc, char** argv, Options& options) {
                 std::cerr << "render_beauty: --fisheye expects a positive focal length in mm\n";
                 return false;
             }
+        } else if (std::strcmp(argv[i], "--omnidirectional") == 0) {
+            options.omnidirectional = true;
         } else if (std::strcmp(argv[i], "--env-light") == 0) {
             if (!needsValue("--env-light")) { return false; }
             options.envLight = std::atoi(argv[++i]) != 0 ? 1 : 0;
@@ -355,7 +360,7 @@ bool parseArgs(int argc, char** argv, Options& options) {
             std::cerr << "render_beauty: unknown argument '" << argv[i]
                       << "'\nusage: render_beauty [--scene scenes/x.json] --out out.png [--out-exr out.exr] [--compare-exr ref.exr] "
                          "[--compare ref.png] [--error-spectrum] [--seed N] [--passes N] [--width W] [--height H] "
-                         "[--exposure EV] [--aov name] [--fisheye FOCAL_MM] [--env-light 0|1] [--bench-log log.jsonl] [--assert-deterministic] [--assert-converged]\n";
+                         "[--exposure EV] [--aov name] [--fisheye FOCAL_MM | --omnidirectional] [--env-light 0|1] [--bench-log log.jsonl] [--assert-deterministic] [--assert-converged]\n";
             return false;
         }
     }
@@ -366,6 +371,10 @@ bool parseArgs(int argc, char** argv, Options& options) {
     // The gates return before the timed loop, so a log request alongside one would silently record nothing.
     if (!options.benchLogPath.empty() && (options.assertDeterministic || options.assertConverged)) {
         std::cerr << "render_beauty: --bench-log records the timing path, which the --assert-* gates do not run\n";
+        return false;
+    }
+    if (options.omnidirectional && options.fisheyeFocalLengthMm > 0.0F) {
+        std::cerr << "render_beauty: --fisheye and --omnidirectional each select the lens; pass one\n";
         return false;
     }
     if (options.passes < 1) {
@@ -397,13 +406,15 @@ int main(int argc, char** argv) {
     }
 
     // Fixed camera from profile.json, no controller: what makes two runs comparable is that neither can have been nudged.
-    const pathtracer::scene::Camera camera = options.fisheyeFocalLengthMm > 0.0F ? [&] {
+    const bool fisheye = options.fisheyeFocalLengthMm > 0.0F;
+    const pathtracer::scene::Camera camera = fisheye || options.omnidirectional ? [&] {
         // Rebuilt only here: the degrees accessors round-trip the pose, which is not bit-exact, so the default path keeps the original.
         const pathtracer::scene::Camera& authored = renderer->defaultCamera();
         pathtracer::scene::Lens lens = authored.lens();
-        lens.projection = pathtracer::scene::LensProjection::FisheyePolynomial;
-        return pathtracer::scene::Camera{authored.position(), authored.yawDegrees(), authored.pitchDegrees(),
-                                         authored.filmBack(), options.fisheyeFocalLengthMm, authored.nearClip(),
+        lens.projection =
+            fisheye ? pathtracer::scene::LensProjection::FisheyePolynomial : pathtracer::scene::LensProjection::Omnidirectional;
+        return pathtracer::scene::Camera{authored.position(), authored.yawDegrees(), authored.pitchDegrees(), authored.filmBack(),
+                                         fisheye ? options.fisheyeFocalLengthMm : authored.focalLengthMm(), authored.nearClip(),
                                          authored.farClip(), authored.aperture(), authored.shutterSeconds(),
                                          authored.iso(), lens};
     }() : renderer->defaultCamera();

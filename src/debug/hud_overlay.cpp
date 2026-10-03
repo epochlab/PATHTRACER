@@ -338,7 +338,7 @@ void drawAovSection(int& aov) {
     ImGui::Separator();
 }
 
-// pos/rot/clip/lens polynomial read-only; filmback and projection dropdowns; focal length, aperture, shutter, ISO, aberration sliders.
+// pos/rot/clip read-only; projection and filmback dropdowns; focal length, aperture, shutter, ISO, aberration sliders.
 void drawCameraSection(const HudFrameData& frame, float& focalLengthMm, float& aperture,
                         float& shutterSeconds, float& iso, int& filmBackPresetIndex,
                         const std::vector<const char*>& filmBackPresetNames, int& lensProjection,
@@ -358,14 +358,17 @@ void drawCameraSection(const HudFrameData& frame, float& focalLengthMm, float& a
         ImGui::TextColored(kCyan, "orbiting");
     }
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+    ImGui::Combo("##lensProjection", &lensProjection, pathtracer::scene::kLensProjectionNames,
+                 IM_ARRAYSIZE(pathtracer::scene::kLensProjectionNames));
+    // The lat-long maps ndc straight to angles, so the gate and focal length frame nothing: greyed, values kept for the other lenses.
+    ImGui::BeginDisabled(lensProjection == static_cast<int>(pathtracer::scene::LensProjection::Omnidirectional));
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
     ImGui::Combo("##filmBackPreset", &filmBackPresetIndex, filmBackPresetNames.data(),
                  static_cast<int>(filmBackPresetNames.size()));
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-    ImGui::Combo("##lensProjection", &lensProjection, pathtracer::scene::kLensProjectionNames,
-                 IM_ARRAYSIZE(pathtracer::scene::kLensProjectionNames));
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
     // Floors at a real circular-fisheye focal length (Nikon 6mm f/2.8): 10mm was a rectilinear assumption a fisheye cannot live with.
     ImGui::SliderFloat("##focalLength", &focalLengthMm, 6.0F, 300.0F, "Focal Length  %.0f mm");
+    ImGui::EndDisabled();
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
     ImGui::SliderFloat("##aperture", &aperture, 1.0F, 22.0F, "Aperture  f/%.1f");
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);

@@ -22,7 +22,7 @@ struct GBuffer {
     pathtracer::gfx::HdrImage lookahead;
     pathtracer::gfx::HdrImage worldPos;
     pathtracer::gfx::HdrImage uv;
-    // Screen-space motion in current pixels, x_now - x_previous of the point seen at the pixel centre; 0 where either view has no image.
+    // x_now - x_previous in current pixels of the point at the pixel centre, the shorter way round a lat-long; 0 where a view has no image.
     pathtracer::gfx::HdrImage motionVector;
     pathtracer::gfx::HdrImage normal;
     pathtracer::gfx::HdrImage geomNormal;
@@ -36,6 +36,7 @@ struct GBuffer {
     pathtracer::gfx::HdrImage wireframe;
     // Bumped by every renderGBuffer call: the buffer is reused in place, so a consumer caching by pointer needs this to see a change.
     std::uint64_t generation = 0;
+    bool wrapsHorizontally = false;  // the lens it was cast through joins its left and right edges, so neighbour reads wrap in x
 };
 
 // Row-parallel over disjoint rows, through the path tracer's own accel and bounce-0 sampling; previousCamera sets motionVector's origin.

@@ -5,6 +5,8 @@
 
 #include <glm/gtc/constants.hpp>
 
+#include "pathtracer/scene/lat_long.h"
+
 namespace pathtracer::scene {
 
 namespace {
@@ -27,17 +29,24 @@ struct EquirectTexel {
     float sinTheta;
 };
 
-EquirectTexel equirectTexelOf(const pathtracer::gfx::ImageTexture& image, const glm::vec3& direction,
-                               const glm::mat3& rotation) {
+// The map's frame is (right, up, forward) = (-X, +Y, +Z): facing +Z with +Y up, -X is on the right, so u never mirrors.
+glm::vec3 mapLocalOf(const glm::vec3& direction, const glm::mat3& rotation) {
     // Row-vector product: rotation's transpose, its exact inverse, taking the world direction into the map's frame.
     const glm::vec3 rotated = direction * rotation;
-    const float theta = std::acos(glm::clamp(rotated.y, -1.0F, 1.0F));
-    const float phi = std::atan2(rotated.x, rotated.z);
-    const float uCoord = (phi / (2.0F * glm::pi<float>())) + 0.5F;
-    const float v = theta / glm::pi<float>();
-    return {std::clamp(static_cast<int>(uCoord * static_cast<float>(image.width)), 0, image.width - 1),
-            std::clamp(static_cast<int>(v * static_cast<float>(image.height)), 0, image.height - 1),
-            std::max(std::sin(theta), 1e-6F)};
+    return {-rotated.x, rotated.y, rotated.z};
+}
+
+// mapLocalOf's inverse: map-frame components back to a world direction.
+glm::vec3 worldOfMapLocal(const glm::vec3& local, const glm::mat3& rotation) {
+    return rotation * glm::vec3(-local.x, local.y, local.z);
+}
+
+EquirectTexel equirectTexelOf(const pathtracer::gfx::ImageTexture& image, const glm::vec3& direction,
+                               const glm::mat3& rotation) {
+    const glm::vec2 uv = latLongUv(mapLocalOf(direction, rotation));
+    return {std::clamp(static_cast<int>(uv.x * static_cast<float>(image.width)), 0, image.width - 1),
+            std::clamp(static_cast<int>(uv.y * static_cast<float>(image.height)), 0, image.height - 1),
+            std::max(std::sin(uv.y * glm::pi<float>()), 1e-6F)};
 }
 
 CdfSample invertCdf(const float* cdf, int count, float u) {
@@ -99,11 +108,7 @@ EnvironmentMap::EnvironmentMap(pathtracer::gfx::ImageTexture image) : image_(std
 }
 
 glm::vec3 EnvironmentMap::sampleDirection(const glm::vec3& direction, const glm::mat3& rotation) const {
-    const glm::vec3 rotated = direction * rotation;
-    const float theta = std::acos(glm::clamp(rotated.y, -1.0F, 1.0F));
-    const float phi = std::atan2(rotated.x, rotated.z);
-    const glm::vec2 uv((phi / (2.0F * glm::pi<float>())) + 0.5F, theta / glm::pi<float>());
-    return pathtracer::gfx::sampleBilinear(image_, uv, pathtracer::gfx::WrapMode::ClampV);
+    return pathtracer::gfx::sampleBilinear(image_, latLongUv(mapLocalOf(direction, rotation)), pathtracer::gfx::WrapMode::ClampV);
 }
 
 EnvironmentMap::EnvSample EnvironmentMap::importanceSampleDirection(glm::vec2 u,
@@ -119,11 +124,8 @@ EnvironmentMap::EnvSample EnvironmentMap::importanceSampleDirection(glm::vec2 u,
     const CdfSample colSample = invertCdf(row, width, u.y);
     const float uCoord = (static_cast<float>(colSample.index) + colSample.fraction) / static_cast<float>(width);
 
-    const float theta = v * glm::pi<float>();
-    const float phi = (uCoord - 0.5F) * 2.0F * glm::pi<float>();
-    const float sinTheta = std::sin(theta);
-    const glm::vec3 rotated(sinTheta * std::sin(phi), std::cos(theta), sinTheta * std::cos(phi));
-    const glm::vec3 direction = rotation * rotated;
+    const glm::vec3 direction = worldOfMapLocal(latLongDirection(glm::vec2(uCoord, v)), rotation);
+    const float sinTheta = std::sin(v * glm::pi<float>());
 
     const float pdfV = (marginalCdf_[static_cast<std::size_t>(rowSample.index) + 1] -
                          marginalCdf_[static_cast<std::size_t>(rowSample.index)]) *

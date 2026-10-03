@@ -93,14 +93,14 @@ def display_encode(
 
 
 # Index-parallel with PT_LENS_* in _ffi.py and LensProjection in scene/lens.h: the projection names Camera.lens accepts.
-LENS_PROJECTIONS = ("rectilinear", "fisheye_polynomial")
+LENS_PROJECTIONS = ("rectilinear", "fisheye_polynomial", "omnidirectional")
 
 
 @dataclass(frozen=True)
 class Camera:
     """Pose, lens and exposure.
 
-    ``aperture``, ``shutter_seconds`` and ``iso`` set the photographic exposure value only. Neither projection
+    ``aperture``, ``shutter_seconds`` and ``iso`` set the photographic exposure value only. No projection
     produces depth of field, and ``aperture`` is not a lens radius.
 
     ``lens`` selects the projection: ``"rectilinear"`` is the pinhole, ``"fisheye_polynomial"`` is
@@ -110,8 +110,15 @@ class Camera:
     calibrated camera's pixel grid is not reproduced. ``fisheye_field_of_view_degrees`` is the full angle across the
     image circle; samples outside the circle are black, and an ``r(theta)`` that is not provably monotone over it is
     rejected. The image circle's radius is ``focal_length_mm * theta_d(theta_max)``, so short focal lengths are what make the
-    projection visible and a circle inside the gate leaves the corners black. Every AOV renders under either lens; G-buffer
-    ``depth`` is the distance along the primary ray, the one depth a fisheye past 90 degrees still defines.
+    projection visible and a circle inside the gate leaves the corners black.
+
+    ``"omnidirectional"`` images the whole sphere as a lat-long, the environment map's own chart on the camera frame: column
+    ``x`` is longitude ``pi * (2 * (x + 0.5) / width - 1)`` turning right from the view direction, row ``y`` colatitude
+    ``pi * (y + 0.5) / height`` from up, so straight behind is the left and right edges, which are one seam. Focal length, film
+    back and the fisheye fields play no part; ``width = 2 * height`` gives square angular pixels.
+
+    Every AOV renders under every lens; G-buffer ``depth`` is the distance along the primary ray, the one depth a fisheye past
+    90 degrees or the lat-long still defines.
 
     ``render`` raises ``RuntimeError`` naming the first invalid field: a non-finite pose, ``pitch_degrees`` outside
     ``(-90, 90)``, clips other than ``0 < near_clip < far_clip`` (``far_clip`` may be ``math.inf``), or any other scalar

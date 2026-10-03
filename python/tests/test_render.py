@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pathtracer import AOVS, Renderer, aov_channels, aov_needs_samples, display_encode
+from pathtracer import AOVS, LENS_PROJECTIONS, Renderer, aov_channels, aov_needs_samples, display_encode
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCENE = "scenes/cornell.json"
@@ -172,14 +172,37 @@ def test_fisheye_lens_changes_the_image(renderer: Renderer) -> None:
 
 
 def test_fisheye_gbuffer_depth_is_the_ray_distance(renderer: Renderer) -> None:
-    """Depth is |worldPos - eye| under either lens: the one depth a fisheye past 90 degrees off-axis still defines."""
-    for lens in ("rectilinear", "fisheye_polynomial"):
+    """Depth is |worldPos - eye| under every lens: the one depth a fisheye past 90 degrees or the lat-long still defines."""
+    for lens in LENS_PROJECTIONS:
         camera = dataclasses.replace(renderer.default_camera, lens=lens, focal_length_mm=10.0)
         frame = renderer.render(aovs=("depth", "worldPos", "alpha"), camera=camera, width=48, height=32)
         hit = frame["alpha"][..., 0] > 0.0
         assert hit.any(), f"{lens}: the camera should see geometry"
         distance = np.linalg.norm(frame["worldPos"][hit] - np.asarray(camera.position, dtype=np.float32), axis=-1)
         assert np.allclose(frame["depth"][..., 0][hit], distance, rtol=1e-5, atol=0.0), lens
+
+
+def test_omnidirectional_pixels_are_the_documented_longitude_and_latitude(renderer: Renderer) -> None:
+    """Each hit's direction from the eye lands at its own pixel centre under Camera's lat-long formula, so the docstring is the code."""
+    camera = dataclasses.replace(renderer.default_camera, lens="omnidirectional")
+    width, height = 64, 32
+    frame = renderer.render(aovs=("worldPos", "alpha"), camera=camera, width=width, height=height)
+    hit = frame["alpha"][..., 0] > 0.0
+    assert hit.any(), "the lat-long should see the scene"
+    yaw, pitch = math.radians(camera.yaw_degrees), math.radians(camera.pitch_degrees)
+    forward = np.array([-math.sin(yaw) * math.cos(pitch), math.sin(pitch), -math.cos(yaw) * math.cos(pitch)])
+    right = np.cross(forward, [0.0, 1.0, 0.0])
+    right /= np.linalg.norm(right)
+    up = np.cross(right, forward)
+    view = frame["worldPos"][hit].astype(np.float64) - np.asarray(camera.position)
+    longitude = np.arctan2(view @ right, view @ forward)
+    colatitude = np.arctan2(np.hypot(view @ right, view @ forward), view @ up)
+    rows, columns = np.nonzero(hit)
+    # 16 ulps of the ray's trig arguments (up to pi), plus float32 worldPos and eye rounding seen over |view|; longitude divides by sin.
+    magnitude = np.abs(frame["worldPos"][hit]).max(axis=-1) + max(map(abs, camera.position))
+    angular = 16.0 * np.finfo(np.float32).eps * (math.pi + magnitude / np.linalg.norm(view, axis=-1))
+    assert (np.abs(longitude - math.pi * (2.0 * (columns + 0.5) / width - 1.0)) <= angular / np.sin(colatitude)).all()
+    assert (np.abs(colatitude - math.pi * (rows + 0.5) / height) <= angular).all()
 
 
 def test_unknown_lens_is_rejected_before_the_abi(renderer: Renderer) -> None:

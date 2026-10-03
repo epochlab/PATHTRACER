@@ -195,6 +195,34 @@ PT_CHECK(render_writes_exactly_the_declared_extent, Slow, Exact) {
     PT_EXPECT(ctx, nonFinite.empty(), "left a non-finite or unwritten texel:" + nonFinite);
 }
 
+// Every PT_LENS_* value decodes and renders finite Beauty and depth through the ABI alone, the lat-long included.
+PT_CHECK(render_accepts_every_lens_projection, Slow, Exact) {
+    constexpr std::array<int, 3> kLenses{PT_LENS_RECTILINEAR, PT_LENS_FISHEYE_POLYNOMIAL, PT_LENS_OMNIDIRECTIONAL};
+    ctx.plan(static_cast<int>(kLenses.size()));
+    const OpenRenderer renderer;
+    if (renderer.handle == nullptr) {
+        for (std::size_t i = 0; i < kLenses.size(); ++i) {
+            PT_EXPECT(ctx, false, "scene load failed: " + renderer.error);
+        }
+        return;
+    }
+    const std::vector<int> aovs{beautyId(), pt_aov_id("depth")};
+    for (const int lens : kLenses) {
+        std::vector<GuardedBuffer> outputs = makeOutputs(aovs);
+        const std::vector<float*> pointers = pointersTo(outputs);
+        PtRenderRequest request = makeRequest(renderer.handle, aovs, 1);
+        request.camera.lens_projection = lens;
+        std::vector<char> err(kErrorCapacity, '\0');
+        const bool rendered = pt_render(renderer.handle, &request, pointers.data(), err.data(), kErrorCapacity) == PT_OK;
+        const bool finite = std::all_of(outputs.begin(), outputs.end(), [](const GuardedBuffer& b) {
+            return b.guardsIntact() && std::all_of(b.storage.begin(), b.storage.begin() + static_cast<std::ptrdiff_t>(b.extent),
+                                                   [](float value) { return std::isfinite(value); });
+        });
+        PT_EXPECT(ctx, rendered && finite,
+                  "lens_projection " + std::to_string(lens) + ": " + (rendered ? "non-finite output" : err.data()));
+    }
+}
+
 // A rejected request returns PT_ERROR naming its field and writes no output float, so a caller's buffers stay what it put there.
 PT_CHECK(render_rejects_invalid_requests_without_writing, Slow, Exact) {
     struct Case {
@@ -202,12 +230,14 @@ PT_CHECK(render_rejects_invalid_requests_without_writing, Slow, Exact) {
         const char* reasonFragment;
         void (*mutate)(PtRenderRequest&, std::vector<float*>&);
     };
-    const std::array<Case, 8> cases{{
+    const std::array<Case, 9> cases{{
         {"aov_count 0", "no AOVs", [](PtRenderRequest& r, std::vector<float*>&) { r.aov_count = 0; }},
         {"null aovs", "no AOVs", [](PtRenderRequest& r, std::vector<float*>&) { r.aovs = nullptr; }},
         {"show_sky 2", "show_sky", [](PtRenderRequest& r, std::vector<float*>&) { r.show_sky = 2; }},
         {"env_light_enabled 2", "env_light_enabled", [](PtRenderRequest& r, std::vector<float*>&) { r.env_light_enabled = 2; }},
         {"lens_projection 7", "lens_projection", [](PtRenderRequest& r, std::vector<float*>&) { r.camera.lens_projection = 7; }},
+        {"lens_projection one past the last", "lens_projection",
+         [](PtRenderRequest& r, std::vector<float*>&) { r.camera.lens_projection = PT_LENS_OMNIDIRECTIONAL + 1; }},
         {"null out[1]", "output buffer 1", [](PtRenderRequest&, std::vector<float*>& p) { p[1] = nullptr; }},
         {"width 0", "resolution", [](PtRenderRequest& r, std::vector<float*>&) { r.width = 0; }},
         {"samples 0", "samples", [](PtRenderRequest& r, std::vector<float*>&) { r.samples = 0; }},

@@ -451,6 +451,8 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
     const float aspect = static_cast<float>(width) / static_cast<float>(height);
     // Constant for the whole pass, so built once: the aspect-taking primaryRay rebuilds it on every one of millions of rays.
     const Camera::ViewBasis basis = camera.viewBasis(aspect);
+    const bool wraps = wrapsHorizontally(basis.lens.projection);
+    out.wrapsHorizontally = wraps;
     // Derived from the target, not fixed: the interactive scale renders a fraction of the frame, where a 96 px grid is only a few tiles.
     const int tileSize = pathTraceTileSize(width, height, threadPool.threadCount());
     const int tilesX = (width + tileSize - 1) / tileSize;
@@ -472,25 +474,30 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
         thread_local std::vector<float> accumulator;
         accumulator.assign(static_cast<std::size_t>(tileSize) * tileSize * kTileLanes, 0.0F);
 
+        // Past a wrapping image's left or right edge the halo is the far edge's pixels: on a lat-long both edges are one meridian.
+        const int haloX0 = wraps ? tileX0 - kFilterExtent : std::max(tileX0 - kFilterExtent, 0);
+        const int haloX1 = wraps ? tileX1 + kFilterExtent : std::min(tileX1 + kFilterExtent, width);
         for (int y = std::max(tileY0 - kFilterExtent, 0);
              y < std::min(tileY1 + kFilterExtent, height); ++y) {
-            for (int x = std::max(tileX0 - kFilterExtent, 0);
-                 x < std::min(tileX1 + kFilterExtent, width); ++x) {
+            for (int x = haloX0; x < haloX1; ++x) {
+                // The owning pixel: its sample stream and its ray, so a wrapped halo sample is bit-identical to the one its owner traces.
+                const int pixelX = (x + width) % width;
                 for (int s = 0; s < settings.samplesPerPixel; ++s) {
                     // sampleBase + s is this sample's position in the accumulated sequence: it must advance across passes to stratify.
                     const int sampleIndex = sampleBase + s;
-                    Sampler sampler(x, y, sampleIndex, sampleCount, scrambleSeed);
+                    Sampler sampler(pixelX, y, sampleIndex, sampleCount, scrambleSeed);
                     const glm::vec2 jitter = sampler.next2D();
+                    // Unwrapped, so the splat below measures filter distance across the seam as across any interior pixel boundary.
                     const float filmX = static_cast<float>(x) + jitter.x;
                     const float filmY = static_cast<float>(y) + jitter.y;
-                    const float ndcX = ((filmX / static_cast<float>(width)) * 2.0F) - 1.0F;
+                    const float ndcX = (((static_cast<float>(pixelX) + jitter.x) / static_cast<float>(width)) * 2.0F) - 1.0F;
                     // HdrImage row 0 is the top (EXR/glTF convention); NDC +Y is up -- flip.
                     const float ndcY = 1.0F - ((filmY / static_cast<float>(height)) * 2.0F);
                     const std::optional<Ray> primary = camera.primaryRay(basis, ndcX, ndcY);
                     // AO and Fresnel draw from their own stream: taking dimensions from `sampler` would shift every later dimension.
-                    Sampler aoSampler(x, y, sampleIndex, sampleCount, scrambleSeed ^ kAoSeedOffset);
+                    Sampler aoSampler(pixelX, y, sampleIndex, sampleCount, scrambleSeed ^ kAoSeedOffset);
                     const glm::vec2 aoSample = aoSampler.next2D();
-                    Sampler fresnelSampler(x, y, sampleIndex, sampleCount, scrambleSeed ^ kFresnelSeedOffset);
+                    Sampler fresnelSampler(pixelX, y, sampleIndex, sampleCount, scrambleSeed ^ kFresnelSeedOffset);
                     const glm::vec2 fresnelSample = fresnelSampler.next2D();
                     // Nullopt is a fisheye sample outside the image circle: no ray exists, so every lane reads zero for it.
                     const TraceResult trace =

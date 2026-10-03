@@ -16,13 +16,16 @@ namespace {
 using pathtracer::gfx::HdrImage;
 using pathtracer::scene::ThreadPool;
 
-// Single-channel Rec.709 luminance, shared by every filter that reads intensity alone. Materialised once: Sobel reads 8 neighbours.
-[[nodiscard]] std::vector<float> luminancePlane(const HdrImage& beauty, ThreadPool& threadPool) {
-    std::vector<float> plane(static_cast<std::size_t>(beauty.width) * static_cast<std::size_t>(beauty.height));
+// Rec.709 luminance, materialised once (Sobel reads 8 neighbours); `pad` wrapped columns each side extend a periodic image past its seam.
+[[nodiscard]] std::vector<float> luminancePlane(const HdrImage& beauty, ThreadPool& threadPool, int pad = 0) {
+    const int width = beauty.width + (2 * pad);
+    std::vector<float> plane(static_cast<std::size_t>(width) * static_cast<std::size_t>(beauty.height));
     threadPool.parallelFor(beauty.height, [&](int y) {
-        const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(beauty.width);
-        for (int x = 0; x < beauty.width; ++x) {
-            const std::size_t texel = (row + static_cast<std::size_t>(x)) * static_cast<std::size_t>(beauty.channels);
+        const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
+        const std::size_t sourceRow = static_cast<std::size_t>(y) * static_cast<std::size_t>(beauty.width);
+        for (int x = 0; x < width; ++x) {
+            const auto column = static_cast<std::size_t>((((x - pad) % beauty.width) + beauty.width) % beauty.width);
+            const std::size_t texel = (sourceRow + column) * static_cast<std::size_t>(beauty.channels);
             plane[row + static_cast<std::size_t>(x)] =
                 (beauty.texels[texel] * kRec709LuminanceWeights.r) +
                 (beauty.texels[texel + 1] * kRec709LuminanceWeights.g) +
@@ -32,9 +35,9 @@ using pathtracer::scene::ThreadPool;
     return plane;
 }
 
-// Neighbour fetch with edge clamping, matching the display texture's GL_CLAMP_TO_EDGE.
-[[nodiscard]] float tap(const std::vector<float>& plane, int width, int height, int x, int y) {
-    const int cx = std::clamp(x, 0, width - 1);
+// Neighbour fetch clamped at the edge, as the display texture's GL_CLAMP_TO_EDGE, or wrapped in x where the image is periodic.
+[[nodiscard]] float tap(const std::vector<float>& plane, int width, int height, int x, int y, bool wrapsHorizontally) {
+    const int cx = wrapsHorizontally ? (x + width) % width : std::clamp(x, 0, width - 1);
     const int cy = std::clamp(y, 0, height - 1);
     return plane[(static_cast<std::size_t>(cy) * static_cast<std::size_t>(width)) + static_cast<std::size_t>(cx)];
 }
@@ -50,21 +53,21 @@ HdrImage luminanceAov(const HdrImage& beauty, ThreadPool& threadPool) {
     return {beauty.width, beauty.height, pathtracer::gfx::kScalarChannels, luminancePlane(beauty, threadPool)};
 }
 
-HdrImage sobelAov(const HdrImage& beauty, ThreadPool& threadPool) {
+HdrImage sobelAov(const HdrImage& beauty, ThreadPool& threadPool, bool wrapsHorizontally) {
     const std::vector<float> plane = luminancePlane(beauty, threadPool);
     HdrImage out = makeAovImage(AovId::Sobel, beauty.width, beauty.height);
     const int width = beauty.width;
     const int height = beauty.height;
     threadPool.parallelFor(height, [&](int y) {
         for (int x = 0; x < width; ++x) {
-            const float tl = tap(plane, width, height, x - 1, y - 1);
-            const float t = tap(plane, width, height, x, y - 1);
-            const float tr = tap(plane, width, height, x + 1, y - 1);
-            const float l = tap(plane, width, height, x - 1, y);
-            const float r = tap(plane, width, height, x + 1, y);
-            const float bl = tap(plane, width, height, x - 1, y + 1);
-            const float b = tap(plane, width, height, x, y + 1);
-            const float br = tap(plane, width, height, x + 1, y + 1);
+            const float tl = tap(plane, width, height, x - 1, y - 1, wrapsHorizontally);
+            const float t = tap(plane, width, height, x, y - 1, wrapsHorizontally);
+            const float tr = tap(plane, width, height, x + 1, y - 1, wrapsHorizontally);
+            const float l = tap(plane, width, height, x - 1, y, wrapsHorizontally);
+            const float r = tap(plane, width, height, x + 1, y, wrapsHorizontally);
+            const float bl = tap(plane, width, height, x - 1, y + 1, wrapsHorizontally);
+            const float b = tap(plane, width, height, x, y + 1, wrapsHorizontally);
+            const float br = tap(plane, width, height, x + 1, y + 1, wrapsHorizontally);
             const float gx = (-tl - (2.0F * l) - bl) + tr + (2.0F * r) + br;
             const float gy = (-bl - (2.0F * b) - br) + tl + (2.0F * t) + tr;
             writeTexel(out, x, y, std::sqrt((gx * gx) + (gy * gy)));
@@ -127,15 +130,17 @@ void demodulate(std::span<const float> plane, const MorletPlaneWave& wave, int w
     });
 }
 
-HdrImage gaborAov(const HdrImage& beauty, ThreadPool& threadPool) {
-    const int width = beauty.width;
-    const int height = beauty.height;
-    const auto pixels = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
-    const std::vector<float> plane = luminancePlane(beauty, threadPool);
-    HdrImage out = makeAovImage(AovId::Gabor, width, height);
-
+HdrImage gaborAov(const HdrImage& beauty, ThreadPool& threadPool, bool wrapsHorizontally) {
     // The finest scale the grid resolves, the same fine scale DoG starts from.
     const float variance = innerScaleVariance();
+    // Off-harmonic carriers make demodulation Bloch-periodic, J(x+W) = J(x)exp(-ikW): wrapped padding to the blur radius keeps taps real.
+    const int pad = wrapsHorizontally ? static_cast<int>(discreteGaussianKernel(variance).size()) - 1 : 0;
+    const int width = beauty.width + (2 * pad);
+    const int height = beauty.height;
+    const auto pixels = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    const std::vector<float> plane = luminancePlane(beauty, threadPool, pad);
+    HdrImage out = makeAovImage(AovId::Gabor, beauty.width, height);
+
     const float carrier = morletCarrier(variance);
     const int orientations = morletOrientations();
 
@@ -172,8 +177,8 @@ HdrImage gaborAov(const HdrImage& beauty, ThreadPool& threadPool) {
 
     threadPool.parallelFor(height, [&](int y) {
         const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
-        for (int x = 0; x < width; ++x) {
-            writeTexel(out, x, y, std::sqrt(peak[row + static_cast<std::size_t>(x)]));
+        for (int x = 0; x < beauty.width; ++x) {
+            writeTexel(out, x, y, std::sqrt(peak[row + static_cast<std::size_t>(x + pad)]));
         }
     });
     return out;
@@ -213,19 +218,20 @@ HdrImage hsvAov(const HdrImage& beauty, ThreadPool& threadPool) {
     return out;
 }
 
-HdrImage dogAov(const HdrImage& beauty, ThreadPool& threadPool) {
+HdrImage dogAov(const HdrImage& beauty, ThreadPool& threadPool, bool wrapsHorizontally) {
     HdrImage out = makeAovImage(AovId::DoG, beauty.width, beauty.height);
     const float fineVariance = innerScaleVariance();
     // One octave up, sigma doubled: variance 4t, reached from the fine level by the semigroup's step 3t.
     const float coarseStep = (4.0F * fineVariance) - fineVariance;
-    // A frame narrower than the coarse step's kernel support would report the mirror, not the image, so the band is empty there.
-    if ((2 * (static_cast<int>(discreteGaussianKernel(coarseStep).size()) - 1)) + 1 > std::min(beauty.width, beauty.height)) {
+    // A frame narrower than the coarse step's kernel support would report the mirror, not the image; a periodic width has no mirror.
+    const int mirroredExtent = wrapsHorizontally ? beauty.height : std::min(beauty.width, beauty.height);
+    if ((2 * (static_cast<int>(discreteGaussianKernel(coarseStep).size()) - 1)) + 1 > mirroredExtent) {
         return out;
     }
     std::vector<float> fine = luminancePlane(beauty, threadPool);
-    diffuse(fine, beauty.width, beauty.height, fineVariance, threadPool);
+    diffuse(fine, beauty.width, beauty.height, fineVariance, threadPool, wrapsHorizontally);
     std::vector<float> coarse = fine;
-    diffuse(coarse, beauty.width, beauty.height, coarseStep, threadPool);
+    diffuse(coarse, beauty.width, beauty.height, coarseStep, threadPool, wrapsHorizontally);
     threadPool.parallelFor(beauty.height, [&](int y) {
         const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(beauty.width);
         for (int x = 0; x < beauty.width; ++x) {
@@ -288,9 +294,9 @@ HdrImage evaluateFilterAov(AovId aov, const FilterInput& input, ThreadPool& thre
     switch (aov) {
         case AovId::HSV:       return hsvAov(input.beauty, threadPool);
         case AovId::Luminance: return luminanceAov(input.beauty, threadPool);
-        case AovId::Sobel:     return sobelAov(input.beauty, threadPool);
-        case AovId::Gabor:     return gaborAov(input.beauty, threadPool);
-        case AovId::DoG:       return dogAov(input.beauty, threadPool);
+        case AovId::Sobel:     return sobelAov(input.beauty, threadPool, input.wrapsHorizontally);
+        case AovId::Gabor:     return gaborAov(input.beauty, threadPool, input.wrapsHorizontally);
+        case AovId::DoG:       return dogAov(input.beauty, threadPool, input.wrapsHorizontally);
         case AovId::ColourOpponent:  return colourOpponentAov(input.beauty, threadPool);
         case AovId::SNR:       return snrAov(input.beauty, input.beautyLuminanceM2, input.samples, threadPool);
 

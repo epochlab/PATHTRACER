@@ -5,14 +5,19 @@
 
 namespace pathtracer::scene {
 
-// Which projection primaryRay builds: Rectilinear is the straight-line-preserving pinhole, FisheyePolynomial is Kannala & Brandt 2006.
-enum class LensProjection { Rectilinear, FisheyePolynomial, Count };
+// Rectilinear is the line-preserving pinhole, FisheyePolynomial Kannala & Brandt 2006, Omnidirectional the 360-degree lat-long.
+enum class LensProjection { Rectilinear, FisheyePolynomial, Omnidirectional, Count };
 
 // Index-parallel with LensProjection, so the HUD dropdown and the config error paths name a projection from one table.
-inline constexpr const char* kLensProjectionNames[] = {"Rectilinear", "Fisheye Polynomial"};
+inline constexpr const char* kLensProjectionNames[] = {"Rectilinear", "Fisheye Polynomial", "Omnidirectional"};
 static_assert(sizeof(kLensProjectionNames) / sizeof(kLensProjectionNames[0]) ==
                   static_cast<int>(LensProjection::Count),
               "kLensProjectionNames must stay index-parallel with LensProjection");
+
+// True where the image's left and right edges are one meridian: the film filter, motion vectors and image filters then wrap in x.
+[[nodiscard]] constexpr bool wrapsHorizontally(LensProjection projection) {
+    return projection == LensProjection::Omnidirectional;
+}
 
 // r(theta) = focalLengthMm * theta_d(theta), theta_d = theta + k1*theta^3 + k2*theta^5 + k3*theta^7 + k4*theta^9.
 struct Lens {

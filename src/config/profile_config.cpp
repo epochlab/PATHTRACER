@@ -39,9 +39,11 @@ std::optional<pathtracer::scene::Lens> parseLens(const nlohmann::json& lens, con
         parsed.projection = pathtracer::scene::LensProjection::Rectilinear;
     } else if (projection == "fisheyePolynomial") {
         parsed.projection = pathtracer::scene::LensProjection::FisheyePolynomial;
+    } else if (projection == "omnidirectional") {
+        parsed.projection = pathtracer::scene::LensProjection::Omnidirectional;
     } else {
         std::cerr << "loadProfileConfig: " << path << " has lens.projection " << projection
-                  << ", expected rectilinear or fisheyePolynomial\n";
+                  << ", expected rectilinear, fisheyePolynomial or omnidirectional\n";
         return std::nullopt;
     }
     const nlohmann::json& coefficients = lens.at("radialCoefficients");

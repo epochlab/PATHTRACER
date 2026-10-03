@@ -22,7 +22,7 @@
     },
     "render": {
         "width": 2048,
-        "height": 1152,
+        "height": 1024,
         "renderScale": 1.0,
         "interactiveRenderScale": 0.1,
         "defaultAOV": 0,

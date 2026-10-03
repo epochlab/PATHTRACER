@@ -53,10 +53,10 @@ public:
     [[nodiscard]] float iso() const { return iso_; }
     [[nodiscard]] Lens lens() const { return lens_; }
 
-    // Paraxial vertical FOV from focal length and film-back height, which viewBasis's half-extents are; a fisheye frame's is below.
+    // Paraxial vertical FOV from focal length and film-back height, which viewBasis's half-extents are; other lenses' is below.
     [[nodiscard]] float verticalFovRadians() const;
 
-    // Angle the frame's vertical extent subtends under the active projection, saturating at the image circle: the HUD's FOV readout.
+    // Angle the frame's vertical extent subtends under the active projection: the fisheye saturates at its circle, the lat-long is pi.
     [[nodiscard]] float verticalAngularExtentRadians() const;
 
     // Orthonormal basis and view-plane half-extents, all primaryRay() needs bar the ndc weight, so a projector can share it.
@@ -64,7 +64,7 @@ public:
         glm::vec3 forward;
         glm::vec3 right;
         glm::vec3 up;
-        // View-plane half-extents at unit depth, tangent-valued: the pinhole arm's ndc weights, which a fisheye leaves unused.
+        // View-plane half-extents at unit depth, tangent-valued: the pinhole arm's ndc weights, which the other lenses leave unused.
         float halfWidth;
         float halfHeight;
         // Sensor half-extents in mm, the image circle and the model: everything the fisheye arm needs without reaching back to the Camera.
@@ -77,7 +77,7 @@ public:
     };
     [[nodiscard]] ViewBasis viewBasis(float aspect) const;
 
-    // Primary ray for a normalized device point (ndc in [-1,1], +Y up), tMin/tMax nearClip()/farClip(); nullopt outside a fisheye's circle.
+    // Ray for ndc in [-1,1] (+Y up), tMin/tMax nearClip()/farClip(); nullopt outside a fisheye's circle. The lat-long is 2-periodic in x.
     [[nodiscard]] std::optional<Ray> primaryRay(float ndcX, float ndcY, float aspect) const;
 
     // Same ray from a basis the caller already built; the aspect-taking overload rebuilds two sin, two cos, an atan and a tan every call.
@@ -89,7 +89,7 @@ public:
         glm::mat2x3 dirPerNdc;
     };
 
-    // primaryRay plus its differential in closed form, one inverse-lens solve for both; nullopt exactly where primaryRay is.
+    // primaryRay plus its closed-form differential, one inverse solve; nullopt where primaryRay is. Lat-long: rank 1 only at ndcY = +/-1.
     [[nodiscard]] std::optional<RayDifferential> primaryRayDifferential(const ViewBasis& basis, float ndcX, float ndcY) const;
 
     // Pinhole camera matrix P = K [R | -R c] (Hartley & Zisserman 2004, eq. 6.8) as NDC rows: ndc = (x . X, y . X) / (depth . X).
@@ -100,7 +100,7 @@ public:
     };
     [[nodiscard]] PinholeMatrix pinholeMatrix(const ViewBasis& basis) const;
 
-    // primaryRay's inverse on homogeneous (p, w), w = 0 a direction at infinity; nullopt behind the camera or past a fisheye's thetaMax.
+    // primaryRay's inverse on (p, w), w = 0 at infinity; nullopt behind the pinhole, past a fisheye's thetaMax, or at the lat-long's eye.
     [[nodiscard]] std::optional<glm::vec2> project(const ViewBasis& basis, const glm::vec4& point) const;
 
     // Pinhole arm, inline for per-pixel use. Divides, not reciprocals: x * (1/z) - x' * (1/z') would contract to an FMA, losing exact 0.

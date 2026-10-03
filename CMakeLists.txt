@@ -358,6 +358,12 @@ add_test(NAME image.gbuffer_aov_fisheye
                  --aov depth --fisheye 4 --out gbuffer_aov_fisheye.png)
 set_tests_properties(image.gbuffer_aov_fisheye PROPERTIES LABELS "image;fast;exact" TIMEOUT 300)
 
+# The same lane through the lat-long: its pole rows give the overlays the most anisotropic ray differential any lens produces.
+add_test(NAME image.gbuffer_aov_omnidirectional
+         COMMAND render_beauty --scene scenes/cornell.json --width 48 --height 24 --passes 4
+                 --aov depth --omnidirectional --out gbuffer_aov_omnidirectional.png)
+set_tests_properties(image.gbuffer_aov_omnidirectional PROPERTIES LABELS "image;fast;exact" TIMEOUT 300)
+
 add_test(NAME image.convergence
          COMMAND render_beauty --scene scenes/cornell.json --width 48 --height 36 --passes 64
                  --assert-converged)

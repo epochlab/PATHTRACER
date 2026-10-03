@@ -181,6 +181,7 @@ struct DisplayedAovSource {
     // A published lane's (generation, samples), unique per publish; the G-buffer's generation or the filter cache's revision, and 0.
     std::uint64_t generation = 0;
     int samples = 0;
+    bool wrapsHorizontally = false;  // the image's lens joins its left and right edges, so the display texture repeats in s
 
     bool operator==(const DisplayedAovSource&) const = default;
 };
@@ -600,7 +601,8 @@ const pathtracer::gfx::HdrImage* ensureFilterImage(
     const pathtracer::debug::ScopedCpuTimer filterTimer(app.stages.filterMs);
     cache.image = pathtracer::debug::evaluateFilterAov(
         aov,
-        pathtracer::debug::FilterInput{snapshot->beauty, snapshot->beautyLuminanceM2.data(), snapshot->samples},
+        pathtracer::debug::FilterInput{snapshot->beauty, snapshot->beautyLuminanceM2.data(), snapshot->samples,
+                                       snapshot->wrapsHorizontally},
         *app.gbufferThreadPool);
     cache.aov = aov;
     cache.generation = snapshot->generation;
@@ -615,14 +617,17 @@ DisplayedAovSource resolveAovImage(AppResources& app,
                                    pathtracer::debug::AovId aov) {
     if (const pathtracer::debug::GBufferLane lane = pathtracer::debug::gbufferLane(aov)) {
         // The buffer is allocated for the process's life now, so a null check no longer distinguishes "no render yet" -- generation 0 does.
-        return app.gbuffer->generation == 0 ? DisplayedAovSource{}
-                                            : DisplayedAovSource{&(*app.gbuffer.*lane), app.gbuffer->generation, 0};
+        return app.gbuffer->generation == 0
+                   ? DisplayedAovSource{}
+                   : DisplayedAovSource{&(*app.gbuffer.*lane), app.gbuffer->generation, 0, app.gbuffer->wrapsHorizontally};
     }
     if (const pathtracer::debug::PathTracedLane lane = pathtracer::debug::pathTracedLane(aov)) {
-        return snapshot ? DisplayedAovSource{&(*snapshot.*lane), snapshot->generation, snapshot->samples} : DisplayedAovSource{};
+        return snapshot ? DisplayedAovSource{&(*snapshot.*lane), snapshot->generation, snapshot->samples, snapshot->wrapsHorizontally}
+                        : DisplayedAovSource{};
     }
     const pathtracer::gfx::HdrImage* filtered = ensureFilterImage(app, snapshot, aov);
-    return filtered != nullptr ? DisplayedAovSource{filtered, app.filterCache.revision, 0} : DisplayedAovSource{};
+    return filtered != nullptr ? DisplayedAovSource{filtered, app.filterCache.revision, 0, snapshot->wrapsHorizontally}
+                               : DisplayedAovSource{};
 }
 
 // Cursor offset within imageRect, in framebuffer pixels with GL's bottom-left origin. Nullopt off-window or over a letterbox bar.
@@ -698,6 +703,8 @@ void ensurePathTraceDisplayTexture(AppResources& app, const DisplayedAovSource& 
         app.pathTraceDisplayTexture = pathtracer::gfx::Texture::createFromFloatPixels(
             shown.width, shown.height, shown.channels, shown.texels.data(), app.displayFormat);
     }
+    // Minification and the aberration taps then read across a lat-long's seam as across any interior column.
+    app.pathTraceDisplayTexture->setWrapsHorizontally(source.wrapsHorizontally);
     app.pathTraceDisplayed = source;
 }
 

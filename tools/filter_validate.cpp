@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstddef>
 #include <numbers>
+#include <random>
 #include <string>
 #include <utility>
 #include <vector>
@@ -513,6 +514,73 @@ PT_CHECK(the_blurred_plane_wave_separates_into_its_two_axes, Fast, Exact) {
         PT_EXPECT(ctx, worst <= 2.0 * static_cast<double>(kFloatEpsilon),
                       std::to_string(width) + "x" + std::to_string(height) + " separates to within " + std::to_string(worst));
     }
+}
+
+// On a cycle the lattice harmonics are the heat kernel's eigenfunctions: periodic diffusion scales cos(2 pi m x / W) by its transfer.
+PT_CHECK(periodic_diffusion_keeps_lattice_harmonics_as_eigenfunctions, Fast, Exact) {
+    ctx.plan(1);
+    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    constexpr int kWidth = 64;
+    constexpr int kHarmonic = 3;
+    const float t = pathtracer::debug::innerScaleVariance();
+    const std::vector<float> kernel = pathtracer::debug::discreteGaussianKernel(t);
+    const double omega = 2.0 * std::numbers::pi * kHarmonic / kWidth;
+    std::vector<float> row(kWidth);
+    for (int x = 0; x < kWidth; ++x) {
+        row[static_cast<std::size_t>(x)] = static_cast<float>(std::cos(omega * x));
+    }
+    pathtracer::debug::diffuse(row, kWidth, 1, t, pool, /*wrapsHorizontally=*/true);
+    // Against the shipped kernel's own transfer, so truncation cancels and what is left is the 2R+1 tap accumulation's rounding.
+    const double transfer = measuredTransfer(kernel, omega);
+    const double bound = static_cast<double>(2 * kernel.size() - 1) * static_cast<double>(kFloatEpsilon);
+    double worst = 0.0;
+    for (int x = 0; x < kWidth; ++x) {
+        worst = std::max(worst, std::abs(static_cast<double>(row[static_cast<std::size_t>(x)]) - (transfer * std::cos(omega * x))));
+    }
+    PT_EXPECT(ctx, worst <= bound, "worst harmonic deviation " + std::to_string(worst) + " bound " + std::to_string(bound));
+}
+
+// A wrapping image has no seam to the filters: rolling its columns rolls Sobel and DoG bit for bit, and Gabor to its own rounding.
+PT_CHECK(wrapped_filters_commute_with_a_cyclic_column_shift, Fast, Exact) {
+    ctx.plan(3);
+    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    constexpr int kWidth = 64;
+    constexpr int kHeight = 48;
+    constexpr int kShift = 23;
+    std::mt19937 rng(static_cast<std::uint32_t>(ctx.subSeed("cyclic-shift")));
+    std::uniform_real_distribution<float> unit(0.0F, 1.0F);
+    std::vector<float> plane(static_cast<std::size_t>(kWidth) * kHeight);
+    for (float& value : plane) {
+        value = unit(rng);
+    }
+    std::vector<float> rolledPlane(plane.size());
+    for (int y = 0; y < kHeight; ++y) {
+        for (int x = 0; x < kWidth; ++x) {
+            rolledPlane[(static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>((x + kShift) % kWidth)] =
+                plane[(static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x)];
+        }
+    }
+    const HdrImage image = greyImage(kWidth, kHeight, plane);
+    const HdrImage rolled = greyImage(kWidth, kHeight, rolledPlane);
+    // Worst |f(roll(I)) - roll(f(I))| over the frame.
+    const auto worstShiftError = [&](const HdrImage& original, const HdrImage& shifted) {
+        float worst = 0.0F;
+        for (int y = 0; y < kHeight; ++y) {
+            for (int x = 0; x < kWidth; ++x) {
+                worst = std::max(worst, std::fabs(texelAt(shifted, (x + kShift) % kWidth, y, 0) - texelAt(original, x, y, 0)));
+            }
+        }
+        return worst;
+    };
+    const float sobel = worstShiftError(pathtracer::debug::sobelAov(image, pool, true), pathtracer::debug::sobelAov(rolled, pool, true));
+    PT_EXPECT(ctx, sobel == 0.0F, "Sobel moved by " + std::to_string(sobel) + " under a cyclic shift");
+    const float dog = worstShiftError(pathtracer::debug::dogAov(image, pool, true), pathtracer::debug::dogAov(rolled, pool, true));
+    PT_EXPECT(ctx, dog == 0.0F, "DoG moved by " + std::to_string(dog) + " under a cyclic shift");
+    // The roll moves the carrier's phase origin, so demodulation, both blur passes and the baseband each round anew: 2R+1 ulps apiece.
+    const auto radius = static_cast<double>(pathtracer::debug::discreteGaussianKernel(pathtracer::debug::innerScaleVariance()).size() - 1);
+    const double bound = 4.0 * ((2.0 * radius) + 1.0) * static_cast<double>(kFloatEpsilon * greyLuminanceGain());
+    const float gabor = worstShiftError(pathtracer::debug::gaborAov(image, pool, true), pathtracer::debug::gaborAov(rolled, pool, true));
+    PT_EXPECT(ctx, gabor <= bound, "Gabor moved by " + std::to_string(gabor) + " under a cyclic shift, bound " + std::to_string(bound));
 }
 
 PT_CHECK_MAIN("filter")

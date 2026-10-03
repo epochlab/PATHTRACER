@@ -24,6 +24,9 @@ public:
 
     void bind(unsigned int unit) const;
 
+    // GL_REPEAT in s for an image whose left and right edges are one meridian, else GL_CLAMP_TO_EDGE; t always clamps.
+    void setWrapsHorizontally(bool wrapsHorizontally);
+
     // Raw GL texture id, for callers needing it directly (PostProcessPass::draw) rather than through bind().
     [[nodiscard]] unsigned int id() const { return id_; }
 
@@ -39,6 +42,7 @@ private:
     int channels_ = 0;
     std::size_t byteSize_ = 0;  // the texture's storage, reported to pathtracer::debug's GPU memory tracker
     std::size_t pixelBufferBytes_ = 0;  // the pixel buffer's storage, reported likewise
+    bool wrapsHorizontally_ = false;  // GL_TEXTURE_WRAP_S is GL_REPEAT, so setWrapsHorizontally touches GL only on a change
 };
 
 }  // namespace pathtracer::gfx

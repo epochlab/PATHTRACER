@@ -545,7 +545,7 @@ pathtracer::scene::Camera withLens(const pathtracer::scene::Camera& camera, path
 
 // Every AOV must render at its declared channel count with no NaN or infinity: a new AOV cannot pass without being produced.
 PT_CHECK(every_aov_renders_finite, Slow, Exact) {
-    ctx.plan(2 * 2 * kAovCount);
+    ctx.plan(2 * 3 * kAovCount);
     std::string error;
     const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", error);
     if (!renderer) {
@@ -555,11 +555,12 @@ PT_CHECK(every_aov_renders_finite, Slow, Exact) {
 
     constexpr int kWidth = 24;
     constexpr int kHeight = 18;
-    // Every AOV through both projections: no producer is lens-specific, so a fisheye must serve each one too.
-    const std::array<pathtracer::scene::Camera, 2> cameras{
+    // Every AOV through every projection: no producer is lens-specific, so a fisheye and the lat-long must serve each one too.
+    const std::array<pathtracer::scene::Camera, 3> cameras{
         renderer->defaultCamera(),
-        withLens(renderer->defaultCamera(), {pathtracer::scene::LensProjection::FisheyePolynomial, {}, 180.0F})};
-    for (int i = 0; i < 2 * kAovCount; ++i) {
+        withLens(renderer->defaultCamera(), {pathtracer::scene::LensProjection::FisheyePolynomial, {}, 180.0F}),
+        withLens(renderer->defaultCamera(), {pathtracer::scene::LensProjection::Omnidirectional})};
+    for (int i = 0; i < static_cast<int>(cameras.size()) * kAovCount; ++i) {
         const auto aov = static_cast<AovId>(i % kAovCount);
         const pathtracer::api::HeadlessRenderer::Request request{
             .camera = cameras[static_cast<std::size_t>(i / kAovCount)],
@@ -750,13 +751,13 @@ PT_CHECK(aov_filter_dispatch_is_total, Fast, Exact) {
     }
 }
 
-// On the optical axis every lens casts the same ray, so an odd-sized frame's centre texel reads one ray distance through both.
+// On the optical axis every lens casts the same ray, so an odd-sized frame's centre texel reads one ray distance through each.
 PT_CHECK(gbuffer_depth_agrees_across_lenses_on_the_axis, Fast, Exact) {
-    ctx.plan(3);
+    ctx.plan(5);
     std::string error;
     const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", error);
     if (!renderer) {
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < 5; ++i) {
             PT_EXPECT(ctx, false, "scene load failed: " + error);
         }
         return;
@@ -778,6 +779,11 @@ PT_CHECK(gbuffer_depth_agrees_across_lenses_on_the_axis, Fast, Exact) {
     // The pinhole re-normalises an already unit forward: at most one rounding of the direction, carried through one intersection.
     PT_EXPECT(ctx, std::fabs(rectilinear - fisheye) <= 4.0F * std::numeric_limits<float>::epsilon() * rectilinear,
               "the axis depth differs between lenses: " + std::to_string(rectilinear) + " vs " + std::to_string(fisheye));
+    // cos(float(pi/2)) leaves the lat-long's axis ray 4.4e-8 rad off forward, a second-order 1e-15 change in the distance.
+    const float omnidirectional = centreDepth(withLens(renderer->defaultCamera(), {pathtracer::scene::LensProjection::Omnidirectional}));
+    PT_EXPECT(ctx, omnidirectional > 0.0F, "the omnidirectional centre ray hit nothing: " + error);
+    PT_EXPECT(ctx, std::fabs(rectilinear - omnidirectional) <= 4.0F * std::numeric_limits<float>::epsilon() * rectilinear,
+              "the axis depth differs between lenses: " + std::to_string(rectilinear) + " vs " + std::to_string(omnidirectional));
 }
 
 // MotionVector measures from Request::previousCamera: absent or equal, motion is exactly zero; a turn left moves the whole frame right.
