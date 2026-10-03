@@ -124,7 +124,6 @@ void DebugCameraController::resetToDefault() {
     position_ = defaultPosition_;
     yawDegrees_ = defaultYawDegrees_;
     pitchDegrees_ = defaultPitchDegrees_;
-    orbiting_ = false;
 }
 
 }  // namespace pathtracer::scene

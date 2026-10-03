@@ -469,6 +469,15 @@ std::optional<AppResources> initializeApp(const pathtracer::config::SceneConfig&
     };
 }
 
+// Ends an orbit and releases the cursor lock resolveOrbitPick took; the only place the orbit flag and the lock are cleared.
+void endOrbit(pathtracer::platform::Window& window, AppResources& app) {
+    if (!app.debugCamera.isOrbiting()) {
+        return;
+    }
+    app.debugCamera.endOrbit();
+    window.setCursorLocked(false);
+}
+
 // Debug-only: 'L' cycles the viewer LUT (sRGB -> Rec709 -> Raw); 'R'/'G'/'B' isolate a channel, pressing the active one again clearing it.
 void wireCallbacks(pathtracer::platform::Window& window, AppResources& app) {
     window.setKeyCallback([&app, &window](int key, int action) {
@@ -487,6 +496,7 @@ void wireCallbacks(pathtracer::platform::Window& window, AppResources& app) {
         } else if (key == GLFW_KEY_B) {
             app.channelView = app.channelView == 3 ? 0 : 3;
         } else if (key == GLFW_KEY_0) {
+            endOrbit(window, app);
             app.debugCamera.resetToDefault();
         } else if (key == GLFW_KEY_I) {
             app.invert = !app.invert;
@@ -506,9 +516,8 @@ void wireCallbacks(pathtracer::platform::Window& window, AppResources& app) {
             if (!app.hud.wantsCaptureMouse()) {
                 app.orbitPickRequested = true;
             }
-        } else if (action == GLFW_RELEASE && app.debugCamera.isOrbiting()) {
-            app.debugCamera.endOrbit();
-            window.setCursorLocked(false);
+        } else if (action == GLFW_RELEASE) {
+            endOrbit(window, app);
         }
     });
 }
