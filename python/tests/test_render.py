@@ -40,20 +40,20 @@ def renderer() -> Renderer:
 
 def test_aov_table_is_populated() -> None:
     assert len(AOVS) == 32
-    names = ("beauty", "depth", "lookahead", "normal", "sobel", "luminance", "gabor", "HSV", "DoG", "colourOpponent", "motionVector", "SNR")
+    names = ("beauty", "depth", "lookahead", "normal", "sobel", "luminance", "gabor", "hsv", "dog", "colourOpponent", "motionVector", "snr")
     for name in names:
         assert name in AOVS
 
 
 def test_aov_names_are_exact() -> None:
     assert aov_channels("bounceCount") == 1
-    for name in ("bounce-count", "Bounce Count", "BounceCount"):
+    for name in ("bounce-count", "Bounce Count", "BounceCount", "HSV"):
         with pytest.raises(ValueError, match="unknown AOV"):
             aov_channels(name)
 
 
 def test_shapes_and_dtypes_match_the_declared_channels(renderer: Renderer) -> None:
-    names = ("beauty", "depth", "normal", "UV")
+    names = ("beauty", "depth", "normal", "uv")
     frame = renderer.render(aovs=names, width=32, height=24, samples=2)
     for name in names:
         array = frame[name]

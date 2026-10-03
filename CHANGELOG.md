@@ -3,6 +3,16 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## AOV call names lower-case standalone acronyms; the HUD shows title-case labels
+
+- feat!: `kAovNames` spells a standalone acronym in lower case: `hsv`, `dog`, `uv`, `ao`, `ior`, `snr` (was `HSV`, `DoG`,
+  `UV`, `AO`, `IOR`, `SNR`). `objectID` is unchanged. `--aov`, `-bench-aovs`, `pt_aov_name`/`pt_aov_id` and Python's
+  `AOVS`/`aovs=` take only the new spellings, and bench logs record them in `"aov"`, so those six no longer match earlier
+  records by name.
+- feat: `kAovLabels`, index-parallel to `AovId`, is the HUD dropdown's title-case text ("Beauty", "Direct Diffuse", "HSV",
+  "Object ID"). It is display only: no name lookup reads it.
+- test: `api_validate aov_names_round_trip` and pytest `test_aov_names_are_exact` refuse `"HSV"`.
+
 ## Python `Camera.rotation`
 
 - feat!: Python's `Camera.rotation` replaces `rotation_degrees`, matching `render`'s `root_rotation`, `light_rotations` and

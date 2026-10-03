@@ -330,11 +330,11 @@ void drawResolutionAndSceneSection(const HudFrameData& frame) {
     ImGui::Separator();
 }
 
-// Names/order come from the shared AovId enum (pathtracer/debug/aov.h), not a locally duplicated array.
+// Labels/order come from the shared AovId enum (pathtracer/debug/aov.h), not a locally duplicated array.
 void drawAovSection(int& aov) {
     ImGui::TextColored(kCyan, "AOV");
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-    ImGui::Combo("##aov", &aov, kAovNames, IM_ARRAYSIZE(kAovNames));
+    ImGui::Combo("##aov", &aov, kAovLabels, IM_ARRAYSIZE(kAovLabels));
     ImGui::Separator();
 }
 
