@@ -9,7 +9,7 @@
 
 namespace pathtracer::scene {
 
-// Primary-hit G-buffer sampling shared by the path tracer (tracePath bounce 0) and the rasterizer, so both resolve materials alike.
+// Primary-hit G-buffer sampling shared by the path tracer (tracePath bounce 0) and renderGBuffer, so both resolve materials alike.
 
 // near: p within thicknessPx of segment [a,b], clamped to its extent, not the infinite line. t: the closest point's [0,1] parameter.
 struct LineProximity {

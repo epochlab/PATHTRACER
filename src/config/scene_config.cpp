@@ -136,7 +136,7 @@ std::optional<MaterialConfig> parseConstantMaterial(const nlohmann::json& j, con
             return std::nullopt;
         }
     }
-    // BSDF fields at identity: the rasterizer still resolves them for G-buffer AOVs, and resolveRoughness clamps by min <= max.
+    // BSDF fields at identity: renderGBuffer still resolves them for G-buffer AOVs, and resolveRoughness clamps by min <= max.
     MaterialConfig material{
         .bumpStrength = 0.0F,
         .roughnessMin = 0.0F,

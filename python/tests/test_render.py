@@ -96,7 +96,7 @@ def test_normals_are_unit_length_where_geometry_was_hit(renderer: Renderer) -> N
     assert np.allclose(lengths, 1.0, atol=1e-5)
 
 
-def test_rasterizer_aovs_need_no_samples() -> None:
+def test_gbuffer_aovs_need_no_samples() -> None:
     assert aov_needs_samples("beauty")
     assert aov_needs_samples("sobel"), "filters read Beauty, so they do need light transport"
     assert not aov_needs_samples("depth")
@@ -170,10 +170,15 @@ def test_fisheye_lens_changes_the_image(renderer: Renderer) -> None:
     )
 
 
-def test_fisheye_lens_rejects_a_gbuffer_aov(renderer: Renderer) -> None:
-    fisheye = dataclasses.replace(renderer.default_camera, lens="fisheye_polynomial", focal_length_mm=10.0)
-    with pytest.raises(RuntimeError, match="fisheye"):
-        renderer.render(aovs=("depth",), camera=fisheye, width=16, height=16, samples=1)
+def test_fisheye_gbuffer_depth_is_the_ray_distance(renderer: Renderer) -> None:
+    """Depth is |worldPos - eye| under either lens: the one depth a fisheye past 90 degrees off-axis still defines."""
+    for lens in ("rectilinear", "fisheye_polynomial"):
+        camera = dataclasses.replace(renderer.default_camera, lens=lens, focal_length_mm=10.0)
+        frame = renderer.render(aovs=("depth", "worldPos", "alpha"), camera=camera, width=48, height=32)
+        hit = frame["alpha"][..., 0] > 0.0
+        assert hit.any(), f"{lens}: the camera should see geometry"
+        distance = np.linalg.norm(frame["worldPos"][hit] - np.asarray(camera.position, dtype=np.float32), axis=-1)
+        assert np.allclose(frame["depth"][..., 0][hit], distance, rtol=1e-5, atol=0.0), lens
 
 
 def test_unknown_lens_is_rejected_before_the_abi(renderer: Renderer) -> None:

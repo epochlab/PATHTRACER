@@ -37,7 +37,7 @@ AovSource aovSource(AovId aov) {
         case AovId::SNR:
             return AovSource::BeautyFilter;
 
-        // The 15 primary-hit lanes renderRasterGBuffer scan-converts. No default: -Werror makes an unclassified AovId a compile error.
+        // The 15 primary-hit lanes renderGBuffer ray-casts. No default: -Werror makes an unclassified AovId a compile error.
         case AovId::Wireframe:
         case AovId::Alpha:
         case AovId::Depth:
@@ -332,7 +332,7 @@ PathTracedLane pathTracedLane(AovId aov) {
 }
 
 GBufferLane gbufferLane(AovId aov) {
-    using GBuffer = pathtracer::scene::RasterGBuffer;
+    using GBuffer = pathtracer::scene::GBuffer;
     switch (aov) {
         case AovId::IOR:        return &GBuffer::iorAov;
         case AovId::Depth:      return &GBuffer::depth;

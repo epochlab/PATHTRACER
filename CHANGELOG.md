@@ -3,6 +3,47 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Primary-ray G-buffer: every AOV under every lens, the rasterizer removed
+
+The 15 G-buffer AOVs came from a scan converter that projects by a perspective divide, so a fisheye refused them all. Each pixel
+now casts one unjittered pixel-centre camera ray through the path tracer's own accel and bounce-0 sampling calls, which is correct
+for any projection by construction. Nothing else used the rasterizer, so it is deleted. Evidence is in `results/primary_ray_gbuffer`.
+
+- **breaking**: `depth` is the distance along the primary ray to the first hit, not planar view z: the one depth a fisheye past
+  90 degrees off-axis still defines. `lookahead` ramps on that distance. Rectilinear depth grows by `1/cos` of the off-axis angle
+- feat: all 15 G-buffer AOVs render under the Kannala-Brandt fisheye in the viewer, the headless renderer, the C ABI and Python. The
+  refusals (API error, startup error, HUD greying, the switch back to Beauty) are removed. Past the image circle the lanes read the
+  background: 0, IOR -1, zero motion
+- feat: `Camera::primaryRayDifferential` returns a primary ray with its closed-form d(dir)/d(ndc) (Igehy 1999). The pinhole arm
+  projects the affine rate off the ray; the fisheye arm chains d(theta)/dr = 1/(f theta_d'(theta)) and sin(theta)/r azimuthally.
+  `fisheyeSample` is the one inverse-lens solve the ray and its differential share, and primaryRay's arithmetic is unchanged
+- feat: wireframe and instance boxes use one projection-general first-order line metric. A mesh edge is `|n.d| / |J^T n|` over
+  the hit triangle's three eye planes (Baerentzen et al. 2006). A box edge is its gnomonic image at d, a segment or a half-line
+  where it crosses behind the view, pulled back to pixels by J's pseudo-inverse and range-tested against the first hit. A
+  per-instance bounding cone and a vectorised per-edge plane reject keep the full test to pixels within reach of an edge
+- refactor: `RasterGBuffer`/`renderRasterGBuffer` become `GBuffer`/`renderGBuffer` (`gbuffer.h`, taking the `EmbreeAccel`).
+  Stage timing `rasterMs` is `gbufferMs`, `RenderStats::rasterMilliseconds` is `gbufferMilliseconds`, the dashboard and spec rows
+  read `gbuffer`, and the bench column `raster_ms` is `gbuffer_ms`. `raster_bench` is `gbuffer_bench`. `aovSelectionAvoidsRasterizer`
+  and the unread `lastRasterMs` are removed
+- test: `gbuffer_validate` replaces `rasterizer_validate`. Every lane equals a pixel-centre ray oracle bit for bit on 5 poses (2
+  pinhole, near clip, 180 and 220 degree fisheyes), and worldPos reprojects onto its pixel within its rounding over the incidence.
+  Wireframe and box flags agree with exact projected-edge distances on every pixel outside the first-order model's Taylor band
+  (including half-lines and an oblique occluder). Watertightness, motion (now also from a fisheye current view, budget relative to
+  the projection's conditioning), occlusion, per-instance boxes and constant inputs are kept
+- test: `camera_validate` checks the differential against double central differences on 3 lenses. `api_validate` renders every AOV
+  through both lenses and checks the on-axis depth agrees across them. `image.gbuffer_aov_fisheye` gates the fisheye end to end.
+  Python checks depth equals |worldPos - eye| under both lenses
+- note: break tests were run. A flipped fisheye azimuthal term, planar depth, an over-tight edge reject, a non-metric line
+  distance and a swapped current projection each fail their check; a dropped projective edge parameter was missed until the box
+  check gained an occluder, and now fails 15 pixels
+- image: the 17 path-traced and filter AOVs and fisheye Beauty are byte-identical on cornell and macbeth (72/72 files). Rectilinear
+  G-buffer lanes match the rasterizer at every interior pixel to float rounding, except depth's new meaning and 36 cornell pixels on
+  the room's four corner creases, where a pixel centre ties two walls and the two producers break the tie differently
+- perf: the G-buffer costs more. At 2048x1152 `gbuffer_ms` B/A is 1.49 [1.47, 1.51] on macbeth (44.8 to 66.6 ms) and 1.67
+  [1.66, 1.68] on cornell (65.3 to 108.8 ms), and 2.59 / 2.09 on gbuffer_bench's dense synthetic layers: Embree single-ray traversal
+  replaces coherent scan conversion. An 8-wide `rtcIntersect8` packet path was measured, matched bit for bit and gained nothing on
+  this arm64 build, so it is not kept. The viewer pays it once per camera settle. Peak RSS falls 2-7%; Beauty `pass_ms` is unchanged
+
 ## Quad light placement: position, rotation and size around a centred gimbal
 
 A quad light was authored as a corner `origin` plus two edge vectors, so cornell's panel read as offset by half its size

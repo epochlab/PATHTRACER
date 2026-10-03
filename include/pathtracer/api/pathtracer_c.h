@@ -49,7 +49,7 @@ typedef struct {
     float aperture;
     float shutter_seconds;
     float iso;
-    /* PT_LENS_*. Under PT_LENS_FISHEYE_POLYNOMIAL a G-buffer AOV is rejected: the rasterizer has no fisheye projection. */
+    /* PT_LENS_*. Every AOV renders under either projection; G-buffer depth is distance along the primary ray. */
     int lens_projection;
     /* k1..k4 of r(theta) = focal_length_mm * (theta + k1*t^3 + k2*t^5 + k3*t^7 + k4*t^9), as OpenCV `fisheye` reports them. */
     float fisheye_coefficients[4];
@@ -68,7 +68,7 @@ typedef struct {
     const PtCamera* previous_camera;
     int width;
     int height;
-    /* Path-traced passes at one sample each, averaged. Ignored by a request whose AOVs are all rasterizer-backed. */
+    /* Path-traced passes at one sample each, averaged. Ignored by a request whose AOVs are all G-buffer-backed. */
     int samples;
     /* Fixes the sampler's scramble. The same seed and request reproduce the same floats exactly. */
     unsigned int seed;

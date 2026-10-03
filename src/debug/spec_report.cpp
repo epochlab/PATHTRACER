@@ -102,7 +102,7 @@ void printSpec(const EngineSpec& spec, const GpuInfo& gpu) {
     } else {
         row("sampling", "unlimited samples  ao range %.2f", static_cast<double>(spec.aoMaxDistance));
     }
-    row("raster", "%u threads", spec.rasterThreads);
+    row("gbuffer", "%u threads", spec.gbufferThreads);
 
     std::fflush(stdout);
 }

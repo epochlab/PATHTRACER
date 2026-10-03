@@ -21,7 +21,7 @@ struct EngineSpec {
     int maxSamples;  // 0 = unbounded
     float aoMaxDistance;
     unsigned int pathTraceThreads;
-    unsigned int rasterThreads;
+    unsigned int gbufferThreads;
     int tileSize;
     int instanceCount;
     int lightCount;

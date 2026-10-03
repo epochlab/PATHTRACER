@@ -458,7 +458,7 @@ PT_CHECK(new_request_restarts_accumulation, Slow, Exact) {
     PT_EXPECT(ctx, samples == 4, detail);
 }
 
-// Suspension parks the driver for a rasterizer AOV: the generation is the scramble seed, so bumping it to cancel would restart the image.
+// Suspension parks the driver for a G-buffer AOV: the generation is the scramble seed, so bumping it to cancel would restart the image.
 PT_CHECK(suspension_halts_and_resumes, Slow, Exact) {
     ctx.plan(3);
     std::unique_ptr<DriverFixture> fixture = makeFixture();

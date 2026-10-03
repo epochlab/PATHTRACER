@@ -21,7 +21,7 @@ constexpr double kGiB = 1024.0 * 1024.0 * 1024.0;
 constexpr double kMillion = 1.0e6;
 
 // Index into PerfDashboard's burst arrays. Bursty means it runs on a small fraction of frames, on a trigger change or a republish.
-enum BurstStage { kBurstRaster = 0, kBurstUpload = 1, kBurstFilter = 2 };
+enum BurstStage { kBurstGBuffer = 0, kBurstUpload = 1, kBurstFilter = 2 };
 
 // Frames per firing, "1/88", in the column a per-frame stage puts its percentage. "never" is a real state, not a missing measurement.
 void formatDuty(std::array<char, 8>& out, double framesPerFiring) {
@@ -133,11 +133,11 @@ void PerfDashboard::accumulate(const DashboardFrame& frame) {
     sums_.hudRenderMs += stages.hudRenderMs;
     sums_.swapMs += stages.swapMs;
     sums_.uploadMs += stages.uploadMs;
-    sums_.rasterMs += stages.rasterMs;
+    sums_.gbufferMs += stages.gbufferMs;
     sums_.filterMs += stages.filterMs;
     sums_.overRangeMs += stages.overRangeMs;
     // Every stage, bursty included: this must reconcile against the measured frame time, so it cannot exclude the costliest.
-    cpuTotalSum_ += stages.fenceMs + stages.paceMs + stages.pollMs + stages.cameraMs + stages.rasterMs + stages.presentMs +
+    cpuTotalSum_ += stages.fenceMs + stages.paceMs + stages.pollMs + stages.cameraMs + stages.gbufferMs + stages.presentMs +
                      stages.histogramMs + stages.overRangeMs + stages.probeMs + stages.hudMs +
                      stages.swapMs + unbilledDrawMs_;
     unbilledDrawMs_ = 0.0F;  // charged exactly once, to the frame that actually paid it
@@ -146,7 +146,7 @@ void PerfDashboard::accumulate(const DashboardFrame& frame) {
     ++totalFrames_;
 
     // A stage that did not run reads exactly 0, so a non-zero value is a firing and the value kept is real, not a diluted mean.
-    const std::array<float, 3> burst{stages.rasterMs, stages.uploadMs, stages.filterMs};
+    const std::array<float, 3> burst{stages.gbufferMs, stages.uploadMs, stages.filterMs};
     for (std::size_t i = 0; i < burst.size(); ++i) {
         if (burst[i] > 0.0F) {
             burstLastMs_[i] = burst[i];
@@ -281,7 +281,7 @@ void PerfDashboard::drawStageRows(const DashboardFrame& frame) {
            pass.height);
     appendStageCell("camera", mean(sums_.cameraMs), cpu);
     append("  trace           %9.2f %6.1f\n", pass.traceMs, phasePct(pass.traceMs));
-    appendBurstCell("raster gbuffer", kBurstRaster, 2);
+    appendBurstCell("gbuffer", kBurstGBuffer, 2);
     append("  accumulate      %9.2f %6.1f\n", pass.accumulateMs, phasePct(pass.accumulateMs));
     appendBurstCell("tex upload", kBurstUpload, 3);
     append("  over-range      %9.2f %6.1f\n", pass.overRangeMs, phasePct(pass.overRangeMs));
