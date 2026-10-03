@@ -67,8 +67,8 @@ BsdfParams makeColoredMetalParams(float roughness, glm::vec3 edgeTint = glm::vec
 // Uniform-solid-angle hemisphere samples (z=u1, r=sqrt(1-u1^2)) integrate pdfBsdf, MIS-combined with sampleBsdf's density (Veach 1997 9.2).
 PT_CHECK(pdf_normalization, Slow, Statistical) {
     std::mt19937 rng(7);
-    constexpr int kUniformSamples = 200000;
-    constexpr int kBsdfSamples = 200000;
+    constexpr int kUniformSamples = 50000;
+    constexpr int kBsdfSamples = 50000;
     constexpr std::uint32_t kBsdfSeed = 7;
     constexpr float kTolerance = 0.05F;
     constexpr double kUniformPdf = 1.0 / (2.0 * kPi);
@@ -267,7 +267,7 @@ PT_CHECK(strategy_coverage, Fast, Exact) {
 
 // Furnace through sampleBsdf over both hemispheres: bound 1.0, except on the exiting side below the critical angle where eta^2 is correct.
 PT_CHECK(furnace_energy_bound, Slow, Statistical) {
-    constexpr int kSampleCount = 200000;
+    constexpr int kSampleCount = 50000;
     constexpr float kTolerance = 0.1F;
     constexpr float kIor = 1.5F;  // matches makeParams/makeColoredMetalParams
     const std::array<float, 4> roughnesses = {0.05F, 0.25F, 0.5F, 1.0F};
@@ -717,8 +717,8 @@ PT_CHECK(transmissive_energy_balance, Slow, Statistical) {
 
 // Round-trip closure of a rough dielectric slab, 1.0 by BSDF sampling alone; the floor is the table's 1e-3 accuracy over a worst 6.2e-4.
 PT_CHECK(transmissive_slab_walk, Slow, Statistical) {
-    // Sized so the band resolves the smallest shortfall the old table left, 0.6% at roughness 0.7, with room to spare.
-    constexpr int kPathsPerReplicate = 1 << 20;
+    // Sized so the band resolves the smallest shortfall the old table left, 0.6% at roughness 0.7; the band stays under it.
+    constexpr int kPathsPerReplicate = 1 << 18;
     constexpr double kEscapeInterpolationFloor = 1e-3;
     const std::array<float, 3> roughnesses = {0.4F, 0.7F, 1.0F};
 
@@ -1019,7 +1019,7 @@ double alphaAt(double roughness) {
 
 // Schlick-split directional albedo: .x is the a channel, .y the b, so Ess(f0) = f0*a + b and a + b = E.
 glm::dvec2 referenceDirectionalAlbedo(double mu, double alpha) {
-    constexpr int kPanels = 96;     // phi, even for Simpson; doubling it moves no digit this file resolves
+    constexpr int kPanels = 48;     // phi, even for Simpson; doubling it moves no worst by over 1%, far inside the tolerances
     constexpr int kPsiNodes = 192;  // psi, twice the generator's, so the control row compares two rules and not one
     const double sinTv = std::sqrt(std::max(0.0, 1.0 - (mu * mu)));
     const auto azimuth = [&](double phi) {

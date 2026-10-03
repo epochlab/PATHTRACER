@@ -3,6 +3,26 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Faster tests, and one benchmark size
+
+`ctest -j4` drops from 77.8 s to 50.8 s wall (237/237 pass). Five Monte Carlo and quadrature checks in `bsdf_validate`
+were 127 of the 164 s of summed test time; the rest of the suite is already under a second per check.
+
+- chore: `bsdf` checks cut, with every tolerance unchanged.
+  - `albedo_table_interpolation` 31.9 s to 16.1 s: 48 phi panels in the reference quadrature, not 96. Each of the five
+    worsts keeps its location and moves under 1% against bounds set at 1.7x. Thinning the node grid instead moved the worst
+    point, so it was rejected.
+  - `transmissive_slab_walk` 20.6 s to 5.2 s: 2^18 paths per replicate. The band's 1e-3 escape floor dominates it, so the
+    half-width grows from 0.0023 to 0.0025 at roughness 0.4 and 0.0034 to 0.0049 at 1.0, still under the 0.6% shortfall it resolves.
+  - `furnace_energy_bound` 11.0 s to 2.7 s and `pdf_normalization` 11.0 s to 2.7 s: 50000 samples per row. Both are
+    one-sided bounds; the worst pdf integral is 1.0015 against 1.05. All three pass seeds 1 to 5.
+- feat: the benchmark workload is 512x256 at 16 samples per pixel, defined once as `kBenchWidth`, `kBenchHeight` and
+  `kBenchSamples` in `bench_log.h`. `pathtracer -bench`, `gbuffer_bench` and `render_beauty` default to it, and their flags
+  still override it. A viewer `-bench` run takes 2.6 s, down from about 93 s at 2048x1152 and 64 samples. `profile.json` is
+  unchanged, so the viewer window keeps its size. Logs recorded at other sizes do not compare with new ones.
+- fix: `render_beauty` rejects `--width` or `--height` below 1. They used to fall back silently to the window size.
+- chore: `render_beauty` defaults to 16 passes, down from 64, when run without `--passes`. The image gates pass theirs.
+
 ## Omnidirectional lens: a 360-degree lat-long, with the seam wrapped everywhere
 
 A third projection images the whole sphere. Each pixel's longitude and latitude give its ray in closed form, on the
