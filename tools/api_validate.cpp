@@ -86,7 +86,7 @@ PT_CHECK(aov_tables_are_total_and_consistent, Fast, Exact) {
 
 // The camelCase names are the vocabulary every consumer spells an AOV in, so each must resolve, and only exactly.
 PT_CHECK(aov_names_round_trip, Fast, Exact) {
-    ctx.plan(kAovCount + 5);
+    ctx.plan(kAovCount + 6);
     for (int i = 0; i < kAovCount; ++i) {
         PT_EXPECT(ctx, pathtracer::debug::aovIdFromName(pathtracer::debug::kAovNames[i]) == static_cast<AovId>(i),
                       std::string("name does not resolve: ") + pathtracer::debug::kAovNames[i]);
@@ -95,6 +95,7 @@ PT_CHECK(aov_names_round_trip, Fast, Exact) {
     PT_EXPECT(ctx, pathtracer::debug::aovIdFromName("bounce-count") == AovId::Count, "hyphen form must not resolve");
     PT_EXPECT(ctx, pathtracer::debug::aovIdFromName("BounceCount") == AovId::Count, "PascalCase form must not resolve");
     PT_EXPECT(ctx, pathtracer::debug::aovIdFromName("Bounce Count") == AovId::Count, "spaced form must not resolve");
+    PT_EXPECT(ctx, pathtracer::debug::aovIdFromName("HSV") == AovId::Count, "upper-case acronym label must not resolve");
     PT_EXPECT(ctx, pathtracer::debug::aovIdFromName("not an aov") == AovId::Count, "unknown name must not resolve");
 }
 

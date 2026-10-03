@@ -50,16 +50,27 @@ enum class AovId : int {
     Count  // sentinel, == array size, not itself a selectable value
 };
 
-// camelCase name, index-parallel to AovId (static_assert below): the one spelling HUD, CLI, profile.json and both APIs share.
+// camelCase call name, a standalone acronym lower case, index-parallel to AovId: the one spelling the CLI, bench logs and both APIs share.
 inline constexpr const char* kAovNames[] = {
-    "beauty", "wireframe", "alpha", "depth", "lookahead", "HSV", "luminance", "sobel",
-    "gabor", "DoG", "worldPos", "UV", "motionVector", "colourOpponent",
-    "normal", "geomNormal", "albedo", "metallic", "roughness", "tangent", "objectID", "AO",
-    "fresnel", "IOR", "bounceCount", "SNR",
+    "beauty", "wireframe", "alpha", "depth", "lookahead", "hsv", "luminance", "sobel",
+    "gabor", "dog", "worldPos", "uv", "motionVector", "colourOpponent",
+    "normal", "geomNormal", "albedo", "metallic", "roughness", "tangent", "objectID", "ao",
+    "fresnel", "ior", "bounceCount", "snr",
     "directDiffuse", "indirectDiffuse", "directSpecular", "indirectSpecular", "refraction", "shadow",
 };
 static_assert(sizeof(kAovNames) / sizeof(kAovNames[0]) == static_cast<int>(AovId::Count),
               "kAovNames must stay index-parallel with AovId");
+
+// Title-case HUD label, acronyms upper case, index-parallel to AovId: display only, never parsed.
+inline constexpr const char* kAovLabels[] = {
+    "Beauty", "Wireframe", "Alpha", "Depth", "Lookahead", "HSV", "Luminance", "Sobel",
+    "Gabor", "DoG", "World Pos", "UV", "Motion Vector", "Colour Opponent",
+    "Normal", "Geom Normal", "Albedo", "Metallic", "Roughness", "Tangent", "Object ID", "AO",
+    "Fresnel", "IOR", "Bounce Count", "SNR",
+    "Direct Diffuse", "Indirect Diffuse", "Direct Specular", "Indirect Specular", "Refraction", "Shadow",
+};
+static_assert(sizeof(kAovLabels) / sizeof(kAovLabels[0]) == static_cast<int>(AovId::Count),
+              "kAovLabels must stay index-parallel with AovId");
 
 // Which of the three producers computes each AOV: 10 accumulated path-traced lanes, 15 G-buffer lanes, 7 filters over Beauty.
 enum class AovSource { PathTraced, GBuffer, BeautyFilter };
