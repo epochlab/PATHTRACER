@@ -1,0 +1,27 @@
+#pragma once
+
+#include <cmath>
+
+#include <glm/glm.hpp>
+#include <glm/gtc/constants.hpp>
+
+namespace pathtracer::scene {
+
+// Plate carree (Snyder 1987) on a frame (right, up, forward): u = 1/2 + longitude/2pi from forward toward right, v = colatitude/pi.
+
+// (u, v) of a direction of any non-zero length. atan2 for both angles: acos(up) keeps only half its digits near a pole.
+[[nodiscard]] inline glm::vec2 latLongUv(const glm::vec3& local) {
+    const float longitude = std::atan2(local.x, local.z);
+    const float colatitude = std::atan2(std::hypot(local.x, local.z), local.y);
+    return {0.5F + (longitude / glm::two_pi<float>()), colatitude / glm::pi<float>()};
+}
+
+// Unit direction at (u, v), latLongUv's inverse. Periodic in u, so a u outside [0, 1) is the same direction one turn over.
+[[nodiscard]] inline glm::vec3 latLongDirection(glm::vec2 uv) {
+    const float longitude = (uv.x - 0.5F) * glm::two_pi<float>();
+    const float colatitude = uv.y * glm::pi<float>();
+    const float sinColatitude = std::sin(colatitude);
+    return {sinColatitude * std::sin(longitude), std::cos(colatitude), sinColatitude * std::cos(longitude)};
+}
+
+}  // namespace pathtracer::scene
