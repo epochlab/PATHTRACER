@@ -50,7 +50,7 @@ std::optional<std::vector<QuadLightConfig>> parseQuadLights(const nlohmann::json
             light.at("rotation").get<glm::vec3>(),
             light.at("size").get<glm::vec2>(),
             light.at("color").get<glm::vec3>(),
-            light.at("intensity").get<float>(),
+            toFloat(light.at("intensity")),
             light.value("twoSided", false),
         };
         // A zero extent subtends no solid angle; a negative one mirrors the quad and flips which face emits.
@@ -230,18 +230,18 @@ std::optional<MaterialConfig> loadMaterialConfig(const std::string& path) {
         }
 
         const MaterialConfig material{
-            j.at("bumpStrength").get<float>(),
-            j.at("roughnessMin").get<float>(),
-            j.at("roughnessMax").get<float>(),
+            toFloat(j.at("bumpStrength")),
+            toFloat(j.at("roughnessMin")),
+            toFloat(j.at("roughnessMax")),
             j.at("diffuseColour").get<glm::vec3>(),
-            j.value("ior", 1.5F),
-            j.value("abbe", 0.0F),
-            j.value("transmissionFactor", 0.0F),
-            j.value("metallicFactor", 0.0F),
-            j.at("roughnessFactor").get<float>(),
-            j.value("diffuseRoughness", 0.0F),
+            floatOr(j, "ior", 1.5F),
+            floatOr(j, "abbe", 0.0F),
+            floatOr(j, "transmissionFactor", 0.0F),
+            floatOr(j, "metallicFactor", 0.0F),
+            toFloat(j.at("roughnessFactor")),
+            floatOr(j, "diffuseRoughness", 0.0F),
             j.value("transmissionColor", glm::vec3(1.0F)),
-            j.value("transmissionDepth", 0.0F),
+            floatOr(j, "transmissionDepth", 0.0F),
             j.value("edgeTint", glm::vec3(1.0F)),
         };
         if (!validMaterialConfig(material, path)) {

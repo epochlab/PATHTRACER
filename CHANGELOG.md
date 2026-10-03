@@ -3,6 +3,29 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## JSON float reads refuse float overflow
+
+The loaders read every number as `float`, and nlohmann's `get<float>()` narrows a finite double past `FLT_MAX`, such as
+`1e39`, to `inf`. The camera and film-back checks then refused that `inf`, but every check written as a sign test
+(`intensity < 0`, `ior > 0`, `aoMaxDistance <= 0` and so on) admitted it, and position and rotation had no check at all.
+
+- fix: `config::toFloat` reads the number as `double` and refuses it unless it rounds to a finite `float`, that is
+  `|x| < FLT_MAX + ulp/2` under IEEE 754 round-to-nearest. The `glm::vec2`/`vec3` hook and every scalar read in
+  `loadSceneConfig`, `loadMaterialConfig`, `loadProfileConfig` and `loadFilmBackPresets` go through it, and `floatOr` covers
+  the optional keys. The refusal is a `json::out_of_range` (406), so each loader reports it through its existing
+  `<loader>: <path>: <what>` line and returns `nullopt`.
+- fix: **`profile.json` `camera.farClip` must now be finite.** JSON has no infinity literal, so `1e39` narrowing to `inf`
+  was the only way to write an unbounded far clip there, and it worked by accident. The C ABI and Python still take
+  `math.inf`.
+- test: `json_float_reads_refuse_float_overflow` sets `+1e39` and `-1e39` in each of 40 float fields across the four
+  loaders, one field at a time, against a base that loads. It also pins the boundary on light intensity: `FLT_MAX` and the
+  largest double that rounds to it load exactly, and `FLT_MAX + ulp/2`, the tie that rounds to `inf`, is refused. With
+  `toFloat` reverted to `get<float>()`, 26 of the 40 fields load an `inf`. Eleven are camera fields, and `Camera::validate`
+  refuses all of them later except `farClip`. The other 15 reach the renderer: light position, rotation, size, colour and
+  intensity, model position and rotation, `ior`, `abbe`, `roughnessFactor`, `transmissionDepth`, both controls and both
+  distances.
+- image: none. Every shipped file is in range, and render_beauty EXRs are byte-identical before and after.
+
 ## Faster tests, and one benchmark size
 
 `ctest -j4` drops from 77.8 s to 50.8 s wall (237/237 pass). Five Monte Carlo and quadrature checks in `bsdf_validate`
