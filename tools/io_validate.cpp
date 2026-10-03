@@ -868,7 +868,7 @@ PT_CHECK(film_back_presets_are_physically_valid, Fast, Exact) {
     PT_EXPECT(ctx, allPositive, "a film-back preset has a non-positive dimension");
 }
 
-// Each preset passes Camera::validFilmBack alone, as the HUD swaps any in; 1e39, a finite double past FLT_MAX, narrows to inf.
+// Each preset passes Camera::validFilmBack alone, as the HUD swaps any in; 1e39, a finite double past FLT_MAX, is refused at the read.
 PT_CHECK(film_back_presets_reject_non_finite_or_non_positive, Fast, Exact) {
     const std::vector<std::pair<std::string, bool>> cases = {
         {"36.0, \"heightMm\": 24.0", true},
@@ -885,6 +885,91 @@ PT_CHECK(film_back_presets_reject_non_finite_or_non_positive, Fast, Exact) {
         PT_EXPECT(ctx, loaded == accepted,
                   "loadFilmBackPresets " + std::string(accepted ? "rejected" : "accepted") + " widthMm " + dimensions);
     }
+}
+
+// Every float field of every loader refuses +-1e39, a finite double that get<float>() would narrow to inf before any range check.
+PT_CHECK(json_float_reads_refuse_float_overflow, Fast, Exact) {
+    struct Loader {
+        const char* name;
+        nlohmann::json base;
+        bool (*loads)(const std::string&);
+        std::vector<const char*> floatFields;  // JSON pointers into base
+    };
+    const nlohmann::json light = {{"type", "quad"},      {"position", {0, 0, 0}}, {"rotation", {0, 0, 0}}, {"size", {1, 1}},
+                                  {"color", {1, 1, 1}}, {"intensity", 5.0}};
+    const nlohmann::json scene = {
+        {"model", {{"gltfPath", "geometry/cornell/cornell_v001.gltf"}, {"position", {0, 0, 0}}, {"rotation", {0, 0, 0}}}},
+        {"environment", {{"hdriPath", "textures/republiqueHDR_2k.exr"}}},
+        {"materialPath", "materials/clay.json"},
+        {"lights", {light}}};
+    // Every optional key present, so a pointer into it overwrites a number rather than creating a malformed sibling.
+    const nlohmann::json material = {{"diffuseColour", {1, 1, 1}}, {"roughnessFactor", 0.5},  {"roughnessMin", 0.045},
+                                     {"roughnessMax", 1.0},        {"bumpStrength", 0.0},     {"ior", 1.5},
+                                     {"abbe", 0.0},                {"transmissionFactor", 0.0}, {"metallicFactor", 0.0},
+                                     {"diffuseRoughness", 0.0},    {"transmissionColor", {1, 1, 1}},
+                                     {"transmissionDepth", 0.0},   {"edgeTint", {1, 1, 1}}};
+    std::ifstream shippedProfile(std::filesystem::path(ASSET_ROOT_DIR) / "config" / "profile.json");
+    const std::vector<Loader> loaders = {
+        {"loadSceneConfig", scene,
+         [](const std::string& path) { return pathtracer::config::loadSceneConfig(path).has_value(); },
+         {"/model/position/0", "/model/rotation/1", "/lights/0/position/2", "/lights/0/rotation/0", "/lights/0/size/1",
+          "/lights/0/color/0", "/lights/0/intensity"}},
+        {"loadMaterialConfig", material,
+         [](const std::string& path) { return pathtracer::config::loadMaterialConfig(path).has_value(); },
+         {"/diffuseColour/0", "/roughnessFactor", "/roughnessMin", "/roughnessMax", "/bumpStrength", "/ior", "/abbe",
+          "/transmissionFactor", "/metallicFactor", "/diffuseRoughness", "/transmissionColor/1", "/transmissionDepth",
+          "/edgeTint/2"}},
+        {"loadMaterialConfig constant", {{"shadingModel", "constant"}, {"diffuseColour", {1, 1, 1}}},
+         [](const std::string& path) { return pathtracer::config::loadMaterialConfig(path).has_value(); },
+         {"/diffuseColour/2"}},
+        {"loadProfileConfig", nlohmann::json::parse(shippedProfile),
+         [](const std::string& path) { return pathtracer::config::loadProfileConfig(path).has_value(); },
+         {"/camera/position/0", "/camera/yawDegrees", "/camera/pitchDegrees", "/camera/focalLengthMm", "/camera/nearClip",
+          "/camera/farClip", "/camera/aperture", "/camera/shutterSeconds", "/camera/iso", "/camera/lens/radialCoefficients/3",
+          "/camera/lens/maxFieldOfViewDegrees", "/controls/flySpeedMetersPerSecond", "/controls/orbitSensitivityDegPerPixel",
+          "/render/renderScale", "/render/interactiveRenderScale", "/pathTracer/aoMaxDistance", "/pathTracer/lookaheadDistance"}},
+        {"loadFilmBackPresets", nlohmann::json::array({{{"name", "gate"}, {"widthMm", 36.0}, {"heightMm", 24.0}}}),
+         [](const std::string& path) { return pathtracer::config::loadFilmBackPresets(path).has_value(); },
+         {"/0/widthMm", "/0/heightMm"}},
+    };
+
+    int planned = 0;
+    for (const Loader& loader : loaders) {
+        planned += 1 + (2 * static_cast<int>(loader.floatFields.size()));
+    }
+    ctx.plan(planned + 3);
+    for (const Loader& loader : loaders) {
+        // Anti-vacuity: each row below differs from this base in one number only.
+        const std::filesystem::path basePath = writeJson("engine_io_float_base.json", loader.base.dump());
+        PT_EXPECT(ctx, loader.loads(basePath.string()), std::string(loader.name) + " rejected its unmutated base");
+        std::filesystem::remove(basePath);
+        for (const char* field : loader.floatFields) {
+            for (const double overflow : {1e39, -1e39}) {
+                nlohmann::json edited = loader.base;
+                edited[nlohmann::json::json_pointer(field)] = overflow;
+                const std::filesystem::path path = writeJson("engine_io_float_overflow.json", edited.dump());
+                PT_EXPECT(ctx, !loader.loads(path.string()),
+                          std::string(loader.name) + " accepted " + field + " = " + nlohmann::json(overflow).dump());
+                std::filesystem::remove(path);
+            }
+        }
+    }
+
+    // The exact boundary, on intensity, which has no upper bound of its own: below FLT_MAX + ulp/2 rounds to FLT_MAX, the tie to inf.
+    const double floatMax = std::numeric_limits<float>::max();
+    const double halfUlp = 0.5 * (floatMax - std::nextafter(std::numeric_limits<float>::max(), 0.0F));
+    const auto intensityLoaded = [&](double intensity) {
+        nlohmann::json edited = scene;
+        edited["lights"][0]["intensity"] = intensity;
+        const std::filesystem::path path = writeJson("engine_io_float_boundary.json", edited.dump());
+        const std::optional<pathtracer::config::SceneConfig> loaded = pathtracer::config::loadSceneConfig(path.string());
+        std::filesystem::remove(path);
+        return loaded ? std::optional(loaded->lights[0].intensity) : std::nullopt;
+    };
+    PT_EXPECT(ctx, intensityLoaded(floatMax) == std::numeric_limits<float>::max(), "FLT_MAX itself did not load exactly");
+    PT_EXPECT(ctx, intensityLoaded(std::nextafter(floatMax + halfUlp, 0.0)) == std::numeric_limits<float>::max(),
+              "the largest double rounding to FLT_MAX did not load as FLT_MAX");
+    PT_EXPECT(ctx, !intensityLoaded(floatMax + halfUlp).has_value(), "FLT_MAX + ulp/2, which rounds to inf, loaded");
 }
 
 // Every appended record is exactly one line that parses back with every schema field, and appending never rewrites earlier lines.

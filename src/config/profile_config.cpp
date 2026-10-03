@@ -53,9 +53,9 @@ std::optional<pathtracer::scene::Lens> parseLens(const nlohmann::json& lens, con
         return std::nullopt;
     }
     for (std::size_t i = 0; i < parsed.radialCoefficients.size(); ++i) {
-        parsed.radialCoefficients[i] = coefficients[i].get<float>();
+        parsed.radialCoefficients[i] = toFloat(coefficients[i]);
     }
-    parsed.maxFieldOfViewDegrees = lens.at("maxFieldOfViewDegrees").get<float>();
+    parsed.maxFieldOfViewDegrees = toFloat(lens.at("maxFieldOfViewDegrees"));
     return parsed;
 }
 
@@ -111,15 +111,15 @@ std::optional<RenderConfig> parseRenderOutput(const nlohmann::json& render, cons
 std::optional<CameraConfig> parseCamera(const nlohmann::json& camera, const std::string& path) {
     CameraConfig config{
         camera.at("position").get<glm::vec3>(),
-        camera.at("yawDegrees").get<float>(),
-        camera.at("pitchDegrees").get<float>(),
+        toFloat(camera.at("yawDegrees")),
+        toFloat(camera.at("pitchDegrees")),
         camera.at("filmBackPreset").get<std::string>(),
-        camera.at("focalLengthMm").get<float>(),
-        camera.at("nearClip").get<float>(),
-        camera.at("farClip").get<float>(),
-        camera.at("aperture").get<float>(),
-        camera.at("shutterSeconds").get<float>(),
-        camera.at("iso").get<float>(),
+        toFloat(camera.at("focalLengthMm")),
+        toFloat(camera.at("nearClip")),
+        toFloat(camera.at("farClip")),
+        toFloat(camera.at("aperture")),
+        toFloat(camera.at("shutterSeconds")),
+        toFloat(camera.at("iso")),
         {},
     };
     const std::optional<pathtracer::scene::Lens> lens = parseLens(camera.at("lens"), path);
@@ -189,11 +189,11 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
             return std::nullopt;
         }
         const ControlsConfig controlsConfig{
-            controls.at("flySpeedMetersPerSecond").get<float>(),
-            controls.at("orbitSensitivityDegPerPixel").get<float>(),
+            toFloat(controls.at("flySpeedMetersPerSecond")),
+            toFloat(controls.at("orbitSensitivityDegPerPixel")),
         };
-        renderConfig->renderScale = render.at("renderScale").get<float>();
-        renderConfig->interactiveRenderScale = render.at("interactiveRenderScale").get<float>();
+        renderConfig->renderScale = toFloat(render.at("renderScale"));
+        renderConfig->interactiveRenderScale = toFloat(render.at("interactiveRenderScale"));
         renderConfig->defaultAov = render.at("defaultAOV").get<int>();
         renderConfig->vsync = render.at("vsync").get<bool>();
         const PathTracerConfig pathTracerConfig{
@@ -201,8 +201,8 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
             pathTracer.at("maxBounces").get<int>(),
             pathTracer.at("russianRouletteStartBounce").get<int>(),
             pathTracer.at("maxSamples").get<int>(),
-            pathTracer.at("aoMaxDistance").get<float>(),
-            pathTracer.at("lookaheadDistance").get<float>(),
+            toFloat(pathTracer.at("aoMaxDistance")),
+            toFloat(pathTracer.at("lookaheadDistance")),
         };
 
         if (!validRender(*renderConfig, path) ||
@@ -232,8 +232,8 @@ std::optional<std::vector<pathtracer::scene::Camera::FilmBackPreset>> loadFilmBa
         presets.reserve(j.size());
         for (const nlohmann::json& presetJson : j) {
             std::string name = presetJson.at("name").get<std::string>();
-            const pathtracer::scene::Camera::FilmBack filmBack{presetJson.at("widthMm").get<float>(),
-                                                               presetJson.at("heightMm").get<float>()};
+            const pathtracer::scene::Camera::FilmBack filmBack{toFloat(presetJson.at("widthMm")),
+                                                               toFloat(presetJson.at("heightMm"))};
             // Each preset checked alone: the HUD can swap any of them into the camera, not just profile.json's.
             if (!pathtracer::scene::Camera::validFilmBack(filmBack)) {
                 std::cerr << "loadFilmBackPresets: " << path << " has a non-finite or non-positive filmBack for \""
