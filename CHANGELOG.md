@@ -3,6 +3,63 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Omnidirectional lens: a 360-degree lat-long, with the seam wrapped everywhere
+
+A third projection images the whole sphere. Each pixel's longitude and latitude give its ray in closed form, on the
+environment map's own chart, so the sphere is seen unwrapped at 2:1. The fisheye reaches 360 degrees only as an image
+circle. Evidence is in `results/omnidirectional_lens`.
+
+- fix!: **the environment map was mirrored.** Its `u` grew towards +X, which is the viewer's left when facing +Z, so every
+  HDRI rendered as its mirror image. `scene/lat_long.h` is now the one plate carree chart (Snyder 1987) on a
+  (right, up, forward) frame: `u = 1/2 + longitude/2pi`, `v = colatitude/pi`. It uses `atan2` for both angles, because
+  `acos` keeps only half its digits near a pole. The map's frame is (-X, +Y, +Z), so only the azimuth flips (`u' = 1 - u`);
+  the poles, the centre (+Z) and the seam (-Z) are unchanged.
+- feat: `LensProjection::Omnidirectional`, named "Omnidirectional" in the HUD dropdown, `"omnidirectional"` in
+  `profile.json` and Python, and `PT_LENS_OMNIDIRECTIONAL` (2) in the C ABI. `PT_ABI_VERSION` stays 4, because no layout
+  changed. ndc is the chart on the camera frame: (0, 0) is forward, +x is the camera's right, the top row is up.
+  - The ray, its closed-form differential (Igehy 1999: longitude pi per ndc, colatitude pi/2) and the inverse projection all
+    share `lat_long.h`.
+  - The inverse is defined everywhere except at the eye itself. Straight behind is ndc x = +/-1, the seam.
+  - The differential has rank 2 at every pixel centre. It drops to rank 1 only on the pole rows' outer edges, so the
+    overlays' pseudo-inverse grows as 1/sin(colatitude) without a clamp.
+  - Focal length and film back play no part, and the HUD greys both out (values kept for the other lenses).
+  - Lens dispatch is a `switch` with no default arm, so an unrouted projection is a compile error.
+- feat: every neighbour read wraps at the seam, through `wrapsHorizontally(LensProjection)`.
+  - The film tile's 1-px halo wraps. Each halo sample is seeded and cast from its owning pixel, so it is bit-identical to
+    the sample that pixel traces.
+  - Motion takes the shorter arc: the IEEE remainder over ndc's circumference of 2, when both views wrap.
+  - `diffuse` wraps its rows, which is the discrete heat kernel on a cycle (Lindeberg 1990). Sobel wraps its taps.
+  - Gabor's off-harmonic carrier makes the demodulated field Bloch-periodic, `J(x+W) = J(x)exp(-ikW)`, so a periodic blur
+    would jump in phase. Instead Gabor pads with wrapped columns to its blur radius, then crops. This is exact.
+  - `PathTraceResult` and `GBuffer` record `wrapsHorizontally`, so the filters and the display texture's `GL_REPEAT` follow
+    the image's own lens rather than the live camera.
+  - Rows keep their boundary at the poles. There a row is constant to first order, so a mirror and the true glide reflection
+    `f(x, -y) = f(x + W/2, y)` agree.
+- chore: `profile.json` renders at 2048x1024, the lat-long's square-pixel aspect. The gate height still sets the rectilinear
+  and fisheye vertical extent, so those frames are only wider.
+- image: **the env-map fix changes every image that sees or is lit by the HDRI.** At 512x256, 32 passes, with the sky shown:
+  mean luminance moves by -1.81% (cornell rectilinear) to +0.03%, and per-pixel relative L1 is 0.10 to 0.89 where the sky
+  fills the frame. Rectilinear and fisheye are otherwise **byte-identical**: commit 2 against HEAD, 36 of 36 EXRs (3 scenes;
+  Beauty, Sobel, DoG, Gabor, depth, wireframe; both lenses). The omnidirectional sky render is the HDRI rolled by half a turn
+  and not mirrored. Two vertical lines at its bottom are in the HDRI itself: its u = 0/1 columns differ by 36x the typical
+  neighbour step.
+- measured: `gbuffer_bench` B/A 1.022 [0.995, 1.057] unpaired, unresolved over 7 rounds. Viewer bench (`-size 512x256
+  -max-samples 32`, Beauty, Sobel, DoG, Gabor): unpaired `pass_trace_ms` 0.994 [0.921, 1.061], unresolved. Lat-long filters at 512x256
+  against rectilinear: Sobel 0.342 vs 0.351 ms and DoG 1.302 vs 1.295 ms (both unchanged); Gabor 8.22 vs 7.77 ms (+5.8%),
+  the cost of its 2R padding columns, about 2% at 2048 wide.
+- test: `camera_validate` gets the closed form, periodicity in longitude, the solid-angle Jacobian `(pi^2/2) sin`, and
+  omnidirectional arms in the round-trip, differential and validation checks. `nee_validate`: the map is unmirrored, and an
+  omnidirectional camera in the map's frame reads it texel for texel. `integrator_validate`: radiance confined inside one end
+  column lights the column across the seam if, and only if, the halo wraps (verified failing without the wrap).
+  `gbuffer_validate`: the pose, cylinder-aware wireframe and box oracles, lat-long motion cases and a yaw step across the
+  seam. `filter_validate`: lattice harmonics are eigenfunctions of periodic diffusion, and Sobel and DoG commute bit-exactly
+  with a cyclic shift (Gabor to its rounding). Also `api_validate`, `io_validate`, `c_abi_validate`, pytest, and
+  `image.gbuffer_aov_omnidirectional`. `ctest` 237/237, pytest 44 passed.
+- note: a statistical check that a half-turn yaw rolls the image by W/2 was tried and dropped. The sampler varies per pixel
+  only by its blue-noise toroidal shift, which the scramble seed does not randomize, so replicate bands understate
+  pixel-to-pixel differences. Near the nadir of cornell, one sky pixel and its rolled twin differed by 27 standard errors
+  at 64 spp. This is a property of the sampler, not of the lens, and the exact integrator check replaces that test.
+
 ## Display texture upload: PBO staging, with the alternatives measured
 
 The display texture re-uploads on every published pass. The render thread packed RGB float into an RGBA half vector, then
