@@ -3,6 +3,11 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Python `Camera.rotation`
+
+- feat!: Python's `Camera.rotation` replaces `rotation_degrees`, matching `render`'s `root_rotation`, `light_rotations` and
+  `env_rotation` and scene.json's `rotation` keys. The C ABI keeps `PtCamera.rotation_degrees`, so ABI 6 is unchanged.
+
 ## Camera XYZ rotation: roll, and no pole
 
 The camera was a yaw and a pitch about a fixed world up. It could not roll, and its basis `cross(forward, up)` was

@@ -127,7 +127,7 @@ class Camera:
     Every AOV renders under every lens; G-buffer ``depth`` is the distance along the primary ray, the one depth a fisheye past
     90 degrees or the lat-long still defines.
 
-    ``rotation_degrees`` is XYZ degrees applied as ``Rz @ Ry @ Rx``, X first about fixed world axes, as scene.json's
+    ``rotation`` is XYZ degrees applied as ``Rz @ Ry @ Rx``, X first about fixed world axes, as scene.json's
     ``rotation`` keys: at rest the camera looks down -Z with +Y up, ``x`` pitches, ``y`` yaws to the left and ``z`` rolls. Any
     finite triple is a pose, straight up and upside down included.
 
@@ -139,7 +139,7 @@ class Camera:
     """
 
     position: tuple[float, float, float]
-    rotation_degrees: tuple[float, float, float]
+    rotation: tuple[float, float, float]
     film_back_mm: tuple[float, float]
     focal_length_mm: float
     near_clip: float
@@ -155,7 +155,7 @@ class Camera:
     def _from_struct(cls, struct: _ffi.PtCamera) -> Camera:
         return cls(
             position=(struct.position[0], struct.position[1], struct.position[2]),
-            rotation_degrees=(struct.rotation_degrees[0], struct.rotation_degrees[1], struct.rotation_degrees[2]),
+            rotation=(struct.rotation_degrees[0], struct.rotation_degrees[1], struct.rotation_degrees[2]),
             film_back_mm=(struct.film_back_mm[0], struct.film_back_mm[1]),
             focal_length_mm=struct.focal_length_mm,
             near_clip=struct.near_clip,
@@ -171,7 +171,7 @@ class Camera:
     def _to_struct(self) -> _ffi.PtCamera:
         struct = _ffi.PtCamera()
         struct.position = (ctypes.c_float * 3)(*self.position)
-        struct.rotation_degrees = (ctypes.c_float * 3)(*self.rotation_degrees)
+        struct.rotation_degrees = (ctypes.c_float * 3)(*self.rotation)
         struct.film_back_mm = (ctypes.c_float * 2)(*self.film_back_mm)
         struct.focal_length_mm = self.focal_length_mm
         struct.near_clip = self.near_clip
