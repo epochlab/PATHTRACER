@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -204,6 +205,9 @@ struct OracleMean {
     std::array<std::vector<float>, kLanes.size()> mean;
     std::array<std::vector<double>, kLanes.size()> tolerance;
     std::array<bool, kLanes.size()> varies{};
+    // HeadlessRenderer's calling pattern: the shared kernels folded in place over whole images, the first pass kept as drawn.
+    std::array<std::vector<float>, kLanes.size()> folded;
+    std::vector<float> foldedM2;
 };
 
 // Renders the driver's passes synchronously: the exact batch mean m_k in double, beside the float32 running mean's error bound E_k.
@@ -219,6 +223,7 @@ OracleMean oracleBatchMean(DriverFixture& fixture, const Camera& camera, int pas
         sum[lane].assign(floats, 0.0);
         oracle.tolerance[lane].assign(floats, 0.0);
     }
+    oracle.foldedM2.assign(pass.beautyLuminanceM2.size(), 0.0F);
     const std::atomic<std::uint64_t> generation{scrambleSeed};
     pathtracer::debug::PassStats stats;
     for (int p = 0; p < passes; ++p) {
@@ -230,6 +235,22 @@ OracleMean oracleBatchMean(DriverFixture& fixture, const Camera& camera, int pas
                                          /*sampleCount=*/passes, generation, scrambleSeed, fixture.pool, stats,
                                          pass);
         const double k = p + 1;
+        const float invN = 1.0F / static_cast<float>(p + 1);
+        if (p > 0) {
+            // kLanes[0] is beauty, read before its own fold below overwrites the previous mean.
+            pathtracer::scene::foldLuminanceM2(oracle.folded[0].data(), pass.beauty.texels.data(),
+                                               static_cast<std::size_t>(pass.beauty.channels), oracle.foldedM2.data(),
+                                               oracle.foldedM2.data(), oracle.foldedM2.size(), invN);
+        }
+        for (std::size_t lane = 0; lane < kLanes.size(); ++lane) {
+            const std::vector<float>& drawn = (pass.*kLanes[lane].image).texels;
+            if (p == 0) {
+                oracle.folded[lane] = drawn;
+            } else {
+                std::vector<float>& mean = oracle.folded[lane];
+                pathtracer::scene::foldRunningMean(mean.data(), drawn.data(), mean.data(), mean.size(), invN);
+            }
+        }
         for (std::size_t lane = 0; lane < kLanes.size(); ++lane) {
             const std::vector<float>& x = (pass.*kLanes[lane].image).texels;
             for (std::size_t i = 0; i < x.size(); ++i) {
@@ -353,6 +374,52 @@ PT_CHECK(running_mean_matches_batch_mean, Slow, Exact) {
                   "%zu of %zu floats over their forward-error bound; worst |running - batch|/bound = %.3e (%s)",
                   violations, floats, worstRatio, worstLane);
     PT_EXPECT(ctx, violations == 0, detail);
+}
+
+// Unification of the two accumulators: the driver's out-of-place row fold equals HeadlessRenderer's in-place one, every bit.
+PT_CHECK(in_place_fold_is_bit_identical_to_driver, Slow, Exact) {
+    constexpr int kPasses = 8;
+    ctx.plan(2);
+    std::unique_ptr<DriverFixture> fixture = makeFixture();
+    if (!fixture->valid()) {
+        for (int i = 0; i < 2; ++i) {
+            PT_EXPECT(ctx, false, "scene/driver construction failed");
+        }
+        return;
+    }
+    const Camera camera = makeCamera();
+    const std::uint64_t generation = fixture->driver->requestTrace(makeRequest(kPasses, camera));
+    const std::shared_ptr<const PathTraceResult> published = waitForPublished(*fixture->driver, generation, kPasses);
+    if (published == nullptr) {
+        for (int i = 0; i < 2; ++i) {
+            PT_EXPECT(ctx, false, "driver never published its maxSamples cap");
+        }
+        return;
+    }
+    const OracleMean expected = oracleBatchMean(*fixture, camera, kPasses, static_cast<std::uint32_t>(generation));
+    std::size_t differing = 0;
+    std::size_t floats = 0;
+    for (std::size_t lane = 0; lane < kLanes.size(); ++lane) {
+        const std::vector<float>& image = ((*published).*kLanes[lane].image).texels;
+        // Bitwise, not ==: a NaN or a signed zero that differs is a divergence too.
+        for (std::size_t i = 0; i < image.size(); ++i) {
+            differing += std::bit_cast<std::uint32_t>(image[i]) != std::bit_cast<std::uint32_t>(expected.folded[lane][i]) ? 1 : 0;
+        }
+        floats += image.size();
+    }
+    char detail[192];
+    std::snprintf(detail, sizeof(detail), "%zu of %zu lane floats differ from the in-place fold", differing, floats);
+    PT_EXPECT(ctx, differing == 0, detail);
+    std::size_t differingM2 = 0;
+    for (std::size_t pixel = 0; pixel < published->beautyLuminanceM2.size(); ++pixel) {
+        differingM2 += std::bit_cast<std::uint32_t>(published->beautyLuminanceM2[pixel]) !=
+                               std::bit_cast<std::uint32_t>(expected.foldedM2[pixel])
+                           ? 1
+                           : 0;
+    }
+    std::snprintf(detail, sizeof(detail), "%zu of %zu M2 floats differ from the in-place fold", differingM2,
+                  published->beautyLuminanceM2.size());
+    PT_EXPECT(ctx, differingM2 == 0, detail);
 }
 
 // A driver holding sampleBase at 0 publishes the mean of N identical passes (sampler.h); pinned at maxSamples = 1, bit-identical.

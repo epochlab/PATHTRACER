@@ -24,29 +24,18 @@ void accumulateMean(PathTraceResult& sample, const PathTraceResult& previousMean
     const std::span<const pathtracer::debug::PathTracedLane> lanes = pathtracer::debug::pathTracedLanes();
     const auto width = static_cast<std::size_t>(sample.beauty.width);
     const auto beautyChannels = static_cast<std::size_t>(sample.beauty.channels);
-    const glm::vec3 weights = pathtracer::debug::kRec709LuminanceWeights;
     threadPool.parallelFor(sample.beauty.height, [&](int y) {
         const std::size_t rowPixel = static_cast<std::size_t>(y) * width;
-        // Before the loop below overwrites it: `beauty` still holds this pass's own radiance and its source the mean of the rest.
-        const float* passBeauty = sample.beauty.texels.data();
-        const float* meanBeauty = previousMean.beauty.texels.data();
-        const float* previousM2 = previousMean.beautyLuminanceM2.data();
-        float* secondMoment = sample.beautyLuminanceM2.data();
-        for (std::size_t pixel = rowPixel; pixel < rowPixel + width; ++pixel) {
-            const std::size_t i = pixel * beautyChannels;
-            const float drawn = (passBeauty[i] * weights.r) + (passBeauty[i + 1] * weights.g) + (passBeauty[i + 2] * weights.b);
-            const float before = (meanBeauty[i] * weights.r) + (meanBeauty[i + 1] * weights.g) + (meanBeauty[i + 2] * weights.b);
-            // Welford 1962 in West 1979's (x - m_prev)(x - m_new) form, the same recurrence and the same invN the RGB lanes use.
-            const float after = before + ((drawn - before) * invN);
-            secondMoment[pixel] = previousM2[pixel] + ((drawn - before) * (drawn - after));
-        }
+        // Before the lane folds overwrite it: `beauty` still holds this pass's own radiance and its source the mean of the rest.
+        foldLuminanceM2(previousMean.beauty.texels.data() + (rowPixel * beautyChannels),
+                        sample.beauty.texels.data() + (rowPixel * beautyChannels), beautyChannels,
+                        previousMean.beautyLuminanceM2.data() + rowPixel, sample.beautyLuminanceM2.data() + rowPixel, width,
+                        invN);
         for (const pathtracer::debug::PathTracedLane lane : lanes) {
             const auto channels = static_cast<std::size_t>((sample.*lane).channels);
-            float* destination = (sample.*lane).texels.data();
-            const float* source = (previousMean.*lane).texels.data();
-            for (std::size_t i = rowPixel * channels; i < (rowPixel + width) * channels; ++i) {
-                destination[i] = source[i] + ((destination[i] - source[i]) * invN);
-            }
+            float* destination = (sample.*lane).texels.data() + (rowPixel * channels);
+            foldRunningMean((previousMean.*lane).texels.data() + (rowPixel * channels), destination, destination,
+                            width * channels, invN);
         }
     });
 }
@@ -98,6 +87,25 @@ double millisecondsSince(std::chrono::steady_clock::time_point start) {
 }
 
 }  // namespace
+
+void foldRunningMean(const float* previousMean, const float* drawn, float* mean, std::size_t count, float invN) {
+    for (std::size_t i = 0; i < count; ++i) {
+        mean[i] = previousMean[i] + ((drawn[i] - previousMean[i]) * invN);
+    }
+}
+
+void foldLuminanceM2(const float* previousMean, const float* drawn, std::size_t channels, const float* previousM2, float* m2,
+                     std::size_t pixels, float invN) {
+    const glm::vec3 weights = pathtracer::debug::kRec709LuminanceWeights;
+    for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
+        const std::size_t i = pixel * channels;
+        const float x = (drawn[i] * weights.r) + (drawn[i + 1] * weights.g) + (drawn[i + 2] * weights.b);
+        const float before = (previousMean[i] * weights.r) + (previousMean[i + 1] * weights.g) + (previousMean[i + 2] * weights.b);
+        // The luminance mean m_n by foldRunningMean's recurrence and invN; (x - m_{n-1})(x - m_n) is West's M2 increment.
+        const float after = before + ((x - before) * invN);
+        m2[pixel] = previousM2[pixel] + ((x - before) * (x - after));
+    }
+}
 
 PathTraceDriver::PathTraceDriver(const EmbreeAccel& accel,
                                   const std::vector<ShadingTriangle>& shadingTriangles,
