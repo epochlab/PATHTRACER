@@ -15,7 +15,6 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/epsilon.hpp>
-#include <glm/gtc/matrix_transform.hpp>
 
 #include "pathtracer/gfx/hdr_image.h"
 #include "check.h"
@@ -26,6 +25,7 @@
 #include "pathtracer/scene/environment_map.h"
 #include "pathtracer/scene/lat_long.h"
 #include "pathtracer/scene/light.h"
+#include "pathtracer/scene/rotation.h"
 #include "pathtracer/scene/sampler.h"
 
 namespace {
@@ -73,9 +73,8 @@ EnvironmentMap makeStructuredEnvironment(pathtracer::gfx::ScalarType type) {
 PT_CHECK(environment_pdf_consistency, Fast, Exact) {
     constexpr int kSampleCount = 20000;
     constexpr float kTolerance = 1e-3F;
-    // Non-zero rotation: sampling rotates by +angle and querying by -angle, so a sign slip cancels at 0 and shows only here.
-    constexpr float kRotation = 0.7F;
-    const glm::mat3 rotation(glm::rotate(glm::mat4(1.0F), kRotation, glm::vec3(0.0F, 1.0F, 0.0F)));
+    // Sampling rotates by R and querying by R^T, so a transpose slip cancels at identity; all three axes, so no axis can hide it.
+    const glm::mat3 rotation = pathtracer::scene::rotationXyz(glm::vec3(25.0F, 40.0F, -60.0F));
     constexpr std::array<pathtracer::gfx::ScalarType, 2> kTypes = {pathtracer::gfx::ScalarType::Float32,
                                                                pathtracer::gfx::ScalarType::Float16};
     ctx.plan(static_cast<int>(kTypes.size()));
@@ -288,7 +287,7 @@ PT_CHECK(omnidirectional_camera_reads_the_environment_texel_for_texel, Fast, Exa
 PT_CHECK(environment_nee_and_miss_share_one_radiance, Fast, Exact) {
     const EnvironmentMap env = makeStructuredEnvironment(pathtracer::gfx::ScalarType::Float32);
     const std::vector<QuadLight> noQuads;
-    const LightSet lights(&env, /*envRotationRadians=*/0.0F, /*envExposure=*/1.0F, noQuads);
+    const LightSet lights(&env, /*envRotationDegrees=*/glm::vec3(0.0F), /*envExposure=*/1.0F, noQuads);
 
     constexpr int kSamples = 4096;
     int drawn = 0;
@@ -458,7 +457,7 @@ float referenceLoQuad(const BsdfParams& params, const glm::vec3& wo, const QuadL
 float misCombinedLoQuad(const BsdfParams& params, const glm::vec3& wo, const QuadLight& quad,
                          const glm::vec3& p, int sampleCount, std::uint32_t seed) {
     const std::vector<QuadLight> quads{quad};
-    const LightSet lights(nullptr, 0.0F, 1.0F, quads);
+    const LightSet lights(nullptr, glm::vec3(0.0F), 1.0F, quads);
     glm::vec3 accum(0.0F);
     for (int i = 0; i < sampleCount; ++i) {
         Sampler sampler(0, 0, i, sampleCount, seed);

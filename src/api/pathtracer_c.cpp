@@ -1,5 +1,6 @@
 #include "pathtracer/api/pathtracer_c.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <memory>
@@ -9,6 +10,7 @@
 #include <vector>
 
 #include <glm/glm.hpp>
+#include <glm/gtc/type_ptr.hpp>
 
 #include "pathtracer/api/headless_renderer.h"
 #include "pathtracer/debug/aov.h"
@@ -73,9 +75,22 @@ void writeError(char* err, int errCap, const std::string& message) {
         lens};
 }
 
-// The request decoded in ABI order, error naming the first bad field; camera ranges follow in render(), after every decode.
+// NULL keeps the authored lights, so it decodes to nullopt; otherwise one XYZ triple per scene light, in scene order.
+[[nodiscard]] std::optional<std::vector<glm::vec3>> toLightRotations(const float* xyz, std::size_t lightCount) {
+    if (xyz == nullptr) {
+        return std::nullopt;
+    }
+    std::vector<glm::vec3> rotations;
+    rotations.reserve(lightCount);
+    for (std::size_t i = 0; i < lightCount; ++i) {
+        rotations.push_back(glm::make_vec3(xyz + (3 * i)));
+    }
+    return rotations;
+}
+
+// The request decoded in ABI order, error naming the first bad field; every range follows in render(), after every decode.
 [[nodiscard]] std::optional<HeadlessRenderer::Request> decodeRequest(const PtRenderRequest& request, float* const* out,
-                                                                     std::string& error) {
+                                                                     std::size_t lightCount, std::string& error) {
     if (request.aovs == nullptr || request.aov_count <= 0) {
         error = "no AOVs requested";
         return std::nullopt;
@@ -123,6 +138,11 @@ void writeError(char* err, int errCap, const std::string& message) {
         .aovs = std::move(aovs),
         .envLightEnabled = envLightEnabled,
         .showSky = showSky,
+        .rootRotationDegrees = request.root_rotation_degrees != nullptr
+                                   ? std::optional(glm::make_vec3(request.root_rotation_degrees))
+                                   : std::nullopt,
+        .lightRotationsDegrees = toLightRotations(request.light_rotation_degrees, lightCount),
+        .envRotationDegrees = glm::make_vec3(request.env_rotation_degrees),
     };
 }
 
@@ -228,6 +248,27 @@ int pt_renderer_default_height(const PtRenderer* renderer) {
     return renderer == nullptr ? 0 : reinterpret_cast<const HeadlessRenderer*>(renderer)->defaultHeight();
 }
 
+int pt_renderer_light_count(const PtRenderer* renderer) {
+    return renderer == nullptr ? 0 : static_cast<int>(reinterpret_cast<const HeadlessRenderer*>(renderer)->scene().lights.size());
+}
+
+void pt_renderer_default_root_rotation(const PtRenderer* renderer, float* out) {
+    if (renderer == nullptr || out == nullptr) {
+        return;
+    }
+    const glm::vec3& rotation = reinterpret_cast<const HeadlessRenderer*>(renderer)->scene().model.rotation;
+    std::copy_n(glm::value_ptr(rotation), 3, out);
+}
+
+void pt_renderer_default_light_rotations(const PtRenderer* renderer, float* out) {
+    if (renderer == nullptr || out == nullptr) {
+        return;
+    }
+    for (const pathtracer::config::QuadLightConfig& light : reinterpret_cast<const HeadlessRenderer*>(renderer)->scene().lights) {
+        out = std::copy_n(glm::value_ptr(light.rotation), 3, out);
+    }
+}
+
 int pt_render(PtRenderer* renderer, const PtRenderRequest* request, float* const* out, char* err,
               int err_cap) {
     try {
@@ -236,13 +277,15 @@ int pt_render(PtRenderer* renderer, const PtRenderRequest* request, float* const
             return PT_ERROR;
         }
         std::string error;
-        const std::optional<HeadlessRenderer::Request> internal = decodeRequest(*request, out, error);
+        auto* const headless = reinterpret_cast<HeadlessRenderer*>(renderer);
+        const std::optional<HeadlessRenderer::Request> internal =
+            decodeRequest(*request, out, headless->scene().lights.size(), error);
         if (!internal.has_value()) {
             writeError(err, err_cap, error);
             return PT_ERROR;
         }
         const std::span<float* const> outputs(out, static_cast<std::size_t>(request->aov_count));
-        if (!reinterpret_cast<HeadlessRenderer*>(renderer)->render(*internal, outputs, error)) {
+        if (!headless->render(*internal, outputs, error)) {
             writeError(err, err_cap, error);
             return PT_ERROR;
         }

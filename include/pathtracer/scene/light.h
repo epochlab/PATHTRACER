@@ -53,8 +53,8 @@ struct LightSample {
 // The lights NEE can sample in one pass: the environment (or none, per the HUD toggle) plus zero or more quads. Selection is uniform.
 class LightSet {
 public:
-    // environment == nullptr excludes it entirely: no NEE, MIS or miss radiance. The quads vector must outlive this LightSet.
-    LightSet(const EnvironmentMap* environment, float envRotationRadians, float envExposure,
+    // environment == nullptr excludes it entirely. envRotationDegrees turns the map to world by rotationXyz. quads must outlive this.
+    LightSet(const EnvironmentMap* environment, const glm::vec3& envRotationDegrees, float envExposure,
              const std::vector<QuadLight>& quads);
 
     [[nodiscard]] int count() const;
@@ -76,7 +76,7 @@ public:
 
 private:
     const EnvironmentMap* environment_;
-    glm::mat3 envRotation_;  // map to world about +Y, built once per LightSet, i.e. once per pass, rather than per environment query
+    glm::mat3 envRotation_;  // map to world, built once per LightSet, i.e. once per pass, rather than per environment query
     float envExposure_;
     const std::vector<QuadLight>& quads_;
 };

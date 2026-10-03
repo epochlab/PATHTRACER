@@ -338,7 +338,7 @@ pathtracer::scene::DebugCameraController makeDebugCamera(const pathtracer::confi
 
 std::optional<AppScene> loadAppScene(const pathtracer::config::SceneConfig& sceneConfig,
                                      const pathtracer::config::ProfileConfig& profileConfig) {
-    const glm::mat4 sceneTransform = pathtracer::scene::rootTransformOf(sceneConfig);
+    const glm::mat4 sceneTransform = pathtracer::scene::rootTransformOf(sceneConfig.model);
     const auto loadStart = std::chrono::steady_clock::now();
     std::optional<pathtracer::scene::LoadedModel> model =
         pathtracer::scene::loadGltf(std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.model.gltfPath, sceneTransform);
@@ -750,7 +750,7 @@ void presentFrame(AppResources& app,
 std::uint64_t requestPathTrace(AppResources& app, const pathtracer::scene::Camera& camera, int traceWidth,
                                int traceHeight) {
     return app.pathTraceDriver->requestTrace(pathtracer::scene::PathTraceDriver::Request{
-        camera, traceWidth, traceHeight, glm::radians(static_cast<float>(app.envRotationDegrees)),
+        camera, traceWidth, traceHeight, glm::vec3(0.0F, static_cast<float>(app.envRotationDegrees), 0.0F),
         app.showSky, app.envLightEnabled, std::exp2(app.envExposureStops), app.scene.baseSettings,
         app.maxSamples});
 }

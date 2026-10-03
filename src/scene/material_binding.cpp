@@ -10,6 +10,8 @@
 
 #include <glm/gtc/matrix_transform.hpp>
 
+#include "pathtracer/scene/rotation.h"
+
 namespace pathtracer::scene {
 
 namespace {
@@ -31,12 +33,9 @@ bool everyKeyNamesAnInstance(const Overrides& overrides, const std::vector<MeshI
     return true;
 }
 
-// translate * Rz * Ry * Rx, rotation in degrees: the one placement convention shared by the model root and every light.
+// translate * rotationXyz: the one placement convention shared by the model root and every light.
 glm::mat4 placementTransform(const glm::vec3& position, const glm::vec3& rotationDegrees) {
-    return glm::translate(glm::mat4(1.0F), position) *
-           glm::rotate(glm::mat4(1.0F), glm::radians(rotationDegrees.z), glm::vec3(0.0F, 0.0F, 1.0F)) *
-           glm::rotate(glm::mat4(1.0F), glm::radians(rotationDegrees.y), glm::vec3(0.0F, 1.0F, 0.0F)) *
-           glm::rotate(glm::mat4(1.0F), glm::radians(rotationDegrees.x), glm::vec3(1.0F, 0.0F, 0.0F));
+    return glm::translate(glm::mat4(1.0F), position) * glm::mat4(rotationXyz(rotationDegrees));
 }
 
 }  // namespace
@@ -160,8 +159,8 @@ std::vector<QuadLight> buildQuadLights(const std::vector<pathtracer::config::Qua
     return quadLights;
 }
 
-glm::mat4 rootTransformOf(const pathtracer::config::SceneConfig& scene) {
-    return placementTransform(scene.model.position, scene.model.rotation);
+glm::mat4 rootTransformOf(const pathtracer::config::ModelConfig& model) {
+    return placementTransform(model.position, model.rotation);
 }
 
 PathTraceSettings baseSettingsOf(const pathtracer::config::ProfileConfig& profile,
