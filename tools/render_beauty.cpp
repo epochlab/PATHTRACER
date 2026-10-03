@@ -622,8 +622,8 @@ int main(int argc, char** argv) {
         linearRgb[(texel * 3) + 1] = rgb.g;
         linearRgb[(texel * 3) + 2] = rgb.b;
     }
-    const std::vector<unsigned char> encoded =
-        pathtracer::gfx::encodeForDisplay(linearRgb, width, height, display.gain, isBeauty, display.offset);
+    std::vector<unsigned char> encoded(linearRgb.size());
+    pathtracer::gfx::encodeForDisplay(linearRgb, width, height, display.gain, isBeauty, display.offset, encoded);
     if (!writePng(options.outPath, width, height, encoded)) {
         return EXIT_FAILURE;
     }

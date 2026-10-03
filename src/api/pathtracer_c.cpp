@@ -266,10 +266,8 @@ int pt_display_encode(const float* rgb, int width, int height, float exposure_ev
         }
         const auto count = static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3;
         // Caller-driven with no AOV context, so the map stays a scalar photographic gain with no offset, as this entry point always was.
-        const std::vector<unsigned char> encoded =
-            pathtracer::gfx::encodeForDisplay(std::span<const float>(rgb, count), width, height,
-                                               glm::vec3(std::pow(2.0F, exposure_ev)), display_transform != 0);
-        std::memcpy(out, encoded.data(), encoded.size());
+        pathtracer::gfx::encodeForDisplay(std::span<const float>(rgb, count), width, height, glm::vec3(std::pow(2.0F, exposure_ev)),
+                                          display_transform != 0, glm::vec3(0.0F), std::span<unsigned char>(out, count));
         return PT_OK;
     } catch (const std::exception& e) {
         writeError(err, err_cap, e.what());

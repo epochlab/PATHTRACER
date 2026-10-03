@@ -3,6 +3,30 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Display encode cost: one shared OCIO processor, a row-wise encode into the caller's buffer
+
+`pt_display_encode` re-parsed the builtin OCIO config and rebuilt its processor on every call. It encoded into a full-frame float
+copy and a full-frame byte vector, then copied the bytes into the caller's buffer. Measured against `main` with an interleaved
+process-per-round harness, 11 rounds. Evidence is in `results/display_encode`.
+
+- perf: the sRGB and Rec.1886 CPU processors are each built once on first use, as thread-safe statics, in `ocio_cpu_transform.cpp`.
+  `applyOcioDisplayTransform` takes a `Lut`, and Raw is the identity. The viewer's Beauty probe uses it, which deletes
+  `main.cpp`'s duplicate cache and its OCIO include.
+- perf: `encodeForDisplay` writes into a caller `std::span<unsigned char>`, one row at a time through a `width x 4` float scratch.
+  RGBA is OCIO's native layout, so the CPU processor transforms the row in place without a conversion pass.
+  `pt_display_encode` hands it the caller's `out`, so the byte temporary and the `memcpy` go. Peak scratch at 2048x1152 drops from
+  28.3 MB plus 7.1 MB to 32 KB.
+- measured: steady-state encode **1x1 5.57 ms -> 1.7 us**, the processor rebuild, 512x288 **0.397x [0.396, 0.398]**,
+  2048x1152 **0.835x [0.835, 0.836]**. At 2048x1152, 39.3 of the remaining 62.5 ms is the per-texel sine-hash dither (two `sin`
+  per texel, mirroring the shader) and the quantize.
+- image: all 32 AOVs on cornell, macbeth and stump are byte-identical through `render_beauty`, 96 of 96 PNGs.
+- test: `display_validate` gains two checks:
+  - `encode_matches_whole_image_transform`: the row-wise encode is bit-equal to a whole-image OCIO pass followed by an
+    untransformed encode; every code lies within the TPDF dither's 1.5-code reach of `255 clamp(v)`; Raw is the identity.
+  - `rec709_lut_is_the_bt1886_inverse_eotf`: `V = L^(1/2.4)` within 1e-5 (ITU-R BT.1886 Annex 1, Lw = 1, Lb = 0).
+  - Five mutations: four are caught. A dither keyed on the wrong row survives inside its own bound, so exact dither parity rests on
+    the byte identity above.
+
 ## C ABI coverage: a validator that calls only the exported ABI
 
 `api_validate` drives `HeadlessRenderer` in C++, so nothing in `ctest` crossed the C ABI that Python and other foreign
