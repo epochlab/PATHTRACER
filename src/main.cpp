@@ -1227,11 +1227,11 @@ struct Options {
     std::string scenePath = ASSET_ROOT_DIR "/scenes/cornell.json";
     // Off by default: the live dashboard redraws in place, wrong for anything scripted. Always compiled in, so -stats measures what ships.
     bool stats = false;
-    // -bench PATH: run one accumulation to profile.json's maxSamples, append it to this benchmark log (bench_log.h), exit.
+    // -bench PATH: run one accumulation at the kBench* size and samples, append it to this benchmark log (bench_log.h), exit.
     std::string benchLogPath;
     // -bench-aovs A,B,C: AovId sequence the run walks, one stage per entry. Empty = today's single-stage capture.
     std::vector<int> benchAovs;
-    // -size WxH and -max-samples N replace profile.json's render.width/height and maxSamples: a benchmark sized without editing it.
+    // -size WxH and -max-samples N replace profile.json's render.width/height and maxSamples, and -bench's defaults, without editing it.
     std::optional<std::pair<int, int>> size;
     std::optional<int> maxSamples;
 };
@@ -1333,6 +1333,10 @@ std::optional<Options> parseOptions(int argc, char** argv) {
                        << " [-size WxH] [-max-samples N]\n";
             return std::nullopt;
         }
+    }
+    if (!options.benchLogPath.empty()) {
+        options.size = options.size.value_or(std::pair{pathtracer::debug::kBenchWidth, pathtracer::debug::kBenchHeight});
+        options.maxSamples = options.maxSamples.value_or(pathtracer::debug::kBenchSamples);
     }
     return options;
 }

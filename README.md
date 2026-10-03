@@ -23,6 +23,8 @@ cmake --build build
 ./build/pathtracer [-scene path/to/scene.json] [-stats] [-bench log.jsonl] [-bench-aovs beauty,normal,...] [-size WxH] [-max-samples N]
 ```
 
+`-bench` runs at 512x256 and 16 samples unless `-size` or `-max-samples` say otherwise; `gbuffer_bench` and `render_beauty` default to the same size.
+
 ## Controls
 
 | Input | Action |

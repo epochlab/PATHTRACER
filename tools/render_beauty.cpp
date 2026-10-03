@@ -47,9 +47,9 @@ struct Options {
     std::string compareExrPath;
     // How --compare-exr's error distributes over frequency: a change that rearranges error without reducing it is invisible to RMSE.
     bool errorSpectrum = false;
-    int width = 0;   // 0 = profile.json's window size
-    int height = 0;
-    int passes = 64;
+    int width = pathtracer::debug::kBenchWidth;
+    int height = pathtracer::debug::kBenchHeight;
+    int passes = pathtracer::debug::kBenchSamples;
     // The scramble seed is one realization, not a sampler property: two seeds give independent error images with the same expected RMSE.
     std::uint32_t scrambleSeed = 1;
     float exposureEv = 0.0F;
@@ -381,6 +381,10 @@ bool parseArgs(int argc, char** argv, Options& options) {
         std::cerr << "render_beauty: --passes must be at least 1\n";
         return false;
     }
+    if (options.width < 1 || options.height < 1) {
+        std::cerr << "render_beauty: --width and --height must be at least 1\n";
+        return false;
+    }
     if (options.errorSpectrum && options.compareExrPath.empty()) {
         std::cerr << "render_beauty: --error-spectrum needs --compare-exr to have an error to analyse\n";
         return false;
@@ -418,8 +422,8 @@ int main(int argc, char** argv) {
                                          authored.farClip(), authored.aperture(), authored.shutterSeconds(),
                                          authored.iso(), lens};
     }() : renderer->defaultCamera();
-    const int width = options.width > 0 ? options.width : renderer->defaultWidth();
-    const int height = options.height > 0 ? options.height : renderer->defaultHeight();
+    const int width = options.width;
+    const int height = options.height;
     // --env-light overrides the scene's own authored default (-1 = no override).
     const std::optional<bool> envLightOverride =
         options.envLight >= 0 ? std::optional<bool>(options.envLight != 0) : std::nullopt;
