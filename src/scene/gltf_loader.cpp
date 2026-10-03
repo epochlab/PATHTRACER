@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <iostream>
+#include <numeric>
 #include <optional>
 #include <string>
 #include <utility>
@@ -133,11 +134,12 @@ std::vector<Vertex> readVertices(const RequiredAccessors& acc) {
     return vertices;
 }
 
-// Rejects a missing or sparse index accessor for the same reason: cgltf cannot signal that failure through its return value.
-std::optional<std::vector<unsigned int>> readIndices(const cgltf_accessor* indicesAcc) {
+// Rejects a sparse index accessor for the same reason; a missing one means the implied 0..vertexCount-1 (glTF 2.0 3.7.2.1).
+std::optional<std::vector<unsigned int>> readIndices(const cgltf_accessor* indicesAcc, cgltf_size vertexCount) {
     if (indicesAcc == nullptr) {
-        std::cerr << "loadGltf: primitive has no index accessor\n";
-        return std::nullopt;
+        std::vector<unsigned int> indices(vertexCount);
+        std::iota(indices.begin(), indices.end(), 0U);
+        return indices;
     }
     if (indicesAcc->is_sparse) {
         std::cerr << "loadGltf: sparse accessors are not supported\n";
@@ -150,34 +152,56 @@ std::optional<std::vector<unsigned int>> readIndices(const cgltf_accessor* indic
     return indices;
 }
 
-// Builds one MeshInstance from a triangle primitive, failing with nullopt rather than defaulting geometry it cannot read.
+// Expands a strip or fan to a list in glTF 2.0 3.7.2.1's per-triangle vertex order, which is what fixes each face's winding.
+std::vector<unsigned int> toTriangleList(std::vector<unsigned int> indices, cgltf_primitive_type type) {
+    if (type == cgltf_primitive_type_triangles) {
+        return indices;
+    }
+    const std::size_t triangleCount = indices.size() < 3 ? 0 : indices.size() - 2;
+    std::vector<unsigned int> list;
+    list.reserve(3 * triangleCount);
+    if (type == cgltf_primitive_type_triangle_strip) {
+        for (std::size_t i = 0; i < triangleCount; ++i) {
+            list.insert(list.end(), {indices[i], indices[i + 1 + (i % 2)], indices[i + 2 - (i % 2)]});
+        }
+    } else {
+        for (std::size_t i = 0; i < triangleCount; ++i) {
+            list.insert(list.end(), {indices[i + 1], indices[i + 2], indices[0]});
+        }
+    }
+    return list;
+}
+
+// True for the triangle topologies; points and lines have no area, so no ray can hit them and they carry no surface.
+bool isSurface(cgltf_primitive_type type) {
+    return type == cgltf_primitive_type_triangles || type == cgltf_primitive_type_triangle_strip ||
+           type == cgltf_primitive_type_triangle_fan;
+}
+
+// Builds one MeshInstance from a triangle-topology primitive, failing with nullopt rather than defaulting geometry it cannot read.
 std::optional<MeshInstance> loadPrimitive(const cgltf_primitive& prim, const glm::mat4& transform, int instanceIndex,
                                            const std::string& name,
                                            std::vector<Triangle>& outWorldTriangles,
                                            std::vector<ShadingTriangle>& outShadingTriangles) {
-    if (prim.type != cgltf_primitive_type_triangles) {
-        std::cerr << "loadGltf: skipping non-triangle primitive\n";
-        return std::nullopt;
-    }
-
     const std::optional<RequiredAccessors> acc = findAttributeAccessors(prim);
     if (!acc.has_value()) {
         return std::nullopt;
     }
-    std::optional<std::vector<unsigned int>> indices = readIndices(prim.indices);
-    if (!indices.has_value()) {
+    std::optional<std::vector<unsigned int>> stream = readIndices(prim.indices, acc->position->count);
+    if (!stream.has_value()) {
         return std::nullopt;
     }
+    std::vector<unsigned int> indices = toTriangleList(std::move(*stream), prim.type);
     // glTF 2.0 3.7.2.1: a negative global determinant makes faces clockwise; re-wind so cross(e1,e2) keeps facing the normal.
     const float handedness = glm::determinant(glm::mat3(transform)) < 0.0F ? -1.0F : 1.0F;
     if (handedness < 0.0F) {
-        for (std::size_t i = 0; i + 2 < indices->size(); i += 3) {
-            std::swap((*indices)[i + 1], (*indices)[i + 2]);
+        for (std::size_t i = 0; i + 2 < indices.size(); i += 3) {
+            std::swap(indices[i + 1], indices[i + 2]);
         }
     }
     const std::vector<Vertex> vertices = readVertices(*acc);
-    appendWorldTriangles(vertices, *indices, transform, outWorldTriangles);
-    appendShadingTriangles(vertices, *indices, transform, handedness, instanceIndex, outShadingTriangles);
+    appendWorldTriangles(vertices, indices, transform, outWorldTriangles);
+    appendShadingTriangles(vertices, indices, transform, handedness, instanceIndex, outShadingTriangles);
 
     // Geometry only: every slot starts at its neutral default, and bindSceneTextures binds the scene JSON's maps by node name.
     return MeshInstance{
@@ -208,10 +232,14 @@ bool walkNodes(cgltf_node* const* nodes, cgltf_size count, const glm::mat4& pare
         if (node->mesh != nullptr) {
             const std::string name = node->name != nullptr ? node->name : "";
             for (cgltf_size pi = 0; pi < node->mesh->primitives_count; ++pi) {
+                const cgltf_primitive& prim = node->mesh->primitives[pi];
+                if (!isSurface(prim.type)) {
+                    std::cerr << "loadGltf: skipping a point or line primitive on node '" << name << "'\n";
+                    continue;
+                }
                 const int instanceIndex = static_cast<int>(instances.size());  // index this primitive's MeshInstance will get
                 std::optional<MeshInstance> instance =
-                    loadPrimitive(node->mesh->primitives[pi], world, instanceIndex, name, worldTriangles,
-                                  shadingTriangles);
+                    loadPrimitive(prim, world, instanceIndex, name, worldTriangles, shadingTriangles);
                 if (!instance.has_value()) {
                     return false;
                 }
