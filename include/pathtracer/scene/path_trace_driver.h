@@ -56,7 +56,7 @@ public:
     // Render-thread-only. Bumps the generation and replaces the pending request; it does not queue. Returns that new generation.
     std::uint64_t requestTrace(const Request& request);
 
-    // Render-thread-only, at most once per frame. Null until the first pass. One mutex-guarded shared_ptr copy keeps the image alive.
+    // Render-thread-only, at most once per frame, null until the first pass. Holding two results at once can stall the driver.
     [[nodiscard]] std::shared_ptr<const PathTraceResult> latestResult() const;
 
     // Render-thread-only. Parks the driver at the next pass boundary. Non-destructive: generation_ is also the sampler scramble seed.
@@ -114,8 +114,11 @@ private:
     mutable std::mutex resultMutex_;
     std::shared_ptr<const PathTraceResult> result_;
 
+    // Holders of a slot at once: the driver's mean being folded from and pass being written, and the reader's one held result.
+    static constexpr std::size_t kDriverHeldBuffers = 2;
+    static constexpr std::size_t kReaderHeldBuffers = 1;
     // Driver-thread-only rotation of buffer sets, reused for the process life, so renderPathTraced allocates no images per pass.
-    std::array<std::shared_ptr<PathTraceResult>, 4> bufferPool_;
+    std::array<std::shared_ptr<PathTraceResult>, kDriverHeldBuffers + kReaderHeldBuffers> bufferPool_;
 
     // Per-chunk private accumulators for reduceOverRange, driver-thread-owned and reused across passes, as passStats_ and bufferPool_ are.
     std::vector<OverRangeHistogram> overRangeHistograms_;

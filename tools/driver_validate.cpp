@@ -642,7 +642,7 @@ PT_CHECK(suspension_preserves_the_accumulation_exactly, Slow, Exact) {
     PT_EXPECT(ctx, differing == 0, detail);
 }
 
-// Four pooled images for three pinnable results: acquireFreeBuffer must STALL rather than return a buffer still being read.
+// Three pooled images, two driver-held and one for the reader: acquireFreeBuffer must STALL rather than recycle a held result.
 PT_CHECK(published_results_are_not_overwritten, Slow, Exact) {
     ctx.plan(1);
     std::unique_ptr<DriverFixture> fixture = makeFixture();

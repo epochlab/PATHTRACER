@@ -167,12 +167,22 @@ struct BenchCapture {
 // The one evaluated BeautyFilter AOV, held across frames. One entry, not a map: exactly one AOV is on screen at a time.
 struct FilterCache {
     pathtracer::debug::AovId aov = pathtracer::debug::AovId::Count;
-    std::shared_ptr<const void> owner;  // identity and lifetime of the published pass this was filtered from
+    // The published pass this was filtered from, by value: (generation, samples) is unique per publish and pins no pool slot.
     std::uint64_t generation = 0;
     int samples = 0;
     // Bumped per re-evaluation, so the display texture's cache key changes even though `image`'s address never does.
     std::uint64_t revision = 0;
     pathtracer::gfx::HdrImage image;
+};
+
+// The HdrImage an AOV displays and the counters that change whenever its contents do; by value, so as a cache key it pins nothing.
+struct DisplayedAovSource {
+    const pathtracer::gfx::HdrImage* image = nullptr;
+    // A published lane's (generation, samples), unique per publish; the G-buffer's generation or the filter cache's revision, and 0.
+    std::uint64_t generation = 0;
+    int samples = 0;
+
+    bool operator==(const DisplayedAovSource&) const = default;
 };
 
 // The immutable scene initializeApp builds once: geometry, lights, environment, BVH and resolved materials, as HeadlessRenderer holds.
@@ -243,14 +253,10 @@ struct AppResources {
     // Constructed in main() right after initializeApp(): its reference members must bind to objects at their final address.
     std::unique_ptr<pathtracer::scene::PathTraceDriver> pathTraceDriver{};
     std::optional<pathtracer::gfx::Texture> pathTraceDisplayTexture{};
-    // Which image the texture holds, not the AovId that selected it, so AOVs sharing a buffer share one upload.
-    const pathtracer::gfx::HdrImage* pathTraceDisplayedImage = nullptr;  // nullptr = nothing uploaded yet
+    // What pathTraceDisplayTexture holds, keyed by image not AovId so AOVs sharing a buffer share one upload; null image = none yet.
+    DisplayedAovSource pathTraceDisplayed{};
     // The display decision for the last rebuilt pathTraceDisplayTexture; its pre-mapped texels are what that texture already holds.
     pathtracer::debug::AovDisplay pathTraceDisplay{{}, {glm::vec3(1.0F), glm::vec3(0.0F)}};
-    // Which GBuffer generation the texture holds; 0 when it was built from a PathTraceResult instead.
-    std::uint64_t pathTraceDisplayedGeneration = 0;
-    // Strong ref, not just an identity pointer, to whichever published object pathTraceDisplayTexture currently reflects.
-    std::shared_ptr<const void> pathTraceDisplayedOwner{};
     PathTraceTriggerState lastPathTraceTrigger{};  // sentinel-initialized, see its own doc comment
     GBufferTriggerState lastGBufferTrigger{};  // the same, for the G-buffer's independent refresh
     // The camera the last frame displayed, MotionVector's origin; the startup pose before the first frame, so it moves from itself.
@@ -580,14 +586,6 @@ void resolveOrbitPick(pathtracer::platform::Window& window, AppResources& app,
     app.lastCursorY = cursorY;
 }
 
-// Bundles the HdrImage an AOV displays with a type-erased strong ref to its owner, which is also an ABA-safe cache key.
-struct DisplayedAovSource {
-    const pathtracer::gfx::HdrImage* image = nullptr;
-    std::shared_ptr<const void> owner;
-    // A counter that changes whenever the image's contents do: the G-buffer's, the filter cache's, or 0 for a published lane.
-    std::uint64_t generation = 0;
-};
-
 // Re-runs the selected image-space filter only when the pass it reads, or the AOV itself, changed. Filters cost tens of milliseconds.
 const pathtracer::gfx::HdrImage* ensureFilterImage(
     AppResources& app, const std::shared_ptr<const pathtracer::scene::PathTraceResult>& snapshot,
@@ -596,8 +594,7 @@ const pathtracer::gfx::HdrImage* ensureFilterImage(
         return nullptr;
     }
     FilterCache& cache = app.filterCache;
-    if (cache.revision != 0 && cache.aov == aov && cache.owner == snapshot &&
-        cache.generation == snapshot->generation && cache.samples == snapshot->samples) {
+    if (cache.revision != 0 && cache.aov == aov && cache.generation == snapshot->generation && cache.samples == snapshot->samples) {
         return &cache.image;
     }
     const pathtracer::debug::ScopedCpuTimer filterTimer(app.stages.filterMs);
@@ -606,7 +603,6 @@ const pathtracer::gfx::HdrImage* ensureFilterImage(
         pathtracer::debug::FilterInput{snapshot->beauty, snapshot->beautyLuminanceM2.data(), snapshot->samples},
         *app.gbufferThreadPool);
     cache.aov = aov;
-    cache.owner = snapshot;
     cache.generation = snapshot->generation;
     cache.samples = snapshot->samples;
     ++cache.revision;
@@ -619,16 +615,14 @@ DisplayedAovSource resolveAovImage(AppResources& app,
                                    pathtracer::debug::AovId aov) {
     if (const pathtracer::debug::GBufferLane lane = pathtracer::debug::gbufferLane(aov)) {
         // The buffer is allocated for the process's life now, so a null check no longer distinguishes "no render yet" -- generation 0 does.
-        return app.gbuffer->generation == 0
-                   ? DisplayedAovSource{}
-                   : DisplayedAovSource{&(*app.gbuffer.*lane), app.gbuffer, app.gbuffer->generation};
+        return app.gbuffer->generation == 0 ? DisplayedAovSource{}
+                                            : DisplayedAovSource{&(*app.gbuffer.*lane), app.gbuffer->generation, 0};
     }
     if (const pathtracer::debug::PathTracedLane lane = pathtracer::debug::pathTracedLane(aov)) {
-        return snapshot ? DisplayedAovSource{&(*snapshot.*lane), snapshot} : DisplayedAovSource{};
+        return snapshot ? DisplayedAovSource{&(*snapshot.*lane), snapshot->generation, snapshot->samples} : DisplayedAovSource{};
     }
     const pathtracer::gfx::HdrImage* filtered = ensureFilterImage(app, snapshot, aov);
-    return filtered != nullptr ? DisplayedAovSource{filtered, snapshot, app.filterCache.revision}
-                               : DisplayedAovSource{};
+    return filtered != nullptr ? DisplayedAovSource{filtered, app.filterCache.revision, 0} : DisplayedAovSource{};
 }
 
 // Cursor offset within imageRect, in framebuffer pixels with GL's bottom-left origin. Nullopt off-window or over a letterbox bar.
@@ -681,14 +675,12 @@ pathtracer::debug::PixelProbeSample samplePixelProbe(
     return {true, glm::vec4(color, 1.0F)};
 }
 
-// Re-uploads only when the owning published object changed: 33MB a frame for texels the GPU holds is work without a reason.
-void ensurePathTraceDisplayTexture(AppResources& app, const std::shared_ptr<const void>& owner,
-                                    const pathtracer::gfx::HdrImage& image, std::uint64_t generation,
-                                    int samples) {
-    if (app.pathTraceDisplayTexture.has_value() && app.pathTraceDisplayedImage == &image &&
-        app.pathTraceDisplayedOwner == owner && app.pathTraceDisplayedGeneration == generation) {
+// Re-uploads only when the displayed image's contents changed: re-sending texels the GPU already holds is work without a reason.
+void ensurePathTraceDisplayTexture(AppResources& app, const DisplayedAovSource& source, int samples) {
+    if (app.pathTraceDisplayTexture.has_value() && app.pathTraceDisplayed == source) {
         return;
     }
+    const pathtracer::gfx::HdrImage& image = *source.image;
     // Started after the cache-key check, never before: on a hit this does nothing and must report 0, not the last real upload's cost.
     const pathtracer::debug::ScopedCpuTimer uploadTimer(app.stages.uploadMs);
     app.stages.uploaded = true;
@@ -706,9 +698,7 @@ void ensurePathTraceDisplayTexture(AppResources& app, const std::shared_ptr<cons
         app.pathTraceDisplayTexture = pathtracer::gfx::Texture::createFromFloatPixels(
             shown.width, shown.height, shown.channels, shown.texels.data(), app.displayFormat);
     }
-    app.pathTraceDisplayedImage = &image;
-    app.pathTraceDisplayedOwner = owner;
-    app.pathTraceDisplayedGeneration = generation;
+    app.pathTraceDisplayed = source;
 }
 
 // Clears the whole viewport, so the letterbox bars are black and an AOV with no buffer leaves no stale contents on screen.
@@ -731,8 +721,7 @@ void presentFrame(AppResources& app,
     if (source.image == nullptr) {
         return;
     }
-    ensurePathTraceDisplayTexture(app, source.owner, *source.image, source.generation,
-                                   pathTraceSnapshot != nullptr ? pathTraceSnapshot->samples : 0);
+    ensurePathTraceDisplayTexture(app, source, pathTraceSnapshot != nullptr ? pathTraceSnapshot->samples : 0);
     const bool isBeauty = aovId == pathtracer::debug::AovId::Beauty;
     app.ocioTransform.setActiveLut(isBeauty ? app.userLut
                                              : pathtracer::gfx::OcioDisplayTransform::Lut::Raw);
