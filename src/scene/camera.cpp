@@ -17,9 +17,17 @@ glm::vec3 forwardFromEuler(float yawRadians, float pitchRadians) {
                                      -std::cos(yawRadians) * cosPitch));
 }
 
+// A sensor point in polar form with the direction the lens images onto it: the one inverse solve a ray and its differential share.
+struct FisheyeSample {
+    float xMm;
+    float yMm;
+    float radiusMm;
+    float theta;
+    glm::vec3 dir;
+};
+
 // Kannala-Brandt arm: the sensor point in mm sets the image radius, the model inverts it to a polar angle about the optical axis.
-std::optional<Ray> fisheyeRay(const Camera::ViewBasis& basis, const glm::vec3& origin, float nearClip,
-                               float farClip, float ndcX, float ndcY) {
+std::optional<FisheyeSample> fisheyeSample(const Camera::ViewBasis& basis, float ndcX, float ndcY) {
     const float xMm = ndcX * basis.halfWidthMm;
     const float yMm = ndcY * basis.halfHeightMm;
     const float radiusMm = std::hypot(xMm, yMm);
@@ -28,7 +36,7 @@ std::optional<Ray> fisheyeRay(const Camera::ViewBasis& basis, const glm::vec3& o
         return std::nullopt;
     }
     if (radiusMm == 0.0F) {
-        return Ray{origin, basis.forward, nearClip, farClip};
+        return FisheyeSample{xMm, yMm, radiusMm, 0.0F, basis.forward};
     }
     const float theta = kannalaBrandtTheta(basis.lens.radialCoefficients, radiusMm / basis.focalLengthMm,
                                             basis.maxThetaRadians);
@@ -36,7 +44,27 @@ std::optional<Ray> fisheyeRay(const Camera::ViewBasis& basis, const glm::vec3& o
     const glm::vec3 azimuth = ((xMm * basis.right) + (yMm * basis.up)) / radiusMm;
     // Unit by construction: forward and the azimuth are orthonormal, and cos^2 + sin^2 = 1 to a rounding.
     const glm::vec3 dir = (std::cos(theta) * basis.forward) + (std::sin(theta) * azimuth);
-    return Ray{origin, dir, nearClip, farClip};
+    return FisheyeSample{xMm, yMm, radiusMm, theta, dir};
+}
+
+// d(dir)/d(ndc) of a fisheye sample: radial via d(theta)/dr = 1/(f theta_d'(theta)), azimuthal via sin(theta)/r, chained by mm/ndc.
+glm::mat2x3 fisheyeDirPerNdc(const Camera::ViewBasis& basis, const FisheyeSample& sample) {
+    const glm::vec2 mmPerNdc(basis.halfWidthMm, basis.halfHeightMm);
+    // On the axis both rates tend to 1/f and the azimuth drops out: the lens is locally a pinhole of focal length f.
+    if (sample.radiusMm == 0.0F) {
+        return glm::mat2x3(basis.right * (mmPerNdc.x / basis.focalLengthMm), basis.up * (mmPerNdc.y / basis.focalLengthMm));
+    }
+    const glm::vec2 radial = glm::vec2(sample.xMm, sample.yMm) / sample.radiusMm;
+    const glm::vec3 azimuth = (radial.x * basis.right) + (radial.y * basis.up);
+    const glm::vec3 tangent = (radial.x * basis.up) - (radial.y * basis.right);
+    const float sinTheta = std::sin(sample.theta);
+    const float thetaPerMm =
+        1.0F / (basis.focalLengthMm * kannalaBrandtRadiusSlope(basis.lens.radialCoefficients, sample.theta));
+    const glm::vec3 dirPerRadiusMm = ((std::cos(sample.theta) * azimuth) - (sinTheta * basis.forward)) * thetaPerMm;
+    const glm::vec3 dirPerArcMm = tangent * (sinTheta / sample.radiusMm);
+    return glm::mat2x3((dirPerRadiusMm * radial.x) - (dirPerArcMm * radial.y),
+                       (dirPerRadiusMm * radial.y) + (dirPerArcMm * radial.x)) *
+           glm::mat2(mmPerNdc.x, 0.0F, 0.0F, mmPerNdc.y);
 }
 
 // Kannala & Brandt 2006 forward model: polar angle off the axis, image radius f * theta_d(theta) along the azimuth.
@@ -113,11 +141,31 @@ std::optional<Ray> Camera::primaryRay(float ndcX, float ndcY, float aspect) cons
 
 std::optional<Ray> Camera::primaryRay(const ViewBasis& basis, float ndcX, float ndcY) const {
     if (basis.lens.projection == LensProjection::FisheyePolynomial) {
-        return fisheyeRay(basis, position_, nearClip_, farClip_, ndcX, ndcY);
+        const std::optional<FisheyeSample> sample = fisheyeSample(basis, ndcX, ndcY);
+        return sample ? std::optional(Ray{position_, sample->dir, nearClip_, farClip_}) : std::nullopt;
     }
     const glm::vec3 dir = glm::normalize(basis.forward + (ndcX * basis.halfWidth * basis.right) +
                                           (ndcY * basis.halfHeight * basis.up));
     return Ray{position_, dir, nearClip_, farClip_};
+}
+
+std::optional<Camera::RayDifferential> Camera::primaryRayDifferential(const ViewBasis& basis, float ndcX,
+                                                                      float ndcY) const {
+    if (basis.lens.projection == LensProjection::FisheyePolynomial) {
+        const std::optional<FisheyeSample> sample = fisheyeSample(basis, ndcX, ndcY);
+        if (!sample) {
+            return std::nullopt;
+        }
+        return RayDifferential{Ray{position_, sample->dir, nearClip_, farClip_}, fisheyeDirPerNdc(basis, *sample)};
+    }
+    // The unnormalised pinhole direction is affine in ndc; normalising projects its rate off the ray: (I - d d^T) v / |v|.
+    const glm::vec3 unnormalised =
+        basis.forward + (ndcX * basis.halfWidth * basis.right) + (ndcY * basis.halfHeight * basis.up);
+    const float length = glm::length(unnormalised);
+    const glm::vec3 dir = glm::normalize(unnormalised);
+    const auto offRay = [&dir, length](const glm::vec3& rate) { return (rate - (glm::dot(dir, rate) * dir)) / length; };
+    return RayDifferential{Ray{position_, dir, nearClip_, farClip_},
+                           glm::mat2x3(offRay(basis.halfWidth * basis.right), offRay(basis.halfHeight * basis.up))};
 }
 
 Camera::PinholeMatrix Camera::pinholeMatrix(const ViewBasis& basis) const {

@@ -58,7 +58,7 @@ public:
         glm::vec3 forward;
         glm::vec3 right;
         glm::vec3 up;
-        // View-plane half-extents at unit depth, tangent-valued. The rasterizer reads them as tangents, so a fisheye leaves them unused.
+        // View-plane half-extents at unit depth, tangent-valued: the pinhole arm's ndc weights, which a fisheye leaves unused.
         float halfWidth;
         float halfHeight;
         // Sensor half-extents in mm, the image circle and the model: everything the fisheye arm needs without reaching back to the Camera.
@@ -76,6 +76,15 @@ public:
 
     // Same ray from a basis the caller already built; the aspect-taking overload rebuilds two sin, two cos, an atan and a tan every call.
     [[nodiscard]] std::optional<Ray> primaryRay(const ViewBasis& basis, float ndcX, float ndcY) const;
+
+    // A primary ray and its exact differential (Igehy 1999): columns d(dir)/d(ndcX), d(dir)/d(ndcY) of the unit direction.
+    struct RayDifferential {
+        Ray ray;
+        glm::mat2x3 dirPerNdc;
+    };
+
+    // primaryRay plus its differential in closed form, one inverse-lens solve for both; nullopt exactly where primaryRay is.
+    [[nodiscard]] std::optional<RayDifferential> primaryRayDifferential(const ViewBasis& basis, float ndcX, float ndcY) const;
 
     // Pinhole camera matrix P = K [R | -R c] (Hartley & Zisserman 2004, eq. 6.8) as NDC rows: ndc = (x . X, y . X) / (depth . X).
     struct PinholeMatrix {

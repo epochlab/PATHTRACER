@@ -12,10 +12,10 @@ namespace pathtracer::debug {
 enum class AovId : int {
     // Utility.
     Beauty = 0,
-    Wireframe,  // combined AOV: white mesh-edge lines + one false-coloured bounding box per instance (rasterizer.h)
+    Wireframe,  // combined AOV: white mesh-edge lines + one false-coloured bounding box per instance (gbuffer.h)
     Alpha,
     Depth,
-    Lookahead,  // Depth remapped through profile.json's lookaheadDistance: 1 at the camera plane, 0 at that horizon and beyond
+    Lookahead,  // Depth remapped through profile.json's lookaheadDistance: 1 at the camera, 0 at that horizon and beyond
     HSV,
     Luminance,
     Sobel,
@@ -23,7 +23,7 @@ enum class AovId : int {
     DoG,
     WorldPos,
     UV,
-    MotionVector,  // geometric screen-space motion in pixels from the request's previous camera (rasterizer.h)
+    MotionVector,  // geometric screen-space motion in pixels from the request's previous camera (gbuffer.h)
     // Perceptual: observer models over Beauty, as against the Utility block's image-space derivative operators.
     ColourOpponent,
     // Material.
@@ -61,7 +61,7 @@ inline constexpr const char* kAovNames[] = {
 static_assert(sizeof(kAovNames) / sizeof(kAovNames[0]) == static_cast<int>(AovId::Count),
               "kAovNames must stay index-parallel with AovId");
 
-// Which of the three producers computes each AOV: 10 accumulated path-traced lanes, 15 rasterizer lanes, 7 filters over Beauty.
+// Which of the three producers computes each AOV: 10 accumulated path-traced lanes, 15 G-buffer lanes, 7 filters over Beauty.
 enum class AovSource { PathTraced, GBuffer, BeautyFilter };
 
 [[nodiscard]] AovSource aovSource(AovId aov);

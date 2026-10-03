@@ -90,7 +90,7 @@ struct FrameStageTimes {
     float paceMs = 0.0F;        // DisplayLink::waitForNextVblank: slack, not engine cost
     float pollMs = 0.0F;
     float cameraMs = 0.0F;
-    float rasterMs = 0.0F;      // renderRasterGBuffer, only on a trigger change into a rasterizer AOV
+    float gbufferMs = 0.0F;     // renderGBuffer, only on a trigger change into a G-buffer AOV
     float filterMs = 0.0F;      // evaluateFilterAov, only when a newly published pass invalidates the filter cache
     float uploadMs = 0.0F;      // the display texture upload, only when a newly published pass invalidates it
     bool uploaded = false;      // the upload ran this frame: an explicit event flag, since a timed stage can legitimately read 0

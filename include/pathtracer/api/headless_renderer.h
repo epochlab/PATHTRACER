@@ -19,7 +19,7 @@
 #include "pathtracer/scene/gltf_loader.h"
 #include "pathtracer/scene/light.h"
 #include "pathtracer/scene/path_tracer.h"
-#include "pathtracer/scene/rasterizer.h"
+#include "pathtracer/scene/gbuffer.h"
 #include "pathtracer/scene/shading_scene.h"
 #include "pathtracer/scene/thread_pool.h"
 
@@ -34,11 +34,10 @@ public:
         std::optional<pathtracer::scene::Camera> previousCamera;
         int width = 0;
         int height = 0;
-        // Path-traced passes at one sample each, averaged. Ignored when every requested AOV comes from the rasterizer.
+        // Path-traced passes at one sample each, averaged. Ignored when every requested AOV comes from the G-buffer.
         int samples = 1;
         // Randomizes the sampler's Owen scramble, fixed across one render's passes. Callers choose the seed, never the per-pass index.
         std::uint32_t scrambleSeed = 1;
-        // A G-buffer AOV requires camera.lens() to be Rectilinear: render() rejects a fisheye rather than rasterize the wrong projection.
         std::vector<pathtracer::debug::AovId> aovs;
         // nullopt keeps the scene's authored environment.lightEnabled; true/false override it, so one scene.json renders lit and unlit.
         std::optional<bool> envLightEnabled;
@@ -50,8 +49,8 @@ public:
     struct RenderStats {
         // One entry per path-traced pass. Empty when the request needed no light transport -- not an error; do not assume a pass happened.
         std::vector<double> passMilliseconds;
-        // Wall clock of the scan-conversion and Beauty-filter work, 0 when it did not run; averaging it with passes would mean nothing.
-        double rasterMilliseconds = 0.0;
+        // Wall clock of the G-buffer and Beauty-filter work, 0 when it did not run; averaging it with passes would mean nothing.
+        double gbufferMilliseconds = 0.0;
         double filterMilliseconds = 0.0;
         pathtracer::debug::RayCounts rays;
     };
@@ -97,7 +96,7 @@ private:
                      pathtracer::gfx::ImageTexture environmentImage, bool envLightEnabled,
                      const pathtracer::scene::Camera& defaultCamera);
 
-    // Sizes the reused path-traced and rasterizer buffers to this request, reallocating only on a resolution change.
+    // Sizes the reused path-traced and G-buffer buffers to this request, reallocating only on a resolution change.
     void resizeBuffers(int width, int height);
     // Traces request.samples one-sample passes into accumulators_, the running sums, then divides them into means.
     void accumulatePathTraced(const Request& request);
@@ -106,8 +105,8 @@ private:
                         int beautyIndex);
     // Divides every running sum by the pass count, by row on the pool.
     void averageAccumulators(const Request& request);
-    // Scan-converts the G-buffer lanes, motion measured from request.previousCamera (camera itself when absent).
-    void rasterizeGBuffer(const Request& request);
+    // Ray-casts the G-buffer lanes, motion measured from request.previousCamera (camera itself when absent).
+    void renderGBufferLanes(const Request& request);
     // Evaluates each distinct BeautyFilter AOV the request names once, over the accumulated Beauty.
     void evaluateFilters(const Request& request);
 
@@ -130,7 +129,7 @@ private:
 
     // Reused across render() calls, reallocated only when the resolution changes.
     pathtracer::scene::PathTraceResult pathTraced_;
-    pathtracer::scene::RasterGBuffer gbuffer_;
+    pathtracer::scene::GBuffer gbuffer_;
     // One running sum per path-traced lane this request needs, parallel to accumulatedAovs_.
     std::vector<pathtracer::debug::AovId> accumulatedAovs_;
     std::vector<pathtracer::gfx::HdrImage> accumulators_;

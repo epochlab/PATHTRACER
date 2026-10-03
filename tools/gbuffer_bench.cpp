@@ -1,4 +1,4 @@
-// Timing harness for renderRasterGBuffer, not a correctness gate.
+// Timing harness for renderGBuffer, not a correctness gate.
 
 #include <algorithm>
 #include <array>
@@ -19,15 +19,16 @@
 #include "pathtracer/debug/bench_log.h"
 #include "pathtracer/gfx/hdr_image.h"
 #include "pathtracer/scene/camera.h"
+#include "pathtracer/scene/embree_accel.h"
+#include "pathtracer/scene/gbuffer.h"
 #include "pathtracer/scene/gltf_loader.h"
 #include "pathtracer/scene/path_tracer.h"
-#include "pathtracer/scene/rasterizer.h"
 #include "pathtracer/scene/shading_scene.h"
 #include "pathtracer/scene/thread_pool.h"
 
 namespace {
 
-using namespace pathtracer::scene;  // NOLINT(google-build-using-namespace) -- tool-local convenience, mirrors rasterizer_validate.cpp
+using namespace pathtracer::scene;  // NOLINT(google-build-using-namespace) -- tool-local convenience, mirrors gbuffer_validate.cpp
 
 constexpr int kMaterialCount = 4;
 constexpr float kNearestLayerZ = 4.0F;   // world units in front of the camera; > nearClip so no layer is clipped away
@@ -82,7 +83,7 @@ std::vector<ShadingTriangle> makeLayeredTriangles(const Options& options, const 
             std::array<glm::vec3, 3> p{};
             for (int k = 0; k < 3; ++k) {
                 const float angle = kVertexAngleStep * static_cast<float>(k);
-                // Per-vertex depth jitter tilts triangles off screen-parallel, so perspective interpolation and the z-test do real work.
+                // Per-vertex depth jitter tilts triangles off screen-parallel, so the BVH and barycentric interpolation do real work.
                 p[static_cast<std::size_t>(k)] =
                     center + glm::vec3(radius * std::cos(angle), radius * std::sin(angle), unit(rng) * radius * 0.25F);
             }
@@ -114,7 +115,7 @@ std::optional<Options> parseOptions(int argc, char** argv) {
     options.height = profile->render.height;
     for (int i = 1; i < argc; ++i) {
         if (i + 1 >= argc) {
-            std::cerr << "raster_bench: " << argv[i] << " expects a value\n";
+            std::cerr << "gbuffer_bench: " << argv[i] << " expects a value\n";
             return std::nullopt;
         }
         const char* flag = argv[i];
@@ -127,12 +128,12 @@ std::optional<Options> parseOptions(int argc, char** argv) {
         const long value = std::strtol(text, &end, 10);
         // strtol reports non-numeric input as 0, so the terminator check is what makes "--seed foo" an error not a silent seed of 0.
         if (end == text || *end != '\0') {
-            std::cerr << "raster_bench: " << flag << " expects an integer, got " << text << '\n';
+            std::cerr << "gbuffer_bench: " << flag << " expects an integer, got " << text << '\n';
             return std::nullopt;
         }
         // Bounded before the narrowing casts below, so an out-of-range argument is an error rather than an implementation-defined wrap.
         if (value < 0 || value > std::numeric_limits<int>::max()) {
-            std::cerr << "raster_bench: " << flag << " out of range: " << text << '\n';
+            std::cerr << "gbuffer_bench: " << flag << " out of range: " << text << '\n';
             return std::nullopt;
         }
         if (std::strcmp(flag, "--triangles") == 0) {
@@ -148,18 +149,18 @@ std::optional<Options> parseOptions(int argc, char** argv) {
         } else if (std::strcmp(flag, "--seed") == 0) {
             options.seed = static_cast<unsigned int>(value);
         } else {
-            std::cerr << "raster_bench: unknown flag " << flag
-                       << "\n  usage: raster_bench [--triangles N] [--width N] [--height N] [--frames N] [--layers N] [--seed N] [--bench-log log.jsonl]\n";
+            std::cerr << "gbuffer_bench: unknown flag " << flag
+                       << "\n  usage: gbuffer_bench [--triangles N] [--width N] [--height N] [--frames N] [--layers N] [--seed N] [--bench-log log.jsonl]\n";
             return std::nullopt;
         }
     }
     if (options.triangleCount < 1 || options.width < 1 || options.height < 1 || options.frames < 1 ||
         options.layers < 1) {
-        std::cerr << "raster_bench: --triangles/--width/--height/--frames/--layers must all be >= 1\n";
+        std::cerr << "gbuffer_bench: --triangles/--width/--height/--frames/--layers must all be >= 1\n";
         return std::nullopt;
     }
     if (options.layers > options.triangleCount) {
-        std::cerr << "raster_bench: --layers cannot exceed --triangles\n";
+        std::cerr << "gbuffer_bench: --layers cannot exceed --triangles\n";
         return std::nullopt;
     }
     return options;
@@ -197,18 +198,29 @@ int main(int argc, char** argv) {
     settings.metallicFactor = 0.2F;
     settings.roughnessFactor = 1.0F;
     const std::vector<PathTraceSettings> perInstanceSettings(instances.size(), settings);
-    // Once outside the timed loop, as the app does at load: the measured cost is projecting and rasterizing the boxes, not deriving them.
+    // Once outside the timed loop, as the app does at load: the measured cost is testing the boxes' edges, not deriving them.
     const std::vector<AabbBounds> instanceBounds =
         computeInstanceBounds(shadingTriangles, static_cast<int>(instances.size()));
 
+    // Built once at load as the app does, so the timed frames measure tracing and shading, not the BVH build.
+    std::vector<Triangle> worldTriangles;
+    worldTriangles.reserve(shadingTriangles.size());
+    for (const ShadingTriangle& tri : shadingTriangles) {
+        worldTriangles.push_back(Triangle{tri.v0.position, tri.v1.position, tri.v2.position});
+    }
+    const std::optional<EmbreeAccel> accel = EmbreeAccel::build(std::move(worldTriangles));
+    if (!accel) {
+        return EXIT_FAILURE;
+    }
+
     ThreadPool threadPool;
-    // One buffer for the whole run as the app owns it: renderRasterGBuffer reuses it in place, so timed frames measure steady state.
-    RasterGBuffer gbuffer;
+    // One buffer for the whole run as the app owns it: renderGBuffer reuses it in place, so timed frames measure steady state.
+    GBuffer gbuffer;
     // Discarded warm-up pass absorbing the once-only costs: spinning up and parking the pool's workers, and the buffer's only allocation.
-    renderRasterGBuffer(camera, camera, shadingTriangles, instances, perInstanceSettings, instanceBounds,
-                         options->width, options->height, threadPool, gbuffer);
+    renderGBuffer(camera, camera, *accel, shadingTriangles, instances, perInstanceSettings, instanceBounds, options->width,
+                  options->height, threadPool, gbuffer);
     if (gbuffer.depth.width != options->width) {
-        std::cerr << "raster_bench: warm-up produced a " << gbuffer.depth.width << "px-wide buffer\n";
+        std::cerr << "gbuffer_bench: warm-up produced a " << gbuffer.depth.width << "px-wide buffer\n";
         return EXIT_FAILURE;
     }
 
@@ -216,13 +228,13 @@ int main(int argc, char** argv) {
     milliseconds.reserve(static_cast<std::size_t>(options->frames));
     for (int frame = 0; frame < options->frames; ++frame) {
         const auto start = std::chrono::steady_clock::now();
-        renderRasterGBuffer(camera, camera, shadingTriangles, instances, perInstanceSettings, instanceBounds,
-                             options->width, options->height, threadPool, gbuffer);
+        renderGBuffer(camera, camera, *accel, shadingTriangles, instances, perInstanceSettings, instanceBounds,
+                      options->width, options->height, threadPool, gbuffer);
         const auto end = std::chrono::steady_clock::now();
         milliseconds.push_back(std::chrono::duration<double, std::milli>(end - start).count());
         // Reading one texel keeps the optimizer from treating the whole call as dead; the result is otherwise unused.
         if (!std::isfinite(gbuffer.depth.texels[0])) {
-            std::cerr << "raster_bench: non-finite depth at texel 0\n";
+            std::cerr << "gbuffer_bench: non-finite depth at texel 0\n";
             return EXIT_FAILURE;
         }
     }
@@ -233,14 +245,14 @@ int main(int argc, char** argv) {
         total += ms;
     }
 
-    std::cout << "raster_bench: " << shadingTriangles.size() << " tris, " << options->width << "x"
+    std::cout << "gbuffer_bench: " << shadingTriangles.size() << " tris, " << options->width << "x"
               << options->height << ", " << options->layers << " layer(s), best-of-" << options->frames
               << ": " << *best << " ms  (mean " << total / static_cast<double>(options->frames)
               << ", worst " << *worst << ")\n";
 
     if (!options->benchLogPath.empty()) {
         const pathtracer::debug::BenchRecord record{
-            .tool = "raster_bench",
+            .tool = "gbuffer_bench",
             .argv = std::vector<std::string>(argv, argv + argc),
             .config = {{"triangles", options->triangleCount},
                        {"width", options->width},

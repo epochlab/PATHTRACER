@@ -149,7 +149,7 @@ add_library(pathtracer_core STATIC
     src/scene/material_binding.cpp
     src/scene/path_trace_driver.cpp
     src/scene/path_tracer.cpp
-    src/scene/rasterizer.cpp
+    src/scene/gbuffer.cpp
     src/scene/ray_types.cpp
     src/scene/sampler.cpp
     src/scene/shading_scene.cpp
@@ -266,7 +266,7 @@ pathtracer_target_defaults(check_selftest NATIVE)
 target_link_libraries(check_selftest PRIVATE glm::glm)
 
 # Every validator links pathtracer_core and pathtracer_check; what each asserts is documented at the top of its own tools/*.cpp.
-foreach(validator embree_validate bsdf_validate sampler_validate nee_validate rasterizer_validate
+foreach(validator embree_validate bsdf_validate sampler_validate nee_validate gbuffer_validate
                   integrator_validate driver_validate io_validate display_validate filter_validate
                   camera_validate)
     add_executable(${validator} tools/${validator}.cpp $<TARGET_OBJECTS:pathtracer_check>)
@@ -303,10 +303,10 @@ pathtracer_target_defaults(render_beauty NATIVE IPO)
 target_link_libraries(render_beauty PRIVATE pathtracer_core)
 
 # Timing harness, not a correctness gate, so it stays out of the add_test loop. Same flags as the validators, timing the shipped codegen.
-add_executable(raster_bench tools/raster_bench.cpp)
-target_compile_definitions(raster_bench PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
-pathtracer_target_defaults(raster_bench NATIVE IPO)
-target_link_libraries(raster_bench PRIVATE pathtracer_core)
+add_executable(gbuffer_bench tools/gbuffer_bench.cpp)
+target_compile_definitions(gbuffer_bench PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
+pathtracer_target_defaults(gbuffer_bench NATIVE IPO)
+target_link_libraries(gbuffer_bench PRIVATE pathtracer_core)
 
 # Benchmark-log analysis and randomized interleaved A/B runner. Not a gate: its verdict is a confidence interval for a human.
 add_executable(bench_compare tools/bench_compare.cpp)
@@ -336,11 +336,17 @@ add_test(NAME image.determinism
                  --assert-deterministic)
 set_tests_properties(image.determinism PROPERTIES LABELS "image;fast;exact" TIMEOUT 300)
 
-# A rasterizer-backed AOV runs no path-traced passes; reducing over that empty set segfaulted until the reporting learned to say so.
+# A G-buffer AOV runs no path-traced passes; reducing over that empty set segfaulted until the reporting learned to say so.
 add_test(NAME image.gbuffer_aov
          COMMAND render_beauty --scene scenes/cornell.json --width 48 --height 36 --passes 4
                  --aov depth --out gbuffer_aov.png)
 set_tests_properties(image.gbuffer_aov PROPERTIES LABELS "image;fast;exact" TIMEOUT 300)
+
+# The same lane through a fisheye whose image circle sits inside the gate: every G-buffer AOV renders under either projection.
+add_test(NAME image.gbuffer_aov_fisheye
+         COMMAND render_beauty --scene scenes/cornell.json --width 48 --height 36 --passes 4
+                 --aov depth --fisheye 4 --out gbuffer_aov_fisheye.png)
+set_tests_properties(image.gbuffer_aov_fisheye PROPERTIES LABELS "image;fast;exact" TIMEOUT 300)
 
 add_test(NAME image.convergence
          COMMAND render_beauty --scene scenes/cornell.json --width 48 --height 36 --passes 64
@@ -365,7 +371,7 @@ endif()
 pathtracer_discover_checks(check_selftest)
 pathtracer_discover_checks(sampler_validate)
 pathtracer_discover_checks(embree_validate)
-pathtracer_discover_checks(rasterizer_validate)
+pathtracer_discover_checks(gbuffer_validate)
 pathtracer_discover_checks(nee_validate)
 pathtracer_discover_checks(integrator_validate)
 pathtracer_discover_checks(bsdf_validate)

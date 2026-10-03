@@ -50,7 +50,7 @@ def aov_channels(name: str) -> int:
 def aov_needs_samples(name: str) -> bool:
     """Whether ``samples`` affects this AOV.
 
-    False for the 15 primary-hit AOVs the rasterizer scan-converts in a single pass; those are essentially free and
+    False for the 15 primary-hit AOVs one pixel-centre camera ray each resolves; those are essentially free and
     converge immediately, so raising ``samples`` for them only wastes time.
     """
     return bool(_LIB.pt_aov_needs_samples(_aov_id(name)))
@@ -110,8 +110,8 @@ class Camera:
     calibrated camera's pixel grid is not reproduced. ``fisheye_field_of_view_degrees`` is the full angle across the
     image circle; samples outside the circle are black, and an ``r(theta)`` that is not provably monotone over it is
     rejected. The image circle's radius is ``focal_length_mm * theta_d(theta_max)``, so short focal lengths are what make the
-    projection visible and a circle inside the gate leaves the corners black. A fisheye lens has no rasterizer projection, so
-    requesting a G-buffer AOV with one raises ``RuntimeError``.
+    projection visible and a circle inside the gate leaves the corners black. Every AOV renders under either lens; G-buffer
+    ``depth`` is the distance along the primary ray, the one depth a fisheye past 90 degrees still defines.
 
     Immutable, so an override is a ``dataclasses.replace`` of ``Renderer.default_camera`` rather than a mutation
     that could leak between renders.
@@ -231,8 +231,8 @@ class Renderer:
         """Renders the requested AOVs and returns them keyed by the names given.
 
         Each producer runs at most once per call, so asking for several AOVs together costs far less than asking for
-        them separately: the 10 path-traced lanes share one sample set, the 15 rasterizer lanes share one
-        scan-conversion, and the Beauty filters share the one accumulated Beauty.
+        them separately: the 10 path-traced lanes share one sample set, the 15 G-buffer lanes share one set of
+        pixel-centre rays, and the Beauty filters share the one accumulated Beauty.
 
         ``samples`` is the number of one-sample passes averaged. The sampler's scramble is fixed by ``seed`` and its
         sequence index advances per pass, so the same arguments always reproduce the same floats exactly.

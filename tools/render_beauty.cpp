@@ -67,7 +67,7 @@ struct Options {
     float fisheyeFocalLengthMm = 0.0F;
 };
 
-// All AOVs are reachable now HeadlessRenderer drives the rasterizer and filters; names come from pathtracer/debug/aov.h, not restated here.
+// All AOVs are reachable now HeadlessRenderer drives the G-buffer and filters; names come from pathtracer/debug/aov.h, not restated here.
 bool resolveAov(const std::string& requested, Options& options) {
     const pathtracer::debug::AovId aov = pathtracer::debug::aovIdFromName(requested);
     if (aov == pathtracer::debug::AovId::Count) {
@@ -259,7 +259,7 @@ void reportErrorSpectrum(const pathtracer::gfx::HdrImage& image, const pathtrace
 // Everything the timed loop's cost depends on goes in config; output paths and exposure do not, so they never split two comparable runs.
 bool appendTimingRecord(const Options& options, int argc, char** argv, int width, int height,
                         const std::string& aovName, const pathtracer::scene::PathTraceSettings& settings,
-                        bool envLightEnabled, double rasterMs, double filterMs,
+                        bool envLightEnabled, double gbufferMs, double filterMs,
                         pathtracer::gfx::ScalarType textureType, const std::vector<double>& milliseconds, const pathtracer::debug::RayCounts& rays,
                         const pathtracer::gfx::HdrImage& accumulated) {
     pathtracer::debug::BenchRecord record{
@@ -278,7 +278,7 @@ bool appendTimingRecord(const Options& options, int argc, char** argv, int width
                    {"ao_max_distance", settings.aoMaxDistance},
                    {"texture_type", pathtracer::gfx::scalarTypeName(textureType)},
                    {"fisheye_focal_length_mm", options.fisheyeFocalLengthMm}},
-        .samples = {milliseconds.empty() ? std::pair<std::string, std::vector<double>>{"raster_ms", {rasterMs}}
+        .samples = {milliseconds.empty() ? std::pair<std::string, std::vector<double>>{"gbuffer_ms", {gbufferMs}}
                                           : std::pair<std::string, std::vector<double>>{"pass_ms", milliseconds}},
         .work = {{"rays", {{"primary", rays.primary}, {"bounce", rays.bounce}, {"ao", rays.ao}, {"shadow", rays.shadow}}},
                  {"crc32", pathtracer::debug::floatCrc32(accumulated.texels)}},
@@ -538,7 +538,7 @@ int main(int argc, char** argv) {
 
     const pathtracer::api::HeadlessRenderer::RenderStats& stats = renderer->lastStats();
     const pathtracer::debug::RayCounts rays = stats.rays;
-    // A rasterizer-backed AOV traces no rays and runs no passes, so there is no per-pass distribution to report for it.
+    // A G-buffer AOV runs no path-traced passes, so there is no per-pass distribution to report for it.
     if (!milliseconds.empty()) {
         std::cout << "render_beauty: rays over " << options.passes << " passes -- primary " << rays.primary
                   << ", bounce " << rays.bounce << ", ao " << rays.ao << ", shadow " << rays.shadow << ", total "
@@ -549,8 +549,8 @@ int main(int argc, char** argv) {
                   << totalMs / static_cast<double>(options.passes) << ", worst " << *worst << ", total "
                   << totalMs << ")\n";
     }
-    if (stats.rasterMilliseconds > 0.0) {
-        std::cout << "render_beauty: rasterized G-buffer in " << stats.rasterMilliseconds << " ms\n";
+    if (stats.gbufferMilliseconds > 0.0) {
+        std::cout << "render_beauty: G-buffer in " << stats.gbufferMilliseconds << " ms\n";
     }
     if (stats.filterMilliseconds > 0.0) {
         std::cout << "render_beauty: Beauty filter in " << stats.filterMilliseconds << " ms\n";
@@ -558,7 +558,7 @@ int main(int argc, char** argv) {
     // Before any output encode, so the record's rusage covers load, build and the timed passes but not PNG/EXR writing.
     if (!options.benchLogPath.empty() &&
         !appendTimingRecord(options, argc, argv, width, height, aovName, renderer->baseSettings(),
-                            envLightEnabled, stats.rasterMilliseconds, stats.filterMilliseconds, renderer->textureType(),
+                            envLightEnabled, stats.gbufferMilliseconds, stats.filterMilliseconds, renderer->textureType(),
                             milliseconds,
                             rays, accumulated)) {
         return EXIT_FAILURE;

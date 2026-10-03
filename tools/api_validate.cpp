@@ -4,6 +4,7 @@
 #include <array>
 #include <cfloat>
 #include <cmath>
+#include <limits>
 #include <numbers>
 #include <cstdio>
 #include <optional>
@@ -54,7 +55,7 @@ void setTexel(HdrImage& image, int x, int y, float r, float g, float b) {
 
 }  // namespace
 
-// Every AovId must be classified, sized and owned by the producer its classification names; an unclassified one routes to the rasterizer.
+// Every AovId must be classified, sized and owned by the producer its classification names; an unclassified one routes to the G-buffer.
 PT_CHECK(aov_tables_are_total_and_consistent, Fast, Exact) {
     ctx.plan(kAovCount * 3);
     for (int i = 0; i < kAovCount; ++i) {
@@ -64,12 +65,12 @@ PT_CHECK(aov_tables_are_total_and_consistent, Fast, Exact) {
                       std::string(pathtracer::debug::kAovNames[i]) + " channels=" + std::to_string(channels));
 
         const pathtracer::debug::PathTracedLane traced = pathtracer::debug::pathTracedLane(aov);
-        const pathtracer::debug::GBufferLane raster = pathtracer::debug::gbufferLane(aov);
+        const pathtracer::debug::GBufferLane gbuffer = pathtracer::debug::gbufferLane(aov);
         const AovSource source = pathtracer::debug::aovSource(aov);
         // Exactly one lane accessor may answer, and only the one the classification points at.
-        const bool ownedCorrectly = (source == AovSource::PathTraced && traced != nullptr && raster == nullptr) ||
-                                     (source == AovSource::GBuffer && raster != nullptr && traced == nullptr) ||
-                                     (source == AovSource::BeautyFilter && traced == nullptr && raster == nullptr);
+        const bool ownedCorrectly = (source == AovSource::PathTraced && traced != nullptr && gbuffer == nullptr) ||
+                                     (source == AovSource::GBuffer && gbuffer != nullptr && traced == nullptr) ||
+                                     (source == AovSource::BeautyFilter && traced == nullptr && gbuffer == nullptr);
         PT_EXPECT(ctx, ownedCorrectly, std::string(pathtracer::debug::kAovNames[i]) + " lane/source disagree");
 
         // aovNeedsLightTransport is derived from aovSource; this pins the derivation itself.
@@ -535,9 +536,16 @@ PT_CHECK(hsv_inverts_to_rgb, Fast, Exact) {
     }
 }
 
+// The same camera through either lens, so a check can hold everything but the projection fixed.
+pathtracer::scene::Camera withLens(const pathtracer::scene::Camera& camera, pathtracer::scene::Lens lens) {
+    return pathtracer::scene::Camera{camera.position(), camera.yawDegrees(), camera.pitchDegrees(), camera.filmBack(),
+                                     camera.focalLengthMm(), camera.nearClip(), camera.farClip(), camera.aperture(),
+                                     camera.shutterSeconds(), camera.iso(), lens};
+}
+
 // Every AOV must render at its declared channel count with no NaN or infinity: a new AOV cannot pass without being produced.
 PT_CHECK(every_aov_renders_finite, Slow, Exact) {
-    ctx.plan(2 * kAovCount);
+    ctx.plan(2 * 2 * kAovCount);
     std::string error;
     const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", error);
     if (!renderer) {
@@ -547,10 +555,14 @@ PT_CHECK(every_aov_renders_finite, Slow, Exact) {
 
     constexpr int kWidth = 24;
     constexpr int kHeight = 18;
-    for (int i = 0; i < kAovCount; ++i) {
-        const auto aov = static_cast<AovId>(i);
+    // Every AOV through both projections: no producer is lens-specific, so a fisheye must serve each one too.
+    const std::array<pathtracer::scene::Camera, 2> cameras{
+        renderer->defaultCamera(),
+        withLens(renderer->defaultCamera(), {pathtracer::scene::LensProjection::FisheyePolynomial, {}, 180.0F})};
+    for (int i = 0; i < 2 * kAovCount; ++i) {
+        const auto aov = static_cast<AovId>(i % kAovCount);
         const pathtracer::api::HeadlessRenderer::Request request{
-            .camera = renderer->defaultCamera(),
+            .camera = cameras[static_cast<std::size_t>(i / kAovCount)],
             .width = kWidth,
             .height = kHeight,
             .samples = 2,
@@ -562,21 +574,21 @@ PT_CHECK(every_aov_renders_finite, Slow, Exact) {
                                   static_cast<std::size_t>(pathtracer::debug::aovChannels(aov)));
         float* pointer = buffer.data();
         if (!renderer->render(request, std::span<float* const>(&pointer, 1), error)) {
-            PT_EXPECT(ctx, false, std::string(pathtracer::debug::kAovNames[i]) + ": " + error);
+            PT_EXPECT(ctx, false, std::string(pathtracer::debug::kAovNames[i % kAovCount]) + ": " + error);
             continue;
         }
         const bool finite = std::all_of(buffer.begin(), buffer.end(),
                                          [](float value) { return std::isfinite(value); });
-        PT_EXPECT(ctx, finite, std::string(pathtracer::debug::kAovNames[i]) + " contains a non-finite value");
+        PT_EXPECT(ctx, finite, std::string(pathtracer::debug::kAovNames[i % kAovCount]) + " contains a non-finite value");
         // Its producer's lane is stored at exactly the channels it declares: the memory the declared count promises, and no padding lane.
         const HdrImage& lane = renderer->lastImage(aov);
         PT_EXPECT(ctx, lane.channels == pathtracer::debug::aovChannels(aov) && lane.texels.size() == buffer.size(),
-                  std::string(pathtracer::debug::kAovNames[i]) + " is stored at " + std::to_string(lane.channels) +
+                  std::string(pathtracer::debug::kAovNames[i % kAovCount]) + " is stored at " + std::to_string(lane.channels) +
                       " channels, not its declared " + std::to_string(pathtracer::debug::aovChannels(aov)));
     }
 }
 
-// Sharing one accumulation, one rasterizer pass and one Beauty across a multi-AOV request must be bit-identical to requesting them singly.
+// Sharing one accumulation, one G-buffer pass and one Beauty across a multi-AOV request must be bit-identical to requesting them singly.
 PT_CHECK(multi_aov_request_matches_single_aov_requests, Slow, Exact) {
     const std::vector<AovId> combined = {AovId::Beauty, AovId::Depth, AovId::Normal, AovId::Sobel, AovId::AO};
     ctx.plan(static_cast<int>(combined.size()));
@@ -738,53 +750,34 @@ PT_CHECK(aov_filter_dispatch_is_total, Fast, Exact) {
     }
 }
 
-// The one projection/producer pairing that has no answer: scan conversion inverts a perspective divide the fisheye does not have.
-PT_CHECK(gbuffer_aov_with_a_fisheye_lens_is_rejected, Fast, Exact) {
-    ctx.plan(4);
+// On the optical axis every lens casts the same ray, so an odd-sized frame's centre texel reads one ray distance through both.
+PT_CHECK(gbuffer_depth_agrees_across_lenses_on_the_axis, Fast, Exact) {
+    ctx.plan(3);
     std::string error;
     const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", error);
     if (!renderer) {
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < 3; ++i) {
             PT_EXPECT(ctx, false, "scene load failed: " + error);
         }
         return;
     }
-
-    constexpr int kWidth = 16;
-    constexpr int kHeight = 12;
-    const pathtracer::scene::Camera& rectilinear = renderer->defaultCamera();
-    // Equidistant, so the lens is admissible on every axis but the one under test: the rejection can only be the projection.
-    const pathtracer::scene::Lens fisheyeLens{pathtracer::scene::LensProjection::FisheyePolynomial, {}, 180.0F};
-    const pathtracer::scene::Camera fisheye{rectilinear.position(),
-                                            rectilinear.yawDegrees(),
-                                            rectilinear.pitchDegrees(),
-                                            rectilinear.filmBack(),
-                                            rectilinear.focalLengthMm(),
-                                            rectilinear.nearClip(),
-                                            rectilinear.farClip(),
-                                            rectilinear.aperture(),
-                                            rectilinear.shutterSeconds(),
-                                            rectilinear.iso(),
-                                            fisheyeLens};
-
-    const auto request = [&](const pathtracer::scene::Camera& camera, AovId aov) {
-        return pathtracer::api::HeadlessRenderer::Request{
-            .camera = camera, .width = kWidth, .height = kHeight, .samples = 1, .scrambleSeed = 3, .aovs = {aov}};
-    };
-    const auto attempt = [&](const pathtracer::scene::Camera& camera, AovId aov) {
-        std::vector<float> buffer(static_cast<std::size_t>(kWidth) * kHeight *
-                                  static_cast<std::size_t>(pathtracer::debug::aovChannels(aov)));
-        float* pointer = buffer.data();
+    constexpr int kWidth = 17;
+    constexpr int kHeight = 13;
+    constexpr std::size_t kCentre = ((kHeight / 2) * kWidth) + (kWidth / 2);
+    const auto centreDepth = [&](const pathtracer::scene::Camera& camera) {
+        const pathtracer::api::HeadlessRenderer::Request request{
+            .camera = camera, .width = kWidth, .height = kHeight, .aovs = {AovId::Depth}};
         error.clear();
-        return renderer->render(request(camera, aov), std::span<float* const>(&pointer, 1), error);
+        return renderer->render(request, error) ? renderer->lastImage(AovId::Depth).texels[kCentre] : -1.0F;
     };
-
-    PT_EXPECT(ctx, !attempt(fisheye, AovId::Depth), "a G-buffer AOV was rendered through a fisheye lens");
-    PT_EXPECT(ctx, error.find("fisheye") != std::string::npos,
-              "the rejection did not name the fisheye lens: " + error);
-    PT_EXPECT(ctx, attempt(fisheye, AovId::Beauty), "a path-traced AOV failed under a fisheye lens: " + error);
-    PT_EXPECT(ctx, attempt(rectilinear, AovId::Depth),
-              "a G-buffer AOV failed under the default rectilinear lens: " + error);
+    const float rectilinear = centreDepth(renderer->defaultCamera());
+    const float fisheye =
+        centreDepth(withLens(renderer->defaultCamera(), {pathtracer::scene::LensProjection::FisheyePolynomial, {}, 180.0F}));
+    PT_EXPECT(ctx, rectilinear > 0.0F, "the rectilinear centre ray hit nothing: " + error);
+    PT_EXPECT(ctx, fisheye > 0.0F, "the fisheye centre ray hit nothing: " + error);
+    // The pinhole re-normalises an already unit forward: at most one rounding of the direction, carried through one intersection.
+    PT_EXPECT(ctx, std::fabs(rectilinear - fisheye) <= 4.0F * std::numeric_limits<float>::epsilon() * rectilinear,
+              "the axis depth differs between lenses: " + std::to_string(rectilinear) + " vs " + std::to_string(fisheye));
 }
 
 // MotionVector measures from Request::previousCamera: absent or equal, motion is exactly zero; a turn left moves the whole frame right.
@@ -822,7 +815,7 @@ PT_CHECK(motion_vector_follows_the_previous_camera, Fast, Exact) {
         rightward = rightward && turned[i] > 0.0F;
     }
     PT_EXPECT(ctx, rightward, "a turn to the left did not move every pixel to the right: " + error);
-    // A lens toggle between views: the previous fisheye projects through its own forward model, the current one rasterizes.
+    // A lens toggle between views: the previous fisheye projects through its own forward model, the current one through the pinhole's.
     const pathtracer::scene::Lens fisheyeLens{pathtracer::scene::LensProjection::FisheyePolynomial, {}, 180.0F};
     const std::vector<float> toggled = motion(posed(0.0F, fisheyeLens));
     PT_EXPECT(ctx, !toggled.empty() && std::all_of(toggled.begin(), toggled.end(), [](float value) { return std::isfinite(value); }),

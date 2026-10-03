@@ -57,7 +57,7 @@
 #include "pathtracer/scene/material_binding.h"
 #include "pathtracer/scene/path_trace_driver.h"
 #include "pathtracer/scene/path_tracer.h"
-#include "pathtracer/scene/rasterizer.h"
+#include "pathtracer/scene/gbuffer.h"
 #include "pathtracer/scene/thread_pool.h"
 
 namespace OCIO = OCIO_NAMESPACE;
@@ -73,7 +73,7 @@ const char* lutName(pathtracer::gfx::OcioDisplayTransform::Lut lut) {
     return lut == Lut::SRGB ? "sRGB" : lut == Lut::Rec709 ? "Rec709" : "Raw";
 }
 
-// Camera geometry, every renderRasterGBuffer input that can change: factored so the two producers compare the same fields.
+// Camera geometry, every renderGBuffer input that can change: factored so the two producers compare the same fields.
 struct ViewInputState {
     glm::vec3 cameraPosition{0.0F};
     float cameraYawDegrees = 0.0F;
@@ -87,7 +87,7 @@ struct ViewInputState {
     bool operator==(const ViewInputState&) const = default;
 };
 
-// One definition for the current and previous views, so the raster trigger compares the two on identical fields.
+// One definition for the current and previous views, so the G-buffer trigger compares the two on identical fields.
 ViewInputState viewInputState(const pathtracer::scene::Camera& camera) {
     return ViewInputState{camera.position(), camera.yawDegrees(), camera.pitchDegrees(), camera.focalLengthMm(),
                           camera.filmBack().heightMm, camera.lens().projection};
@@ -112,14 +112,14 @@ struct PathTraceTriggerState {
     bool operator==(const PathTraceTriggerState&) const = default;
 };
 
-// The rasterizer's own last-rendered state: separate because an environment change must retrace without re-rasterizing a G-buffer.
-struct RasterTriggerState {
+// The G-buffer's own last-rendered state: separate because an environment change must retrace without re-rendering the G-buffer.
+struct GBufferTriggerState {
     ViewInputState view;
-    // MotionVector's origin: the first still frame after a move differs here alone, and re-rasterizes to exact zero motion.
+    // MotionVector's origin: the first still frame after a move differs here alone, and re-renders to exact zero motion.
     ViewInputState previousView;
     float renderScale = 0.0F;  // same sentinel, same bound
 
-    bool operator==(const RasterTriggerState&) const = default;
+    bool operator==(const GBufferTriggerState&) const = default;
 };
 
 // Seconds of no input before promoting back to full renderScale: longer than the gaps between drag events, short enough to feel immediate.
@@ -237,9 +237,6 @@ struct AppResources {
     bool vsync;  // profile.json: pace each frame to the vblank, or run uncapped
     // Chromatic aberration strength (0 = off), radial UV offset passed to OcioDisplayTransform::setAberration -- HUD slider only.
     float aberrationStrength = 0.0F;
-    // The rasterizer runs only on a trigger change, so its cost is a last-actual plus duty cycle rather than a per-frame average.
-    float lastRasterMs = 0.0F;
-
     // Async path-traced view, selected by `aov`; requestTrace() is called only from requestPathTraceIfTriggerChanged.
     int maxSamples;  // accumulated-pass cap for PathTraceDriver; 0 = unbounded
     pathtracer::gfx::ScalarType displayFormat;  // pathTraceDisplayTexture's component type (profile.json displayBitDepth)
@@ -251,12 +248,12 @@ struct AppResources {
     const pathtracer::gfx::HdrImage* pathTraceDisplayedImage = nullptr;  // nullptr = nothing uploaded yet
     // The display decision for the last rebuilt pathTraceDisplayTexture; its pre-mapped texels are what that texture already holds.
     pathtracer::debug::AovDisplay pathTraceDisplay{{}, {glm::vec3(1.0F), glm::vec3(0.0F)}};
-    // Which RasterGBuffer generation the texture holds; 0 when it was built from a PathTraceResult instead.
+    // Which GBuffer generation the texture holds; 0 when it was built from a PathTraceResult instead.
     std::uint64_t pathTraceDisplayedGeneration = 0;
     // Strong ref, not just an identity pointer, to whichever published object pathTraceDisplayTexture currently reflects.
     std::shared_ptr<const void> pathTraceDisplayedOwner{};
     PathTraceTriggerState lastPathTraceTrigger{};  // sentinel-initialized, see its own doc comment
-    RasterTriggerState lastRasterTrigger{};  // the same, for the rasterizer's independent refresh
+    GBufferTriggerState lastGBufferTrigger{};  // the same, for the G-buffer's independent refresh
     // The camera the last frame displayed, MotionVector's origin; the startup pose before the first frame, so it moves from itself.
     pathtracer::scene::Camera previousFrameCamera;
     // The authored image in pixels (profile.json render.width/height), fixed for the session and independent of the window.
@@ -267,10 +264,10 @@ struct AppResources {
     float interactiveRenderScale;
     std::chrono::steady_clock::time_point lastInputChange{};
 
-    // Synchronous CPU rasterizer for the 15 primary-hit AOVs, their only producer. unique_ptr: ThreadPool owns threads and cannot move.
-    std::unique_ptr<pathtracer::scene::ThreadPool> rasterThreadPool = std::make_unique<pathtracer::scene::ThreadPool>();
+    // Synchronous pool for the 15 G-buffer AOVs and the Beauty filters. unique_ptr: ThreadPool owns threads and cannot move.
+    std::unique_ptr<pathtracer::scene::ThreadPool> gbufferThreadPool = std::make_unique<pathtracer::scene::ThreadPool>();
     // Allocated once and rendered into in place, never republished: its `generation`, not its address, tells one render from the next.
-    std::shared_ptr<pathtracer::scene::RasterGBuffer> rasterGBuffer = std::make_shared<pathtracer::scene::RasterGBuffer>();
+    std::shared_ptr<pathtracer::scene::GBuffer> gbuffer = std::make_shared<pathtracer::scene::GBuffer>();
     // Scene file's basename, for the dashboard's one-line SCENE row -- the full path is in the spec block, and the row has no space for it.
     std::string sceneName;
 
@@ -568,7 +565,7 @@ glm::vec3 applyBeautyDisplayTransform(glm::vec3 hdrColor, const AppResources& ap
     return displayColor;
 }
 
-// Orbit pivot from a single Embree ray down the view centre. Reading the G-buffer centre texel instead forced a full rasterization.
+// Orbit pivot from a single Embree ray down the view centre. Reading the G-buffer centre texel instead forced a full G-buffer render.
 void resolveOrbitPick(pathtracer::platform::Window& window, AppResources& app,
                        const pathtracer::scene::Camera& camera) {
     if (!app.orbitPickRequested) {
@@ -594,7 +591,7 @@ void resolveOrbitPick(pathtracer::platform::Window& window, AppResources& app,
 struct DisplayedAovSource {
     const pathtracer::gfx::HdrImage* image = nullptr;
     std::shared_ptr<const void> owner;
-    // A counter that changes whenever the image's contents do: the rasterizer's, the filter cache's, or 0 for a published lane.
+    // A counter that changes whenever the image's contents do: the G-buffer's, the filter cache's, or 0 for a published lane.
     std::uint64_t generation = 0;
 };
 
@@ -614,7 +611,7 @@ const pathtracer::gfx::HdrImage* ensureFilterImage(
     cache.image = pathtracer::debug::evaluateFilterAov(
         aov,
         pathtracer::debug::FilterInput{snapshot->beauty, snapshot->beautyLuminanceM2.data(), snapshot->samples},
-        *app.rasterThreadPool);
+        *app.gbufferThreadPool);
     cache.aov = aov;
     cache.owner = snapshot;
     cache.generation = snapshot->generation;
@@ -629,9 +626,9 @@ DisplayedAovSource resolveAovImage(AppResources& app,
                                    pathtracer::debug::AovId aov) {
     if (const pathtracer::debug::GBufferLane lane = pathtracer::debug::gbufferLane(aov)) {
         // The buffer is allocated for the process's life now, so a null check no longer distinguishes "no render yet" -- generation 0 does.
-        return app.rasterGBuffer->generation == 0
+        return app.gbuffer->generation == 0
                    ? DisplayedAovSource{}
-                   : DisplayedAovSource{&(*app.rasterGBuffer.*lane), app.rasterGBuffer, app.rasterGBuffer->generation};
+                   : DisplayedAovSource{&(*app.gbuffer.*lane), app.gbuffer, app.gbuffer->generation};
     }
     if (const pathtracer::debug::PathTracedLane lane = pathtracer::debug::pathTracedLane(aov)) {
         return snapshot ? DisplayedAovSource{&(*snapshot.*lane), snapshot} : DisplayedAovSource{};
@@ -769,7 +766,7 @@ std::uint64_t requestPathTrace(AppResources& app, const pathtracer::scene::Camer
         app.maxSamples});
 }
 
-// Once per frame, re-tracing on any input that changes the image. The rasterizer is synchronous, 21 ms at 1024x576, so it stays gated.
+// Once per frame, re-tracing on any input that changes the image. The G-buffer is synchronous, so it stays gated on its own trigger.
 void requestPathTraceIfTriggerChanged(AppResources& app, const pathtracer::scene::Camera& camera,
                                        std::chrono::steady_clock::time_point now) {
     const ViewInputState view = viewInputState(camera);
@@ -801,21 +798,18 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const pathtracer::scene
         app.lastPathTraceTrigger = pathTrace;
     }
 
-    const RasterTriggerState raster{view, viewInputState(previousCamera), renderScale};
-    const bool rasterizable = camera.lens().projection == pathtracer::scene::LensProjection::Rectilinear;
-    if (needsLightTransport || !rasterizable || raster == app.lastRasterTrigger || traceWidth <= 0 ||
-        traceHeight <= 0) {
+    const GBufferTriggerState gbufferTrigger{view, viewInputState(previousCamera), renderScale};
+    if (needsLightTransport || gbufferTrigger == app.lastGBufferTrigger || traceWidth <= 0 || traceHeight <= 0) {
         return;
     }
     {
-        const pathtracer::debug::ScopedCpuTimer rasterTimer(app.stages.rasterMs);
-        pathtracer::scene::renderRasterGBuffer(camera, previousCamera, app.scene.model.shadingTriangles,
-                                            app.scene.model.instances, app.scene.perInstanceSettings,
-                                            app.scene.instanceBounds,
-                                            traceWidth, traceHeight, *app.rasterThreadPool,
-                                            *app.rasterGBuffer);
+        const pathtracer::debug::ScopedCpuTimer gbufferTimer(app.stages.gbufferMs);
+        pathtracer::scene::renderGBuffer(camera, previousCamera, app.scene.accel, app.scene.model.shadingTriangles,
+                                         app.scene.model.instances, app.scene.perInstanceSettings,
+                                         app.scene.instanceBounds, traceWidth, traceHeight, *app.gbufferThreadPool,
+                                         *app.gbuffer);
     }
-    app.lastRasterTrigger = raster;
+    app.lastGBufferTrigger = gbufferTrigger;
 }
 
 // Fraction of texels clipping at the display encode plus that peak, from pre-transform beauty rather than the framebuffer Histogram reads.
@@ -859,11 +853,6 @@ void applyCameraEdits(AppResources& app, const CameraEdits& edits) {
     app.debugCamera.setShutterSeconds(edits.shutterSeconds);
     app.debugCamera.setIso(edits.iso);
     app.debugCamera.setLensProjection(static_cast<pathtracer::scene::LensProjection>(edits.lensProjection));
-    // A rasterizer AOV has no fisheye producer, so switching projection with one selected falls back to the lane that always has one.
-    if (edits.lensProjection != static_cast<int>(pathtracer::scene::LensProjection::Rectilinear) &&
-        !aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(app.aov))) {
-        app.aov = static_cast<int>(pathtracer::debug::AovId::Beauty);
-    }
     app.filmBackPresetIndex = edits.filmBackPresetIndex;
     app.debugCamera.setFilmBack(app.filmBackPresets[static_cast<std::size_t>(edits.filmBackPresetIndex)].filmBack);
 }
@@ -986,10 +975,10 @@ void updateDashboard(AppResources& app,
     app.dashboard.update(frame);
 }
 
-// True once the selected AOV's producer has nothing left to do: a rasterizer AOV is finished as soon as a G-buffer exists.
+// True once the selected AOV's producer has nothing left to do: a G-buffer AOV is finished as soon as a G-buffer exists.
 bool stageComplete(const AppResources& app, const BenchCapture& bench) {
     if (!aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(app.aov))) {
-        return app.rasterGBuffer->generation != 0;
+        return app.gbuffer->generation != 0;
     }
     return !bench.passes.empty() && bench.passes.back().generation == bench.generation &&
            bench.passes.back().passIndex == app.maxSamples;
@@ -1011,7 +1000,7 @@ void captureBenchFrame(pathtracer::platform::Window& window, AppResources& app, 
     bench.frameMs.push_back(frameMs);
     bench.presentGpuMs.push_back(app.postTimer.millisecondsElapsed());
     bench.refreshHz.push_back(static_cast<float>(app.refreshHz));
-    // Only uploads the displayed AOV's producer issued: a superseded request can still publish, and a raster upload is never the driver's.
+    // Only uploads the displayed AOV's producer issued: a superseded request can still publish; a G-buffer upload is never the driver's.
     const bool ourUpload = !aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(app.aov)) ||
                            (snapshot != nullptr && snapshot->generation == bench.generation);
     if (app.stages.uploaded && ourUpload) {
@@ -1033,17 +1022,6 @@ void captureBenchFrame(pathtracer::platform::Window& window, AppResources& app, 
     bench.stageStart = now;
     ++bench.stage;
     app.aov = bench.aovs[bench.stage];
-}
-
-// True when every AOV the session starts on -- profile.json's default and the whole bench schedule -- needs light transport.
-bool aovSelectionAvoidsRasterizer(const pathtracer::config::ProfileConfig& profileConfig,
-                               const std::vector<int>& benchAovs) {
-    if (!aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(profileConfig.render.defaultAov))) {
-        return false;
-    }
-    return std::all_of(benchAovs.begin(), benchAovs.end(), [](int aov) {
-        return aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(aov));
-    });
 }
 
 // Everything the captured workload's cost depends on; two engine records are comparable iff these are equal.
@@ -1108,7 +1086,7 @@ nlohmann::json benchSamples(const BenchCapture& bench) {
             {"pace_ms", frameColumn(&Stages::paceMs)},
             {"poll_ms", frameColumn(&Stages::pollMs)},
             {"camera_ms", frameColumn(&Stages::cameraMs)},
-            {"raster_ms", frameColumn(&Stages::rasterMs)},
+            {"gbuffer_ms", frameColumn(&Stages::gbufferMs)},
             {"filter_ms", frameColumn(&Stages::filterMs)},
             {"upload_ms", bench.uploadMs},
             {"present_ms", frameColumn(&Stages::presentMs)},
@@ -1343,17 +1321,11 @@ bool validStartup(const Options& options, const std::optional<pathtracer::config
         std::cerr << "main: -bench-aovs is the schedule -bench walks; it does nothing on its own\n";
         return false;
     }
-    if (profileConfig->camera.lens.projection != pathtracer::scene::LensProjection::Rectilinear &&
-        !aovSelectionAvoidsRasterizer(*profileConfig, options.benchAovs)) {
-        // The rasterizer has no fisheye projection, so a G-buffer AOV asked for up front would wait on a G-buffer that never arrives.
-        std::cerr << "main: a fisheye lens cannot serve the selected rasterizer AOV; choose a path-traced AOV\n";
-        return false;
-    }
     if (!options.benchLogPath.empty() &&
         (profileConfig->pathTracer.maxSamples <= 0 ||
          !aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(
              options.benchAovs.empty() ? profileConfig->render.defaultAov : options.benchAovs.front())))) {
-        // An unbounded accumulation never ends and a rasterizer AOV parks the driver, so neither is a benchmark workload.
+        // An unbounded accumulation never ends and a G-buffer AOV parks the driver, so neither is a benchmark workload.
         std::cerr << "main: -bench needs profile.json maxSamples > 0 and a path-traced first AOV\n";
         return false;
     }

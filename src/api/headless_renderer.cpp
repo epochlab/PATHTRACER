@@ -99,12 +99,6 @@ struct SceneInputs {
         error = "no AOVs requested";
         return false;
     }
-    // Scan conversion is a perspective divide, which a fisheye has no equivalent of: rejected rather than silently approximated.
-    if (requestsSource(request.aovs, AovSource::GBuffer) &&
-        request.camera.lens().projection != pathtracer::scene::LensProjection::Rectilinear) {
-        error = "G-buffer AOVs require a rectilinear lens: a fisheye has no rasterizer projection";
-        return false;
-    }
     return true;
 }
 
@@ -210,8 +204,8 @@ void HeadlessRenderer::resizeBuffers(int width, int height) {
         return;
     }
     pathTraced_ = pathtracer::scene::makePathTraceResult(width, height);
-    // renderRasterGBuffer reallocates on a size change and clears per row otherwise; resetting the stamp says this buffer holds nothing.
-    gbuffer_ = pathtracer::scene::RasterGBuffer{};
+    // renderGBuffer reallocates on a size change and clears per row otherwise; resetting the stamp says this buffer holds nothing.
+    gbuffer_ = pathtracer::scene::GBuffer{};
     accumulators_.clear();
     bufferWidth_ = width;
     bufferHeight_ = height;
@@ -261,14 +255,14 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
     accumulatedAovs_ = accumulatedAovsFor(request.aovs, wantsFilter);
 
     stats_.passMilliseconds.clear();
-    stats_.rasterMilliseconds = 0.0;
+    stats_.gbufferMilliseconds = 0.0;
     stats_.filterMilliseconds = 0.0;
     stats_.rays = pathtracer::debug::RayCounts{};
     if (!accumulatedAovs_.empty()) {
         accumulatePathTraced(request);
     }
     if (requestsSource(request.aovs, AovSource::GBuffer)) {
-        rasterizeGBuffer(request);
+        renderGBufferLanes(request);
     }
     filteredAovs_.clear();
     filtered_.clear();
@@ -374,14 +368,13 @@ void HeadlessRenderer::averageAccumulators(const Request& request) {
     });
 }
 
-void HeadlessRenderer::rasterizeGBuffer(const Request& request) {
-    const auto rasterStart = std::chrono::steady_clock::now();
-    pathtracer::scene::renderRasterGBuffer(request.camera, request.previousCamera.value_or(request.camera),
-                                        model_.shadingTriangles, model_.instances,
-                                        perInstanceSettings_, instanceBounds_, request.width,
-                                        request.height, threadPool_, gbuffer_);
-    stats_.rasterMilliseconds =
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - rasterStart).count();
+void HeadlessRenderer::renderGBufferLanes(const Request& request) {
+    const auto gbufferStart = std::chrono::steady_clock::now();
+    pathtracer::scene::renderGBuffer(request.camera, request.previousCamera.value_or(request.camera), accel_,
+                                     model_.shadingTriangles, model_.instances, perInstanceSettings_, instanceBounds_,
+                                     request.width, request.height, threadPool_, gbuffer_);
+    stats_.gbufferMilliseconds =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - gbufferStart).count();
 }
 
 // Filters read accumulated Beauty, so they run after the loop, each distinct one evaluated once however many AOVs ask for it.

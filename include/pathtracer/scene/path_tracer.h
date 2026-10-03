@@ -38,7 +38,7 @@ struct PathTraceSettings {
     int russianRouletteStartBounce;
     // AO ray bound and obscurance falloff scale (Zhukov 1998; Iones 2003): a hit at t gives 1-(1-t/aoMaxDistance)^2 visibility.
     float aoMaxDistance = 1.0F;
-    // Horizon of the Lookahead AOV ramp (rasterizer.h), scene units: camera-space Z maps linearly to 1 at the camera plane and 0 here.
+    // Horizon of the Lookahead AOV ramp (gbuffer.h), scene units: ray distance maps linearly to 1 at the camera and 0 here.
     float lookaheadDistance = 10.0F;
     float rrMinProb = 0.05F;  // floor: stops a near-zero-throughput path being killed with near-certainty
     // Exactly 1.0: a path at full throughput must never be terminated; a lower cap costs more in variance than the deep paths it saves.

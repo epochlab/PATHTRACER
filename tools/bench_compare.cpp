@@ -46,7 +46,7 @@ struct Options {
 
 constexpr const char* kUsage =
     "usage: bench_compare run --a BIN --b BIN --rounds N --log PATH [--metric M] [--alpha A] [--seed S] -- ARGS...\n"
-    "         ARGS must make the child append to PATH (render_beauty/raster_bench --bench-log PATH, pathtracer -bench PATH)\n"
+    "         ARGS must make the child append to PATH (render_beauty/gbuffer_bench --bench-log PATH, pathtracer -bench PATH)\n"
     "       bench_compare compare --log PATH --a ID --b ID [--metric M] [--alpha A]\n"
     "       bench_compare history --log PATH --tool T [--metric M] [--alpha A]\n"
     "  ID: a build uuid prefix or git SHA; M: a samples column or rusage field (default: the only samples column)\n";
