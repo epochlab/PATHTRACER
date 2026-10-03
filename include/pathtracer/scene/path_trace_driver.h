@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -122,5 +123,12 @@ private:
     // Declared last: constructed last, so driverLoop starts once every member exists, and destroyed first, jthread stopping and joining.
     std::jthread thread_;
 };
+
+// Running mean m_n = m_{n-1} + (x_n - m_{n-1}) * invN over count floats; `mean` may alias either input. HeadlessRenderer shares it.
+void foldRunningMean(const float* previousMean, const float* drawn, float* mean, std::size_t count, float invN);
+
+// Welford (1962) M2 of Rec.709 luminance over `pixels` Beauty texels, West's (1979) form; call before foldRunningMean overwrites them.
+void foldLuminanceM2(const float* previousMean, const float* drawn, std::size_t channels, const float* previousM2, float* m2,
+                     std::size_t pixels, float invN);
 
 }  // namespace pathtracer::scene

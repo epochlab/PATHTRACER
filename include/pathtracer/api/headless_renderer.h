@@ -98,13 +98,11 @@ private:
 
     // Sizes the reused path-traced and G-buffer buffers to this request, reallocating only on a resolution change.
     void resizeBuffers(int width, int height);
-    // Traces request.samples one-sample passes into accumulators_, the running sums, then divides them into means.
+    // Traces request.samples one-sample passes and folds each into accumulators_, the running means PathTraceDriver publishes.
     void accumulatePathTraced(const Request& request);
-    // Adds one pass's lanes to their sums and its Beauty luminance to the Welford second moment.
+    // Folds one pass into the means and the Beauty luminance M2 in place, through the driver's foldRunningMean/foldLuminanceM2.
     void accumulatePass(const Request& request, int pass, const std::vector<const std::vector<float>*>& laneSources,
                         int beautyIndex);
-    // Divides every running sum by the pass count, by row on the pool.
-    void averageAccumulators(const Request& request);
     // Ray-casts the G-buffer lanes, motion measured from request.previousCamera (camera itself when absent).
     void renderGBufferLanes(const Request& request);
     // Evaluates each distinct BeautyFilter AOV the request names once, over the accumulated Beauty.
@@ -130,10 +128,10 @@ private:
     // Reused across render() calls, reallocated only when the resolution changes.
     pathtracer::scene::PathTraceResult pathTraced_;
     pathtracer::scene::GBuffer gbuffer_;
-    // One running sum per path-traced lane this request needs, parallel to accumulatedAovs_.
+    // One running mean per path-traced lane this request needs, parallel to accumulatedAovs_.
     std::vector<pathtracer::debug::AovId> accumulatedAovs_;
     std::vector<pathtracer::gfx::HdrImage> accumulators_;
-    // Welford second moment of the per-pass Beauty luminance, carried beside the naive sum so the published mean stays bit-identical.
+    // Welford second moment of the per-pass Beauty luminance, bit-identical to the driver's PathTraceResult::beautyLuminanceM2.
     std::vector<float> beautyLuminanceM2_;
     // One evaluated filter per distinct BeautyFilter AOV, so lastImage() can return one and two AOVs sharing a filter evaluate it once.
     std::vector<pathtracer::debug::AovId> filteredAovs_;

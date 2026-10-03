@@ -11,6 +11,7 @@
 #include "pathtracer/debug/aov_routing.h"
 #include "pathtracer/debug/render_stats.h"
 #include "pathtracer/scene/material_binding.h"
+#include "pathtracer/scene/path_trace_driver.h"
 
 namespace pathtracer::api {
 
@@ -325,57 +326,37 @@ void HeadlessRenderer::accumulatePathTraced(const Request& request) {
         accumulatePass(request, pass, laneSources, beautyIndex);
     }
     stats_.rays = stats.rays();
-    averageAccumulators(request);
 }
 
 void HeadlessRenderer::accumulatePass(const Request& request, int pass,
                                       const std::vector<const std::vector<float>*>& laneSources, int beautyIndex) {
     const auto width = static_cast<std::size_t>(request.width);
-    const auto beautyChannels = static_cast<std::size_t>(pathTraced_.beauty.channels);
-    const glm::vec3 weights = pathtracer::debug::kRec709LuminanceWeights;
-    // By row, as the interactive driver's accumulateMean is: each element's chain stays in order, so the sum is bit-identical.
+    // The driver's own arithmetic, folded in place: same kernels, same invN, same per-element order, so the two means are bit-identical.
+    const float invN = 1.0F / static_cast<float>(pass + 1);
     threadPool_.parallelFor(request.height, [&](int y) {
         const std::size_t rowPixel = static_cast<std::size_t>(y) * width;
-        if (beautyIndex >= 0) {
-            const float* drawnLane = laneSources[static_cast<std::size_t>(beautyIndex)]->data();
-            // Still the passes before this one, so dividing recovers exactly the mean the driver's own lane would hold.
-            const float* runningSum = accumulators_[static_cast<std::size_t>(beautyIndex)].texels.data();
-            const float inversePrevious = pass == 0 ? 0.0F : 1.0F / static_cast<float>(pass);
-            const float inverseCount = 1.0F / static_cast<float>(pass + 1);
-            for (std::size_t pixel = rowPixel; pixel < rowPixel + width; ++pixel) {
-                const std::size_t i = pixel * beautyChannels;
-                const float drawn = (drawnLane[i] * weights.r) + (drawnLane[i + 1] * weights.g) +
-                                    (drawnLane[i + 2] * weights.b);
-                // At the first pass the mean is the draw, so Welford's product is exactly zero with no branch of its own.
-                const float before = pass == 0 ? drawn
-                                               : ((runningSum[i] * weights.r) + (runningSum[i + 1] * weights.g) +
-                                                  (runningSum[i + 2] * weights.b)) * inversePrevious;
-                const float after = before + ((drawn - before) * inverseCount);
-                beautyLuminanceM2_[pixel] += (drawn - before) * (drawn - after);
+        // The first pass is kept as drawn, as the driver keeps it: folding into a zero mean would turn -0 into +0 and M2 into NaN at inf.
+        if (pass == 0) {
+            for (std::size_t lane = 0; lane < laneSources.size(); ++lane) {
+                const auto channels = static_cast<std::size_t>(accumulators_[lane].channels);
+                const float* drawn = laneSources[lane]->data() + (rowPixel * channels);
+                std::copy(drawn, drawn + (width * channels), accumulators_[lane].texels.data() + (rowPixel * channels));
             }
+            return;
+        }
+        if (beautyIndex >= 0) {
+            const auto channels = static_cast<std::size_t>(pathTraced_.beauty.channels);
+            const auto beauty = static_cast<std::size_t>(beautyIndex);
+            const float* mean = accumulators_[beauty].texels.data() + (rowPixel * channels);
+            const float* drawn = laneSources[beauty]->data() + (rowPixel * channels);
+            float* m2 = beautyLuminanceM2_.data() + rowPixel;
+            pathtracer::scene::foldLuminanceM2(mean, drawn, channels, m2, m2, width, invN);
         }
         for (std::size_t lane = 0; lane < laneSources.size(); ++lane) {
             const auto channels = static_cast<std::size_t>(accumulators_[lane].channels);
-            const float* source = laneSources[lane]->data();
-            float* sum = accumulators_[lane].texels.data();
-            for (std::size_t i = rowPixel * channels; i < (rowPixel + width) * channels; ++i) {
-                sum[i] += source[i];
-            }
-        }
-    });
-}
-
-void HeadlessRenderer::averageAccumulators(const Request& request) {
-    const auto width = static_cast<std::size_t>(request.width);
-    const auto passes = static_cast<float>(request.samples);
-    threadPool_.parallelFor(request.height, [&](int y) {
-        const std::size_t rowPixel = static_cast<std::size_t>(y) * width;
-        for (pathtracer::gfx::HdrImage& accumulator : accumulators_) {
-            const auto channels = static_cast<std::size_t>(accumulator.channels);
-            float* texels = accumulator.texels.data();
-            for (std::size_t i = rowPixel * channels; i < (rowPixel + width) * channels; ++i) {
-                texels[i] /= passes;
-            }
+            float* mean = accumulators_[lane].texels.data() + (rowPixel * channels);
+            pathtracer::scene::foldRunningMean(mean, laneSources[lane]->data() + (rowPixel * channels), mean,
+                                               width * channels, invN);
         }
     });
 }

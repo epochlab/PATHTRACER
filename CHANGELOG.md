@@ -3,6 +3,40 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Accumulation arithmetic: one running mean for the viewer and headless
+
+The viewer averaged passes with an incremental running mean. Headless summed them in float and divided once at the end. Both
+produce a mean, but they round differently, so the comments calling the two bit-identical were false. Headless now uses the
+viewer's arithmetic. Evidence is in `results/accumulation_arithmetic`.
+
+- fix: `foldRunningMean` and `foldLuminanceM2` (`path_trace_driver.h`) are the driver's two inner loops, lifted verbatim:
+  - `foldRunningMean` is m_n = m_{n-1} + (x_n - m_{n-1}) / n
+  - `foldLuminanceM2` is Welford's (1962) M2 in West's (1979) form
+  - `PathTraceDriver` folds out of place into the fresh pass buffer, and `HeadlessRenderer` folds in place on the lanes a request
+    needs. Both run the same kernels, invN and per-element order, and both keep the first pass as drawn.
+- fix: `averageAccumulators` and headless's float sums are removed, along with the Welford mean it rebuilt as `sum * (1/(n-1))`
+- why the running mean, of the two float32 options:
+  - Both have an O(nu) worst-case forward error (Higham 2002, §4.2).
+  - The running mean is exact on a constant signal, where `x - m = 0`. A float sum stops being exact once `k·x` needs more than
+    24 bits.
+  - Its update is centred: it loses a sample only when `|x - m|/n` is below half an ulp of m, whereas a sum loses one when `|x|`
+    is below half an ulp of n·m (Chan, Golub & LeVeque 1983).
+  - It cannot overflow. It also needs no final divide pass and costs the same 12 B per element per pass.
+- why not a double or Kahan-compensated accumulator: it would double the accumulator memory and the viewer's accumulation
+  bandwidth for a typical error already about 100x below binary16 output resolution at 65 536 passes
+- image:
+  - the viewer is unchanged: its converged Beauty CRC (1462477921), ray counts and window capture are identical
+  - headless Beauty at the viewer's `-bench` workload now has the viewer's CRC, where before it differed
+  - headless path-traced lanes move by rounding only: median 1 ulp, max 7 ulp, one texel at 72 ulp (relative 7e-6)
+  - SNR moves only where the measured dispersion is rounding residue (SNR >= 1.5e5)
+  - two macbeth texels whose samples were all identical now have M2 = 0 and so SNR 0, the defined converged value, instead of a
+    spurious 9.3e7
+  - G-buffer AOVs are byte-identical
+- perf: no resolved change. Viewer `pass_accumulate_ms` B/A = 1.0015 [0.9917, 1.0090], and headless `user_s` B/A = 0.9996
+  [0.9980, 1.0034].
+- test: `driver_validate` `in_place_fold_is_bit_identical_to_driver` requires the driver's 10 published lanes and M2 to equal, bit
+  for bit, headless's in-place fold. It fails on the old sum-then-divide (525/1536 floats) and on a mis-ordered M2 fold (64/64).
+
 ## Camera validation: every parameter, at every boundary
 
 The C ABI checked only the lens, so pose, focal length, aperture, shutter, ISO, film back and clips went through unchecked.
