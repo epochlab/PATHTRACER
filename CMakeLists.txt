@@ -297,6 +297,14 @@ target_compile_definitions(api_validate PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_D
 pathtracer_target_defaults(api_validate NATIVE IPO)
 target_link_libraries(api_validate PRIVATE pathtracer_core)
 
+# The exported C ABI as a foreign caller sees it: links only the shared library, and compiles pathtracer_c.h as strict ISO C11.
+add_executable(c_abi_validate tools/c_abi_validate.cpp tools/c_abi_header.c $<TARGET_OBJECTS:pathtracer_check>)
+target_include_directories(c_abi_validate PRIVATE include tools)
+set_target_properties(c_abi_validate PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+set_source_files_properties(tools/c_abi_header.c PROPERTIES COMPILE_OPTIONS "-pedantic-errors")
+pathtracer_target_defaults(c_abi_validate NATIVE)
+target_link_libraries(c_abi_validate PRIVATE pathtracer_c)
+
 # Headless before/after comparison renders. Not a correctness gate: its output is a picture, and a full render outlasts any validator.
 add_executable(render_beauty tools/render_beauty.cpp $<TARGET_OBJECTS:pathtracer_check>)
 target_include_directories(render_beauty PRIVATE tools)
@@ -382,6 +390,7 @@ pathtracer_discover_checks(io_validate)
 pathtracer_discover_checks(display_validate)
 pathtracer_discover_checks(colour_validate)
 pathtracer_discover_checks(api_validate)
+pathtracer_discover_checks(c_abi_validate)
 pathtracer_discover_checks(filter_validate)
 pathtracer_discover_checks(camera_validate)
 
