@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <limits>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -493,6 +494,32 @@ PT_CHECK(request_generation_labels_its_passes, Slow, Exact) {
         return pass.generation == latest && pass.passIndex == kCap && !pass.cancelled;
     });
     PT_EXPECT(ctx, labelled, "the final pass never carried the generation requestTrace returned");
+}
+
+// Passes finish faster than frames on small images, so a per-frame read of the latest record drops some; the taken log must not.
+PT_CHECK(every_pass_record_is_taken_once_in_order, Slow, Exact) {
+    constexpr int kCap = 12;
+    ctx.plan(2);
+    std::unique_ptr<DriverFixture> fixture = makeFixture();
+    if (!fixture->valid()) {
+        PT_EXPECT(ctx, false, "scene/driver construction failed");
+        PT_EXPECT(ctx, false, "scene/driver construction failed");
+        return;
+    }
+    const std::uint64_t generation = fixture->driver->requestTrace(makeRequest(kCap, makeCamera()));
+    std::vector<int> indices;
+    const bool converged = waitFor([&] {
+        for (const pathtracer::debug::PassRecord& pass : fixture->driver->takePassRecords()) {
+            if (pass.generation == generation && !pass.cancelled) {
+                indices.push_back(pass.passIndex);
+            }
+        }
+        return !indices.empty() && indices.back() == kCap;
+    });
+    std::vector<int> expected(kCap);
+    std::iota(expected.begin(), expected.end(), 1);
+    PT_EXPECT(ctx, converged && indices == expected, "taken pass indices must be exactly 1.." + std::to_string(kCap) + " in order");
+    PT_EXPECT(ctx, fixture->driver->takePassRecords().empty(), "a converged driver must have nothing left to take");
 }
 
 // A new request must RESTART accumulation, never mix camera poses; pins the bump-implies-engaged-request invariant 16 suppressions rest on.

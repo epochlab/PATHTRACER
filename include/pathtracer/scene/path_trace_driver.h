@@ -65,6 +65,9 @@ public:
     // Render-thread-only. The most recent pass's timings and ray counts, cancelled included; generation is 0 before the first pass.
     [[nodiscard]] pathtracer::debug::PassRecord lastPassRecord() const;
 
+    // Render-thread-only, once per frame. Every record since the last call, in pass order: several passes can finish within one frame.
+    [[nodiscard]] std::vector<pathtracer::debug::PassRecord> takePassRecords();
+
 private:
     void driverLoop(std::stop_token stopToken);
     // Blocks until requestTrace or setSuspended bumps wakeEpoch_ past `seen`, or the driver stops. Replaces polling for new work.
@@ -105,6 +108,7 @@ private:
     // Republished every finished pass, cancelled included. Separate from resultMutex_ so a dashboard read never contends with publish.
     mutable std::mutex statsMutex_;
     pathtracer::debug::PassRecord lastPass_;
+    std::vector<pathtracer::debug::PassRecord> untakenPasses_;  // emptied by takePassRecords each frame, so it holds a frame's worth
 
     // Republished on every completed pass, guarded by resultMutex_ against latestResult()'s render-thread read.
     mutable std::mutex resultMutex_;
