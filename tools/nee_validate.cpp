@@ -6,8 +6,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <random>
+#include <string>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -243,6 +245,43 @@ PT_CHECK(environment_lat_long_is_unmirrored, Fast, Exact) {
     std::snprintf(detail, sizeof(detail), "image left reads (%.4f, %.4f, %.4f), expected the map's left half (1, 0, 0)",
                   static_cast<double>(seenLeft.x), static_cast<double>(seenLeft.y), static_cast<double>(seenLeft.z));
     PT_EXPECT(ctx, glm::all(glm::epsilonEqual(seenLeft, left, 1e-6F)), detail);
+}
+
+// The lens's chart is the map's: an omnidirectional camera posed in the map's frame, at its resolution, reads each texel at its centre.
+PT_CHECK(omnidirectional_camera_reads_the_environment_texel_for_texel, Fast, Exact) {
+    constexpr int kWidth = 32;
+    constexpr int kHeight = 16;
+    constexpr int kChannels = pathtracer::gfx::kRgbChannels;
+    // Every texel distinct, so a mirrored, shifted or transposed chart cannot land on an equal value by coincidence.
+    std::vector<float> rgb(static_cast<std::size_t>(kWidth) * kHeight * kChannels);
+    for (std::size_t i = 0; i < rgb.size(); ++i) {
+        rgb[i] = static_cast<float>(i + 1) / static_cast<float>(rgb.size());
+    }
+    const pathtracer::gfx::ImageTexture image =
+        tools::fixtures::makeImageTexture(kWidth, kHeight, kChannels, rgb, pathtracer::gfx::ScalarType::Float32);
+    const EnvironmentMap env(image);
+    // Yaw 180 faces +Z with -X on the right and +Y up: the map's (right, up, forward), so pixel (x, y) and texel (x, y) share (u, v).
+    const pathtracer::scene::Camera camera(glm::vec3(0.0F), 180.0F, 0.0F, {36.0F, 24.0F}, 35.0F, 0.1F, 100.0F, 2.8F, 0.01F, 100.0F,
+                                           pathtracer::scene::Lens{pathtracer::scene::LensProjection::Omnidirectional});
+    const pathtracer::scene::Camera::ViewBasis basis = camera.viewBasis(2.0F);
+    // The (u, v) round trip carries 16 ulps of its pi-scaled angles; longitude's is amplified by 1/sin(colatitude) toward a pole.
+    constexpr float kRoundTripUlps = 16.0F;
+    int mismatches = 0;
+    for (int y = 0; y < kHeight; ++y) {
+        const float sinColatitude = std::sin(glm::pi<float>() * (static_cast<float>(y) + 0.5F) / kHeight);
+        for (int x = 0; x < kWidth; ++x) {
+            const float ndcX = (((static_cast<float>(x) + 0.5F) / kWidth) * 2.0F) - 1.0F;
+            const float ndcY = 1.0F - (((static_cast<float>(y) + 0.5F) / kHeight) * 2.0F);
+            const glm::vec3 seen = env.sampleDirection(camera.primaryRay(basis, ndcX, ndcY)->dir);
+            const glm::vec3 texel = image.texel(x, y);
+            // Off-centre by `offset` texels, bilinear blends in at most that fraction of a neighbour, whose difference is bounded here.
+            const float offset = kRoundTripUlps * std::numeric_limits<float>::epsilon() * static_cast<float>(kWidth) / sinColatitude;
+            const float neighbourSpan = static_cast<float>(kWidth) / static_cast<float>(rgb.size()) * kChannels;
+            mismatches += glm::all(glm::lessThanEqual(glm::abs(seen - texel), glm::vec3(2.0F * offset * neighbourSpan))) ? 0 : 1;
+        }
+    }
+    ctx.plan(1);
+    PT_EXPECT(ctx, mismatches == 0, std::to_string(mismatches) + " pixels read a texel other than their own");
 }
 
 // MIS weights sum to 1, so both strategies must evaluate ONE Le. Structured, not uniform: on a uniform map every lookup agrees.

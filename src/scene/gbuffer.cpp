@@ -26,7 +26,7 @@ constexpr float kLineThicknessPx = 1.0F;
 
 const glm::vec3 kWireframeColor(1.0F, 1.0F, 1.0F);
 
-// One lens's forward model, chosen once per call: a pinhole stays an inline matrix product, a fisheye goes through Camera::project.
+// One lens's forward model, chosen once per call: a pinhole stays an inline matrix product, any other lens goes through Camera::project.
 struct Projector {
     const Camera& camera;
     Camera::ViewBasis basis;
@@ -91,6 +91,7 @@ struct GBufferView {
     Projector previous;
     glm::vec2 pixelsPerNdc;  // (W/2, -H/2): NDC +Y up to pixels with row 0 at the top
     std::vector<ViewBox> boxes;
+    bool wrapsHorizontally;  // both views wrap, so a motion's x lives on a circle rather than a line
 };
 
 // A pixel-centre ray in the local linear image model d(p + dp) = d + J dp (Igehy 1999), J's columns d(dir)/d(pixel x, y).
@@ -257,7 +258,16 @@ struct GBufferScene {
 void writeMotion(GBuffer& result, const GBufferView& view, int x, int y, const glm::vec4& point) {
     const std::optional<glm::vec2> now = view.current(point);
     const std::optional<glm::vec2> before = view.previous(point);
-    writeTexel(result.motionVector, x, y, now && before ? (*now - *before) * view.pixelsPerNdc : glm::vec2(0.0F));
+    if (!now || !before) {
+        writeTexel(result.motionVector, x, y, glm::vec2(0.0F));
+        return;
+    }
+    glm::vec2 motion = *now - *before;
+    // Both ends on one lat-long's ndc circle of circumference 2: IEEE remainder is exact and takes the shorter arc across the seam.
+    if (view.wrapsHorizontally) {
+        motion.x = std::remainder(motion.x, 2.0F);
+    }
+    writeTexel(result.motionVector, x, y, motion * view.pixelsPerNdc);
 }
 
 void renderPixel(GBuffer& result, const GBufferView& view, const GBufferScene& scene, int x, int y) {
@@ -319,10 +329,12 @@ void renderGBuffer(const Camera& camera, const Camera& previousCamera, const Emb
                    GBuffer& result) {
     ensureLanes(result, width, height);
     ++result.generation;
+    result.wrapsHorizontally = wrapsHorizontally(camera.lens().projection);
 
     const float aspect = static_cast<float>(width) / static_cast<float>(height);
     GBufferView view{camera, camera.viewBasis(aspect), projectorFor(camera, aspect), projectorFor(previousCamera, aspect),
-                     glm::vec2(0.5F * static_cast<float>(width), -0.5F * static_cast<float>(height)), {}};
+                     glm::vec2(0.5F * static_cast<float>(width), -0.5F * static_cast<float>(height)), {},
+                     result.wrapsHorizontally && wrapsHorizontally(previousCamera.lens().projection)};
     // One box per instance in its ObjectID false colour; an instance that contributed no triangles has an empty box and no edges.
     view.boxes.reserve(instanceBounds.size());
     for (std::size_t i = 0; i < instanceBounds.size(); ++i) {

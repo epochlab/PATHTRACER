@@ -12,7 +12,7 @@
 
 namespace pathtracer::debug {
 
-// CPU implementations of the seven Beauty-reading AOVs. Sobel clamps at the edge; DoG and Gabor, built on scale_space.h, mirror.
+// CPU implementations of the seven Beauty-reading AOVs. Sobel clamps at the edge, DoG and Gabor mirror; all three wrap a periodic x.
 
 // Rec.709 luminance weights (ITU-R BT.709-6), the one triple every luminance reduction in the engine dots against.
 inline constexpr glm::vec3 kRec709LuminanceWeights{0.2126F, 0.7152F, 0.0722F};
@@ -62,11 +62,11 @@ void demodulate(std::span<const float> plane, const MorletPlaneWave& wave, int w
 
 // Gradient magnitude of Luminance under the fixed 3x3 Sobel operator (Sobel & Feldman 1968), one channel.
 [[nodiscard]] pathtracer::gfx::HdrImage sobelAov(const pathtracer::gfx::HdrImage& beauty,
-                                              pathtracer::scene::ThreadPool& threadPool);
+                                              pathtracer::scene::ThreadPool& threadPool, bool wrapsHorizontally = false);
 
 // Peak quadrature magnitude of the 2-D Morlet wavelet bank over Luminance (Morlet 1982; Antoine & Murenzi 1996), one channel.
 [[nodiscard]] pathtracer::gfx::HdrImage gaborAov(const pathtracer::gfx::HdrImage& beauty,
-                                              pathtracer::scene::ThreadPool& threadPool);
+                                              pathtracer::scene::ThreadPool& threadPool, bool wrapsHorizontally = false);
 
 // HSV as three channels: hue and saturation normalised to [0,1], value left scene-referred so it is not clamped at white.
 [[nodiscard]] pathtracer::gfx::HdrImage hsvAov(const pathtracer::gfx::HdrImage& beauty,
@@ -74,7 +74,7 @@ void demodulate(std::span<const float> plane, const MorletPlaneWave& wave, int w
 
 // Signed first band of the Laplacian pyramid (Burt & Adelson 1983), finest octave minus the next, one channel. Zero if it cannot fit.
 [[nodiscard]] pathtracer::gfx::HdrImage dogAov(const pathtracer::gfx::HdrImage& beauty,
-                                            pathtracer::scene::ThreadPool& threadPool);
+                                            pathtracer::scene::ThreadPool& threadPool, bool wrapsHorizontally = false);
 
 // Cone-opponent displacement from Rec.709 white (cone_space.h): (l - l_white, s - s_white), two channels, invariant to a positive gain.
 [[nodiscard]] pathtracer::gfx::HdrImage colourOpponentAov(const pathtracer::gfx::HdrImage& beauty,
@@ -91,6 +91,7 @@ struct FilterInput {
     // Welford second moment of the per-pass luminance and the passes averaged in; a variance is undefined below two of them.
     const float* beautyLuminanceM2 = nullptr;
     int samples = 0;
+    bool wrapsHorizontally = false;  // the lens joins the image's left and right edges, so neighbourhood filters wrap in x
 };
 
 // The one dispatch for every BeautyFilter AOV; a non-filter id yields an empty image. No default arm, so a new filter must be routed.

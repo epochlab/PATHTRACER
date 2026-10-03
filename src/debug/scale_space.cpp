@@ -47,11 +47,16 @@ using pathtracer::scene::ThreadPool;
     return std::exp(logScale + std::log(sum));
 }
 
-// Folded column indices for one row, built once per pass: the row loop would otherwise pay a modulo per boundary tap per row.
-[[nodiscard]] std::vector<int> foldTable(int extent, int radius) {
+// Index on a cycle of `extent` samples, any offset: the periodic boundary, under which the kernel is the heat kernel on that cycle.
+[[nodiscard]] int wrap(int i, int extent) {
+    return ((i % extent) + extent) % extent;
+}
+
+// Folded indices for one line, built once per pass: the row loop would otherwise pay a modulo per boundary tap per row.
+[[nodiscard]] std::vector<int> foldTable(int extent, int radius, bool periodic) {
     std::vector<int> table(static_cast<std::size_t>(extent + (2 * radius)));
     for (int i = 0; i < extent + (2 * radius); ++i) {
-        table[static_cast<std::size_t>(i)] = mirror(i - radius, extent);
+        table[static_cast<std::size_t>(i)] = periodic ? wrap(i - radius, extent) : mirror(i - radius, extent);
     }
     return table;
 }
@@ -61,9 +66,9 @@ constexpr int kConvolutionBlock = 32;
 
 // One separable pass in the centre-relative form: an exactly representable affine field's tap pairs cancel, so its interior is kept.
 void diffuseRows(const float* __restrict src, float* __restrict dst, const std::vector<float>& kernel, int width,
-                 int height, ThreadPool& threadPool) {
+                 int height, bool wrapsHorizontally, ThreadPool& threadPool) {
     const int radius = static_cast<int>(kernel.size()) - 1;
-    const std::vector<int> fold = foldTable(width, radius);
+    const std::vector<int> fold = foldTable(width, radius, wrapsHorizontally);
     // Columns nearer than radius to either edge need the fold; the interior span between them indexes directly and vectorises.
     const int interiorBegin = std::min(radius, width);
     const int interiorEnd = std::max(width - radius, interiorBegin);
@@ -107,7 +112,7 @@ void diffuseRows(const float* __restrict src, float* __restrict dst, const std::
 void diffuseColumns(const float* __restrict src, float* __restrict dst, const std::vector<float>& kernel, int width,
                     int height, ThreadPool& threadPool) {
     const int radius = static_cast<int>(kernel.size()) - 1;
-    const std::vector<int> fold = foldTable(height, radius);
+    const std::vector<int> fold = foldTable(height, radius, false);
     threadPool.parallelFor(height, [&](int y) {
         const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
         const float* __restrict centre = src + row;
@@ -169,7 +174,7 @@ std::vector<float> discreteGaussianKernel(float t) {
     return kernel;
 }
 
-void diffuse(std::span<float> plane, int width, int height, float t, ThreadPool& threadPool) {
+void diffuse(std::span<float> plane, int width, int height, float t, ThreadPool& threadPool, bool wrapsHorizontally) {
     if (!(t > 0.0F) || width <= 0 || height <= 0) {
         return;
     }
@@ -178,7 +183,7 @@ void diffuse(std::span<float> plane, int width, int height, float t, ThreadPool&
         return;
     }
     std::vector<float> scratch(plane.size());
-    diffuseRows(plane.data(), scratch.data(), kernel, width, height, threadPool);
+    diffuseRows(plane.data(), scratch.data(), kernel, width, height, wrapsHorizontally, threadPool);
     diffuseColumns(scratch.data(), plane.data(), kernel, width, height, threadPool);
 }
 
