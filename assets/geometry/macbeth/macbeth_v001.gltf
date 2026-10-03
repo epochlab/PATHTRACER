@@ -67,18 +67,6 @@
       "componentType": 5125,
       "count": 6,
       "type": "SCALAR"
-    },
-    {
-      "bufferView": 8,
-      "componentType": 5126,
-      "count": 4,
-      "type": "VEC4"
-    },
-    {
-      "bufferView": 9,
-      "componentType": 5126,
-      "count": 4,
-      "type": "VEC4"
     }
   ],
   "asset": {
@@ -124,21 +112,11 @@
       "buffer": 0,
       "byteLength": 24,
       "byteOffset": 312
-    },
-    {
-      "buffer": 0,
-      "byteLength": 64,
-      "byteOffset": 336
-    },
-    {
-      "buffer": 0,
-      "byteLength": 64,
-      "byteOffset": 400
     }
   ],
   "buffers": [
     {
-      "byteLength": 464,
+      "byteLength": 336,
       "uri": "macbeth_v001_data.bin"
     }
   ],
@@ -149,7 +127,6 @@
           "attributes": {
             "NORMAL": 4,
             "POSITION": 0,
-            "TANGENT": 8,
             "TEXCOORD_0": 3
           },
           "indices": 7
@@ -162,7 +139,6 @@
           "attributes": {
             "NORMAL": 2,
             "POSITION": 5,
-            "TANGENT": 9,
             "TEXCOORD_0": 1
           },
           "indices": 6

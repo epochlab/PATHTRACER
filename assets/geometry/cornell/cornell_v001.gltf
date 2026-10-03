@@ -119,24 +119,6 @@
       "componentType": 5125,
       "count": 30,
       "type": "SCALAR"
-    },
-    {
-      "bufferView": 15,
-      "componentType": 5126,
-      "count": 20,
-      "type": "VEC4"
-    },
-    {
-      "bufferView": 16,
-      "componentType": 5126,
-      "count": 510,
-      "type": "VEC4"
-    },
-    {
-      "bufferView": 17,
-      "componentType": 5126,
-      "count": 510,
-      "type": "VEC4"
     }
   ],
   "asset": {
@@ -217,26 +199,11 @@
       "buffer": 0,
       "byteLength": 120,
       "byteOffset": 73440
-    },
-    {
-      "buffer": 0,
-      "byteLength": 320,
-      "byteOffset": 73560
-    },
-    {
-      "buffer": 0,
-      "byteLength": 8160,
-      "byteOffset": 73880
-    },
-    {
-      "buffer": 0,
-      "byteLength": 8160,
-      "byteOffset": 82040
     }
   ],
   "buffers": [
     {
-      "byteLength": 90200,
+      "byteLength": 73560,
       "uri": "cornell_v001_data.bin"
     }
   ],
@@ -248,7 +215,6 @@
             "COLOR_0": 4,
             "NORMAL": 10,
             "POSITION": 5,
-            "TANGENT": 15,
             "TEXCOORD_0": 8
           },
           "indices": 14
@@ -262,7 +228,6 @@
             "COLOR_0": 0,
             "NORMAL": 7,
             "POSITION": 11,
-            "TANGENT": 16,
             "TEXCOORD_0": 6
           },
           "indices": 13
@@ -276,7 +241,6 @@
             "COLOR_0": 9,
             "NORMAL": 2,
             "POSITION": 3,
-            "TANGENT": 17,
             "TEXCOORD_0": 1
           },
           "indices": 12

@@ -35,7 +35,14 @@ Evidence is in `results/geometry_loader`.
   rebuilt as a fan plus a strip, with a point and a line primitive added, renders its normal, geomNormal, tangent and shadow lanes
   bit-identical to the shipped list; beauty and directDiffuse differ only by rounding (max 1.4e-6).
 - chore: `tools/gltf_tangent` is removed. It patched missing tangents in with a UV-unaware basis, which the loader now replaces.
-  cornell and macbeth still carry its tangents; neither uses a normal map.
+- chore: the tangents it had written into cornell and macbeth are deleted (their accessors, views and trailing buffer bytes), so
+  both now load with MikkTSpace tangents.
+  - macbeth: all 32 AOVs are byte-identical, because MikkTSpace gives the same +x tangent on its axis-aligned charts.
+  - cornell: only the tangent lane changes deterministically; every other G-buffer lane and shadow is byte-identical. The
+    path-traced lanes change only their Monte Carlo realization, because the isotropic BSDFs sample in the rotated frame:
+    - every lane differs per pixel by less than its two-seed noise floor
+    - beauty's image mean moves by z = +1.25 and every radiance lobe by |z| <= 1.1, so no bias
+  - Loading cornell takes 2.32 ms instead of 0.275 ms.
 - test: five `io_validate` checks, built on a glTF fixture writer:
   - `gltf_mirrored_transform_keeps_geometric_and_shading_normals_agreed`
   - `gltf_strip_and_fan_triangulate_with_consistent_winding`
