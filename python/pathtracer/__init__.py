@@ -113,6 +113,10 @@ class Camera:
     projection visible and a circle inside the gate leaves the corners black. Every AOV renders under either lens; G-buffer
     ``depth`` is the distance along the primary ray, the one depth a fisheye past 90 degrees still defines.
 
+    ``render`` raises ``RuntimeError`` naming the first invalid field: a non-finite pose, ``pitch_degrees`` outside
+    ``(-90, 90)``, clips other than ``0 < near_clip < far_clip`` (``far_clip`` may be ``math.inf``), or any other scalar
+    that is not finite and positive.
+
     Immutable, so an override is a ``dataclasses.replace`` of ``Renderer.default_camera`` rather than a mutation
     that could leak between renders.
     """

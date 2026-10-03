@@ -463,17 +463,13 @@ PT_CHECK(profile_config_render_display_settings, Fast, Exact) {
     }
 }
 
-// camera.lens selects the projection and carries the polynomial; both are validated whichever projection the profile selects.
+// camera.lens parses its projection name and four coefficients here; value ranges are camera_validate's, on the assembled Camera.
 PT_CHECK(profile_config_camera_lens, Fast, Exact) {
     struct Case {
         std::string name;
         nlohmann::json lens;
         bool accepted;
     };
-    // theta_d' = 1 + 3*k1*theta^2 with k1 = -1/3 vanishes at theta = 1 rad, so a 180-degree circle (thetaMax = pi/2) crosses it.
-    const nlohmann::json nonMonotone = {{"projection", "fisheyePolynomial"},
-                                        {"maxFieldOfViewDegrees", 180.0},
-                                        {"radialCoefficients", {-1.0 / 3.0, 0.0, 0.0, 0.0}}};
     const nlohmann::json rectilinear = {{"projection", "rectilinear"},
                                       {"maxFieldOfViewDegrees", 180.0},
                                       {"radialCoefficients", {0.0, 0.0, 0.0, 0.0}}};
@@ -481,10 +477,6 @@ PT_CHECK(profile_config_camera_lens, Fast, Exact) {
     fisheye["projection"] = "fisheyePolynomial";
     nlohmann::json threeCoefficients = rectilinear;
     threeCoefficients["radialCoefficients"] = {0.0, 0.0, 0.0};
-    nlohmann::json zeroFov = rectilinear;
-    zeroFov["maxFieldOfViewDegrees"] = 0.0;
-    nlohmann::json overFov = rectilinear;
-    overFov["maxFieldOfViewDegrees"] = 360.5;
     nlohmann::json unknownProjection = rectilinear;
     unknownProjection["projection"] = "pinhole";
     nlohmann::json missingProjection = rectilinear;
@@ -496,10 +488,6 @@ PT_CHECK(profile_config_camera_lens, Fast, Exact) {
         {"an unknown projection name", unknownProjection, false},
         {"no projection at all", missingProjection, false},
         {"three coefficients instead of four", threeCoefficients, false},
-        {"a zero field of view", zeroFov, false},
-        {"a field of view past 360 degrees", overFov, false},
-        // Rejected under a rectilinear projection too: the HUD can switch to the fisheye at runtime, so the polynomial must hold anyway.
-        {"a non-monotone polynomial", nonMonotone, false},
     };
 
     const std::filesystem::path shippedPath = std::filesystem::path(ASSET_ROOT_DIR) / "config" / "profile.json";
@@ -870,6 +858,25 @@ PT_CHECK(film_back_presets_are_physically_valid, Fast, Exact) {
         allPositive = allPositive && preset.filmBack.widthMm > 0.0F && preset.filmBack.heightMm > 0.0F;
     }
     PT_EXPECT(ctx, allPositive, "a film-back preset has a non-positive dimension");
+}
+
+// Each preset passes Camera::validFilmBack alone, as the HUD swaps any in; 1e39, a finite double past FLT_MAX, narrows to inf.
+PT_CHECK(film_back_presets_reject_non_finite_or_non_positive, Fast, Exact) {
+    const std::vector<std::pair<std::string, bool>> cases = {
+        {"36.0, \"heightMm\": 24.0", true},
+        {"36.0, \"heightMm\": 0.0", false},
+        {"-36.0, \"heightMm\": 24.0", false},
+        {"36.0, \"heightMm\": 1e39", false},
+    };
+    ctx.plan(static_cast<int>(cases.size()));
+    for (const auto& [dimensions, accepted] : cases) {
+        const std::filesystem::path path =
+            writeJson("engine_io_sensor.json", "[{\"name\": \"gate\", \"widthMm\": " + dimensions + "}]");
+        const bool loaded = pathtracer::config::loadFilmBackPresets(path.string()).has_value();
+        std::filesystem::remove(path);
+        PT_EXPECT(ctx, loaded == accepted,
+                  "loadFilmBackPresets " + std::string(accepted ? "rejected" : "accepted") + " widthMm " + dimensions);
+    }
 }
 
 // Every appended record is exactly one line that parses back with every schema field, and appending never rewrites earlier lines.

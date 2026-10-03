@@ -25,7 +25,7 @@ struct CameraConfig {
     float aperture;
     float shutterSeconds;
     float iso;
-    // Projection selector plus the polynomial, validated whichever projection is active so the HUD dropdown can switch either way.
+    // Projection selector plus the polynomial; Camera::validate checks both whichever is active, as the HUD dropdown switches either way.
     pathtracer::scene::Lens lens;
 };
 
@@ -71,7 +71,7 @@ struct ProfileConfig {
 // Reads and parses path; nullopt and a stderr log if missing, unreadable or unparseable. User input: failure is surfaced, not asserted.
 [[nodiscard]] std::optional<ProfileConfig> loadProfileConfig(const std::string& path);
 
-// Reads the film-back preset catalogue, a JSON array of {name, widthMm, heightMm}. loadProfileConfig's contract plus a positivity check.
+// Reads the film-back preset catalogue, a JSON array of {name, widthMm, heightMm}; each must pass Camera::validFilmBack.
 [[nodiscard]] std::optional<std::vector<pathtracer::scene::Camera::FilmBackPreset>> loadFilmBackPresets(
     const std::string& path);
 

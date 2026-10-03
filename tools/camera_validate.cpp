@@ -55,10 +55,28 @@ constexpr std::array<float, 4> kStereographicTaylor{1.0F / 12.0F, 1.0F / 120.0F,
 constexpr std::array<float, 4> kOrthographicTaylor{-1.0F / 6.0F, 1.0F / 120.0F, -1.0F / 5040.0F,
                                                     1.0F / 362880.0F};
 
+// The constructor's arguments as one value with valid defaults, so a validation row varies exactly one of them.
+struct CameraArgs {
+    glm::vec3 position{0.0F};
+    float yawDegrees = 0.0F;
+    float pitchDegrees = 0.0F;
+    Camera::FilmBack filmBack = kFullFrame;
+    float focalLengthMm = 35.0F;
+    float nearClip = 0.01F;
+    float farClip = 100.0F;
+    float aperture = 2.8F;
+    float shutterSeconds = 0.008F;
+    float iso = 400.0F;
+    Lens lens{};
+
+    [[nodiscard]] Camera build() const {
+        return Camera{position, yawDegrees, pitchDegrees, filmBack, focalLengthMm, nearClip, farClip, aperture,
+                      shutterSeconds, iso, lens};
+    }
+};
+
 Camera makeCamera(float focalLengthMm, Lens lens) {
-    return Camera{glm::vec3(0.0F, 0.0F, 0.0F), 0.0F,  0.0F,  kFullFrame, focalLengthMm,
-                  0.01F,                       100.0F, 2.8F, 0.008F,      400.0F,
-                  lens};
+    return CameraArgs{.focalLengthMm = focalLengthMm, .lens = lens}.build();
 }
 
 Lens fisheye(const std::array<float, 4>& coefficients, float fieldOfViewDegrees) {
@@ -591,6 +609,135 @@ PT_CHECK(primary_ray_differential_matches_central_differences, Fast, Exact) {
         std::cout << "camera_validate: differential " << name << " -- " << imaged << " imaged, worst " << worst << " of budget\n";
         PT_EXPECT(ctx, imaged > 0, std::string(name) + ": no ndc sample on the grid was imaged");
         PT_EXPECT(ctx, mismatches == 0, std::string(name) + ": " + std::to_string(mismatches) + " differentials departed from the stencil");
+    }
+}
+
+// Every rule in Camera::validate, one field varied per row from a camera that validates, plus the boundary values each rule admits.
+PT_CHECK(camera_validate_rejects_each_invalid_parameter, Fast, Exact) {
+    constexpr float kInf = std::numeric_limits<float>::infinity();
+    constexpr float kNaN = std::numeric_limits<float>::quiet_NaN();
+    // theta_d' = 1 - theta^2 vanishes at 1 rad, inside a 180-degree circle's pi/2: rejected under rectilinear too, as the HUD can switch.
+    const std::array<float, 4> nonMonotone{-1.0F / 3.0F, 0.0F, 0.0F, 0.0F};
+    struct Row {
+        const char* name;
+        CameraArgs args;
+        bool accepted;
+    };
+    const auto with = [](auto edit) {
+        CameraArgs args;
+        edit(args);
+        return args;
+    };
+    const std::vector<Row> rows = {
+        {"the base camera", CameraArgs{}, true},
+        {"position x NaN", with([&](CameraArgs& a) { a.position.x = kNaN; }), false},
+        {"position z inf", with([&](CameraArgs& a) { a.position.z = kInf; }), false},
+        {"yaw NaN", with([&](CameraArgs& a) { a.yawDegrees = kNaN; }), false},
+        {"yaw inf", with([&](CameraArgs& a) { a.yawDegrees = kInf; }), false},
+        {"yaw 720, periodic", with([](CameraArgs& a) { a.yawDegrees = 720.0F; }), true},
+        {"pitch 89.9", with([](CameraArgs& a) { a.pitchDegrees = 89.9F; }), true},
+        {"pitch -89.9", with([](CameraArgs& a) { a.pitchDegrees = -89.9F; }), true},
+        {"pitch 90", with([](CameraArgs& a) { a.pitchDegrees = 90.0F; }), false},
+        {"pitch -90", with([](CameraArgs& a) { a.pitchDegrees = -90.0F; }), false},
+        {"pitch 100", with([](CameraArgs& a) { a.pitchDegrees = 100.0F; }), false},
+        {"pitch NaN", with([&](CameraArgs& a) { a.pitchDegrees = kNaN; }), false},
+        {"film back width 0", with([](CameraArgs& a) { a.filmBack.widthMm = 0.0F; }), false},
+        {"film back height -24", with([](CameraArgs& a) { a.filmBack.heightMm = -24.0F; }), false},
+        {"film back height inf", with([&](CameraArgs& a) { a.filmBack.heightMm = kInf; }), false},
+        {"film back width NaN", with([&](CameraArgs& a) { a.filmBack.widthMm = kNaN; }), false},
+        {"focal 0", with([](CameraArgs& a) { a.focalLengthMm = 0.0F; }), false},
+        {"focal -35", with([](CameraArgs& a) { a.focalLengthMm = -35.0F; }), false},
+        {"focal inf", with([&](CameraArgs& a) { a.focalLengthMm = kInf; }), false},
+        {"focal NaN", with([&](CameraArgs& a) { a.focalLengthMm = kNaN; }), false},
+        {"focal 1e-7, a finite half-height", with([](CameraArgs& a) { a.focalLengthMm = 1e-7F; }), true},
+        {"focal 1e-38, h/2f overflows", with([](CameraArgs& a) { a.focalLengthMm = 1e-38F; }), false},
+        {"gate 1e-7 mm at focal 3e38, h/2f underflows",
+         with([](CameraArgs& a) { a.filmBack = {1e-7F, 1e-7F}; a.focalLengthMm = 3e38F; }), false},
+        {"near 0", with([](CameraArgs& a) { a.nearClip = 0.0F; }), false},
+        {"near -1", with([](CameraArgs& a) { a.nearClip = -1.0F; }), false},
+        {"near inf", with([&](CameraArgs& a) { a.nearClip = kInf; a.farClip = kInf; }), false},
+        {"near NaN", with([&](CameraArgs& a) { a.nearClip = kNaN; }), false},
+        {"far equal to near", with([](CameraArgs& a) { a.farClip = a.nearClip; }), false},
+        {"far below near", with([](CameraArgs& a) { a.farClip = 0.5F * a.nearClip; }), false},
+        {"far NaN", with([&](CameraArgs& a) { a.farClip = kNaN; }), false},
+        {"far +inf, the unbounded ray", with([&](CameraArgs& a) { a.farClip = kInf; }), true},
+        {"aperture 0", with([](CameraArgs& a) { a.aperture = 0.0F; }), false},
+        {"aperture inf", with([&](CameraArgs& a) { a.aperture = kInf; }), false},
+        {"aperture 1e30, EV100 overflows", with([](CameraArgs& a) { a.aperture = 1e30F; }), false},
+        {"aperture 1e-30, EV100 underflows", with([](CameraArgs& a) { a.aperture = 1e-30F; }), false},
+        {"shutter 0", with([](CameraArgs& a) { a.shutterSeconds = 0.0F; }), false},
+        {"shutter -0.008", with([](CameraArgs& a) { a.shutterSeconds = -0.008F; }), false},
+        {"shutter NaN", with([&](CameraArgs& a) { a.shutterSeconds = kNaN; }), false},
+        {"ISO 0", with([](CameraArgs& a) { a.iso = 0.0F; }), false},
+        {"ISO inf", with([&](CameraArgs& a) { a.iso = kInf; }), false},
+        {"ISO NaN", with([&](CameraArgs& a) { a.iso = kNaN; }), false},
+        {"field of view 0", with([](CameraArgs& a) { a.lens.maxFieldOfViewDegrees = 0.0F; }), false},
+        {"field of view 360", with([](CameraArgs& a) { a.lens.maxFieldOfViewDegrees = 360.0F; }), true},
+        {"field of view 360.5", with([](CameraArgs& a) { a.lens.maxFieldOfViewDegrees = 360.5F; }), false},
+        {"field of view NaN", with([&](CameraArgs& a) { a.lens.maxFieldOfViewDegrees = kNaN; }), false},
+        {"fisheye, equidistant", with([](CameraArgs& a) { a.lens = fisheye({}, 180.0F); }), true},
+        {"non-monotone polynomial under rectilinear", with([&](CameraArgs& a) { a.lens.radialCoefficients = nonMonotone; }), false},
+        {"non-monotone polynomial under fisheye", with([&](CameraArgs& a) { a.lens = fisheye(nonMonotone, 180.0F); }), false},
+    };
+    ctx.plan(static_cast<int>(rows.size()));
+    for (const Row& row : rows) {
+        std::string error;
+        const bool accepted = row.args.build().validate(error);
+        // A rejection must name its reason; an acceptance must leave the caller's error untouched.
+        PT_EXPECT(ctx, accepted == row.accepted && error.empty() == accepted,
+                  std::string(row.name) + (accepted ? " was accepted" : " was rejected: " + error));
+    }
+}
+
+// The pitch bound is the basis's own domain, not a chosen margin: accepted exactly where right agrees with the yaw's horizontal right.
+PT_CHECK(pitch_domain_is_exactly_the_unaliased_basis, Fast, Exact) {
+    constexpr int kSteps = 64;
+    constexpr std::array<float, 3> kYaws{0.0F, 37.0F, -150.0F};
+    ctx.plan(static_cast<int>(kYaws.size()) * 2);
+    for (const float yaw : kYaws) {
+        const glm::vec3 yawRight(std::cos(glm::radians(yaw)), 0.0F, -std::sin(glm::radians(yaw)));
+        for (const float pole : {90.0F, -90.0F}) {
+            int mismatches = 0;
+            int accepted = 0;
+            // Floats straddling the pole: those whose radians round to or past pi/2 flip cos(pitch), and with it right.
+            float pitch = pole;
+            for (int i = 0; i < kSteps; ++i) {
+                pitch = std::nextafter(pitch, 0.0F);
+            }
+            for (int i = 0; i < 2 * kSteps; ++i, pitch = std::nextafter(pitch, 2.0F * pole)) {
+                CameraArgs args;
+                args.yawDegrees = yaw;
+                args.pitchDegrees = pitch;
+                const Camera camera = args.build();
+                const Camera::ViewBasis basis = camera.viewBasis(kAspect);
+                // A NaN right, the pole's 0/0, fails the comparison too.
+                const bool upright = glm::dot(basis.right, yawRight) > 0.0F;
+                std::string error;
+                const bool valid = camera.validate(error);
+                accepted += valid ? 1 : 0;
+                mismatches += valid != upright ? 1 : 0;
+            }
+            PT_EXPECT(ctx, mismatches == 0 && accepted > 0 && accepted < 2 * kSteps,
+                      "yaw " + std::to_string(yaw) + " pole " + std::to_string(pole) + ": " + std::to_string(mismatches) +
+                          " pitches where validate disagrees with the basis, " + std::to_string(accepted) + " accepted");
+        }
+    }
+}
+
+// The pinhole half-height is h/2f itself: tan(atan(h/2f)) saturates at small f, where atan rounds to a float at pi/2.
+PT_CHECK(pinhole_half_height_is_exact_at_extreme_focal_lengths, Fast, Exact) {
+    constexpr std::array<float, 4> kFocals{1e-7F, 1e-3F, 35.0F, 1e6F};
+    ctx.plan(static_cast<int>(kFocals.size()));
+    for (const float focal : kFocals) {
+        const Camera camera = makeCamera(focal, Lens{});
+        const Camera::ViewBasis basis = camera.viewBasis(kAspect);
+        const std::optional<Ray> top = camera.primaryRay(basis, 0.0F, 1.0F);
+        std::string error;
+        PT_EXPECT(ctx,
+                  camera.validate(error) && basis.halfHeight == basis.halfHeightMm / focal && top.has_value() &&
+                      glm::dot(top->dir, basis.up) > 0.0F,
+                  "focal " + std::to_string(focal) + " mm: half-height " + std::to_string(basis.halfHeight) +
+                      ", or the top edge does not look up " + error);
     }
 }
 

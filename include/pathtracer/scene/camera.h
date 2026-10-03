@@ -10,7 +10,7 @@
 
 namespace pathtracer::scene {
 
-// Pose, lens and exposure, immutable once constructed. Right-handed, +Y up, -Z forward; yaw/pitch Euler, clamped to +/-89 upstream.
+// Pose, lens and exposure, immutable once constructed. Right-handed, +Y up, -Z forward; yaw/pitch Euler, pitch bounded by validate().
 class Camera {
 public:
     // Sensor gate size in mm ({36.0F, 24.0F} for 35mm full-frame), paired with focal length to derive vertical FOV.
@@ -29,6 +29,12 @@ public:
     Camera(const glm::vec3& position, float yawDegrees, float pitchDegrees, FilmBack filmBack,
            float focalLengthMm, float nearClip, float farClip, float aperture,
            float shutterSeconds, float iso, Lens lens = Lens{});
+
+    // Every invariant the projections and exposure divide by or take trig of; false names the first violation. Run at each boundary.
+    [[nodiscard]] bool validate(std::string& error) const;
+
+    // Finite and positive in both dimensions, a FOV and aspect divisor; shared with sensor.json, whose presets the HUD swaps in.
+    [[nodiscard]] static bool validFilmBack(FilmBack filmBack);
 
     [[nodiscard]] glm::vec3 position() const { return position_; }
 

@@ -822,4 +822,30 @@ PT_CHECK(motion_vector_follows_the_previous_camera, Fast, Exact) {
               "a fisheye previous view failed or gave a non-finite motion: " + error);
 }
 
+// render() is the boundary for C++ and C ABI callers alike: an invalid camera or previous camera fails it, the error naming which.
+PT_CHECK(render_rejects_an_invalid_camera, Fast, Exact) {
+    ctx.plan(3);
+    std::string error;
+    const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", error);
+    if (!renderer) {
+        for (int i = 0; i < 3; ++i) {
+            PT_EXPECT(ctx, false, "scene load failed: " + error);
+        }
+        return;
+    }
+    const pathtracer::scene::Camera& camera = renderer->defaultCamera();
+    const pathtracer::scene::Camera zeroFieldOfView = withLens(camera, {pathtracer::scene::LensProjection::Rectilinear, {}, 0.0F});
+    const auto render = [&](const pathtracer::scene::Camera& current, std::optional<pathtracer::scene::Camera> previous) {
+        const pathtracer::api::HeadlessRenderer::Request request{
+            .camera = current, .previousCamera = previous, .width = 8, .height = 8, .aovs = {AovId::Depth}};
+        error.clear();
+        return renderer->render(request, error);
+    };
+    PT_EXPECT(ctx, render(camera, camera), "the default camera was rejected: " + error);
+    PT_EXPECT(ctx, !render(zeroFieldOfView, std::nullopt) && error.find("field of view") != std::string::npos,
+              "a zero field of view was not rejected by name: " + error);
+    PT_EXPECT(ctx, !render(camera, zeroFieldOfView) && error.starts_with("previousCamera: "),
+              "an invalid previous camera was not rejected under its own name: " + error);
+}
+
 PT_CHECK_MAIN("api")
