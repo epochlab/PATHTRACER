@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <chrono>
 #include <filesystem>
 #include <cmath>
@@ -10,6 +11,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -783,7 +785,8 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const pathtracer::scene
     const PathTraceTriggerState pathTrace{input, renderScale};
     if (pathTrace != app.lastPathTraceTrigger) {
         const std::uint64_t generation = requestPathTrace(app, camera, traceWidth, traceHeight);
-        if (app.bench) {
+        // Only an accumulation at the settled scale is the workload: an interactive one can converge before the settle promotes it.
+        if (app.bench && renderScale == app.renderScale) {
             app.bench->restart(generation);
         }
         app.lastPathTraceTrigger = pathTrace;
@@ -975,17 +978,15 @@ bool stageComplete(const AppResources& app, const BenchCapture& bench) {
            bench.passes.back().passIndex == app.maxSamples;
 }
 
-// Appends this frame's stage times and any newly finished pass. `pass` was read before this frame's snapshot, the driver publishing first.
+// Appends this frame's stage times and its finished passes. `passes` were taken before this frame's snapshot, the driver publishing first.
 void captureBenchFrame(pathtracer::platform::Window& window, AppResources& app, BenchCapture& bench,
-                       const pathtracer::debug::PassRecord& pass,
+                       const std::vector<pathtracer::debug::PassRecord>& passes,
                        const std::shared_ptr<const pathtracer::scene::PathTraceResult>& snapshot, float frameMs,
                        std::chrono::steady_clock::time_point now) {
-    const bool ours = pass.generation == bench.generation && !pass.cancelled;
-    // Keyed on the generation too: consecutive generations both number passes from 1, so an index-only test would drop a restart's first.
-    const bool unseen = bench.passes.empty() || bench.passes.back().generation != pass.generation ||
-                        bench.passes.back().passIndex != pass.passIndex;
-    if (ours && unseen) {
-        bench.passes.push_back(pass);
+    for (const pathtracer::debug::PassRecord& pass : passes) {
+        if (pass.generation == bench.generation && !pass.cancelled) {
+            bench.passes.push_back(pass);
+        }
     }
     bench.frames.push_back(app.stages);
     bench.frameMs.push_back(frameMs);
@@ -1116,7 +1117,7 @@ bool finishBench(const AppResources& app, const BenchCapture& bench) {
             expected = 0;
         }
         if (pass.passIndex != ++expected) {
-            std::cerr << "pathtracer: -bench missed a pass record of generation " << generation << " (two passes finished within one frame); nothing logged\n";
+            std::cerr << "pathtracer: -bench is missing pass " << expected << " of generation " << generation << "; nothing logged\n";
             return false;
         }
     }
@@ -1191,12 +1192,10 @@ void renderFrame(pathtracer::platform::Window& window, pathtracer::platform::Dis
 
     requestPathTraceIfTriggerChanged(app, camera, frameNow);
 
-    // Read before the snapshot so a final record guarantees the snapshot holds the final image -- see captureBenchFrame.
-    const pathtracer::debug::PassRecord benchPass =
-        app.bench ? app.pathTraceDriver->lastPassRecord() : pathtracer::debug::PassRecord{};
+    // Taken every frame, so none accumulate, and before the snapshot, so a final record guarantees the snapshot holds the final image.
+    const std::vector<pathtracer::debug::PassRecord> finishedPasses = app.pathTraceDriver->takePassRecords();
     // Held for the rest of the frame so the images stay valid if the driver publishes mid-frame. Null until the first pass completes.
-    const std::shared_ptr<const pathtracer::scene::PathTraceResult> pathTraceSnapshot =
-        app.pathTraceDriver != nullptr ? app.pathTraceDriver->latestResult() : nullptr;
+    const std::shared_ptr<const pathtracer::scene::PathTraceResult> pathTraceSnapshot = app.pathTraceDriver->latestResult();
 
     resolveOrbitPick(window, app, camera);
 
@@ -1224,7 +1223,7 @@ void renderFrame(pathtracer::platform::Window& window, pathtracer::platform::Dis
         updateDashboard(app, pathTraceSnapshot, dtSeconds * 1000.0F, viewportWidth, viewportHeight);
     }
     if (app.bench) {
-        captureBenchFrame(window, app, *app.bench, benchPass, pathTraceSnapshot, dtSeconds * 1000.0F, frameNow);
+        captureBenchFrame(window, app, *app.bench, finishedPasses, pathTraceSnapshot, dtSeconds * 1000.0F, frameNow);
     }
 }
 
@@ -1236,7 +1235,30 @@ struct Options {
     std::string benchLogPath;
     // -bench-aovs A,B,C: AovId sequence the run walks, one stage per entry. Empty = today's single-stage capture.
     std::vector<int> benchAovs;
+    // -size WxH and -max-samples N replace profile.json's render.width/height and maxSamples: a benchmark sized without editing it.
+    std::optional<std::pair<int, int>> size;
+    std::optional<int> maxSamples;
 };
+
+// True when `digits` is a whole decimal integer of at least `minimum`, nothing else: the bounds profile.json applies to the same keys.
+bool parseInteger(std::string_view digits, int minimum, int& out) {
+    const auto [end, error] = std::from_chars(digits.data(), digits.data() + digits.size(), out);
+    return error == std::errc{} && end == digits.data() + digits.size() && out >= minimum;
+}
+
+// "WxH", both positive integers. nullopt, reported, otherwise.
+std::optional<std::pair<int, int>> parseSize(const char* text) {
+    const std::string_view view(text);
+    const std::size_t separator = view.find('x');
+    int width = 0;
+    int height = 0;
+    if (separator == std::string_view::npos || !parseInteger(view.substr(0, separator), 1, width) ||
+        !parseInteger(view.substr(separator + 1), 1, height)) {
+        std::cerr << "pathtracer: -size expects WxH, two positive integers, got '" << text << "'\n";
+        return std::nullopt;
+    }
+    return std::pair{width, height};
+}
 
 // Resolves a comma-separated AOV list against kAovNames, so -bench-aovs and the HUD name the same AOVs. nullopt on an unknown name.
 std::optional<std::vector<int>> parseAovList(const char* list) {
@@ -1292,9 +1314,27 @@ std::optional<Options> parseOptions(int argc, char** argv) {
                 return std::nullopt;
             }
             options.benchAovs = std::move(*aovs);
+        } else if (std::strcmp(argv[i], "-size") == 0) {
+            if (i + 1 >= argc) {
+                std::cerr << "pathtracer: -size expects a value\n";
+                return std::nullopt;
+            }
+            options.size = parseSize(argv[++i]);
+            if (!options.size) {
+                return std::nullopt;
+            }
+        } else if (std::strcmp(argv[i], "-max-samples") == 0) {
+            int maxSamples = 0;
+            if (i + 1 >= argc || !parseInteger(argv[i + 1], 0, maxSamples)) {
+                std::cerr << "pathtracer: -max-samples expects a non-negative integer, 0 for unbounded\n";
+                return std::nullopt;
+            }
+            options.maxSamples = maxSamples;
+            ++i;
         } else {
             std::cerr << "pathtracer: unknown flag " << argv[i]
-                       << "\n  usage: pathtracer [-scene path/to/scene.json] [-stats] [-bench log.jsonl] [-bench-aovs beauty,normal,...]\n";
+                       << "\n  usage: pathtracer [-scene path/to/scene.json] [-stats] [-bench log.jsonl] [-bench-aovs beauty,normal,...]"
+                       << " [-size WxH] [-max-samples N]\n";
             return std::nullopt;
         }
     }
@@ -1317,7 +1357,7 @@ bool validStartup(const Options& options, const std::optional<pathtracer::config
          !aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(
              options.benchAovs.empty() ? profileConfig->render.defaultAov : options.benchAovs.front())))) {
         // An unbounded accumulation never ends and a G-buffer AOV parks the driver, so neither is a benchmark workload.
-        std::cerr << "main: -bench needs profile.json maxSamples > 0 and a path-traced first AOV\n";
+        std::cerr << "main: -bench needs maxSamples > 0 and a path-traced first AOV\n";
         return false;
     }
     return true;
@@ -1390,8 +1430,15 @@ int main(int argc, char** argv) {
 
     // profile.json's window size must be known before Window is constructed, so config loads first, before any GL object exists.
     const std::optional<pathtracer::config::SceneConfig> sceneConfig = pathtracer::config::loadSceneConfig(options->scenePath);
-    const std::optional<pathtracer::config::ProfileConfig> profileConfig =
+    std::optional<pathtracer::config::ProfileConfig> profileConfig =
         pathtracer::config::loadProfileConfig(ASSET_ROOT_DIR "/config/profile.json");
+    if (profileConfig && options->size) {
+        profileConfig->render.width = options->size->first;
+        profileConfig->render.height = options->size->second;
+    }
+    if (profileConfig && options->maxSamples) {
+        profileConfig->pathTracer.maxSamples = *options->maxSamples;
+    }
     const int exitCode = validStartup(*options, sceneConfig, profileConfig)
                              ? runApp(*options, *sceneConfig, *profileConfig, argc, argv)
                              : EXIT_FAILURE;

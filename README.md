@@ -20,7 +20,7 @@ cmake --build build
 ## Run
 
 ```
-./build/pathtracer [-scene path/to/scene.json] [-stats] [-bench log.jsonl]
+./build/pathtracer [-scene path/to/scene.json] [-stats] [-bench log.jsonl] [-bench-aovs beauty,normal,...] [-size WxH] [-max-samples N]
 ```
 
 ## Controls

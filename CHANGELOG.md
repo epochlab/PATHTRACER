@@ -3,6 +3,24 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Viewer benchmark sizing: `-size`, `-max-samples`, and no lost pass records
+
+A viewer `-bench` at the authored 2048x1152 and 64 samples takes about 93 s per run, so a 7-round A/B took about 22 minutes. The
+run is now sized from argv; the review benchmark is `-size 512x256 -max-samples 32`, **3.9 s per run**. Evidence is in
+`results/viewer_size`.
+
+- feat: `-size WxH` and `-max-samples N` replace `render.width/height` and `pathTracer.maxSamples` after the profile loads.
+  They are parsed whole at the argv boundary with the profile's own bounds (extents >= 1, samples >= 0). The bench config
+  already records the traced width, height and `max_samples`, so records of different sizes never compare.
+- fix: `PathTraceDriver::takePassRecords()` returns every pass record since the last call, cancelled included; the frame
+  loop takes them every frame. The bench read `lastPassRecord()` once per frame and lost records whenever two passes finished
+  within one frame, which is every frame at 512x256. `lastPassRecord()` stays for the HUD and dashboard.
+- fix: only a request at the settled `renderScale` restarts a bench capture. Before, the interactive accumulation
+  (51x26 at 512x256) could reach `maxSamples` inside the 0.25 s settle window and be logged as the workload. Full-size runs
+  were unaffected: their interactive accumulation outlasts the settle window.
+- test: `driver_validate` `every_pass_record_is_taken_once_in_order` drains a 12-pass accumulation through
+  `takePassRecords` and requires exactly passes 1..12, in order, with nothing left. `ctest` 214/214.
+
 ## Display encode cost: one shared OCIO processor, a row-wise encode into the caller's buffer
 
 `pt_display_encode` re-parsed the builtin OCIO config and rebuilt its processor on every call. It encoded into a full-frame float

@@ -176,6 +176,13 @@ pathtracer::debug::PassRecord PathTraceDriver::lastPassRecord() const {
     return lastPass_;
 }
 
+std::vector<pathtracer::debug::PassRecord> PathTraceDriver::takePassRecords() {
+    std::vector<pathtracer::debug::PassRecord> taken;
+    const std::lock_guard<std::mutex> lock(statsMutex_);
+    taken.swap(untakenPasses_);
+    return taken;
+}
+
 // Driver-thread-only. passStats_ is read here so the completed and cancelled call sites share one definition of a PassRecord.
 void PathTraceDriver::publishPassRecord(std::uint64_t generation, int passIndex, int width,
                                          int height, double traceMs, double accumulateMs,
@@ -196,6 +203,7 @@ void PathTraceDriver::publishPassRecord(std::uint64_t generation, int passIndex,
                                             cancelled};
     const std::lock_guard<std::mutex> lock(statsMutex_);
     lastPass_ = record;
+    untakenPasses_.push_back(record);
 }
 
 // Driver-thread-only. Resets the pass counters, builds this pass's LightSet and traces one pass into `pass`; returns the trace time.
