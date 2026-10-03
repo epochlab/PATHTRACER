@@ -6,6 +6,7 @@
 #include <iostream>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <glm/gtc/matrix_inverse.hpp>
@@ -46,10 +47,10 @@ void appendWorldTriangles(const std::vector<Vertex>& vertices,
     }
 }
 
-// Parallel to appendWorldTriangles: normal via inverse-transpose, tangent via transform directly.
+// Parallel to appendWorldTriangles: normal via inverse-transpose, tangent via transform directly, handedness = sign(det M).
 void appendShadingTriangles(const std::vector<Vertex>& vertices,
                              const std::vector<unsigned int>& indices, const glm::mat4& transform,
-                             int instanceIndex, std::vector<ShadingTriangle>& outShadingTriangles) {
+                             float handedness, int instanceIndex, std::vector<ShadingTriangle>& outShadingTriangles) {
     const glm::mat3 linear(transform);
     const glm::mat3 normalMatrix = glm::inverseTranspose(linear);
     const auto toWorldVertex = [&](unsigned int index) {
@@ -58,7 +59,8 @@ void appendShadingTriangles(const std::vector<Vertex>& vertices,
             glm::vec3(transform * glm::vec4(v.position, 1.0F)),
             glm::normalize(normalMatrix * v.normal),
             v.uv,
-            glm::vec4(glm::normalize(linear * glm::vec3(v.tangent)), v.tangent.w),
+            // sign det[M^-T N, MT, MB] = sign(det M): cross(N',T') tracks M*B only once w takes the determinant's sign.
+            glm::vec4(glm::normalize(linear * glm::vec3(v.tangent)), v.tangent.w * handedness),
             v.colour,
         };
     };
@@ -162,13 +164,20 @@ std::optional<MeshInstance> loadPrimitive(const cgltf_primitive& prim, const glm
     if (!acc.has_value()) {
         return std::nullopt;
     }
-    const std::optional<std::vector<unsigned int>> indices = readIndices(prim.indices);
+    std::optional<std::vector<unsigned int>> indices = readIndices(prim.indices);
     if (!indices.has_value()) {
         return std::nullopt;
     }
+    // glTF 2.0 3.7.2.1: a negative global determinant makes faces clockwise; re-wind so cross(e1,e2) keeps facing the normal.
+    const float handedness = glm::determinant(glm::mat3(transform)) < 0.0F ? -1.0F : 1.0F;
+    if (handedness < 0.0F) {
+        for (std::size_t i = 0; i + 2 < indices->size(); i += 3) {
+            std::swap((*indices)[i + 1], (*indices)[i + 2]);
+        }
+    }
     const std::vector<Vertex> vertices = readVertices(*acc);
     appendWorldTriangles(vertices, *indices, transform, outWorldTriangles);
-    appendShadingTriangles(vertices, *indices, transform, instanceIndex, outShadingTriangles);
+    appendShadingTriangles(vertices, *indices, transform, handedness, instanceIndex, outShadingTriangles);
 
     // Geometry only: every slot starts at its neutral default, and bindSceneTextures binds the scene JSON's maps by node name.
     return MeshInstance{

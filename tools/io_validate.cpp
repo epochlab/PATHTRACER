@@ -1,4 +1,4 @@
-// Correctness gate for the engine's file boundaries: the EXR round trip and the JSON scene, profile and bench-log parsers.
+// Correctness gate for the engine's file boundaries: the EXR round trip, the glTF loader and the JSON scene, profile and bench-log parsers.
 
 #include <algorithm>
 #include <array>
@@ -32,6 +32,9 @@
 #include "pathtracer/debug/bench_log.h"
 #include "pathtracer/gfx/hdr_image.h"
 #include "pathtracer/gfx/texture.h"
+#include "pathtracer/scene/gbuffer_shading.h"
+#include "pathtracer/scene/gltf_loader.h"
+#include "pathtracer/scene/shading_scene.h"
 
 namespace {
 
@@ -924,6 +927,95 @@ PT_CHECK(float_crc32_matches_reference, Fast, Exact) {
     const std::vector<float> mixed{1.0F, -2.5F, 0.1F};
     PT_EXPECT(ctx, pathtracer::debug::floatCrc32(zero) == 0x2144DF1CU, "CRC-32 of four zero bytes is not 0x2144DF1C");
     PT_EXPECT(ctx, pathtracer::debug::floatCrc32(mixed) == 2706677804U, "CRC-32 of {1, -2.5, 0.1} disagrees with zlib.crc32");
+}
+
+// One glTF primitive's fixture data, written verbatim so each check states the exact attributes it exercises.
+struct GltfPrimitive {
+    std::vector<glm::vec3> positions;
+    std::vector<glm::vec3> normals;
+    std::vector<glm::vec2> uvs;
+    std::vector<glm::vec4> tangents;
+    std::vector<unsigned int> indices;
+};
+
+// Writes a one-mesh .gltf and its .bin to scratch, the mesh instanced by one node per entry of nodeScales; returns the .gltf path.
+std::filesystem::path writeGltf(const std::string& stem, const GltfPrimitive& prim, const std::vector<glm::vec3>& nodeScales) {
+    std::vector<unsigned char> bin;
+    nlohmann::json bufferViews = nlohmann::json::array();
+    nlohmann::json accessors = nlohmann::json::array();
+    const auto addAccessor = [&](const void* data, std::size_t bytes, int componentType, std::size_t count, const char* type) {
+        const auto* first = static_cast<const unsigned char*>(data);
+        bufferViews.push_back({{"buffer", 0}, {"byteOffset", bin.size()}, {"byteLength", bytes}});
+        bin.insert(bin.end(), first, first + bytes);
+        accessors.push_back({{"bufferView", bufferViews.size() - 1}, {"componentType", componentType}, {"count", count}, {"type", type}});
+        return accessors.size() - 1;
+    };
+    constexpr int kFloat = 5126;
+    constexpr int kUnsignedInt = 5125;
+    nlohmann::json primitive = {{"attributes",
+                                 {{"POSITION", addAccessor(prim.positions.data(), prim.positions.size() * sizeof(glm::vec3), kFloat,
+                                                           prim.positions.size(), "VEC3")},
+                                  {"NORMAL", addAccessor(prim.normals.data(), prim.normals.size() * sizeof(glm::vec3), kFloat,
+                                                         prim.normals.size(), "VEC3")},
+                                  {"TEXCOORD_0", addAccessor(prim.uvs.data(), prim.uvs.size() * sizeof(glm::vec2), kFloat,
+                                                             prim.uvs.size(), "VEC2")},
+                                  {"TANGENT", addAccessor(prim.tangents.data(), prim.tangents.size() * sizeof(glm::vec4), kFloat,
+                                                          prim.tangents.size(), "VEC4")}}}};
+    primitive["indices"] =
+        addAccessor(prim.indices.data(), prim.indices.size() * sizeof(unsigned int), kUnsignedInt, prim.indices.size(), "SCALAR");
+    nlohmann::json nodes = nlohmann::json::array();
+    nlohmann::json sceneNodes = nlohmann::json::array();
+    for (const glm::vec3& scale : nodeScales) {
+        sceneNodes.push_back(nodes.size());
+        nodes.push_back({{"mesh", 0}, {"scale", {scale.x, scale.y, scale.z}}});
+    }
+    const std::string binName = stem + ".bin";
+    const nlohmann::json gltf = {{"asset", {{"version", "2.0"}}},
+                                 {"scene", 0},
+                                 {"scenes", {{{"nodes", sceneNodes}}}},
+                                 {"nodes", nodes},
+                                 {"meshes", {{{"primitives", {primitive}}}}},
+                                 {"accessors", accessors},
+                                 {"bufferViews", bufferViews},
+                                 {"buffers", {{{"uri", binName}, {"byteLength", bin.size()}}}}};
+    std::ofstream(scratchPath(binName.c_str()), std::ios::binary)
+        .write(reinterpret_cast<const char*>(bin.data()), static_cast<std::streamsize>(bin.size()));
+    const std::filesystem::path path = scratchPath((stem + ".gltf").c_str());
+    std::ofstream(path) << gltf.dump();
+    return path;
+}
+
+// Unit quad in z=0 facing +z, wound counter-clockwise from +z, with p = (u, 1-v): +x is +u and +y is image-up.
+GltfPrimitive makeQuad() {
+    const glm::vec3 up(0.0F, 0.0F, 1.0F);
+    return GltfPrimitive{{{0.0F, 0.0F, 0.0F}, {1.0F, 0.0F, 0.0F}, {1.0F, 1.0F, 0.0F}, {0.0F, 1.0F, 0.0F}},
+                         {up, up, up, up},
+                         {{0.0F, 1.0F}, {1.0F, 1.0F}, {1.0F, 0.0F}, {0.0F, 0.0F}},
+                         std::vector<glm::vec4>(4, glm::vec4(1.0F, 0.0F, 0.0F, 1.0F)),
+                         {0, 1, 2, 0, 2, 3}};
+}
+
+// glTF 2.0 3.7.2.1: winding follows the determinant, so a mirrored node must keep its face normal on the shading normal's side.
+PT_CHECK(gltf_mirrored_transform_keeps_geometric_and_shading_normals_agreed, Fast, Exact) {
+    // Identity, a single-axis mirror and a non-uniform mirror: the handedness rule is sign(det M), not orthogonality.
+    const std::vector<glm::vec3> scales = {{1.0F, 1.0F, 1.0F}, {-1.0F, 1.0F, 1.0F}, {2.0F, -0.5F, 3.0F}};
+    const std::optional<pathtracer::scene::LoadedModel> model =
+        pathtracer::scene::loadGltf(writeGltf("engine_io_validate_mirror", makeQuad(), scales).string());
+    constexpr int kTrianglesPerQuad = 2;
+    ctx.plan(1 + (static_cast<int>(scales.size()) * kTrianglesPerQuad * 2));
+    PT_EXPECT(ctx, model && model->shadingTriangles.size() == scales.size() * kTrianglesPerQuad, "the fixture did not load as one quad per node");
+    if (!model) {
+        return;
+    }
+    for (const pathtracer::scene::ShadingTriangle& tri : model->shadingTriangles) {
+        const glm::mat3 linear(model->instances[static_cast<std::size_t>(tri.instanceIndex)].transform);
+        const pathtracer::scene::ShadingVertex shading = pathtracer::scene::interpolateShading(tri, 1.0F / 3.0F, 1.0F / 3.0F);
+        PT_EXPECT(ctx, glm::dot(pathtracer::scene::geometricNormalOf(tri), shading.normal) > 0.0F,
+                  "the geometric normal opposes the shading normal");
+        // The authored bitangent is cross(+z, +x) * 1 = +y; a vector field maps by M, so the world bitangent must point along M * y.
+        const glm::vec3 bitangent = glm::cross(shading.normal, glm::vec3(shading.tangent)) * shading.tangent.w;
+        PT_EXPECT(ctx, glm::dot(bitangent, linear * glm::vec3(0.0F, 1.0F, 0.0F)) > 0.0F, "the world bitangent opposes M * B");
+    }
 }
 
 }  // namespace
