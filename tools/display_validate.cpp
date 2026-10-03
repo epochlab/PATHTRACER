@@ -4,6 +4,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <random>
+#include <string>
 #include <vector>
 
 #include "check.h"
@@ -102,6 +104,62 @@ PT_CHECK(ocio_transform_handles_a_real_image, Slow, Exact) {
     std::snprintf(detail, sizeof(detail), "%zu of %zu texel channels disagree with a per-scalar transform of the same value",
                   mismatched, image.size());
     PT_EXPECT(ctx, mismatched == 0, detail);
+}
+
+// The probe's Rec.709 LUT is BT.1886's inverse EOTF at Lw = 1, Lb = 0 (ITU-R BT.1886 Annex 1): V = L^(1/2.4), not sRGB's piecewise curve.
+PT_CHECK(rec709_lut_is_the_bt1886_inverse_eotf, Fast, Exact) {
+    constexpr int kSteps = 64;
+    // OCIO's float pow round-off, the anchor check's bound; the sRGB curve in its place fails it.
+    constexpr float kTolerance = 1e-5F;
+    ctx.plan(1);
+    float worst = 0.0F;
+    for (int i = 0; i <= kSteps; ++i) {
+        const float v = static_cast<float>(i) / kSteps;
+        std::vector<float> rgb{v, v, v};
+        pathtracer::gfx::applyOcioDisplayTransform(rgb, 1, 1, pathtracer::gfx::OcioDisplayTransform::Lut::Rec709);
+        worst = std::max(worst, std::fabs(rgb[0] - std::pow(v, 1.0F / 2.4F)));
+    }
+    PT_EXPECT(ctx, worst <= kTolerance, "max |Rec.709 - L^(1/2.4)| = " + std::to_string(worst));
+}
+
+// The row-wise encode against a whole-image reference: transform the mapped frame in one OCIO call, then encode it untransformed.
+PT_CHECK(encode_matches_whole_image_transform, Fast, Exact) {
+    constexpr int kWidth = 13;  // deliberately not a multiple of any SIMD width
+    constexpr int kHeight = 7;
+    constexpr std::size_t kFloats = static_cast<std::size_t>(kWidth) * kHeight * 3;
+    ctx.plan(3);
+    const glm::vec3 gain(1.7F, 0.9F, 1.2F);
+    const glm::vec3 offset(0.01F, -0.02F, 0.0F);
+    // Negative, in-gamut and far over-range values, so the curve's linear toe, its power segment and the clamp are all exercised.
+    std::mt19937_64 rng(ctx.seed());
+    std::uniform_real_distribution<float> radiance(-0.5F, 8.0F);
+    std::vector<float> rgb(kFloats);
+    std::vector<float> mapped(kFloats);
+    for (std::size_t i = 0; i < kFloats; ++i) {
+        rgb[i] = radiance(rng);
+        mapped[i] = (rgb[i] * gain[static_cast<glm::length_t>(i % 3)]) + offset[static_cast<glm::length_t>(i % 3)];
+    }
+    std::vector<unsigned char> rowWise(kFloats);
+    pathtracer::gfx::encodeForDisplay(rgb, kWidth, kHeight, gain, true, offset, rowWise);
+    std::vector<float> transformed = mapped;
+    pathtracer::gfx::applyOcioDisplayTransform(transformed, kWidth, kHeight);
+    std::vector<unsigned char> reference(kFloats);
+    pathtracer::gfx::encodeForDisplay(transformed, kWidth, kHeight, glm::vec3(1.0F), false, glm::vec3(0.0F), reference);
+    std::size_t differing = 0;
+    for (std::size_t i = 0; i < kFloats; ++i) {
+        differing += rowWise[i] != reference[i] ? 1 : 0;
+    }
+    PT_EXPECT(ctx, differing == 0, std::to_string(differing) + " of " + std::to_string(kFloats) + " bytes differ from the reference");
+    // Independent of the encode's addressing: TPDF dither keeps |d| < 1/255, so each code lies within 1.5 of 255 clamp(v).
+    std::size_t outOfBound = 0;
+    for (std::size_t i = 0; i < kFloats; ++i) {
+        const float expected = 255.0F * std::clamp(transformed[i], 0.0F, 1.0F);
+        outOfBound += std::fabs(static_cast<float>(reference[i]) - expected) < 1.5F ? 0 : 1;
+    }
+    PT_EXPECT(ctx, outOfBound == 0, std::to_string(outOfBound) + " codes lie beyond the dither's reach of their value");
+    std::vector<float> raw = mapped;
+    pathtracer::gfx::applyOcioDisplayTransform(raw, kWidth, kHeight, pathtracer::gfx::OcioDisplayTransform::Lut::Raw);
+    PT_EXPECT(ctx, raw == mapped, "the Raw LUT must leave every value untouched");
 }
 
 // --- FrameStats: testable exactly only because tick() takes an injectable clock, steady_clock having made every assertion a race.

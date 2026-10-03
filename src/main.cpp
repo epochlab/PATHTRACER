@@ -20,8 +20,6 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
 
-#include <OpenColorIO/OpenColorIO.h>
-
 #include "pathtracer/config/profile_config.h"
 #include "pathtracer/config/scene_config.h"
 #include "pathtracer/debug/aov.h"
@@ -40,6 +38,7 @@
 #include "pathtracer/debug/system_info.h"
 #include "pathtracer/gfx/gl_debug.h"
 #include "pathtracer/gfx/hdr_image.h"
+#include "pathtracer/gfx/ocio_cpu_transform.h"
 #include "pathtracer/gfx/ocio_display_transform.h"
 #include "pathtracer/gfx/post_process_pass.h"
 #include "pathtracer/gfx/shader_program.h"
@@ -59,8 +58,6 @@
 #include "pathtracer/scene/path_tracer.h"
 #include "pathtracer/scene/gbuffer.h"
 #include "pathtracer/scene/thread_pool.h"
-
-namespace OCIO = OCIO_NAMESPACE;
 
 namespace {
 
@@ -540,23 +537,6 @@ pathtracer::scene::Camera updateCamera(const pathtracer::platform::Window& windo
     return app.debugCamera.snapshot();
 }
 
-// Cached CPU OCIO processors for the Beauty probe, built once: getProcessor parses the builtin config, as the GPU shaders do at startup.
-const OCIO::ConstCPUProcessorRcPtr& ocioCpuProcessor(pathtracer::gfx::OcioDisplayTransform::Lut lut) {
-    static const OCIO::ConstConfigRcPtr config =
-        OCIO::Config::CreateFromBuiltinConfig(pathtracer::gfx::kOcioConfigName);
-    static const OCIO::ConstCPUProcessorRcPtr srgbProcessor =
-        config
-            ->getProcessor(pathtracer::gfx::kOcioSceneColorSpace, pathtracer::gfx::kOcioSrgbDisplay,
-                            pathtracer::gfx::kOcioView, OCIO::TRANSFORM_DIR_FORWARD)
-            ->getDefaultCPUProcessor();
-    static const OCIO::ConstCPUProcessorRcPtr rec709Processor =
-        config
-            ->getProcessor(pathtracer::gfx::kOcioSceneColorSpace, pathtracer::gfx::kOcioRec709Display,
-                            pathtracer::gfx::kOcioView, OCIO::TRANSFORM_DIR_FORWARD)
-            ->getDefaultCPUProcessor();
-    return lut == pathtracer::gfx::OcioDisplayTransform::Lut::Rec709 ? rec709Processor : srgbProcessor;
-}
-
 // The Beauty probe's display transform on one texel: channel isolation, exposure, the OCIO curve, then invert -- the shaders' own order.
 glm::vec3 applyBeautyDisplayTransform(glm::vec3 hdrColor, const AppResources& app) {
     if (app.channelView == 1) {
@@ -566,12 +546,10 @@ glm::vec3 applyBeautyDisplayTransform(glm::vec3 hdrColor, const AppResources& ap
     } else if (app.channelView == 3) {
         hdrColor = glm::vec3(hdrColor.b);
     }
-    glm::vec3 displayColor = hdrColor * std::pow(2.0F, app.debugCamera.relativeExposureEv());
-    if (app.userLut != pathtracer::gfx::OcioDisplayTransform::Lut::Raw) {
-        std::array<float, 3> pixel{displayColor.r, displayColor.g, displayColor.b};
-        ocioCpuProcessor(app.userLut)->applyRGB(pixel.data());
-        displayColor = {pixel[0], pixel[1], pixel[2]};
-    }
+    const glm::vec3 exposed = hdrColor * std::pow(2.0F, app.debugCamera.relativeExposureEv());
+    std::array<float, 3> pixel{exposed.r, exposed.g, exposed.b};
+    pathtracer::gfx::applyOcioDisplayTransform(pixel, 1, 1, app.userLut);
+    glm::vec3 displayColor{pixel[0], pixel[1], pixel[2]};
     if (app.invert) {
         displayColor = glm::vec3(1.0F) - displayColor;
     }
