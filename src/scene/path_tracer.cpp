@@ -261,7 +261,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
         }
 
         const ShadingVertex shading = interpolateShading(triangle, hit->u, hit->v);
-        const ShadingFrame frame = buildShadingFrame(shading, material, instanceSettings);
+        const ShadingFrame frame = buildShadingFrame(triangle, shading, material, instanceSettings);
         const BsdfParams params =
             resolveBsdfParams(material, shading.uv, shading.colour, instanceSettings, heroChannel);
         const glm::vec3 woWorld = -ray.dir;

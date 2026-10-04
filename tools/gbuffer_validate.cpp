@@ -42,7 +42,7 @@ constexpr int kMaterialCount = 4;
 constexpr float kSceneNearZ = 1.0F;
 constexpr float kSceneFarZ = 16.0F;
 constexpr float kEps = std::numeric_limits<float>::epsilon();
-// camera_validate's budget for a dozen rounded operations, applied to each stage of a reprojection or a line distance.
+// camera_validate's budget for a dozen rounded operations, applied to each stage of a reprojection, a line distance or a bump gradient.
 constexpr float kClosedFormUlps = 16.0F;
 // The AOV's documented on-screen line width (gbuffer.cpp), the threshold every line classification compares against.
 constexpr float kLineThicknessPx = 1.0F;
@@ -233,7 +233,7 @@ bool matchesOracle(const GBuffer& g, int x, int y, const Hit& hit, const Fixture
     const Material& material = fixture.instances[instance].material;
     const PathTraceSettings& settings = fixture.perInstanceSettings[instance];
     const ShadingVertex shading = interpolateShading(triangle, hit.u, hit.v);
-    const ShadingFrame frame = buildShadingFrame(shading, material, settings);
+    const ShadingFrame frame = buildShadingFrame(triangle, shading, material, settings);
     const BsdfParams params = resolveBsdfParams(material, shading.uv, shading.colour, settings, std::nullopt);
     return texelAt(g.depth, x, y).x == hit.t &&
            texelAt(g.lookahead, x, y).x == std::clamp(1.0F - (hit.t / settings.lookaheadDistance), 0.0F, 1.0F) &&
@@ -878,20 +878,115 @@ PT_CHECK(constant_inputs_match_unit_textures, Fast, Exact) {
         glm::vec4 tangent = tangentFor(normal);
         tangent.w = unit(rng) < 0.5F ? -1.0F : 1.0F;
         const ShadingVertex vertex{glm::vec3(0.0F), normal, glm::vec2(wrappedUv(rng), wrappedUv(rng)), tangent, randomVec3()};
+        // Unit edges along the tangent frame, uv advancing one unit along each: a well-conditioned dP/duv for the bump gradient.
+        ShadingTriangle triangle{vertex, vertex, vertex, 0};
+        triangle.v1.position = glm::vec3(tangent);
+        triangle.v1.uv += glm::vec2(1.0F, 0.0F);
+        triangle.v2.position = glm::cross(normal, glm::vec3(tangent)) * tangent.w;
+        triangle.v2.uv += glm::vec2(0.0F, 1.0F);
 
         const BsdfParams constantParams = resolveBsdfParams(constant, vertex.uv, vertex.colour, settings, std::nullopt);
         const BsdfParams texturedParams = resolveBsdfParams(textured, vertex.uv, vertex.colour, settings, std::nullopt);
         paramMismatches += sameBsdfParams(constantParams, texturedParams) ? 0 : 1;
-        const ShadingFrame constantFrame = buildShadingFrame(vertex, constant, settings);
-        frameMismatches += constantFrame == buildShadingFrame(vertex, textured, settings) ? 0 : 1;
+        const ShadingFrame constantFrame = buildShadingFrame(triangle, vertex, constant, settings);
+        frameMismatches += constantFrame == buildShadingFrame(triangle, vertex, textured, settings) ? 0 : 1;
         // Four taps of a constant height differ by exactly 0, so the texture path only renormalises the unbumped normal.
-        bumpMismatches += buildShadingFrame(vertex, bumped, settings)[2] == glm::normalize(constantFrame[2]) ? 0 : 1;
+        bumpMismatches += buildShadingFrame(triangle, vertex, bumped, settings)[2] == glm::normalize(constantFrame[2]) ? 0 : 1;
     }
     std::cout << "gbuffer_validate: constant vs 1x1 texture over " << kCases << " cases -- " << paramMismatches << " BsdfParams, "
               << frameMismatches << " frame, " << bumpMismatches << " bump mismatches\n";
     PT_EXPECT(ctx, paramMismatches == 0, "a constant input resolved BsdfParams differently from its 1x1 texture");
     PT_EXPECT(ctx, frameMismatches == 0, "a constant normal built a different shading frame from its 1x1 texture");
     PT_EXPECT(ctx, bumpMismatches == 0, "a constant bump texture tilted the normal: its gradient is not exactly zero");
+}
+
+// H = a*u + b*v is linear, so bilinear taps reproduce it and the true surface gradient of h = bumpStrength*H is a 3x3 solve per triangle.
+PT_CHECK(bump_gradient_is_world_height, Fast, Exact) {
+    constexpr int kCases = 256;
+    constexpr glm::vec2 kSlopeUv(0.6F, -0.8F);
+    // Upper bound of |H| over [0,1]^2, the scale of each bilinear tap's rounding.
+    constexpr float kHeightMax = 1.4F;
+    // Each extreme texel size on each axis: the slope must not change with resolution, nor with model scale or uv mirroring.
+    constexpr std::array<glm::ivec2, 3> kResolutions{{{16, 4096}, {256, 256}, {4096, 16}}};
+    std::mt19937 rng(static_cast<std::mt19937::result_type>(ctx.seed()));
+    std::uniform_real_distribution<float> unit(0.0F, 1.0F);
+    std::uniform_real_distribution<float> signedUnit(-1.0F, 1.0F);
+    std::uniform_real_distribution<float> interiorUv(0.2F, 0.8F);
+    std::uniform_real_distribution<float> decades(-3.0F, 3.0F);
+    ctx.plan(2);
+    int failures = 0;
+    int mirrored = 0;
+    double worstRatio = 0.0;
+    for (const glm::ivec2 resolution : kResolutions) {
+        std::vector<float> heights(static_cast<std::size_t>(resolution.x) * static_cast<std::size_t>(resolution.y));
+        for (int y = 0; y < resolution.y; ++y) {
+            for (int x = 0; x < resolution.x; ++x) {
+                heights[(static_cast<std::size_t>(y) * static_cast<std::size_t>(resolution.x)) + static_cast<std::size_t>(x)] =
+                    glm::dot(kSlopeUv, (glm::vec2(x, y) + 0.5F) / glm::vec2(resolution));
+            }
+        }
+        const Material material{.bump = std::make_shared<const pathtracer::gfx::ImageTexture>(pathtracer::gfx::ImageTexture{
+                                    resolution.x, resolution.y, pathtracer::gfx::kScalarChannels, std::move(heights)})};
+        const glm::dvec2 texel = 1.0 / glm::dvec2(resolution);
+        for (int i = 0; i < kCases; ++i) {
+            const glm::vec3 normal = glm::normalize(glm::vec3(signedUnit(rng), signedUnit(rng), signedUnit(rng)));
+            glm::vec4 tangent = tangentFor(normal);
+            tangent.w = unit(rng) < 0.5F ? -1.0F : 1.0F;
+            const glm::vec3 bitangent = glm::cross(normal, glm::vec3(tangent));
+            const float scale = std::pow(10.0F, decades(rng));
+            // In-plane edges at least a quarter as wide as long, so the triangle and its world-space reference stay well conditioned.
+            glm::vec2 edge1;
+            glm::vec2 edge2;
+            do {
+                edge1 = glm::vec2(signedUnit(rng), signedUnit(rng));
+                edge2 = glm::vec2(signedUnit(rng), signedUnit(rng));
+            } while (std::fabs((edge1.x * edge2.y) - (edge1.y * edge2.x)) < 0.25F);
+            const glm::vec3 p0 = scale * glm::vec3(signedUnit(rng), signedUnit(rng), signedUnit(rng));
+            const auto inPlane = [&](glm::vec2 e) { return p0 + (scale * ((e.x * glm::vec3(tangent)) + (e.y * bitangent))); };
+            const auto uvAt = [&] { return glm::vec2(interiorUv(rng), interiorUv(rng)); };
+            const ShadingTriangle triangle{ShadingVertex{p0, normal, uvAt(), tangent},
+                                           ShadingVertex{inPlane(edge1), normal, uvAt(), tangent},
+                                           ShadingVertex{inPlane(edge2), normal, uvAt(), tangent}, 0};
+            float u = unit(rng);
+            float v = unit(rng);
+            if (u + v > 1.0F) {
+                u = 1.0F - u;
+                v = 1.0F - v;
+            }
+            PathTraceSettings settings = makeTestSettings();
+            settings.bumpStrength = scale * signedUnit(rng);
+            const glm::vec3 bumped = buildShadingFrame(triangle, interpolateShading(triangle, u, v), material, settings)[2];
+
+            // Rows e1, e2, n: grad . e_k = dh_k with grad . n = 0, an independent route to the in-plane gradient.
+            const glm::dvec3 e1 = glm::dvec3(triangle.v1.position) - glm::dvec3(triangle.v0.position);
+            const glm::dvec3 e2 = glm::dvec3(triangle.v2.position) - glm::dvec3(triangle.v0.position);
+            const glm::dvec3 n(normal);
+            const glm::dmat3 solve = glm::inverse(glm::transpose(glm::dmat3(e1, e2, n)));
+            const glm::dvec2 duv1 = glm::dvec2(triangle.v1.uv) - glm::dvec2(triangle.v0.uv);
+            const glm::dvec2 duv2 = glm::dvec2(triangle.v2.uv) - glm::dvec2(triangle.v0.uv);
+            const auto worldGradient = [&](glm::dvec2 slopeUv) {
+                return solve * glm::dvec3(glm::dot(slopeUv, duv1), glm::dot(slopeUv, duv2), 0.0);
+            };
+            const double strength = settings.bumpStrength;
+            const glm::dvec3 gradient = worldGradient(strength * glm::dvec2(kSlopeUv));
+            const glm::dvec3 expected = glm::normalize(n - gradient);
+            mirrored += ((duv1.x * duv2.y) - (duv1.y * duv2.x)) < 0.0 ? 1 : 0;
+
+            // Tap rounding over the 2-texel span, carried to world space by |grad u| and |grad v|; |n - grad| >= 1, so normalize adds none.
+            const glm::dvec2 slopeErrorUv = std::abs(strength) * kClosedFormUlps * kEps * kHeightMax / (2.0 * texel);
+            const double budget = (slopeErrorUv.x * glm::length(worldGradient({1.0, 0.0}))) +
+                                  (slopeErrorUv.y * glm::length(worldGradient({0.0, 1.0}))) +
+                                  (kClosedFormUlps * kEps * (1.0 + glm::length(gradient)));
+            const double ratio = glm::length(glm::dvec3(bumped) - expected) / budget;
+            worstRatio = std::max(worstRatio, ratio);
+            failures += ratio <= 1.0 ? 0 : 1;
+        }
+    }
+    const int total = kCases * static_cast<int>(kResolutions.size());
+    std::cout << "gbuffer_validate: bump surface gradient over " << total << " cases (" << mirrored << " mirrored uv) -- " << failures
+              << " outside the forward-error bound, worst " << worstRatio << " of it\n";
+    PT_EXPECT(ctx, failures == 0, "a bumped normal left the closed-form surface gradient of h = bumpStrength*H");
+    PT_EXPECT(ctx, mirrored > 0 && mirrored < total, "the draw did not cover both uv orientations");
 }
 
 // Double-precision pinhole K [R | -R c] (Hartley & Zisserman 2004, eq. 6.8) on homogeneous (p, w): shares no arithmetic with project.
