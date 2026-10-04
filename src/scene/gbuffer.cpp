@@ -225,7 +225,7 @@ std::optional<glm::vec3> nearBoxEdge(const std::vector<ViewBox>& boxes, const Pi
 glm::vec3 shadeHit(GBuffer& result, int x, int y, const Hit& hit, const PixelRay& pixel, const ShadingTriangle& triangle,
               const Material& material, const PathTraceSettings& settings) {
     const ShadingVertex shading = interpolateShading(triangle, hit.u, hit.v);
-    const ShadingFrame frame = buildShadingFrame(shading, material, settings);
+    const ShadingFrame frame = buildShadingFrame(triangle, shading, material, settings);
     const BsdfParams params = resolveBsdfParams(material, shading.uv, shading.colour, settings, std::nullopt);
     writeTexel(result.depth, x, y, hit.t);
     writeTexel(result.lookahead, x, y, std::clamp(1.0F - (hit.t / settings.lookaheadDistance), 0.0F, 1.0F));

@@ -37,7 +37,7 @@ struct QuadLightConfig {
 
 // Tunable shading constants turning a material's textures into BSDF input, externalized so they need no recompile.
 struct MaterialConfig {
-    float bumpStrength;   // scales the bump texture's raw per-texel height difference; see path_tracer.cpp's buildShadingFrame
+    float bumpStrength;   // world-space height per unit bump texture value (metres): h = bumpStrength*H; see buildShadingFrame
     float roughnessMin;   // floor applied to the roughness texture sample, avoids a near-zero-roughness GGX singularity
     float roughnessMax;   // ceiling applied to the roughness texture sample
     glm::vec3 diffuseColour;      // multiplies Material::baseColor
