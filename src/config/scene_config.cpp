@@ -114,7 +114,7 @@ bool validMaterialConfig(const MaterialConfig& m, const std::string& path) {
         std::cerr << "loadMaterialConfig: " << path << ": ior is " << m.ior << ", expected > 0\n";
         ok = false;
     }
-    // Scales a raw height difference either way, so sign is free; only a non-finite value would reach normalize() as NaN.
+    // A height either way (negative reads the map as depth), so sign is free; only a non-finite value would reach normalize() as NaN.
     if (!std::isfinite(m.bumpStrength)) {
         std::cerr << "loadMaterialConfig: " << path << ": bumpStrength is not finite\n";
         ok = false;

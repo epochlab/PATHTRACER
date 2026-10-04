@@ -28,9 +28,9 @@ struct LineProximity {
                                             const PathTraceSettings& settings,
                                             std::optional<int> heroChannel);
 
-// Gram-Schmidt re-orthogonalized tangent frame, normal- and bump-mapped.
-[[nodiscard]] ShadingFrame buildShadingFrame(const ShadingVertex& shading, const Material& material,
-                                              const PathTraceSettings& settings);
+// Gram-Schmidt re-orthogonalized tangent frame, normal- and bump-mapped. triangle: the hit's corners, whose edges carry dP/duv.
+[[nodiscard]] ShadingFrame buildShadingFrame(const ShadingTriangle& triangle, const ShadingVertex& shading,
+                                              const Material& material, const PathTraceSettings& settings);
 
 [[nodiscard]] glm::vec3 geometricNormalOf(const ShadingTriangle& tri);
 

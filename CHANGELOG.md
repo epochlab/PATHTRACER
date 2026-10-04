@@ -3,6 +3,32 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Bump strength is a world-space height: Mikkelsen's surface gradient
+
+`bumpStrength` multiplied the height difference across two texels along the glTF tangent frame. It was not a slope, so
+the tilt fell as texture resolution rose and changed with model size (the stump needed about 10). Its v term was also
+inverted on every glTF asset: the bitangent `cross(n, t) * w` points image-up (-dP/dv, `gltf_loader.cpp`), while the
+height difference was taken along +v. Evidence is in `results/bump_scale`.
+
+- fix!: `bumpStrength` is the world-space height (metres) per unit of bump texture value, h = bumpStrength * H.
+  `buildShadingFrame` takes the hit triangle and tilts by Mikkelsen's surface gradient (Mikkelsen 2010, 2020), using the
+  triangle's edges in place of screen derivatives:
+  - grad h = (dh1 * (e2 x n) + dh2 * (n x e1)) / (e1 . (e2 x n)), with dh_k = (dh/duv) . duv_k. That divides by dP/duv
+    itself, so the tilt is independent of texture resolution, model scale, uv shear and uv mirroring.
+  - dh/duv is the central difference divided by its 2-texel span.
+  - The uv parametrisation drops out, since dh_k are per-edge height deltas. The only divisor is the triple product
+    e1 . (e2 x n), so no epsilon is needed. The sign comes from the geometry, not the tangent's `w`, which fixes the v
+    inversion.
+  - A constant bump still leaves the normal bit-identical.
+- fix!: `materials/principled.json` sets `bumpStrength` 0.005 m. This is the stump's own equivalent of the old 10,
+  10 * 2 texels * |dP/du| / 4096, with |dP/du| = 1.028 m per uv (area-weighted median over the glTF). Measured in the
+  linear regime, it reproduces the old magnitude to 0.4%.
+- test: `gbuffer_validate bump_gradient_is_world_height` checks 768 random triangles against an independent double-precision
+  3x3 solve of grad . e_k = dh_k, grad . n = 0, within a derived forward-error bound.
+  - Coverage: model scale over 6 decades, uv mirroring both ways, and texel sizes 1/16 to 1/4096 on each axis.
+  - Inverting the v term fails 767/768 cases.
+  - `constant_inputs_match_unit_textures` builds a triangle around its vertex.
+
 ## AOV call names lower-case standalone acronyms; the HUD shows title-case labels
 
 - feat!: `kAovNames` spells a standalone acronym in lower case: `hsv`, `dog`, `uv`, `ao`, `ior`, `snr` (was `HSV`, `DoG`,

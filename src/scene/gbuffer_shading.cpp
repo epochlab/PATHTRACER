@@ -64,7 +64,7 @@ BsdfParams resolveBsdfParams(const Material& material, glm::vec2 uv, const glm::
                        eonAlbedoInversion(baseColor, settings.diffuseRoughness), transmissionTint};
 }
 
-ShadingFrame buildShadingFrame(const ShadingVertex& shading, const Material& material,
+ShadingFrame buildShadingFrame(const ShadingTriangle& triangle, const ShadingVertex& shading, const Material& material,
                                 const PathTraceSettings& settings) {
     const glm::vec3 normal = glm::normalize(shading.normal);
     glm::vec3 tangent = glm::vec3(shading.tangent);
@@ -75,18 +75,27 @@ ShadingFrame buildShadingFrame(const ShadingVertex& shading, const Material& mat
     const glm::vec3 tangentSpaceNormal = glm::normalize((normalSample * 2.0F) - 1.0F);
     const glm::vec3 mappedNormal = glm::normalize(ShadingFrame(tangent, bitangent, normal) * tangentSpaceNormal);
 
-    // Blinn 1978 bump mapping: adjacent-texel height differences tilt the normal. A constant height has zero gradient: no tilt.
+    // Bump (Blinn 1978) as Mikkelsen's surface gradient: height h = bumpStrength*H in world units, n' = n - grad_s(h). Constant H: no tilt.
     glm::vec3 bumpedNormal = mappedNormal;
     if (const TextureHandle* bumpTexture = std::get_if<TextureHandle>(&material.bump)) {
         const pathtracer::gfx::ImageTexture& bump = **bumpTexture;
         const glm::vec2 texel(1.0F / static_cast<float>(bump.width), 1.0F / static_cast<float>(bump.height));
-        const float dHdu = pathtracer::gfx::sampleBilinear(bump, shading.uv + glm::vec2(texel.x, 0.0F)).r -
-                           pathtracer::gfx::sampleBilinear(bump, shading.uv - glm::vec2(texel.x, 0.0F)).r;
-        const float dHdv = pathtracer::gfx::sampleBilinear(bump, shading.uv + glm::vec2(0.0F, texel.y)).r -
-                           pathtracer::gfx::sampleBilinear(bump, shading.uv - glm::vec2(0.0F, texel.y)).r;
-        bumpedNormal = glm::normalize(
-            mappedNormal - (settings.bumpStrength * dHdu * tangent) -
-            (settings.bumpStrength * dHdv * bitangent));
+        const glm::vec2 heightStep(
+            pathtracer::gfx::sampleBilinear(bump, shading.uv + glm::vec2(texel.x, 0.0F)).r -
+                pathtracer::gfx::sampleBilinear(bump, shading.uv - glm::vec2(texel.x, 0.0F)).r,
+            pathtracer::gfx::sampleBilinear(bump, shading.uv + glm::vec2(0.0F, texel.y)).r -
+                pathtracer::gfx::sampleBilinear(bump, shading.uv - glm::vec2(0.0F, texel.y)).r);
+        // Central difference over its 2-texel span: dh/duv per unit uv, so the slope no longer falls as texture resolution rises.
+        const glm::vec2 dhduv = settings.bumpStrength * heightStep / (2.0F * texel);
+        // Mikkelsen 2010, edges for screen derivatives: (dh1*R1 + dh2*R2)/det divides by dP/duv itself, so mirrored uvs keep their sign.
+        const glm::vec3 edge1 = triangle.v1.position - triangle.v0.position;
+        const glm::vec3 edge2 = triangle.v2.position - triangle.v0.position;
+        const glm::vec3 r1 = glm::cross(edge2, normal);
+        const glm::vec3 r2 = glm::cross(normal, edge1);
+        const float dh1 = glm::dot(dhduv, triangle.v1.uv - triangle.v0.uv);
+        const float dh2 = glm::dot(dhduv, triangle.v2.uv - triangle.v0.uv);
+        const glm::vec3 surfaceGradient = ((dh1 * r1) + (dh2 * r2)) / glm::dot(edge1, r1);
+        bumpedNormal = glm::normalize(mappedNormal - surfaceGradient);
     }
 
     const glm::vec3 finalTangent =
