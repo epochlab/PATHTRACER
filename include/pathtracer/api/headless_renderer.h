@@ -90,7 +90,6 @@ public:
 
     // Resolved scene state a caller may need to report rather than render with: a benchmark naming its settings.
     [[nodiscard]] const pathtracer::scene::PathTraceSettings& baseSettings() const { return baseSettings_; }
-    [[nodiscard]] pathtracer::gfx::ScalarType textureType() const { return profile_.render.textureType; }
     [[nodiscard]] bool defaultEnvLightEnabled() const { return scene_.environment.lightEnabled; }
     // The authored scene.json: its model.rotation and lights[i].rotation are the pose a request's nullopt keeps.
     [[nodiscard]] const pathtracer::config::SceneConfig& scene() const { return scene_; }
@@ -107,7 +106,8 @@ private:
 
     HeadlessRenderer(std::string assetRoot, pathtracer::config::ProfileConfig profile, pathtracer::config::SceneConfig scene,
                      Geometry geometry, std::vector<pathtracer::scene::PathTraceSettings> perInstanceSettings,
-                     pathtracer::scene::PathTraceSettings baseSettings, pathtracer::gfx::ImageTexture environmentImage,
+                     pathtracer::scene::PathTraceSettings baseSettings,
+                     std::shared_ptr<const pathtracer::gfx::ImageTexture> environmentTexture,
                      const pathtracer::scene::Camera& defaultCamera);
 
     // Loads the glTF under model's root, places lights under it and builds the BVH: open() and every pose change share it.

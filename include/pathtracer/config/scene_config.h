@@ -23,6 +23,13 @@ struct EnvironmentConfig {
     std::string hdriPath;  // environment map, relative to ASSET_ROOT_DIR
     // Whether the environment is a light (NEE, MIS, contributing to every miss) rather than just the background. Optional, default true.
     bool lightEnabled = true;
+    std::optional<std::string> colorSpace;  // the map's OCIO colour space, overriding its file's tag. Optional
+};
+
+// One texture binding: the image relative to ASSET_ROOT_DIR and, for a colour slot only, an OCIO space overriding its file's tag.
+struct TextureConfig {
+    std::string path;
+    std::optional<std::string> colorSpace;
 };
 
 // Rectangular area light: a size.x by size.y quad centred on its local origin in the XY plane, color * intensity leaving along -Z.
@@ -70,8 +77,8 @@ struct SceneConfig {
     std::string materialPath;
     // glTF node name -> material JSON path, overriding materialPath for that instance. Optional; absent means every instance uses it.
     std::map<std::string, std::string> materialOverrides;
-    // glTF node name -> {Material slot name -> EXR path relative to ASSET_ROOT_DIR}; the only texture source. Optional.
-    std::map<std::string, std::map<std::string, std::string>> textures;
+    // glTF node name -> {Material slot name -> texture}, a path string or {path, colorSpace}; the only texture source. Optional.
+    std::map<std::string, std::map<std::string, TextureConfig>> textures;
     // Rectangular area lights, in the glTF's own vertex space (ModelConfig position/rotation applies too). Optional; absent means none.
     std::vector<QuadLightConfig> lights;
 };

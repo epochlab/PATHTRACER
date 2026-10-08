@@ -80,23 +80,25 @@ inline SlabWalk slabWalkLo(const pathtracer::scene::BsdfParams& params, int path
     return {sum / count, static_cast<double>(vertices) / count, truncated};
 }
 
-// Interleaved float test data of `channels` per texel stored at type, rounded to nearest even as loadImageTexture's read does.
-inline pathtracer::gfx::ImageTexture makeImageTexture(int width, int height, int channels, const std::vector<float>& texels,
-                                                  pathtracer::gfx::ScalarType type) {
-    if (type == pathtracer::gfx::ScalarType::Float32) {
-        return {width, height, channels, texels};
-    }
-    return {width, height, channels, std::vector<pathtracer::gfx::Half>(texels.begin(), texels.end())};
+// Interleaved float test data as a texture, served by the TextureSystem as a scene file is.
+inline std::shared_ptr<const pathtracer::gfx::ImageTexture> makeTexture(
+    int width, int height, int channels, std::vector<float> texels,
+    pathtracer::gfx::TextureWrap wrap = pathtracer::gfx::TextureWrap::Repeat) {
+    return pathtracer::gfx::makeTexture({width, height, channels, std::move(texels)}, wrap);
+}
+
+// An equirect environment of interleaved RGB test radiance, through the same texture path a scene's HDRI takes.
+inline pathtracer::scene::EnvironmentMap makeEnvironment(int width, int height, std::vector<float> rgb) {
+    return pathtracer::scene::EnvironmentMap(
+        makeTexture(width, height, pathtracer::gfx::kRgbChannels, std::move(rgb), pathtracer::gfx::TextureWrap::LatLong));
 }
 
 // Uniform-radiance (L0 = 1) equirect environment: a real image, so EnvironmentMap's CDFs run their normal path, not the all-black fallback.
 inline pathtracer::scene::EnvironmentMap makeUniformEnvironment() {
     constexpr int kWidth = 64;
     constexpr int kHeight = 32;
-    return pathtracer::scene::EnvironmentMap(makeImageTexture(
-        kWidth, kHeight, pathtracer::gfx::kRgbChannels,
-        std::vector<float>(static_cast<std::size_t>(kWidth) * kHeight * pathtracer::gfx::kRgbChannels, 1.0F),
-        pathtracer::gfx::ScalarType::Float32));
+    return makeEnvironment(kWidth, kHeight,
+                           std::vector<float>(static_cast<std::size_t>(kWidth) * kHeight * pathtracer::gfx::kRgbChannels, 1.0F));
 }
 
 // The neutral default (white baseColor, flat normal, constant bump) with constant roughness and specular f0.

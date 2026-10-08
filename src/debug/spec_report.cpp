@@ -59,8 +59,8 @@ void printHost(const HostInfo& host) {
 void printBuild(const BuildInfo& build, const LibraryVersions& libs) {
     row("compiler", "%s", build.compiler);
     row("flags", "-march=%s  IPO %s", build.march, build.ipo ? "on" : "off");
-    row("libraries", "embree %s  openexr %s  ocio %s  glew %s  glm %s", libs.embree.c_str(),
-        libs.openexr.c_str(), libs.ocio.c_str(), libs.glew.c_str(), libs.glm.c_str());
+    row("libraries", "embree %s  oiio %s  ocio %s  glew %s  glm %s", libs.embree.c_str(),
+        libs.oiio.c_str(), libs.ocio.c_str(), libs.glew.c_str(), libs.glm.c_str());
     // glfw last and alone: glfwGetVersionString appends its backend list, making this field ~50 columns where the others are ~12.
     row("glfw", "%s", libs.glfw.c_str());
 }

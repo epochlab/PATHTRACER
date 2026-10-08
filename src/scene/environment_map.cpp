@@ -12,8 +12,8 @@ namespace pathtracer::scene {
 namespace {
 
 // Rec.709 weights, kRec709LuminanceWeights, floored at 0: a negative texel makes the CDF non-monotonic, which invertCdf's search needs.
-float luminanceOf(const pathtracer::gfx::ImageTexture& image, int x, int y) {
-    const glm::vec3 texel = image.texel(x, y);
+float luminanceOf(const pathtracer::gfx::HdrImage& image, int x, int y) {
+    const glm::vec3 texel = image.rgb((static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width)) + static_cast<std::size_t>(x));
     return std::max(0.0F, (0.2126F * texel.r) + (0.7152F * texel.g) + (0.0722F * texel.b));
 }
 
@@ -41,11 +41,10 @@ glm::vec3 worldOfMapLocal(const glm::vec3& local, const glm::mat3& rotation) {
     return rotation * glm::vec3(-local.x, local.y, local.z);
 }
 
-EquirectTexel equirectTexelOf(const pathtracer::gfx::ImageTexture& image, const glm::vec3& direction,
-                               const glm::mat3& rotation) {
+EquirectTexel equirectTexelOf(int width, int height, const glm::vec3& direction, const glm::mat3& rotation) {
     const glm::vec2 uv = latLongUv(mapLocalOf(direction, rotation));
-    return {std::clamp(static_cast<int>(uv.x * static_cast<float>(image.width)), 0, image.width - 1),
-            std::clamp(static_cast<int>(uv.y * static_cast<float>(image.height)), 0, image.height - 1),
+    return {std::clamp(static_cast<int>(uv.x * static_cast<float>(width)), 0, width - 1),
+            std::clamp(static_cast<int>(uv.y * static_cast<float>(height)), 0, height - 1),
             std::max(std::sin(uv.y * glm::pi<float>()), 1e-6F)};
 }
 
@@ -61,9 +60,12 @@ CdfSample invertCdf(const float* cdf, int count, float u) {
 
 }  // namespace
 
-EnvironmentMap::EnvironmentMap(pathtracer::gfx::ImageTexture image) : image_(std::move(image)) {
-    const int width = image_.width;
-    const int height = image_.height;
+EnvironmentMap::EnvironmentMap(std::shared_ptr<const pathtracer::gfx::ImageTexture> texture) : texture_(std::move(texture)) {
+    const pathtracer::gfx::HdrImage image = pathtracer::gfx::readTexels(*texture_).value();
+    width_ = image.width;
+    height_ = image.height;
+    const int width = width_;
+    const int height = height_;
     marginalCdf_.assign(static_cast<std::size_t>(height) + 1, 0.0F);
     conditionalCdf_.assign(static_cast<std::size_t>(height) * (static_cast<std::size_t>(width) + 1),
                             0.0F);
@@ -77,7 +79,7 @@ EnvironmentMap::EnvironmentMap(pathtracer::gfx::ImageTexture image) : image_(std
         float* row = &conditionalCdf_[static_cast<std::size_t>(y) * (static_cast<std::size_t>(width) + 1)];
         float rowSum = 0.0F;
         for (int x = 0; x < width; ++x) {
-            rowSum += luminanceOf(image_, x, y) * sinTheta;
+            rowSum += luminanceOf(image, x, y) * sinTheta;
             row[x + 1] = rowSum;
         }
         if (rowSum > 0.0F) {
@@ -108,13 +110,13 @@ EnvironmentMap::EnvironmentMap(pathtracer::gfx::ImageTexture image) : image_(std
 }
 
 glm::vec3 EnvironmentMap::sampleDirection(const glm::vec3& direction, const glm::mat3& rotation) const {
-    return pathtracer::gfx::sampleBilinear(image_, latLongUv(mapLocalOf(direction, rotation)), pathtracer::gfx::WrapMode::ClampV);
+    return pathtracer::gfx::sampleTexture(*texture_, latLongUv(mapLocalOf(direction, rotation)));
 }
 
 EnvironmentMap::EnvSample EnvironmentMap::importanceSampleDirection(glm::vec2 u,
                                                                      const glm::mat3& rotation) const {
-    const int width = image_.width;
-    const int height = image_.height;
+    const int width = width_;
+    const int height = height_;
 
     const CdfSample rowSample = invertCdf(marginalCdf_.data(), height, u.x);
     const float v = (static_cast<float>(rowSample.index) + rowSample.fraction) / static_cast<float>(height);
@@ -138,9 +140,9 @@ EnvironmentMap::EnvSample EnvironmentMap::importanceSampleDirection(glm::vec2 u,
 }
 
 float EnvironmentMap::pdf(const glm::vec3& direction, const glm::mat3& rotation) const {
-    const int width = image_.width;
-    const int height = image_.height;
-    const EquirectTexel texel = equirectTexelOf(image_, direction, rotation);
+    const int width = width_;
+    const int height = height_;
+    const EquirectTexel texel = equirectTexelOf(width, height, direction, rotation);
     const float* row =
         &conditionalCdf_[static_cast<std::size_t>(texel.y) * (static_cast<std::size_t>(width) + 1)];
 

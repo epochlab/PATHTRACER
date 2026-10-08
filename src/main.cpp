@@ -249,7 +249,6 @@ struct AppResources {
     // Async path-traced view, selected by `aov`; requestTrace() is called only from requestPathTraceIfTriggerChanged.
     int maxSamples;  // accumulated-pass cap for PathTraceDriver; 0 = unbounded
     pathtracer::gfx::ScalarType displayFormat;  // pathTraceDisplayTexture's component type (profile.json displayBitDepth)
-    pathtracer::gfx::ScalarType textureType;    // scene textures' storage (profile.json textureBitDepth), recorded in -bench configs
     // Constructed in main() right after initializeApp(): its reference members must bind to objects at their final address.
     std::unique_ptr<pathtracer::scene::PathTraceDriver> pathTraceDriver{};
     std::optional<pathtracer::gfx::Texture> pathTraceDisplayTexture{};
@@ -342,18 +341,17 @@ std::optional<AppScene> loadAppScene(const pathtracer::config::SceneConfig& scen
     std::optional<pathtracer::scene::LoadedModel> model =
         pathtracer::scene::loadGltf(std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.model.gltfPath, sceneTransform);
     // Scene-JSON textures bind before anything reads a material; bindSceneTextures logs the reason it fails.
-    if (model && !pathtracer::scene::bindSceneTextures(model->instances, sceneConfig.textures, ASSET_ROOT_DIR,
-                                                       profileConfig.render.textureType)) {
+    if (model && !pathtracer::scene::bindSceneTextures(model->instances, sceneConfig.textures, ASSET_ROOT_DIR)) {
         model.reset();
     }
     const double loadMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - loadStart).count();
-    // Decoded once here, not through a texture-upload helper: the path tracer samples this CPU ImageTexture directly, with no GPU upload.
-    std::optional<pathtracer::gfx::ImageTexture> environmentImage = pathtracer::gfx::loadImageTexture(
-        std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.environment.hdriPath, profileConfig.render.textureType,
-        pathtracer::gfx::kRgbChannels);
+    // A CPU texture the path tracer samples through the texture cache, never uploaded: the display shows only the traced image.
+    std::shared_ptr<const pathtracer::gfx::ImageTexture> environmentTexture = pathtracer::gfx::openTexture(
+        std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.environment.hdriPath, pathtracer::gfx::kRgbChannels,
+        pathtracer::gfx::ImageRole::Colour, pathtracer::gfx::TextureWrap::LatLong, sceneConfig.environment.colorSpace);
     std::optional<pathtracer::config::MaterialConfig> materialConfig = pathtracer::config::loadMaterialConfig(
         std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.materialPath);
-    if (!model || !environmentImage || !materialConfig) {
+    if (!model || !environmentTexture || !materialConfig) {
         std::cerr << "main: model load, environment map load, or material load failed, aborting startup\n";
         return std::nullopt;
     }
@@ -384,7 +382,7 @@ std::optional<AppScene> loadAppScene(const pathtracer::config::SceneConfig& scen
     std::vector<pathtracer::scene::AabbBounds> instanceBounds =
         pathtracer::scene::computeInstanceBounds(model->shadingTriangles, static_cast<int>(model->instances.size()));
     return AppScene{std::move(*model), std::move(instanceLightIndex), std::move(quadLights),
-                    pathtracer::scene::EnvironmentMap(std::move(*environmentImage)), std::move(*accel), baseSettings,
+                    pathtracer::scene::EnvironmentMap(std::move(environmentTexture)), std::move(*accel), baseSettings,
                     std::move(*perInstanceSettings), std::move(instanceBounds), totalTriangles, loadMs, accelBuildMs};
 }
 
@@ -467,7 +465,6 @@ std::optional<AppResources> initializeApp(const pathtracer::config::SceneConfig&
         .vsync = profileConfig.render.vsync,
         .maxSamples = profileConfig.pathTracer.maxSamples,
         .displayFormat = profileConfig.render.displayFormat,
-        .textureType = profileConfig.render.textureType,
         .previousFrameCamera = initialCamera,
         .imageWidth = profileConfig.render.width,
         .imageHeight = profileConfig.render.height,
@@ -1036,8 +1033,7 @@ nlohmann::json benchConfig(const AppResources& app, const BenchCapture& bench) {
                      {"light", app.envLightEnabled}, {"show_sky", app.showSky}}},
             {"hud", app.showHud},
             {"vsync", app.vsync},
-            {"display_type", pathtracer::gfx::scalarTypeName(app.displayFormat)},
-            {"texture_type", pathtracer::gfx::scalarTypeName(app.textureType)}};
+            {"display_type", pathtracer::gfx::scalarTypeName(app.displayFormat)}};
     // Only with -bench-aovs, so a single-stage record stays comparable with every one logged before this existed.
     if (!schedule.empty()) {
         config["aov_schedule"] = schedule;

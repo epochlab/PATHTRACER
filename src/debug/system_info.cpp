@@ -8,7 +8,7 @@
 #include <GLFW/glfw3.h>
 
 #include <OpenColorIO/OpenColorABI.h>
-#include <OpenEXR/OpenEXRConfig.h>
+#include <OpenImageIO/oiioversion.h>
 #include <embree4/rtcore_config.h>
 #include <glm/detail/setup.hpp>
 
@@ -31,7 +31,7 @@ GpuInfo queryGpuInfo() {
 LibraryVersions queryLibraryVersions() {
     LibraryVersions versions;
     versions.embree = RTC_VERSION_STRING;
-    versions.openexr = OPENEXR_VERSION_STRING;
+    versions.oiio = OIIO_VERSION_STRING;
     versions.ocio = OCIO_VERSION_FULL_STR;
     // glfwGetVersionString carries the backend list too: which platform and timer backend were compiled in, not just the version.
     versions.glfw = glfwGetVersionString();

@@ -3,6 +3,38 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## OpenImageIO TextureSystem: native-precision texture cache, colour-managed inputs, MIP-mapped lookups
+
+Material textures and the environment were CPU arrays at `profile.json textureBitDepth`, filtered by a hand-written
+bilinear and assumed linear Rec.709. At 16 a float32 HDRI with a texel above 65504, an unclipped sun, overflowed to
+infinity and was rejected. Every texture now goes through one OpenImageIO TextureSystem, still from linear EXR only.
+Evidence is in `results/oiio`.
+
+- feat!: `openTexture` opens a linear EXR's leading channels into the TextureSystem; any other format is refused.
+  - Colour slots (base colour, specular, environment) take the file's colour space from its tag or from a scene override,
+    and convert into the working space through OCIO before caching. Data slots (normal, bump, roughness) read raw.
+  - A tiled, MIP-mapped EXR already in the working space is served in place. Any other is made into one once, maketx's
+    auto-tx: converted, written by `make_texture` as an uncompressed tiled MIP-mapped EXR under the temp directory, keyed
+    by path, mtime, size, channels, space and config. OIIO's in-cache colour transform cannot do this: it reads only tiled
+    files, at the tile's own format, under its default config.
+  - Half sources stay half unless conversion takes a texel past 65504, and float32 stays float32, so the overflow is gone.
+  - A NaN or Inf texel is refused when the texture is derived, as `loadImage` refuses it.
+- feat!: lookups are TextureSystem filters. Values are bilinear within a level and anisotropic across levels by the
+  footprint, which is interpolating, so a texel-centre point lookup is the texel. A footprint selects MIP levels; every
+  lookup passes zero until differentials arrive.
+- feat!: bump takes dH/duv from the lookup's own analytic derivative of a smart-bicubic B-spline: one C1 lookup in place
+  of four bilinear taps, so the slope no longer facets at texel boundaries.
+- feat!: `EnvironmentMap(texture)` builds its CDFs from the texture's own finest level (`readTexels`), so the pdf follows
+  exactly what lookups filter.
+- feat!: scene.json texture bindings are a path or `{path, colorSpace}`, and `environment.colorSpace` overrides the HDRI's
+  tag. A data slot given a colour space is refused.
+- feat!: `profile.json textureBitDepth` is retired and refused if set. Bench records drop `texture_type`.
+- test: `io_validate` checks a float32 1e6 texel survives, slot channel selection, an ACEScg half EXR cached as
+  `loadImage`'s conversion rounded once to half, the scene override, data read raw, a PNG refused, a 16-texel footprint
+  over a checker filtering to its mean through the MIP chain, NaN refusal, and the scene schema. `nee_validate` writes a
+  half EXR so the CDF follows the stored value. `gbuffer_validate` bounds a 1x1 texture's read by two nested lerps' 6u and
+  its constant slope by the B-spline's derivative weights.
+
 ## OpenImageIO image I/O: colour-managed reads, tagged EXRs, 16-bit RGBA PNG capture
 
 Images were read and written by hand: OpenEXR assumed linear Rec.709 (chromaticities only warned on), and `render_beauty`

@@ -145,7 +145,7 @@ void reportErrorSpectrum(const pathtracer::gfx::HdrImage& image, const pathtrace
 bool appendTimingRecord(const Options& options, int argc, char** argv, int width, int height,
                         const std::string& aovName, const pathtracer::scene::PathTraceSettings& settings,
                         bool envLightEnabled, double gbufferMs, double filterMs,
-                        pathtracer::gfx::ScalarType textureType, const std::vector<double>& milliseconds, const pathtracer::debug::RayCounts& rays,
+                        const std::vector<double>& milliseconds, const pathtracer::debug::RayCounts& rays,
                         const pathtracer::gfx::HdrImage& accumulated) {
     pathtracer::debug::BenchRecord record{
         .tool = "render_beauty",
@@ -161,7 +161,6 @@ bool appendTimingRecord(const Options& options, int argc, char** argv, int width
                    {"max_bounces", settings.maxBounces},
                    {"rr_start_bounce", settings.russianRouletteStartBounce},
                    {"ao_max_distance", settings.aoMaxDistance},
-                   {"texture_type", pathtracer::gfx::scalarTypeName(textureType)},
                    {"fisheye_focal_length_mm", options.fisheyeFocalLengthMm},
                    {"omnidirectional", options.omnidirectional}},
         .samples = {milliseconds.empty() ? std::pair<std::string, std::vector<double>>{"gbuffer_ms", {gbufferMs}}
@@ -460,7 +459,7 @@ int main(int argc, char** argv) {
     // Before any output encode, so the record's rusage covers load, build and the timed passes but not PNG/EXR writing.
     if (!options.benchLogPath.empty() &&
         !appendTimingRecord(options, argc, argv, width, height, aovName, renderer->baseSettings(),
-                            envLightEnabled, stats.gbufferMilliseconds, stats.filterMilliseconds, renderer->textureType(),
+                            envLightEnabled, stats.gbufferMilliseconds, stats.filterMilliseconds,
                             milliseconds,
                             rays, accumulated)) {
         return EXIT_FAILURE;

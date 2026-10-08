@@ -28,7 +28,7 @@ struct SceneInputs {
     pathtracer::config::ProfileConfig profile;
     pathtracer::config::SceneConfig scene;
     pathtracer::config::MaterialConfig material;
-    pathtracer::gfx::ImageTexture environmentImage;
+    std::shared_ptr<const pathtracer::gfx::ImageTexture> environmentTexture;
 };
 
 [[nodiscard]] std::optional<SceneInputs> loadSceneInputs(const std::string& assetRoot, const std::string& scenePath,
@@ -51,13 +51,14 @@ struct SceneInputs {
         error = "failed to load material " + assetRoot + "/" + scene->materialPath;
         return std::nullopt;
     }
-    std::optional<pathtracer::gfx::ImageTexture> environmentImage = pathtracer::gfx::loadImageTexture(
-        assetRoot + "/" + scene->environment.hdriPath, profile->render.textureType, pathtracer::gfx::kRgbChannels);
-    if (!environmentImage) {
+    std::shared_ptr<const pathtracer::gfx::ImageTexture> environmentTexture =
+        pathtracer::gfx::openTexture(assetRoot + "/" + scene->environment.hdriPath, pathtracer::gfx::kRgbChannels,
+                                     pathtracer::gfx::ImageRole::Colour, pathtracer::gfx::TextureWrap::LatLong, scene->environment.colorSpace);
+    if (!environmentTexture) {
         error = "failed to load environment " + assetRoot + "/" + scene->environment.hdriPath;
         return std::nullopt;
     }
-    return SceneInputs{std::move(*profile), std::move(*scene), std::move(*material), std::move(*environmentImage)};
+    return SceneInputs{std::move(*profile), std::move(*scene), std::move(*material), std::move(environmentTexture)};
 }
 
 // profile.json names a film-back preset, assets/config/sensor.json supplies its dimensions. Resolved as initializeApp does.
@@ -204,8 +205,7 @@ std::unique_ptr<HeadlessRenderer> HeadlessRenderer::open(const std::string& asse
     if (!geometry) {
         return nullptr;
     }
-    if (!pathtracer::scene::bindSceneTextures(geometry->model.instances, scene.textures, assetRoot,
-                                              inputs->profile.render.textureType)) {
+    if (!pathtracer::scene::bindSceneTextures(geometry->model.instances, scene.textures, assetRoot)) {
         error = "failed to bind scene textures";
         return nullptr;
     }
@@ -228,14 +228,14 @@ std::unique_ptr<HeadlessRenderer> HeadlessRenderer::open(const std::string& asse
 
     return std::unique_ptr<HeadlessRenderer>(new HeadlessRenderer(
         assetRoot, std::move(inputs->profile), std::move(inputs->scene), std::move(*geometry), std::move(*perInstanceSettings),
-        baseSettings, std::move(inputs->environmentImage), *camera));
+        baseSettings, std::move(inputs->environmentTexture), *camera));
 }
 
 HeadlessRenderer::HeadlessRenderer(std::string assetRoot, pathtracer::config::ProfileConfig profile,
                                    pathtracer::config::SceneConfig scene, Geometry geometry,
                                    std::vector<pathtracer::scene::PathTraceSettings> perInstanceSettings,
                                    pathtracer::scene::PathTraceSettings baseSettings,
-                                   pathtracer::gfx::ImageTexture environmentImage,
+                                   std::shared_ptr<const pathtracer::gfx::ImageTexture> environmentTexture,
                                    const pathtracer::scene::Camera& defaultCamera)
     : assetRoot_(std::move(assetRoot)),
       profile_(std::move(profile)),
@@ -245,7 +245,7 @@ HeadlessRenderer::HeadlessRenderer(std::string assetRoot, pathtracer::config::Pr
       builtLightRotationsDegrees_(rotationsOf(scene_.lights)),
       perInstanceSettings_(std::move(perInstanceSettings)),
       baseSettings_(baseSettings),
-      environmentMap_(std::move(environmentImage)),
+      environmentMap_(std::move(environmentTexture)),
       defaultCamera_(defaultCamera) {}
 
 HeadlessRenderer::~HeadlessRenderer() = default;

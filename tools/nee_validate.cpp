@@ -5,18 +5,23 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <random>
 #include <string>
+#include <tuple>
 #include <vector>
 
+#include <OpenImageIO/imageio.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/epsilon.hpp>
 
 #include "pathtracer/gfx/hdr_image.h"
+#include "pathtracer/gfx/scalar_type.h"
 #include "check.h"
 #include "fixtures.h"
 #include "stats.h"
@@ -53,7 +58,7 @@ BsdfParams makeParams(float roughness, float metallic) {
 }
 
 // Dim background with one bright patch: a uniform map gives linear CDFs, where a mis-scaled Jacobian or an off-by-one bin would pass.
-EnvironmentMap makeStructuredEnvironment(pathtracer::gfx::ScalarType type) {
+EnvironmentMap makeStructuredEnvironment() {
     constexpr int kWidth = 64;
     constexpr int kHeight = 32;
     constexpr int kChannels = pathtracer::gfx::kRgbChannels;
@@ -66,7 +71,7 @@ EnvironmentMap makeStructuredEnvironment(pathtracer::gfx::ScalarType type) {
             rgb[idx + 2] = 300.0F;
         }
     }
-    return EnvironmentMap(tools::fixtures::makeImageTexture(kWidth, kHeight, kChannels, rgb, type));
+    return tools::fixtures::makeEnvironment(kWidth, kHeight, rgb);
 }
 
 // sample returns a density, pdf() recovers it from a direction; MIS uses both, so disagreement corrupts every MIS weight in the renderer.
@@ -75,35 +80,31 @@ PT_CHECK(environment_pdf_consistency, Fast, Exact) {
     constexpr float kTolerance = 1e-3F;
     // Sampling rotates by R and querying by R^T, so a transpose slip cancels at identity; all three axes, so no axis can hide it.
     const glm::mat3 rotation = pathtracer::scene::rotationXyz(glm::vec3(25.0F, 40.0F, -60.0F));
-    constexpr std::array<pathtracer::gfx::ScalarType, 2> kTypes = {pathtracer::gfx::ScalarType::Float32,
-                                                               pathtracer::gfx::ScalarType::Float16};
-    ctx.plan(static_cast<int>(kTypes.size()));
-    for (const pathtracer::gfx::ScalarType type : kTypes) {
-        const EnvironmentMap env = makeStructuredEnvironment(type);
-        std::mt19937 rng(static_cast<std::mt19937::result_type>(ctx.seed()));
-        std::uniform_real_distribution<float> unit(0.0F, 1.0F);
-        int worstIndex = -1;
-        float worstRelative = 0.0F;
-        for (int i = 0; i < kSampleCount; ++i) {
-            const EnvironmentMap::EnvSample sample =
-                env.importanceSampleDirection(glm::vec2(unit(rng), unit(rng)), rotation);
-            const float queried = env.pdf(sample.direction, rotation);
-            const float relative = std::fabs(queried - sample.pdf) / std::max(sample.pdf, 1e-6F);
-            if (relative > worstRelative) {
-                worstRelative = relative;
-                worstIndex = i;
-            }
+    ctx.plan(1);
+    const EnvironmentMap env = makeStructuredEnvironment();
+    std::mt19937 rng(static_cast<std::mt19937::result_type>(ctx.seed()));
+    std::uniform_real_distribution<float> unit(0.0F, 1.0F);
+    int worstIndex = -1;
+    float worstRelative = 0.0F;
+    for (int i = 0; i < kSampleCount; ++i) {
+        const EnvironmentMap::EnvSample sample =
+            env.importanceSampleDirection(glm::vec2(unit(rng), unit(rng)), rotation);
+        const float queried = env.pdf(sample.direction, rotation);
+        const float relative = std::fabs(queried - sample.pdf) / std::max(sample.pdf, 1e-6F);
+        if (relative > worstRelative) {
+            worstRelative = relative;
+            worstIndex = i;
         }
-        // Two code paths over one direction: exactness with a float tolerance, not statistics -- they agree or every MIS weight is wrong.
-        char detail[224];
-        std::snprintf(detail, sizeof(detail),
-                      "%s: worst relative mismatch %.3e at sample %d, between importanceSampleDirection's own pdf and pdf()",
-                      pathtracer::gfx::scalarTypeName(type), static_cast<double>(worstRelative), worstIndex);
-        PT_EXPECT(ctx, worstRelative <= kTolerance, detail);
     }
+    // Two code paths over one direction: exactness with a float tolerance, not statistics -- they agree or every MIS weight is wrong.
+    char detail[224];
+    std::snprintf(detail, sizeof(detail),
+                  "worst relative mismatch %.3e at sample %d, between importanceSampleDirection's own pdf and pdf()",
+                  static_cast<double>(worstRelative), worstIndex);
+    PT_EXPECT(ctx, worstRelative <= kTolerance, detail);
 }
 
-// CDFs must come from the values the map returns: 1 + 2^-11 stores as 1.0 in binary16.
+// CDFs must come from the values the map returns: a half EXR stores 1 + 2^-11 as 1.0, and the cache keeps the file's half.
 PT_CHECK(environment_pdf_tracks_stored_luminance, Fast, Exact) {
     constexpr int kWidth = 64;
     constexpr int kHeight = 32;
@@ -125,22 +126,29 @@ PT_CHECK(environment_pdf_tracks_stored_luminance, Fast, Exact) {
         return glm::vec3(-local.x, local.y, local.z);
     };
     ctx.plan(2);
-    for (const pathtracer::gfx::ScalarType type : {pathtracer::gfx::ScalarType::Float16, pathtracer::gfx::ScalarType::Float32}) {
-        const pathtracer::gfx::ImageTexture image = tools::fixtures::makeImageTexture(kWidth, kHeight, kChannels, rgb, type);
-        const float storedRatio = image.texel(kPatchX, kPatchY).g / image.texel(kBackgroundX, kPatchY).g;
-        const float sourceRatio = midpoint;
-        const EnvironmentMap env(image);
-        // Same row, so sin(theta) cancels and the solid-angle pdf ratio is the luminance ratio.
+    const std::filesystem::path path = std::filesystem::temp_directory_path() / "engine_nee_half_environment.exr";
+    OIIO::ImageSpec spec(kWidth, kHeight, kChannels, OIIO::TypeHalf);
+    const std::unique_ptr<OIIO::ImageOutput> output = OIIO::ImageOutput::create("openexr");
+    const bool written = output && output->open(path.string(), spec) && output->write_image(OIIO::TypeFloat, rgb.data()) && output->close();
+    const std::shared_ptr<const pathtracer::gfx::ImageTexture> stored =
+        written ? pathtracer::gfx::openTexture(path.string(), kChannels, pathtracer::gfx::ImageRole::Colour, pathtracer::gfx::TextureWrap::LatLong)
+                : nullptr;
+    const std::shared_ptr<const pathtracer::gfx::ImageTexture> exact =
+        tools::fixtures::makeTexture(kWidth, kHeight, kChannels, rgb, pathtracer::gfx::TextureWrap::LatLong);
+    for (const auto& [name, texture, expected] : {std::tuple{"half EXR", stored, 1.0F}, std::tuple{"float", exact, midpoint}}) {
+        if (!texture) {
+            PT_EXPECT(ctx, false, std::string(name) + ": the probe texture did not open");
+            continue;
+        }
+        const EnvironmentMap env(texture);
+        // Same row, so sin(theta) cancels and the solid-angle pdf ratio is the stored luminance ratio, exactly.
         const float pdfRatio = env.pdf(centre(kPatchX, kPatchY)) / env.pdf(centre(kBackgroundX, kPatchY));
-        const bool tracksStored = type == pathtracer::gfx::ScalarType::Float16
-                                      ? std::fabs(pdfRatio - storedRatio) < std::fabs(pdfRatio - sourceRatio)
-                                      : std::fabs(pdfRatio - sourceRatio) < std::fabs(pdfRatio - 1.0F);
-        char detail[224];
-        std::snprintf(detail, sizeof(detail), "%s: pdf ratio %.9g, stored luminance ratio %.9g, source ratio %.9g",
-                      pathtracer::gfx::scalarTypeName(type), static_cast<double>(pdfRatio),
-                      static_cast<double>(storedRatio), static_cast<double>(sourceRatio));
-        PT_EXPECT(ctx, tracksStored, detail);
+        char detail[192];
+        std::snprintf(detail, sizeof(detail), "%s: pdf ratio %.9g, stored luminance ratio %.9g", name, static_cast<double>(pdfRatio),
+                      static_cast<double>(expected));
+        PT_EXPECT(ctx, std::fabs(pdfRatio - expected) < std::fabs(pdfRatio - (expected == 1.0F ? midpoint : 1.0F)), detail);
     }
+    std::filesystem::remove(path);
 }
 
 // MIS-combined NEE + BSDF estimator mirroring tracePath: power heuristic, and with no geometry both strategies reach the environment.
@@ -196,8 +204,7 @@ PT_CHECK(environment_poles_do_not_blend_opposite_rows, Fast, Exact) {
             rgb[idx + 2] = row.z;
         }
     }
-    const EnvironmentMap env(
-        tools::fixtures::makeImageTexture(kWidth, kHeight, kChannels, rgb, pathtracer::gfx::ScalarType::Float32));
+    const EnvironmentMap env = tools::fixtures::makeEnvironment(kWidth, kHeight, rgb);
 
     const glm::vec3 zenith = env.sampleDirection(glm::vec3(0.0F, 1.0F, 0.0F));
     const glm::vec3 nadir = env.sampleDirection(glm::vec3(0.0F, -1.0F, 0.0F));
@@ -228,8 +235,7 @@ PT_CHECK(environment_lat_long_is_unmirrored, Fast, Exact) {
             rgb[idx + 2] = texel.z;
         }
     }
-    const EnvironmentMap env(
-        tools::fixtures::makeImageTexture(kWidth, kHeight, kChannels, rgb, pathtracer::gfx::ScalarType::Float32));
+    const EnvironmentMap env = tools::fixtures::makeEnvironment(kWidth, kHeight, rgb);
     // Yaw 180 faces +Z, the map's centre column; a quarter frame either side stays well inside one half of the map.
     const pathtracer::scene::Camera camera(glm::vec3(0.0F), glm::vec3(0.0F, 180.0F, 0.0F), {36.0F, 24.0F}, 35.0F, 0.1F, 100.0F, 2.8F,
                                            0.01F, 100.0F);
@@ -256,9 +262,7 @@ PT_CHECK(omnidirectional_camera_reads_the_environment_texel_for_texel, Fast, Exa
     for (std::size_t i = 0; i < rgb.size(); ++i) {
         rgb[i] = static_cast<float>(i + 1) / static_cast<float>(rgb.size());
     }
-    const pathtracer::gfx::ImageTexture image =
-        tools::fixtures::makeImageTexture(kWidth, kHeight, kChannels, rgb, pathtracer::gfx::ScalarType::Float32);
-    const EnvironmentMap env(image);
+    const EnvironmentMap env = tools::fixtures::makeEnvironment(kWidth, kHeight, rgb);
     // Yaw 180 faces +Z with -X on the right and +Y up: the map's (right, up, forward), so pixel (x, y) and texel (x, y) share (u, v).
     const pathtracer::scene::Camera camera(glm::vec3(0.0F), glm::vec3(0.0F, 180.0F, 0.0F), {36.0F, 24.0F}, 35.0F, 0.1F, 100.0F, 2.8F,
                                            0.01F, 100.0F, pathtracer::scene::Lens{pathtracer::scene::LensProjection::Omnidirectional});
@@ -272,7 +276,8 @@ PT_CHECK(omnidirectional_camera_reads_the_environment_texel_for_texel, Fast, Exa
             const float ndcX = (((static_cast<float>(x) + 0.5F) / kWidth) * 2.0F) - 1.0F;
             const float ndcY = 1.0F - (((static_cast<float>(y) + 0.5F) / kHeight) * 2.0F);
             const glm::vec3 seen = env.sampleDirection(camera.primaryRay(basis, ndcX, ndcY)->dir);
-            const glm::vec3 texel = image.texel(x, y);
+            const std::size_t index = ((static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x)) * kChannels;
+            const glm::vec3 texel(rgb[index], rgb[index + 1], rgb[index + 2]);
             // Off-centre by `offset` texels, bilinear blends in at most that fraction of a neighbour, whose difference is bounded here.
             const float offset = kRoundTripUlps * std::numeric_limits<float>::epsilon() * static_cast<float>(kWidth) / sinColatitude;
             const float neighbourSpan = static_cast<float>(kWidth) / static_cast<float>(rgb.size()) * kChannels;
@@ -285,7 +290,7 @@ PT_CHECK(omnidirectional_camera_reads_the_environment_texel_for_texel, Fast, Exa
 
 // MIS weights sum to 1, so both strategies must evaluate ONE Le. Structured, not uniform: on a uniform map every lookup agrees.
 PT_CHECK(environment_nee_and_miss_share_one_radiance, Fast, Exact) {
-    const EnvironmentMap env = makeStructuredEnvironment(pathtracer::gfx::ScalarType::Float32);
+    const EnvironmentMap env = makeStructuredEnvironment();
     const std::vector<QuadLight> noQuads;
     const LightSet lights(&env, /*envRotationDegrees=*/glm::vec3(0.0F), /*envExposure=*/1.0F, noQuads);
 

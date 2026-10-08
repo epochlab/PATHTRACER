@@ -27,8 +27,7 @@
         "defaultAOV": 0,
         "defaultLUT": "sRGB",
         "vsync": true,
-        "displayBitDepth": 16,
-        "textureBitDepth": 16
+        "displayBitDepth": 16
     },
     "pathTracer": {
         "samplesPerPixel": 1,
