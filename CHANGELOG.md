@@ -3,6 +3,29 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## MIP-filtered primary hits from ray differentials
+
+Every lookup read MIP level 0 at a point, so a texture minified far below a pixel aliased in the G-buffer's single
+pixel-centre sample and cost the Beauty samples many level-0 tiles. Bounce 0 now filters by its footprint. Evidence is in
+`results/oiio`.
+
+- feat: `primaryHitFootprint` transfers the camera ray's direction differential onto the hit plane (Igehy 1999) and into
+  uv through the triangle's edges, by a Gram solve that needs no dP/duv inverse.
+- feat: the path tracer's footprint is one sample's stratum, 1/sqrt(N) of a pixel for N stratified samples (pbrt-v4's
+  differential scale). Prefilter blur so vanishes as N grows, and an image split into passes filters as one render does.
+  The G-buffer's one pixel-centre sample takes the whole pixel.
+- feat: only base colour and specular are filtered: radiance is linear in them, so a prefiltered lookup is exact in
+  expectation. Normal, bump and roughness stay point-sampled for the samples to integrate. Filtering them shortens and
+  flattens normals (Toksvig 2005), which brightened the minified stump by 13%.
+- feat: a primary miss into a shown sky filters the environment over the same footprint, carried to st by
+  `latLongUvJacobian`. Secondary vertices still point-sample until differentials propagate through the BSDF.
+- test: `integrator_validate primary_hits_filter_minified_textures` renders a checker minified 64:1 to its mean in Beauty
+  and Albedo, both failing at about 1/8 with zero footprints. `gbuffer_validate primary_hit_footprint_is_the_plane_transfer`
+  checks the transfer against a facing and a 60-degree plane, and `nee_validate lat_long_jacobian_inverts_the_chart_tangents`
+  checks the Jacobian against the chart's tangents. The bitwise G-buffer oracle passes the same footprint.
+  `api_validate turning_the_world_with_the_camera_leaves_the_image` renders 64x48. At 2:1, every sky footprint has st
+  aspect exactly 2, where OIIO's int(2a - 1) probe count steps on a few-ulp turn.
+
 ## OpenImageIO TextureSystem: native-precision texture cache, colour-managed inputs, MIP-mapped lookups
 
 Material textures and the environment were CPU arrays at `profile.json textureBitDepth`, filtered by a hand-written

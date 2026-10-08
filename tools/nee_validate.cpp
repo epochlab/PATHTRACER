@@ -544,4 +544,43 @@ PT_CHECK(mis_agreement_quad_light, Slow, Statistical) {
 
 }  // namespace
 
+// latLongUvJacobian against the chart's own tangents: the u and v tangents map to (1, 0) and (0, 1), the radial direction to 0.
+PT_CHECK(lat_long_jacobian_inverts_the_chart_tangents, Fast, Exact) {
+    std::mt19937 rng(static_cast<std::mt19937::result_type>(ctx.seed()));
+    // Clear of the poles, where u is singular; any radius, since uv reads only the direction.
+    std::uniform_real_distribution<float> unit(0.0F, 1.0F);
+    std::uniform_real_distribution<float> band(0.1F, 0.9F);
+    std::uniform_real_distribution<float> radius(0.5F, 2.0F);
+    float worst = 0.0F;
+    for (int i = 0; i < 1024; ++i) {
+        const glm::vec2 uv(unit(rng), band(rng));
+        const float r = radius(rng);
+        const glm::vec3 local = r * pathtracer::scene::latLongDirection(uv);
+        const float longitude = (uv.x - 0.5F) * glm::two_pi<float>();
+        const float colatitude = uv.y * glm::pi<float>();
+        const float sinColatitude = std::sin(colatitude);
+        const float cosColatitude = std::cos(colatitude);
+        const glm::vec3 perU = r * glm::two_pi<float>() * sinColatitude * glm::vec3(std::cos(longitude), 0.0F, -std::sin(longitude));
+        const glm::vec3 perV =
+            r * glm::pi<float>() * glm::vec3(cosColatitude * std::sin(longitude), -sinColatitude, cosColatitude * std::cos(longitude));
+        const glm::mat3x2 jacobian = pathtracer::scene::latLongUvJacobian(local);
+        // Entries scale as 1/(r sin) and tangents as r sin, so each product is O(1); the radial row cancels terms of size 1/sin.
+        const float conditioning = 1.0F / sinColatitude;
+        // The radial rate against the terms it cancels: |J l| / (|J|_F |l|), 0 exactly in real arithmetic.
+        const float frobenius =
+            std::sqrt(glm::dot(jacobian[0], jacobian[0]) + glm::dot(jacobian[1], jacobian[1]) + glm::dot(jacobian[2], jacobian[2]));
+        const float error = std::max({glm::length((jacobian * perU) - glm::vec2(1.0F, 0.0F)),
+                                      glm::length((jacobian * perV) - glm::vec2(0.0F, 1.0F)),
+                                      glm::length(jacobian * local) / (frobenius * glm::length(local))});
+        worst = std::max(worst, error / conditioning);
+    }
+    // 3 terms of (6 + 2) roundings is 24u = 12 eps per unit conditioning; 16 eps adds the 1-ulp sin and cos the tangents are built from.
+    const float bound = 16.0F * std::numeric_limits<float>::epsilon();
+    ctx.plan(1);
+    char detail[160];
+    std::snprintf(detail, sizeof(detail), "the Jacobian misses the chart's tangents by %.3g per unit conditioning, over %.3g",
+                  static_cast<double>(worst), static_cast<double>(bound));
+    PT_EXPECT(ctx, worst <= bound, detail);
+}
+
 PT_CHECK_MAIN("nee")

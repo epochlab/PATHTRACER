@@ -228,14 +228,16 @@ bool isBackground(const GBuffer& g, int x, int y) {
 }
 
 // The hit's lanes against the oracle's own sampling calls, compared bitwise: both resolve the same ray through the same functions.
-bool matchesOracle(const GBuffer& g, int x, int y, const Hit& hit, const Fixture& fixture) {
+bool matchesOracle(const GBuffer& g, int x, int y, const Ray& ray, const glm::mat2x3& dirPerPixel, const Hit& hit,
+                   const Fixture& fixture) {
     const ShadingTriangle& triangle = fixture.shadingTriangles[static_cast<std::size_t>(hit.triangleIndex)];
     const auto instance = static_cast<std::size_t>(triangle.instanceIndex);
     const Material& material = fixture.instances[instance].material;
     const PathTraceSettings& settings = fixture.perInstanceSettings[instance];
     const ShadingVertex shading = interpolateShading(triangle, hit.u, hit.v);
+    const pathtracer::gfx::TextureFootprint footprint = primaryHitFootprint(triangle, ray, hit.t, dirPerPixel);
     const ShadingFrame frame = buildShadingFrame(triangle, shading, material, settings);
-    const BsdfParams params = resolveBsdfParams(material, shading.uv, shading.colour, settings, std::nullopt);
+    const BsdfParams params = resolveBsdfParams(material, shading.uv, footprint, shading.colour, settings, std::nullopt);
     return texelAt(g.depth, x, y).x == hit.t &&
            texelAt(g.lookahead, x, y).x == std::clamp(1.0F - (hit.t / settings.lookaheadDistance), 0.0F, 1.0F) &&
            texelAt(g.worldPos, x, y) == shading.position && glm::vec2(texelAt(g.uv, x, y)) == glm::fract(shading.uv) &&
@@ -281,7 +283,8 @@ PoseCounts checkPose(Fixture& fixture, const Camera& camera) {
                 continue;
             }
             ++counts.hits;
-            counts.fieldMismatches += matchesOracle(g, x, y, *hit, fixture) ? 0 : 1;
+            const std::optional<glm::mat2x3> dirPerPixel = dirPerPixelAt(camera, basis, ndc);
+            counts.fieldMismatches += dirPerPixel && matchesOracle(g, x, y, *ray, *dirPerPixel, *hit, fixture) ? 0 : 1;
             const ShadingTriangle& triangle = fixture.shadingTriangles[static_cast<std::size_t>(hit->triangleIndex)];
             const double ratio = reprojectionRatio(camera, basis, triangle, *ray, texelAt(g.worldPos, x, y), ndc);
             counts.worstReprojection = std::max(counts.worstReprojection, ratio);
@@ -898,8 +901,8 @@ PT_CHECK(constant_inputs_match_unit_textures, Fast, Exact) {
         // Shading consumes a lookup exactly as a constant of the value it read: the texture path adds nothing past the filter.
         const Material asRead{.baseColor = read(textured.baseColor), .normal = read(textured.normal), .bump = height,
                               .roughness = roughnessRead, .specular = read(textured.specular)};
-        const BsdfParams readParams = resolveBsdfParams(asRead, vertex.uv, vertex.colour, settings, std::nullopt);
-        const BsdfParams texturedParams = resolveBsdfParams(textured, vertex.uv, vertex.colour, settings, std::nullopt);
+        const BsdfParams readParams = resolveBsdfParams(asRead, vertex.uv, {}, vertex.colour, settings, std::nullopt);
+        const BsdfParams texturedParams = resolveBsdfParams(textured, vertex.uv, {}, vertex.colour, settings, std::nullopt);
         paramMismatches += lookupsHold && sameBsdfParams(readParams, texturedParams) ? 0 : 1;
         frameMismatches += buildShadingFrame(triangle, vertex, asRead, settings) == buildShadingFrame(triangle, vertex, textured, settings) ? 0 : 1;
         // A constant's B-spline slope is a sum of derivative weights, exactly 0, with sum |w'| <= 1: rounding leaves at most 6u|h|.
@@ -1235,5 +1238,38 @@ PT_CHECK(motion_vector_is_zero_where_the_previous_view_has_no_image, Fast, Exact
 }
 
 }  // namespace
+
+// Igehy's transfer against plane geometry: a facing plane maps a direction step to t times it, a plane tilted by 60 degrees twice that.
+PT_CHECK(primary_hit_footprint_is_the_plane_transfer, Fast, Exact) {
+    constexpr float kDistance = 5.0F;
+    constexpr float kStep = 1.0e-3F;  // radians per footprint axis
+    constexpr float kUvPerMetre = 3.0F;
+    const Ray ray{glm::vec3(0.0F), glm::vec3(0.0F, 0.0F, -1.0F), 0.0F, 100.0F};
+    const glm::mat2x3 dirFootprint(glm::vec3(kStep, 0.0F, 0.0F), glm::vec3(0.0F, kStep, 0.0F));
+    ctx.plan(2);
+    for (const float tiltDegrees : {0.0F, 60.0F}) {
+        // Tilted about y: the footprint's x step runs along along = (cos a, 0, -sin a), foreshortened by 1/cos a; y stays t * step.
+        const float tilt = glm::radians(tiltDegrees);
+        const glm::vec3 along(std::cos(tilt), 0.0F, -std::sin(tilt));
+        const glm::vec3 up(0.0F, 1.0F, 0.0F);
+        const glm::vec3 hit(0.0F, 0.0F, -kDistance);
+        // uv is affine in (along, up) at kUvPerMetre, through a sheared second edge so the Gram solve is not diagonal.
+        const auto corner = [&](float a, float b) {
+            return ShadingVertex{hit + (a * along) + (b * up), glm::cross(along, up), kUvPerMetre * glm::vec2(a, b),
+                                 glm::vec4(along, 1.0F)};
+        };
+        const ShadingTriangle triangle{corner(0.0F, 0.0F), corner(1.0F, 0.0F), corner(1.0F, 1.0F), 0};
+        const pathtracer::gfx::TextureFootprint footprint = primaryHitFootprint(triangle, ray, kDistance, dirFootprint);
+        const glm::vec2 expectedDx(kUvPerMetre * kDistance * kStep / std::cos(tilt), 0.0F);
+        const glm::vec2 expectedDy(0.0F, kUvPerMetre * kDistance * kStep);
+        // Edges (1,0) and (1,1): Gram condition (3 + sqrt 5) / (3 - sqrt 5) ~ 6.9 over ~20 roundings of u = eps/2, 7 * 20 u = 70 eps.
+        const float bound = 70.0F * std::numeric_limits<float>::epsilon() * glm::length(expectedDx);
+        const float error = std::max(glm::length(footprint.dx - expectedDx), glm::length(footprint.dy - expectedDy));
+        char detail[160];
+        std::snprintf(detail, sizeof(detail), "tilt %.0f: footprint is %.3g from the plane's foreshortened step, over %.3g",
+                      static_cast<double>(tiltDegrees), static_cast<double>(error), static_cast<double>(bound));
+        PT_EXPECT(ctx, error <= bound, detail);
+    }
+}
 
 PT_CHECK_MAIN("gbuffer")

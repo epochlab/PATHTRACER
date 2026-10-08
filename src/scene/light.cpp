@@ -128,6 +128,13 @@ glm::vec3 LightSet::environmentRadiance(const glm::vec3& direction) const {
     return environment_->sampleDirection(direction, envRotation_) * envExposure_;
 }
 
+glm::vec3 LightSet::environmentRadiance(const glm::vec3& direction, const glm::mat2x3& dirFootprint) const {
+    if (environment_ == nullptr) {
+        return glm::vec3(0.0F);
+    }
+    return environment_->sampleDirection(direction, dirFootprint, envRotation_) * envExposure_;
+}
+
 float LightSet::pdfEnvironment(const glm::vec3& dir) const {
     if (environment_ == nullptr) {
         return 0.0F;

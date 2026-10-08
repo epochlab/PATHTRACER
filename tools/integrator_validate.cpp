@@ -31,6 +31,7 @@
 #include "pathtracer/scene/camera.h"
 #include "pathtracer/scene/embree_accel.h"
 #include "pathtracer/scene/environment_map.h"
+#include "pathtracer/scene/gbuffer.h"
 #include "pathtracer/scene/gltf_loader.h"
 #include "pathtracer/scene/light.h"
 #include "pathtracer/scene/material_binding.h"
@@ -1768,6 +1769,74 @@ PT_CHECK(alpha_is_filtered_primary_coverage, Fast, Exact) {
     PT_EXPECT(ctx, monotone, "coverage rises moving off the half-plane");
     PT_EXPECT(ctx, premultiplied, "a transparent pixel carries radiance with the sky hidden");
     PT_EXPECT(ctx, opaqueSky, "a shown sky is not opaque");
+}
+
+// A checker minified 64:1 reads its mean wherever bounce 0 filters: Beauty by each sample's stratum, the G-buffer's Albedo by its pixel.
+PT_CHECK(primary_hits_filter_minified_textures, Fast, Exact) {
+    constexpr int kChecker = 64;
+    constexpr float kTexelsPerPixel = 64.0F;
+    std::vector<float> checker;
+    for (int y = 0; y < kChecker; ++y) {
+        for (int x = 0; x < kChecker; ++x) {
+            const auto texel = static_cast<float>((x + y) % 2);
+            checker.insert(checker.end(), {texel, texel, texel});
+        }
+    }
+    const Camera camera = makeCamera();
+    const Camera::ViewBasis basis = camera.viewBasis(1.0F);
+    // The z = 0 plane faces the camera along its axis: one pixel spans 2 z tan(half-angle) / kImageSize metres, the narrower axis set.
+    const float pixelMetres = 2.0F * camera.position().z * std::min(basis.halfWidth, basis.halfHeight) / static_cast<float>(kImageSize);
+    const float uvPerMetre = kTexelsPerPixel / (static_cast<float>(kChecker) * pixelMetres);
+    const glm::vec3 normal(0.0F, 0.0F, 1.0F);
+    const glm::vec4 tangent(1.0F, 0.0F, 0.0F, 1.0F);
+    // Half a texel over, so a pixel centre, a whole number of texels plus a half from the axis, lands on a texel centre: 0 or 1 to a point.
+    const glm::vec2 halfTexel(0.5F / static_cast<float>(kChecker));
+    const auto vertex = [&](float x, float y) {
+        return ShadingVertex{glm::vec3(x, y, 0.0F), normal, (glm::vec2(x, y) * uvPerMetre) + halfTexel, tangent};
+    };
+    // A metre each way covers the frame and every filter tap past it, so no pixel sees the sky.
+    const ShadingVertex v0 = vertex(-1.0F, -1.0F);
+    const ShadingVertex v1 = vertex(1.0F, -1.0F);
+    const ShadingVertex v2 = vertex(1.0F, 1.0F);
+    const ShadingVertex v3 = vertex(-1.0F, 1.0F);
+    TestScene scene;
+    scene.worldTriangles = {Triangle{v0.position, v1.position, v2.position}, Triangle{v0.position, v2.position, v3.position}};
+    scene.shadingTriangles = {ShadingTriangle{v0, v1, v2, 0}, ShadingTriangle{v0, v2, v3, 0}};
+    Material material = makeMaterial(1.0F, glm::vec3(0.04F));
+    material.baseColor = tools::fixtures::makeTexture(kChecker, kChecker, pathtracer::gfx::kRgbChannels, checker);
+    scene.instances = {MeshInstance{material, glm::mat4(1.0F), ""}};
+    std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+    const EnvironmentMap env = makeUniformEnvironment();
+    // Constant emits the filtered base colour and nothing else, so Beauty is the lookup itself, splatted.
+    PathTraceSettings settings = makeSettings(0, 1, 0.0F);
+    settings.shadingModel = pathtracer::scene::ShadingModel::Constant;
+    settings.samplesPerPixel = 16;
+    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    const pathtracer::scene::PathTraceResult traced = renderPass(scene, env, settings, *accel, pool, /*showSky=*/false);
+    const std::vector<PathTraceSettings> perInstance(1, settings);
+    pathtracer::scene::GBuffer gbuffer;
+    pathtracer::scene::renderGBuffer(camera, camera, *accel, scene.shadingTriangles, scene.instances, perInstance,
+                                     pathtracer::scene::computeInstanceBounds(scene.shadingTriangles, 1), kImageSize, kImageSize, pool,
+                                     gbuffer);
+    // 16 texels per stratum select levels 3-4, every one exactly 0.5; the blend and the splat's (sum w) fl(1/sum w) round a few ulp.
+    const float bound = 8.0F * std::numeric_limits<float>::epsilon() * 0.5F;
+    float worstBeauty = 0.0F;
+    float worstAlbedo = 0.0F;
+    for (std::size_t pixel = 0; pixel < static_cast<std::size_t>(kImageSize) * kImageSize; ++pixel) {
+        const glm::vec3 beauty = traced.beauty.rgb(pixel);
+        const glm::vec3 albedo = gbuffer.albedo.rgb(pixel);
+        worstBeauty = std::max({worstBeauty, std::abs(beauty.r - 0.5F), std::abs(beauty.g - 0.5F), std::abs(beauty.b - 0.5F)});
+        worstAlbedo = std::max({worstAlbedo, std::abs(albedo.r - 0.5F), std::abs(albedo.g - 0.5F), std::abs(albedo.b - 0.5F)});
+    }
+    ctx.plan(2);
+    char detail[160];
+    // Point lookups of a 0/1 checker would leave 16 samples' mean about 1/8 from 0.5: these bounds hold only if bounce 0 filtered.
+    std::snprintf(detail, sizeof(detail), "Beauty is %.3g from the checker's mean 0.5, over %.3g", static_cast<double>(worstBeauty),
+                  static_cast<double>(bound));
+    PT_EXPECT(ctx, worstBeauty <= bound, detail);
+    std::snprintf(detail, sizeof(detail), "Albedo is %.3g from the checker's mean 0.5, over %.3g", static_cast<double>(worstAlbedo),
+                  static_cast<double>(bound));
+    PT_EXPECT(ctx, worstAlbedo <= bound, detail);
 }
 
 // Radiance only inside one end column, 1/8 px clear of its edges: the column across the seam is lit if, and only if, the filter wraps.
