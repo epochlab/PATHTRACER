@@ -9,18 +9,18 @@
 #include <cstdlib>
 #include <cctype>
 #include <cstring>
-#include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <numeric>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
-#include <OpenColorIO/OpenColorIO.h>
+#include <OpenImageIO/imageio.h>
 #include <glm/gtc/matrix_transform.hpp>
-#include <zlib.h>
 
 #include "pathtracer/api/headless_renderer.h"
 #include "pathtracer/debug/aov.h"
@@ -33,8 +33,6 @@
 #include "pathtracer/gfx/ocio_cpu_transform.h"
 #include "pathtracer/gfx/ocio_display_transform.h"
 #include "pathtracer/scene/camera.h"
-
-namespace OCIO = OCIO_NAMESPACE;
 
 namespace {
 
@@ -84,143 +82,28 @@ bool resolveAov(const std::string& requested, Options& options) {
     return true;
 }
 
-// Big-endian u32 append -- PNG is network byte order throughout.
-void appendBe32(std::vector<unsigned char>& out, std::uint32_t value) {
-    out.push_back(static_cast<unsigned char>((value >> 24) & 0xFFU));
-    out.push_back(static_cast<unsigned char>((value >> 16) & 0xFFU));
-    out.push_back(static_cast<unsigned char>((value >> 8) & 0xFFU));
-    out.push_back(static_cast<unsigned char>(value & 0xFFU));
-}
+// A PNG's 16-bit codes, every channel, through OIIO's reader: both sides of --compare as stored, not as this process encoded them.
+struct Png16 {
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    std::vector<std::uint16_t> codes;
+};
 
-void appendChunk(std::vector<unsigned char>& out, const char* type,
-                  const std::vector<unsigned char>& data) {
-    appendBe32(out, static_cast<std::uint32_t>(data.size()));
-    const std::size_t crcStart = out.size();
-    out.insert(out.end(), type, type + 4);
-    out.insert(out.end(), data.begin(), data.end());
-    const uLong crc = crc32(crc32(0L, Z_NULL, 0), out.data() + crcStart,
-                             static_cast<uInt>(out.size() - crcStart));
-    appendBe32(out, static_cast<std::uint32_t>(crc));
-}
-
-// Minimal 8-bit RGB PNG writer: zlib arrives transitively with OpenEXR, so a debug artifact needs no vendored image library.
-bool writePng(const std::string& path, int width, int height,
-               const std::vector<unsigned char>& rgb) {
-    // Each scanline is prefixed with its filter byte; 0 = None, which compresses adequately here and keeps the encoder trivial.
-    std::vector<unsigned char> raw;
-    raw.reserve((static_cast<std::size_t>(width) * 3 + 1) * static_cast<std::size_t>(height));
-    for (int y = 0; y < height; ++y) {
-        raw.push_back(0);
-        const std::size_t rowStart = static_cast<std::size_t>(y) * static_cast<std::size_t>(width) * 3;
-        raw.insert(raw.end(), rgb.begin() + static_cast<std::ptrdiff_t>(rowStart),
-                    rgb.begin() + static_cast<std::ptrdiff_t>(rowStart) +
-                        (static_cast<std::ptrdiff_t>(width) * 3));
+std::optional<Png16> readPng16(const std::string& path) {
+    const std::unique_ptr<OIIO::ImageInput> input = OIIO::ImageInput::open(path);
+    if (!input) {
+        std::cerr << "render_beauty: " << OIIO::geterror() << '\n';
+        return std::nullopt;
     }
-
-    uLongf compressedSize = compressBound(static_cast<uLong>(raw.size()));
-    std::vector<unsigned char> compressed(compressedSize);
-    if (compress2(compressed.data(), &compressedSize, raw.data(), static_cast<uLong>(raw.size()),
-                   Z_BEST_COMPRESSION) != Z_OK) {
-        std::cerr << "render_beauty: zlib compression failed\n";
-        return false;
+    const OIIO::ImageSpec& spec = input->spec();
+    Png16 png{spec.width, spec.height, spec.nchannels, {}};
+    png.codes.resize(static_cast<std::size_t>(spec.width) * static_cast<std::size_t>(spec.height) * static_cast<std::size_t>(spec.nchannels));
+    if (!input->read_image(0, 0, 0, spec.nchannels, OIIO::TypeUInt16, png.codes.data())) {
+        std::cerr << "render_beauty: " << path << ": " << input->geterror() << '\n';
+        return std::nullopt;
     }
-    compressed.resize(compressedSize);
-
-    std::vector<unsigned char> png = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n'};
-    std::vector<unsigned char> ihdr;
-    appendBe32(ihdr, static_cast<std::uint32_t>(width));
-    appendBe32(ihdr, static_cast<std::uint32_t>(height));
-    ihdr.push_back(8);  // bit depth
-    ihdr.push_back(2);  // colour type 2 = truecolour RGB
-    ihdr.push_back(0);  // deflate
-    ihdr.push_back(0);  // adaptive filtering
-    ihdr.push_back(0);  // no interlace
-    appendChunk(png, "IHDR", ihdr);
-    appendChunk(png, "IDAT", compressed);
-    appendChunk(png, "IEND", {});
-
-    std::ofstream file(path, std::ios::binary);
-    if (!file) {
-        std::cerr << "render_beauty: could not open " << path << " for writing\n";
-        return false;
-    }
-    file.write(reinterpret_cast<const char*>(png.data()),
-                static_cast<std::streamsize>(png.size()));
-    return file.good();
-}
-
-// Reads back a PNG this tool wrote: only writePng's exact IHDR (8-bit, colour type 2, no interlace) and filter 0, anything else rejected.
-bool readPng(const std::string& path, int& width, int& height, std::vector<unsigned char>& rgb) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file) {
-        std::cerr << "render_beauty: could not read " << path << '\n';
-        return false;
-    }
-    const std::vector<unsigned char> bytes((std::istreambuf_iterator<char>(file)),
-                                            std::istreambuf_iterator<char>());
-    if (bytes.size() < 8 || bytes[0] != 0x89 || bytes[1] != 'P') {
-        std::cerr << "render_beauty: " << path << " is not a PNG\n";
-        return false;
-    }
-    const auto be32 = [&bytes](std::size_t at) {
-        return (static_cast<std::uint32_t>(bytes[at]) << 24) |
-               (static_cast<std::uint32_t>(bytes[at + 1]) << 16) |
-               (static_cast<std::uint32_t>(bytes[at + 2]) << 8) |
-               static_cast<std::uint32_t>(bytes[at + 3]);
-    };
-
-    std::vector<unsigned char> idat;
-    std::size_t at = 8;
-    while (at + 8 <= bytes.size()) {
-        const std::uint32_t length = be32(at);
-        const std::string type(reinterpret_cast<const char*>(&bytes[at + 4]), 4);
-        const std::size_t dataAt = at + 8;
-        if (dataAt + length > bytes.size()) {
-            break;
-        }
-        if (type == "IHDR") {
-            // The 13-byte payload is indexed directly below; a chunk declaring less would read past the buffer on a truncated file.
-            if (length < 13) {
-                std::cerr << "render_beauty: " << path << " has a malformed IHDR\n";
-                return false;
-            }
-            width = static_cast<int>(be32(dataAt));
-            height = static_cast<int>(be32(dataAt + 4));
-            if (bytes[dataAt + 8] != 8 || bytes[dataAt + 9] != 2 || bytes[dataAt + 12] != 0) {
-                std::cerr << "render_beauty: " << path
-                          << " is not the 8-bit non-interlaced RGB this tool writes\n";
-                return false;
-            }
-        } else if (type == "IDAT") {
-            idat.insert(idat.end(), bytes.begin() + static_cast<std::ptrdiff_t>(dataAt),
-                         bytes.begin() + static_cast<std::ptrdiff_t>(dataAt + length));
-        }
-        at = dataAt + length + 4;  // + CRC
-    }
-    if (width <= 0 || height <= 0 || idat.empty()) {
-        std::cerr << "render_beauty: " << path << " has no usable image data\n";
-        return false;
-    }
-
-    const std::size_t stride = (static_cast<std::size_t>(width) * 3) + 1;
-    uLongf rawSize = static_cast<uLongf>(stride * static_cast<std::size_t>(height));
-    std::vector<unsigned char> raw(rawSize);
-    if (uncompress(raw.data(), &rawSize, idat.data(), static_cast<uLong>(idat.size())) != Z_OK ||
-        rawSize != stride * static_cast<std::size_t>(height)) {
-        std::cerr << "render_beauty: " << path << " failed to inflate\n";
-        return false;
-    }
-    rgb.resize(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3);
-    for (int y = 0; y < height; ++y) {
-        if (raw[static_cast<std::size_t>(y) * stride] != 0) {
-            std::cerr << "render_beauty: " << path << " uses a PNG filter this tool cannot read\n";
-            return false;
-        }
-        std::memcpy(&rgb[static_cast<std::size_t>(y) * static_cast<std::size_t>(width) * 3],
-                     &raw[(static_cast<std::size_t>(y) * stride) + 1],
-                     static_cast<std::size_t>(width) * 3);
-    }
-    return true;
+    return png;
 }
 
 // Each octave band's share of total error power.
@@ -429,6 +312,10 @@ int main(int argc, char** argv) {
         options.envLight >= 0 ? std::optional<bool>(options.envLight != 0) : std::nullopt;
     const bool envLightEnabled = envLightOverride.value_or(renderer->defaultEnvLightEnabled());
     const std::string aovName = pathtracer::debug::kAovNames[static_cast<int>(options.aov)];
+    const bool isBeauty = options.aov == pathtracer::debug::AovId::Beauty;
+    // Alpha shares Beauty's samples and filter, so asking for it with Beauty costs one lane and changes no Beauty float.
+    const std::vector<pathtracer::debug::AovId> requested =
+        isBeauty ? std::vector{options.aov, pathtracer::debug::AovId::Alpha} : std::vector{options.aov};
 
     // One accumulation parameterised by its randomization: the mean of `passes` single-sample passes, as PathTraceDriver does.
     const auto accumulate = [&](std::uint32_t scrambleSeed, int passes) {
@@ -438,7 +325,7 @@ int main(int argc, char** argv) {
             .height = height,
             .samples = passes,
             .scrambleSeed = scrambleSeed,
-            .aovs = {options.aov},
+            .aovs = requested,
             .envLightEnabled = envLightOverride,
         };
         if (!renderer->render(request, error)) {
@@ -580,7 +467,9 @@ int main(int argc, char** argv) {
     }
 
     if (!options.outExrPath.empty()) {
-        if (!pathtracer::gfx::writeExr(options.outExrPath, accumulated)) {
+        const pathtracer::gfx::ImageRole role =
+            pathtracer::debug::aovIsColour(options.aov) ? pathtracer::gfx::ImageRole::Colour : pathtracer::gfx::ImageRole::Data;
+        if (!pathtracer::gfx::writeExr(options.outExrPath, accumulated, role)) {
             return EXIT_FAILURE;
         }
         std::cout << "render_beauty: wrote " << options.outExrPath << " (linear " << aovName << ", "
@@ -588,7 +477,9 @@ int main(int argc, char** argv) {
     }
 
     if (!options.compareExrPath.empty()) {
-        const std::optional<pathtracer::gfx::HdrImage> reference = pathtracer::gfx::loadExr(options.compareExrPath);
+        const std::optional<pathtracer::gfx::HdrImage> reference = pathtracer::gfx::loadImage(
+            options.compareExrPath,
+            pathtracer::debug::aovIsColour(options.aov) ? pathtracer::gfx::ImageRole::Colour : pathtracer::gfx::ImageRole::Data);
         if (!reference.has_value()) {
             return EXIT_FAILURE;
         }
@@ -619,7 +510,6 @@ int main(int argc, char** argv) {
         }
     }
 
-    const bool isBeauty = options.aov == pathtracer::debug::AovId::Beauty;
     // The same display decision presentFrame makes, so a PNG and the viewer agree by construction rather than by two copies staying level.
     const pathtracer::debug::AovDisplay prepared = pathtracer::debug::aovDisplay(
         options.aov, accumulated, {options.passes, renderer->baseSettings().maxBounces});
@@ -630,31 +520,43 @@ int main(int argc, char** argv) {
     }
     // The shared encode takes packed RGB, so expand each texel exactly as the viewer's texture swizzle does.
     const pathtracer::gfx::HdrImage& source = prepared.mapped.texels.empty() ? accumulated : prepared.mapped;
-    std::vector<float> linearRgb(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3);
-    for (std::size_t texel = 0; texel < linearRgb.size() / 3; ++texel) {
-        const glm::vec3 rgb = source.rgb(texel);
+    const std::size_t pixels = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    std::vector<float> linearRgb(pixels * 3);
+    // Beauty is radiance premultiplied by coverage; PNG stores straight alpha, so it is unassociated here, in linear, before the curve.
+    const pathtracer::gfx::HdrImage* alpha = isBeauty ? &renderer->lastImage(pathtracer::debug::AovId::Alpha) : nullptr;
+    for (std::size_t texel = 0; texel < pixels; ++texel) {
+        const float coverage = alpha != nullptr ? alpha->texels[texel] : 1.0F;
+        const glm::vec3 rgb = coverage > 0.0F ? source.rgb(texel) / coverage : glm::vec3(0.0F);
         linearRgb[(texel * 3) + 0] = rgb.r;
         linearRgb[(texel * 3) + 1] = rgb.g;
         linearRgb[(texel * 3) + 2] = rgb.b;
     }
-    std::vector<unsigned char> encoded(linearRgb.size());
-    pathtracer::gfx::encodeForDisplay(linearRgb, width, height, display.gain, isBeauty, display.offset, encoded);
-    if (!writePng(options.outPath, width, height, encoded)) {
+    std::vector<float> encoded(linearRgb.size());
+    pathtracer::gfx::encodeForDisplay(linearRgb, width, height, display.gain, isBeauty, display.offset, std::span<float>(encoded));
+    pathtracer::gfx::HdrImage png = pathtracer::gfx::makeImage(width, height, alpha != nullptr ? 4 : 3);
+    for (std::size_t texel = 0; texel < pixels; ++texel) {
+        float* out = png.texels.data() + (texel * static_cast<std::size_t>(png.channels));
+        std::copy_n(encoded.data() + (texel * 3), 3, out);
+        if (alpha != nullptr) {
+            out[3] = alpha->texels[texel];
+        }
+    }
+    if (!pathtracer::gfx::writeDisplayPng(options.outPath, png)) {
         return EXIT_FAILURE;
     }
     std::cout << "render_beauty: wrote " << options.outPath << " (" << aovName << ", " << width
               << "x" << height << ", " << options.passes << " passes)\n";
 
     if (!options.comparePath.empty()) {
-        int refWidth = 0;
-        int refHeight = 0;
-        std::vector<unsigned char> reference;
-        if (!readPng(options.comparePath, refWidth, refHeight, reference)) {
+        const std::optional<Png16> written = readPng16(options.outPath);
+        const std::optional<Png16> reference = readPng16(options.comparePath);
+        if (!written || !reference) {
             return EXIT_FAILURE;
         }
-        if (refWidth != width || refHeight != height) {
-            std::cerr << "render_beauty: --compare image is " << refWidth << "x" << refHeight
-                      << ", this render is " << width << "x" << height << "\n";
+        if (reference->width != written->width || reference->height != written->height || reference->channels != written->channels) {
+            std::cerr << "render_beauty: --compare image is " << reference->width << "x" << reference->height << "x"
+                      << reference->channels << ", this render is " << written->width << "x" << written->height << "x"
+                      << written->channels << "\n";
             return EXIT_FAILURE;
         }
         int maxDelta = 0;
@@ -662,19 +564,19 @@ int main(int argc, char** argv) {
         // Signed mean alongside RMS: near-zero mean against non-zero RMS means light moved rather than appeared or vanished.
         double signedSum = 0.0;
         std::size_t differing = 0;
-        for (std::size_t i = 0; i < encoded.size(); ++i) {
-            const int signedDelta = static_cast<int>(encoded[i]) - static_cast<int>(reference[i]);
+        for (std::size_t i = 0; i < written->codes.size(); ++i) {
+            const int signedDelta = static_cast<int>(written->codes[i]) - static_cast<int>(reference->codes[i]);
             const int delta = std::abs(signedDelta);
             maxDelta = std::max(maxDelta, delta);
             squaredSum += static_cast<double>(delta) * delta;
             signedSum += signedDelta;
             differing += delta != 0 ? 1 : 0;
         }
-        const double rms = std::sqrt(squaredSum / static_cast<double>(encoded.size()));
-        const double meanSigned = signedSum / static_cast<double>(encoded.size());
-        std::cout << "render_beauty: vs " << options.comparePath << " -- max channel delta "
-                  << maxDelta << "/255, RMS " << rms << ", mean signed " << meanSigned << ", "
-                  << differing << "/" << encoded.size() << " channels differ\n";
+        const double rms = std::sqrt(squaredSum / static_cast<double>(written->codes.size()));
+        const double meanSigned = signedSum / static_cast<double>(written->codes.size());
+        std::cout << "render_beauty: vs " << options.comparePath << " -- max channel delta " << maxDelta << "/"
+                  << std::numeric_limits<std::uint16_t>::max() << ", RMS " << rms << ", mean signed " << meanSigned << ", "
+                  << differing << "/" << written->codes.size() << " channels differ\n";
     }
     return EXIT_SUCCESS;
 }

@@ -269,7 +269,7 @@ struct AppResources {
     float interactiveRenderScale;
     std::chrono::steady_clock::time_point lastInputChange{};
 
-    // Synchronous pool for the 15 G-buffer AOVs and the Beauty filters. unique_ptr: ThreadPool owns threads and cannot move.
+    // Synchronous pool for the 14 G-buffer AOVs and the Beauty filters. unique_ptr: ThreadPool owns threads and cannot move.
     std::unique_ptr<pathtracer::scene::ThreadPool> gbufferThreadPool = std::make_unique<pathtracer::scene::ThreadPool>();
     // Allocated once and rendered into in place, never republished: its `generation`, not its address, tells one render from the next.
     std::shared_ptr<pathtracer::scene::GBuffer> gbuffer = std::make_shared<pathtracer::scene::GBuffer>();

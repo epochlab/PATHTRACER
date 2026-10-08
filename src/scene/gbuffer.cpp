@@ -238,7 +238,6 @@ glm::vec3 shadeHit(GBuffer& result, int x, int y, const Hit& hit, const PixelRay
     writeTexel(result.roughness, x, y, params.roughness);
     writeTexel(result.tangent, x, y, frame[0]);
     writeTexel(result.objectId, x, y, falseColorForId(triangle.instanceIndex));
-    writeTexel(result.alpha, x, y, 1.0F);
     writeTexel(result.iorAov, x, y, settings.ior);
     if (nearTriangleEdge(triangle, pixel)) {
         writeTexel(result.wireframe, x, y, kWireframeColor);

@@ -55,8 +55,8 @@ constexpr float kFilterRadius = 1.5F;
 // How far a splat reaches: a sample sits at most 1.0 past its own pixel's far centre, so two pixels away weighs exactly zero.
 constexpr int kFilterExtent = 1;
 constexpr int kFilterTableSize = 64;
-// Per-tile lanes: beauty.rgb, termination bounce, shadow, five transport buckets, AO, Fresnel. Scalars broadcast to RGB at write-out.
-constexpr int kSampleLanes = 24;
+// Per-tile lanes: beauty.rgb, termination bounce, shadow, five transport buckets, AO, Fresnel, alpha. Scalars broadcast at write-out.
+constexpr int kSampleLanes = 25;
 constexpr int kTileLanes = kSampleLanes + 1;  // plus the per-pixel filter weight the lanes above are normalised by
 
 // Sampled at |x| = i/(N-1) * kFilterRadius, read by truncating lookup: PBRT's table trick, replacing three cos() per tap.
@@ -111,6 +111,7 @@ struct TraceResult {
     float ao;  // 1.0 = unoccluded, 0.0 = occluded within aoMaxDistance -- inverted relative to shadow above
     // One VNDF draw's Fresnel at the primary hit; 0 where there is no BSDF vertex at bounce 0.
     glm::vec3 fresnel{0.0F};
+    float alpha = 0.0F;  // 1 where the primary ray hits, or misses into a shown sky; 0 with no ray at all
 
     // Transport-component breakdown -- see PathTraceResult's doc comment for the bucketing rule.
     glm::vec3 directDiffuse{0.0F};
@@ -166,6 +167,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
     float gAo = 1.0F;      // default: background is fully unoccluded, matching the polarity in PathTraceResult
     // Default: no BSDF vertex at bounce 0 -- the camera ray missed, or hit an emitter, which returns before shading.
     glm::vec3 gFresnel(0.0F);
+    float gAlpha = 0.0F;
 
     // MIS state for the previous bounce's BSDF sample: reweights this bounce's miss against NEE's pdf so neither double-counts.
     float lastBsdfPdf = 0.0F;
@@ -178,6 +180,9 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
     for (; bounce <= settings.maxBounces + 1; ++bounce) {
         (bounce == 0 ? rays.primary : rays.bounce) += 1;
         const std::optional<Hit> hit = accel.intersect(ray);
+        if (bounce == 0) {
+            gAlpha = hit.has_value() || showSky ? 1.0F : 0.0F;
+        }
 
         // Beer-Lambert for the segment just travelled. A miss is unbounded, so it is written per channel: exp(-0 * inf) is NaN.
         if (mediumSigmaA.has_value()) {
@@ -419,8 +424,8 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
         ray = Ray{offsetOrigin, wiWorld, offsetEpsilon, std::numeric_limits<float>::max()};
     }
 
-    return {radiance,           bounce,               gShadow,             gAo,
-            gFresnel,           directDiffuseAccum,   indirectDiffuseAccum,
+    return {radiance,           bounce,               gShadow,              gAo,
+            gFresnel,           gAlpha,               directDiffuseAccum,   indirectDiffuseAccum,
             directSpecularAccum, indirectSpecularAccum, refractionAccum};
 }
 
@@ -517,7 +522,8 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                         trace.indirectSpecular.z,  trace.refraction.x,
                         trace.refraction.y,        trace.refraction.z,
                         trace.ao,                  trace.fresnel.x,
-                        trace.fresnel.y,           trace.fresnel.z};
+                        trace.fresnel.y,           trace.fresnel.z,
+                        trace.alpha};
 
                     // Clipped to this tile: taps outside belong to a neighbouring tile, which traces this same sample itself.
                     const int splatX0 = std::max(tileX0, static_cast<int>(std::ceil(filmX - 0.5F - kFilterRadius)));
@@ -567,6 +573,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                 writeTexel(out.refraction, x, y, glm::vec3(lanes[17], lanes[18], lanes[19]) * invWeight);
                 writeTexel(out.ao, x, y, lanes[20] * invWeight);
                 writeTexel(out.fresnel, x, y, glm::vec3(lanes[21], lanes[22], lanes[23]) * invWeight);
+                writeTexel(out.alpha, x, y, lanes[24] * invWeight);
             }
         }
 

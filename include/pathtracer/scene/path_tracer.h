@@ -112,6 +112,9 @@ struct PathTraceResult {
     // E[F(wo.wh)] at the primary hit, wh ~ D_vis(wo), one VNDF draw per sample (bsdf.h). 0 where bounce 0 has no BSDF vertex.
     pathtracer::gfx::HdrImage fresnel;
 
+    // Filtered primary opacity: a sample is opaque on any hit, or on a miss when showSky shows the environment behind it.
+    pathtracer::gfx::HdrImage alpha;
+
     // Welford second moment of each texel's per-pass Rec.709 luminance, one float and not an image: an SNR needs no chromaticity.
     std::vector<float> beautyLuminanceM2;
 
@@ -122,7 +125,7 @@ struct PathTraceResult {
     int samples = 0;  // passes averaged in, stamped with generation so image and count publish as one snapshot
 };
 
-// All 10 images at their aovChannels counts and the second-moment lane, zeroed at width x height: renderPathTraced's `out`.
+// All 11 images at their aovChannels counts and the second-moment lane, zeroed at width x height: renderPathTraced's `out`.
 [[nodiscard]] PathTraceResult makePathTraceResult(int width, int height);
 
 // Whether a primary ray that misses returns environment radiance when nothing overrides it; viewer, driver and headless share it.

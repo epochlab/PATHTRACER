@@ -5,11 +5,12 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <exception>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <random>
 #include <string>
@@ -17,11 +18,9 @@
 #include <variant>
 #include <vector>
 
-#include <OpenEXR/ImfChannelList.h>
-#include <OpenEXR/ImfFrameBuffer.h>
-#include <OpenEXR/ImfHeader.h>
-#include <OpenEXR/ImfInputFile.h>
-#include <OpenEXR/ImfOutputFile.h>
+#include <OpenColorIO/OpenColorIO.h>
+#include <OpenImageIO/color.h>
+#include <OpenImageIO/imageio.h>
 #include <glm/glm.hpp>
 #include <nlohmann/json.hpp>
 
@@ -31,6 +30,7 @@
 #include "pathtracer/debug/aov.h"
 #include "pathtracer/debug/bench_log.h"
 #include "pathtracer/gfx/hdr_image.h"
+#include "pathtracer/gfx/ocio_display_transform.h"
 #include "pathtracer/gfx/texture.h"
 #include "pathtracer/scene/gbuffer_shading.h"
 #include "pathtracer/scene/gltf_loader.h"
@@ -58,74 +58,63 @@ pathtracer::gfx::HdrImage makeProbeImage() {
     return image;
 }
 
-// Writes interleaved full-float `planes` straight through OpenEXR, for probes writeExr never produces: an RGBA or an R-only file.
-bool writeExrPlanes(const std::filesystem::path& path, int width, int height, const std::vector<const char*>& planes,
-                    std::vector<float> texels) {
-    try {
-        Imf::Header header(width, height);
-        Imf::FrameBuffer frameBuffer;
-        const std::size_t xStride = sizeof(float) * planes.size();
-        for (std::size_t c = 0; c < planes.size(); ++c) {
-            header.channels().insert(planes[c], Imf::Channel(Imf::FLOAT));
-            frameBuffer.insert(planes[c], Imf::Slice(Imf::FLOAT, reinterpret_cast<char*>(texels.data() + c), xStride,
-                                                     xStride * static_cast<std::size_t>(width)));
-        }
-        Imf::OutputFile file(path.string().c_str(), header);
-        file.setFrameBuffer(frameBuffer);
-        file.writePixels(height);
-        return true;
-    } catch (const std::exception& e) {
-        std::cerr << "io_validate: could not write " << path << ": " << e.what() << '\n';
+// Writes interleaved full-float `planes` through OIIO with `attributes` set, for probes writeExr never produces: RGBA, R-only, retagged.
+bool writeExrPlanes(const std::filesystem::path& path, int width, int height, const std::vector<std::string>& planes,
+                    const std::vector<float>& texels, const std::function<void(OIIO::ImageSpec&)>& attributes = {}) {
+    OIIO::ImageSpec spec(width, height, static_cast<int>(planes.size()), OIIO::TypeFloat);
+    spec.channelnames = planes;
+    spec.alpha_channel = -1;
+    if (attributes) {
+        attributes(spec);
+    }
+    const std::unique_ptr<OIIO::ImageOutput> output = OIIO::ImageOutput::create("openexr");
+    if (!output || !output->open(path.string(), spec) || !output->write_image(OIIO::TypeFloat, texels.data()) || !output->close()) {
+        std::cerr << "io_validate: could not write " << path << ": " << (output ? output->geterror() : OIIO::geterror()) << '\n';
         return false;
     }
+    return true;
 }
 
-// The losslessness hdr_image.h claims in prose, bit-exact: the 1e-20 and 65504 rows are what would expose a half-float channel.
+// The file's own header, read back independently of loadImage: what another tool reading it would see.
+std::optional<OIIO::ImageSpec> headerOf(const std::filesystem::path& path) {
+    const std::unique_ptr<OIIO::ImageInput> input = OIIO::ImageInput::open(path.string());
+    return input ? std::optional(input->spec()) : std::nullopt;
+}
+
+// The losslessness hdr_image.h claims in prose, bit-exact under both roles: Colour is an identity conversion into the working space.
 PT_CHECK(exr_round_trip_is_lossless, Fast, Exact) {
-    ctx.plan(4);
+    ctx.plan(8);
     const pathtracer::gfx::HdrImage original = makeProbeImage();
-    const std::filesystem::path path = scratchPath("engine_io_validate_roundtrip.exr");
-    std::filesystem::remove(path);
-
-    PT_EXPECT(ctx, pathtracer::gfx::writeExr(path.string(), original), "writeExr failed on a valid image");
-    const std::optional<pathtracer::gfx::HdrImage> loaded = pathtracer::gfx::loadExr(path.string());
-    if (!loaded.has_value()) {
-        PT_EXPECT(ctx, false, "loadExr returned nullopt for a file writeExr had just written");
-        PT_EXPECT(ctx, false, "dimensions unavailable");
-        PT_EXPECT(ctx, false, "contents unavailable");
+    for (const pathtracer::gfx::ImageRole role : {pathtracer::gfx::ImageRole::Colour, pathtracer::gfx::ImageRole::Data}) {
+        const char* name = role == pathtracer::gfx::ImageRole::Colour ? "Colour" : "Data";
+        const std::filesystem::path path = scratchPath("engine_io_validate_roundtrip.exr");
         std::filesystem::remove(path);
-        return;
-    }
-
-    char dimDetail[160];
-    std::snprintf(dimDetail, sizeof(dimDetail), "round trip returned %dx%d, wrote %dx%d", loaded->width,
-                  loaded->height, original.width, original.height);
-    PT_EXPECT(ctx, loaded->width == original.width && loaded->height == original.height, dimDetail);
-    PT_EXPECT(ctx, loaded->channels == original.channels && loaded->texels.size() == original.texels.size(),
-              "round trip changed the channel count");
-
-    std::size_t differing = 0;
-    float worst = 0.0F;
-    if (loaded->texels.size() == original.texels.size()) {
-        for (std::size_t i = 0; i < original.texels.size(); ++i) {
-            if (loaded->texels[i] != original.texels[i]) {
-                ++differing;
-                worst = std::max(worst, std::fabs(loaded->texels[i] - original.texels[i]));
-            }
+        PT_EXPECT(ctx, pathtracer::gfx::writeExr(path.string(), original, role), std::string(name) + ": writeExr failed on a valid image");
+        const std::optional<pathtracer::gfx::HdrImage> loaded = pathtracer::gfx::loadImage(path.string(), role);
+        std::filesystem::remove(path);
+        if (!loaded.has_value()) {
+            PT_EXPECT(ctx, false, std::string(name) + ": loadImage returned nullopt for a file writeExr had just written");
+            PT_EXPECT(ctx, false, "dimensions unavailable");
+            PT_EXPECT(ctx, false, "contents unavailable");
+            continue;
         }
+        PT_EXPECT(ctx, true, "loaded");
+        PT_EXPECT(ctx, loaded->width == original.width && loaded->height == original.height && loaded->channels == original.channels,
+                  std::string(name) + ": round trip changed the image's shape");
+        std::size_t differing = 0;
+        for (std::size_t i = 0; i < original.texels.size() && loaded->texels.size() == original.texels.size(); ++i) {
+            differing += loaded->texels[i] != original.texels[i] ? 1 : 0;
+        }
+        PT_EXPECT(ctx, loaded->texels.size() == original.texels.size() && differing == 0,
+                  std::string(name) + ": " + std::to_string(differing) + " floats changed across the round trip");
     }
-    char detail[192];
-    std::snprintf(detail, sizeof(detail), "%zu of %zu floats changed across the round trip, worst delta %.9g",
-                  differing, original.texels.size(), static_cast<double>(worst));
-    PT_EXPECT(ctx, differing == 0, detail);
-    std::filesystem::remove(path);
 }
 
-// An AOV is written at the channels it carries, exactly the first `channels` of R,G,B, and loadExr reads it back as itself.
+// An AOV is written at the channels it carries, exactly the first `channels` of R,G,B, and loadImage reads it back as itself.
 PT_CHECK(exr_write_keeps_the_declared_channels, Fast, Exact) {
     constexpr int kWidth = 3;
     constexpr int kHeight = 2;
-    constexpr std::array<const char*, 3> kPlanes{"R", "G", "B"};
+    const std::vector<std::string> kPlanes{"R", "G", "B"};
     ctx.plan(2 * static_cast<int>(kPlanes.size()));
     for (int channels = 1; channels <= static_cast<int>(kPlanes.size()); ++channels) {
         pathtracer::gfx::HdrImage image = pathtracer::gfx::makeImage(kWidth, kHeight, channels);
@@ -133,24 +122,143 @@ PT_CHECK(exr_write_keeps_the_declared_channels, Fast, Exact) {
             image.texels[i] = 0.5F + static_cast<float>(i);  // distinct per float, so a stride or plane slip reads a wrong value
         }
         const std::filesystem::path path = scratchPath("engine_io_validate_channels.exr");
-        std::vector<std::string> names;
+        std::optional<OIIO::ImageSpec> header;
         std::optional<pathtracer::gfx::HdrImage> loaded;
-        if (pathtracer::gfx::writeExr(path.string(), image)) {
-            const Imf::InputFile file(path.string().c_str());
-            for (auto it = file.header().channels().begin(); it != file.header().channels().end(); ++it) {
-                names.emplace_back(it.name());
-            }
-            loaded = pathtracer::gfx::loadExr(path.string());
+        if (pathtracer::gfx::writeExr(path.string(), image, pathtracer::gfx::ImageRole::Data)) {
+            header = headerOf(path);
+            loaded = pathtracer::gfx::loadImage(path.string(), pathtracer::gfx::ImageRole::Data);
         }
         std::filesystem::remove(path);
-        // ChannelList iterates by name, not by insertion, so the plane sets are compared sorted.
-        std::vector<std::string> expected(kPlanes.begin(), kPlanes.begin() + channels);
-        std::sort(names.begin(), names.end());
-        std::sort(expected.begin(), expected.end());
-        PT_EXPECT(ctx, names == expected, std::to_string(channels) + "-channel image wrote the wrong plane set");
+        const std::vector<std::string> expected(kPlanes.begin(), kPlanes.begin() + channels);
+        PT_EXPECT(ctx, header && header->channelnames == expected, std::to_string(channels) + "-channel image wrote the wrong plane set");
         PT_EXPECT(ctx, loaded && loaded->channels == channels && loaded->texels == image.texels,
                   std::to_string(channels) + "-channel image did not load back as itself");
     }
+}
+
+// Colour EXRs carry the working space twice, as OIIO's tag and OpenEXR's chromaticities; the oracle is BT.709's own published xy.
+PT_CHECK(exr_write_declares_its_colour_space, Fast, Exact) {
+    // ITU-R BT.709-6 Table 1, items 1.3 and 1.4: R, G, B primaries and the D65 white, the working space's definition.
+    constexpr std::array<float, 8> kBt709{0.640F, 0.330F, 0.300F, 0.600F, 0.150F, 0.060F, 0.3127F, 0.3290F};
+    // Half a unit in the fourth decimal, the precision BT.709 publishes its white point at.
+    constexpr float kPublishedPrecision = 5e-5F;
+    ctx.plan(4);
+    const pathtracer::gfx::HdrImage image{1, 1, pathtracer::gfx::kRgbChannels, {0.25F, 0.5F, 0.75F}};
+    const std::filesystem::path path = scratchPath("engine_io_validate_tags.exr");
+    std::optional<OIIO::ImageSpec> colour;
+    std::optional<OIIO::ImageSpec> data;
+    if (pathtracer::gfx::writeExr(path.string(), image, pathtracer::gfx::ImageRole::Colour)) {
+        colour = headerOf(path);
+    }
+    if (pathtracer::gfx::writeExr(path.string(), image, pathtracer::gfx::ImageRole::Data)) {
+        data = headerOf(path);
+    }
+    std::filesystem::remove(path);
+    const OIIO::ColorConfig config(std::string("ocio://") + pathtracer::gfx::kOcioConfigName);
+    PT_EXPECT(ctx, colour && config.equivalent(colour->get_string_attribute("oiio:ColorSpace"), pathtracer::gfx::kOcioSceneColorSpace),
+              "a Colour EXR is not tagged with the working space");
+    const OIIO::ParamValue* chromaticities =
+        colour ? colour->find_attribute("chromaticities", OIIO::TypeDesc(OIIO::TypeDesc::FLOAT, 8)) : nullptr;
+    float worst = std::numeric_limits<float>::infinity();
+    if (chromaticities != nullptr) {
+        worst = 0.0F;
+        for (std::size_t i = 0; i < kBt709.size(); ++i) {
+            worst = std::max(worst, std::abs(static_cast<const float*>(chromaticities->data())[i] - kBt709[i]));
+        }
+    }
+    char detail[160];
+    std::snprintf(detail, sizeof(detail), "Colour EXR chromaticities differ from BT.709 by %.3g, over its published %.3g", worst,
+                  kPublishedPrecision);
+    PT_EXPECT(ctx, worst <= kPublishedPrecision, detail);
+    PT_EXPECT(ctx, data && config.isData(config.resolve(data->get_string_attribute("oiio:ColorSpace"))), "a Data EXR is not tagged as data");
+    PT_EXPECT(ctx, data && data->find_attribute("chromaticities") == nullptr, "a Data EXR declares chromaticities");
+}
+
+// A Colour read lands in the working space through OCIO, the oracle the config's own CPU processor; only linear EXR is read at all.
+PT_CHECK(image_load_converts_colour_to_the_working_space, Fast, Exact) {
+    const std::vector<float> stored{0.18F, 0.5F, 0.9F, 1.0F, 0.0F, 4.0F};
+    const auto oracle = [&](const char* source) {
+        const OCIO_NAMESPACE::ConstConfigRcPtr config = OCIO_NAMESPACE::Config::CreateFromBuiltinConfig(pathtracer::gfx::kOcioConfigName);
+        std::vector<float> expected = stored;
+        OCIO_NAMESPACE::PackedImageDesc desc(expected.data(), 2, 1, 3);
+        config->getProcessor(source, pathtracer::gfx::kOcioSceneColorSpace)->getDefaultCPUProcessor()->apply(desc);
+        return expected;
+    };
+    ctx.plan(5);
+    const std::filesystem::path path = scratchPath("engine_io_validate_acescg.exr");
+    const bool written = writeExrPlanes(path, 2, 1, {"R", "G", "B"}, stored, [](OIIO::ImageSpec& spec) {
+        spec.attribute("oiio:ColorSpace", "ACEScg");
+    });
+    const std::optional<pathtracer::gfx::HdrImage> colour = pathtracer::gfx::loadImage(path.string(), pathtracer::gfx::ImageRole::Colour);
+    const std::optional<pathtracer::gfx::HdrImage> data = pathtracer::gfx::loadImage(path.string(), pathtracer::gfx::ImageRole::Data);
+    std::filesystem::remove(path);
+    PT_EXPECT(ctx, written && colour && colour->texels == oracle("ACEScg"), "an ACEScg EXR did not read as OCIO's ACEScg to working space");
+    PT_EXPECT(ctx, data && data->texels == stored, "a Data read converted values it must leave raw");
+
+    // Linear EXR is the one input: a PNG, and an EXR tagged with the sRGB texture curve, are refused rather than decoded.
+    const std::filesystem::path png = scratchPath("engine_io_validate_srgb.png");
+    const std::vector<std::uint8_t> codes{0, 10, 46, 128, 188, 255};
+    OIIO::ImageSpec spec(2, 1, 3, OIIO::TypeUInt8);
+    const std::unique_ptr<OIIO::ImageOutput> output = OIIO::ImageOutput::create("png");
+    const bool pngWritten = output && output->open(png.string(), spec) && output->write_image(OIIO::TypeUInt8, codes.data()) && output->close();
+    const std::filesystem::path encoded = scratchPath("engine_io_validate_srgb.exr");
+    const bool encodedWritten = writeExrPlanes(encoded, 2, 1, {"R", "G", "B"}, stored, [](OIIO::ImageSpec& exrSpec) {
+        exrSpec.attribute("oiio:ColorSpace", "sRGB - Texture");
+    });
+    std::cout << "  the stderr diagnostics below are expected: a PNG, and an sRGB-encoded EXR, are not linear EXR\n";
+    PT_EXPECT(ctx, pngWritten && !pathtracer::gfx::loadImage(png.string(), pathtracer::gfx::ImageRole::Colour), "a PNG was read as scene data");
+    PT_EXPECT(ctx, encodedWritten && !pathtracer::gfx::loadImage(encoded.string(), pathtracer::gfx::ImageRole::Colour),
+              "an EXR tagged with an encoded colour space was read as linear");
+    PT_EXPECT(ctx, !pathtracer::gfx::loadImage(png.string(), pathtracer::gfx::ImageRole::Data), "a PNG was read as data");
+    std::filesystem::remove(png);
+    std::filesystem::remove(encoded);
+}
+
+// Untagged EXRs mean BT.709 by OpenEXR's own rule; untagged chromaticities naming other primaries cannot be honoured, so are refused.
+PT_CHECK(image_load_honours_untagged_exr_chromaticities, Fast, Exact) {
+    const std::vector<float> stored{0.25F, 0.5F, 0.75F};
+    const auto withChromaticities = [&](const char* name, std::array<float, 8> xy) {
+        const std::filesystem::path path = scratchPath(name);
+        writeExrPlanes(path, 1, 1, {"R", "G", "B"}, stored, [&](OIIO::ImageSpec& spec) {
+            spec.attribute("chromaticities", OIIO::TypeDesc(OIIO::TypeDesc::FLOAT, 8), xy.data());
+        });
+        return path;
+    };
+    ctx.plan(3);
+    // ITU-R BT.709-6's primaries and D65, and ACES AP1 with its D60 white (SMPTE ST 2065-1 / S-2014-004).
+    const std::filesystem::path rec709 = withChromaticities("engine_io_validate_709.exr", {0.64F, 0.33F, 0.30F, 0.60F, 0.15F, 0.06F, 0.3127F, 0.3290F});
+    const std::filesystem::path ap1 = withChromaticities("engine_io_validate_ap1.exr", {0.713F, 0.293F, 0.165F, 0.830F, 0.128F, 0.044F, 0.32168F, 0.33767F});
+    const std::optional<pathtracer::gfx::HdrImage> asRec709 = pathtracer::gfx::loadImage(rec709.string(), pathtracer::gfx::ImageRole::Colour);
+    PT_EXPECT(ctx, asRec709 && asRec709->texels == stored, "an untagged BT.709 EXR did not read unchanged into the BT.709 working space");
+    std::cout << "  the stderr diagnostic below is expected: untagged AP1 chromaticities name no space the file is tagged with\n";
+    PT_EXPECT(ctx, !pathtracer::gfx::loadImage(ap1.string(), pathtracer::gfx::ImageRole::Colour),
+              "untagged AP1 chromaticities were read as BT.709");
+    PT_EXPECT(ctx, pathtracer::gfx::loadImage(ap1.string(), pathtracer::gfx::ImageRole::Data), "a Data read refused a file over its chromaticities");
+    std::filesystem::remove(rec709);
+    std::filesystem::remove(ap1);
+}
+
+// A display capture keeps 16 bits, straight alpha and the sRGB chunk (PNG 1.2, 4.2.2.6): read back independently of the writer.
+PT_CHECK(display_png_is_16_bit_rgba_tagged, Fast, Exact) {
+    const pathtracer::gfx::HdrImage image{2, 1, 4, {0.0F, 0.5F, 1.0F, 0.25F, 1.5F, -0.5F, 1.0F / 65535.0F, 1.0F}};
+    ctx.plan(3);
+    const std::filesystem::path path = scratchPath("engine_io_validate_display.png");
+    const bool written = pathtracer::gfx::writeDisplayPng(path.string(), image);
+    // OIIO associates alpha on read unless told the caller wants the file's straight values.
+    OIIO::ImageSpec straight;
+    straight.attribute("oiio:UnassociatedAlpha", 1);
+    const std::unique_ptr<OIIO::ImageInput> input = OIIO::ImageInput::open(path.string(), &straight);
+    std::vector<std::uint16_t> codes(image.texels.size());
+    const bool read = input && input->read_image(0, 0, 0, 4, OIIO::TypeUInt16, codes.data());
+    PT_EXPECT(ctx, written && read && input->spec().nchannels == 4 && input->spec().format == OIIO::TypeUInt16,
+              "the capture is not a 16-bit, four-channel PNG");
+    // Round to nearest after the clamp: 1.5 and -0.5 saturate, alpha 0.25 is stored unpremultiplied, one code survives as one code.
+    const std::vector<std::uint16_t> expected{0, 32768, 65535, 16384, 65535, 0, 1, 65535};
+    PT_EXPECT(ctx, codes == expected, "16-bit codes are not the clamped, rounded display values with straight alpha");
+    std::ifstream file(path, std::ios::binary);
+    const std::string bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    PT_EXPECT(ctx, bytes.find("sRGB") != std::string::npos, "the capture carries no sRGB chunk for the display it encodes");
+    std::filesystem::remove(path);
 }
 
 // HdrImage::rgb is the CPU half of the display contract Texture's swizzle states: a scalar broadcasts, a second channel leaves B 0.
@@ -165,21 +273,21 @@ PT_CHECK(hdr_image_rgb_expands_as_the_display_swizzle, Fast, Exact) {
 }
 
 // A missing file must be reported, not treated as an empty image: a caller given a zero-sized image renders black and never knows.
-PT_CHECK(exr_load_rejects_bad_input, Fast, Exact) {
+PT_CHECK(image_load_rejects_bad_input, Fast, Exact) {
     ctx.plan(2);
     const std::filesystem::path missing = scratchPath("engine_io_validate_does_not_exist.exr");
     std::filesystem::remove(missing);
-    PT_EXPECT(ctx, !pathtracer::gfx::loadExr(missing.string()).has_value(),
-                  "loadExr accepted a path that does not exist");
+    PT_EXPECT(ctx, !pathtracer::gfx::loadImage(missing.string(), pathtracer::gfx::ImageRole::Data).has_value(),
+              "loadImage accepted a path that does not exist");
 
-    // A file that exists but is not an EXR: the realistic corruption, which a magic-number check catches and a header check does not.
+    // A file that exists but is not an image: the realistic corruption, which a magic-number check catches and a header check does not.
     const std::filesystem::path garbage = scratchPath("engine_io_validate_garbage.exr");
     {
         std::ofstream out(garbage, std::ios::binary);
         out << "this is not an OpenEXR file, but it is definitely a file";
     }
-    PT_EXPECT(ctx, !pathtracer::gfx::loadExr(garbage.string()).has_value(),
-                  "loadExr accepted a file whose contents are not EXR");
+    PT_EXPECT(ctx, !pathtracer::gfx::loadImage(garbage.string(), pathtracer::gfx::ImageRole::Data).has_value(),
+              "loadImage accepted a file whose contents are not an image");
     std::filesystem::remove(garbage);
 }
 
@@ -671,7 +779,7 @@ PT_CHECK(image_texture_half_load, Fast, Exact) {
             image.texels.insert(image.texels.end(), {v, v, v});
         }
         const std::filesystem::path path = scratchPath(name);
-        return pathtracer::gfx::writeExr(path.string(), image) ? std::optional(path) : std::nullopt;
+        return pathtracer::gfx::writeExr(path.string(), image, pathtracer::gfx::ImageRole::Colour) ? std::optional(path) : std::nullopt;
     };
     const auto sameTexels = [](const pathtracer::gfx::ImageTexture& a, const std::vector<float>& expected) {
         for (int x = 0; x < a.width; ++x) {
@@ -783,10 +891,10 @@ PT_CHECK(image_texture_channel_selection, Fast, Exact) {
     std::cout << "  the stderr diagnostics below are expected: an R-only file has no G or B channel to read\n";
     PT_EXPECT(ctx, !pathtracer::gfx::loadImageTexture(redPath.string(), ScalarType::Float32, pathtracer::gfx::kRgbChannels),
               "an R-only file was accepted by an RGB slot, which would have read zero-filled G and B");
-    const std::optional<pathtracer::gfx::HdrImage> redExr = pathtracer::gfx::loadExr(redPath.string());
+    const std::optional<pathtracer::gfx::HdrImage> redExr = pathtracer::gfx::loadImage(redPath.string(), pathtracer::gfx::ImageRole::Data);
     PT_EXPECT(ctx, redExr && redExr->channels == pathtracer::gfx::kScalarChannels && redExr->texels == red,
-              "loadExr did not read an R-only file as its one channel");
-    const std::optional<pathtracer::gfx::HdrImage> rgbExr = pathtracer::gfx::loadExr(rgbaPath.string());
+              "loadImage did not read an R-only file as its one channel");
+    const std::optional<pathtracer::gfx::HdrImage> rgbExr = pathtracer::gfx::loadImage(rgbaPath.string(), pathtracer::gfx::ImageRole::Data);
     const auto rgbExrMatches = [&] {
         for (int y = 0; y < kHeight; ++y) {
             for (int x = 0; x < kWidth; ++x) {
@@ -798,7 +906,7 @@ PT_CHECK(image_texture_channel_selection, Fast, Exact) {
         return true;
     };
     PT_EXPECT(ctx, rgbExr && rgbExr->channels == pathtracer::gfx::kRgbChannels && rgbExrMatches(),
-              "loadExr of an RGBA file did not return its exact RGB at three floats per texel");
+              "loadImage of an RGBA file did not return its exact RGB at three floats per texel");
     std::filesystem::remove(rgbaPath);
     std::filesystem::remove(redPath);
 }

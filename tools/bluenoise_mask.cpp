@@ -212,7 +212,7 @@ bool writePreview(const std::string& path, const std::array<std::uint16_t, kPixe
         const auto value = static_cast<float>((ranks[static_cast<std::size_t>(i)] + 0.5) / kPixels);
         writeTexel(image, i % kSize, i / kSize, glm::vec3(value));
     }
-    return pathtracer::gfx::writeExr(path, image);
+    return pathtracer::gfx::writeExr(path, image, pathtracer::gfx::ImageRole::Data);
 }
 
 }  // namespace

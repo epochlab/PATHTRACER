@@ -13,7 +13,7 @@
 
 namespace pathtracer::gfx {
 
-// Linear float image of 1-3 interleaved channels, row-major, row 0 top: every AOV lane at its aovChannels count, and EXR I/O.
+// Linear float image of 1-4 interleaved channels, row-major, row 0 top: every AOV lane at its aovChannels count, and image I/O.
 struct HdrImage {
     int width = 0;
     int height = 0;
@@ -61,11 +61,17 @@ struct ImageTexture {
 // The first `channels` of R,G,B decoded straight into type's storage; nullopt if one is absent. Float16 rejects over-range as Inf.
 [[nodiscard]] std::optional<ImageTexture> loadImageTexture(const std::string& path, ScalarType type, int channels);
 
-// Linear EXR read as float at its leading R, RG or RGB planes, any other ignored; nullopt on I/O failure or no R, all texels finite.
-[[nodiscard]] std::optional<HdrImage> loadExr(const std::string& path);
+// Colour: RGB in a colour space, converted to and from the working space. Data: normals, depths, heights, read and written raw.
+enum class ImageRole { Colour, Data };
 
-// Writes a linear scanline EXR of the image's first `channels` of R,G,B, full float, so a round trip through loadExr is lossless.
-[[nodiscard]] bool writeExr(const std::string& path, const HdrImage& image);
+// A linear EXR's leading R, RG or RGB as float in the working space, Colour converted by OCIO; nullopt, logged, unless all finite.
+[[nodiscard]] std::optional<HdrImage> loadImage(const std::string& path, ImageRole role);
+
+// Full-float EXR of the image's first `channels` of R,G,B, lossless through loadImage; Colour tags working space and chromaticities.
+[[nodiscard]] bool writeExr(const std::string& path, const HdrImage& image, ImageRole role);
+
+// Display-referred RGB or RGBA (straight alpha), clamped to [0, 1], as a 16-bit PNG tagged with the display colour space it encodes.
+[[nodiscard]] bool writeDisplayPng(const std::string& path, const HdrImage& image);
 
 // How the v axis resolves outside [0,1). u always repeats; ClampV is for an equirect map, whose top and bottom rows are poles.
 enum class WrapMode { Repeat, ClampV };
