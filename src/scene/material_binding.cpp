@@ -1,13 +1,17 @@
 #include "pathtracer/scene/material_binding.h"
 
+#include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <map>
 #include <memory>
 #include <set>
 #include <string_view>
+#include <type_traits>
 #include <tuple>
 #include <utility>
 #include <variant>
+#include <vector>
 
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -39,7 +43,172 @@ glm::mat4 placementTransform(const glm::vec3& position, const glm::vec3& rotatio
     return glm::translate(glm::mat4(1.0F), position) * glm::mat4(rotationXyz(rotationDegrees));
 }
 
+constexpr std::string_view kGeometryNormal = "geometry_normal";
+
+// Every input at its specification default, the instance inputNamed reads specifications and types from.
+const OpenPbrInputs<Constant> kSpecificationDefaults{};
+
+// A file opens once per (path, channel count, role, colour space, channel offset), however many inputs and nodes share it.
+using TextureKey = std::tuple<std::string, int, pathtracer::gfx::ImageRole, std::optional<std::string>, int>;
+
+// An input's specification and channel count by name; nullopt for a name that is no OpenPBR input.
+struct NamedInput {
+    InputSpec spec;
+    int channels;
+};
+
+std::optional<NamedInput> inputNamed(std::string_view name) {
+    std::optional<NamedInput> found;
+    forEachInput(
+        [&](const InputSpec& spec, const auto& value) {
+            if (spec.name == name) {
+                found = NamedInput{spec, std::is_same_v<std::decay_t<decltype(value)>, float> ? pathtracer::gfx::kScalarChannels
+                                                                                               : pathtracer::gfx::kRgbChannels};
+            }
+        },
+        kSpecificationDefaults);
+    return found;
+}
+
+// One image a binding opens, and the range its texels are clamped into; none for a normal or height map, whose any finite value is data.
+struct ImageKey {
+    TextureKey key;
+    std::optional<InputRange> range;
+};
+
+// A binding resolved against its input: the input's image (geometry_normal's normal map) and geometry_normal's height map.
+struct ResolvedBinding {
+    std::optional<ImageKey> image;
+    std::optional<ImageKey> bump;
+    float bumpHeightMetres = 0.0F;
+};
+
+// The images a binding opens, or why it cannot apply to its input, from the binding alone.
+std::variant<ResolvedBinding, std::string> resolveBinding(const std::string& name, const pathtracer::config::TextureConfig& texture) {
+    using pathtracer::gfx::ImageRole;
+    if (name == kGeometryNormal) {
+        if (texture.channel != 0) {
+            return "a normal map reads R, G and B, so it takes no channel";
+        }
+        ResolvedBinding resolved;
+        if (texture.path) {
+            resolved.image = ImageKey{{*texture.path, pathtracer::gfx::kRgbChannels, ImageRole::Data, texture.colorSpace, 0}, std::nullopt};
+        }
+        if (texture.bump) {
+            resolved.bump = ImageKey{{texture.bump->path, pathtracer::gfx::kScalarChannels, ImageRole::Data, std::nullopt, 0}, std::nullopt};
+            resolved.bumpHeightMetres = texture.bump->heightMetres;
+        }
+        if (!resolved.image && !resolved.bump) {
+            return "binds neither a normal map nor a bump";
+        }
+        return resolved;
+    }
+    const std::optional<NamedInput> input = inputNamed(name);
+    if (!input) {
+        return "is not an OpenPBR input";
+    }
+    if (input->spec.requiresVolumes) {
+        return "requires volumetric transport";
+    }
+    if (!texture.path) {
+        return "binds no path";
+    }
+    if (texture.bump) {
+        return "only geometry_normal takes a bump";
+    }
+    if (input->channels != pathtracer::gfx::kScalarChannels && texture.channel != 0) {
+        return "a colour input reads R, G and B, so it takes no channel";
+    }
+    return ResolvedBinding{ImageKey{{*texture.path, input->channels, input->spec.role, texture.colorSpace, texture.channel}, input->spec.range},
+                           std::nullopt};
+}
+
+// A texture with the extremes of its finest level: every texel lies in an interval input's range iff both extremes do.
+struct OpenedTexture {
+    TextureHandle texture;
+    float min;
+    float max;
+};
+
+// Opens the texture and scans its finest level once, so a tiled file served in place is checked as a derived one is.
+std::optional<OpenedTexture> openScanned(const std::string& path, const TextureKey& key) {
+    const auto& [file, channels, role, colorSpace, offset] = key;
+    TextureHandle texture = pathtracer::gfx::openTexture(path, channels, role, pathtracer::gfx::TextureWrap::Repeat, colorSpace, offset);
+    const std::optional<pathtracer::gfx::HdrImage> texels = texture ? pathtracer::gfx::readTexels(*texture) : std::nullopt;
+    if (!texels || !std::all_of(texels->texels.begin(), texels->texels.end(), [](float t) { return std::isfinite(t); })) {
+        return std::nullopt;
+    }
+    const auto [min, max] = std::minmax_element(texels->texels.begin(), texels->texels.end());
+    return OpenedTexture{std::move(texture), *min, *max};
+}
+
+// Opens an image once into `loaded`; false, logged, when it fails. A texel past the range is reported here and clamped at lookup.
+bool openImage(std::map<TextureKey, OpenedTexture>& loaded, const ImageKey& image, const std::string& assetRoot, const std::string& where) {
+    auto it = loaded.find(image.key);
+    if (it == loaded.end()) {
+        std::optional<OpenedTexture> opened = openScanned(assetRoot + "/" + std::get<0>(image.key), image.key);
+        if (!opened) {
+            std::cerr << "bindSceneTextures: " << where << " texture '" << std::get<0>(image.key) << "' failed to load or holds a non-finite texel\n";
+            return false;
+        }
+        it = loaded.emplace(image.key, std::move(*opened)).first;
+    }
+    const OpenedTexture& opened = it->second;
+    if (image.range && !(inRange(opened.min, *image.range) && inRange(opened.max, *image.range))) {
+        std::cerr << "bindSceneTextures: " << where << " texture '" << std::get<0>(image.key) << "' spans [" << opened.min << ", " << opened.max
+                  << "], outside the input's range; texels are clamped into it\n";
+    }
+    return true;
+}
+
+// Writes one resolved binding into the material: its input's texture, or geometry_normal's normal and height maps.
+void assignBinding(Material& material, const std::string& name, const ResolvedBinding& binding,
+                   const std::map<TextureKey, OpenedTexture>& loaded) {
+    const auto textureOf = [&](const std::optional<ImageKey>& image) { return image ? loaded.at(image->key).texture : nullptr; };
+    if (name == kGeometryNormal) {
+        material.geometryNormal = NormalInput{textureOf(binding.image), textureOf(binding.bump), binding.bumpHeightMetres};
+        return;
+    }
+    forEachInput(
+        [&](const InputSpec& spec, auto& input) {
+            if (spec.name == name) {
+                input = textureOf(binding.image);
+            }
+        },
+        material);
+}
+
 }  // namespace
+
+bool applySceneMaterials(std::vector<MeshInstance>& instances, const std::string& materialPath,
+                         const std::map<std::string, std::string>& materialOverrides, const std::string& assetRoot) {
+    if (!everyKeyNamesAnInstance(materialOverrides, instances, "applySceneMaterials", "materialOverrides")) {
+        return false;
+    }
+    // Each file parsed once however many nodes name it; any failure leaves every instance untouched.
+    std::map<std::string, Material> byPath;
+    const auto load = [&](const std::string& path) {
+        if (byPath.contains(path)) {
+            return true;
+        }
+        const std::optional<pathtracer::config::MaterialConfig> constants = pathtracer::config::loadMaterialConfig(assetRoot + "/" + path);
+        if (!constants) {
+            std::cerr << "applySceneMaterials: material '" << path << "' failed to load\n";
+            return false;
+        }
+        byPath.emplace(path, materialOf(*constants));
+        return true;
+    };
+    if (!load(materialPath) ||
+        !std::all_of(materialOverrides.begin(), materialOverrides.end(), [&](const auto& entry) { return load(entry.second); })) {
+        return false;
+    }
+    for (MeshInstance& instance : instances) {
+        const auto it = materialOverrides.find(instance.name);
+        instance.material = byPath.at(it == materialOverrides.end() ? materialPath : it->second);
+    }
+    return true;
+}
 
 bool bindSceneTextures(std::vector<MeshInstance>& instances,
                        const std::map<std::string, std::map<std::string, pathtracer::config::TextureConfig>>& textures,
@@ -47,108 +216,33 @@ bool bindSceneTextures(std::vector<MeshInstance>& instances,
     if (!everyKeyNamesAnInstance(textures, instances, "bindSceneTextures", "textures")) {
         return false;
     }
-    using ScalarSlot = MaterialInput<float> Material::*;
-    using ColorSlot = MaterialInput<glm::vec3> Material::*;
-    // Albedo and specular f0 are colours, converted into the working space; a normal, height or roughness is data, read raw.
-    struct Slot {
-        std::variant<ScalarSlot, ColorSlot> member;
-        pathtracer::gfx::ImageRole role;
-    };
-    static const std::map<std::string_view, Slot> kSlots = {
-        {"baseColorTexture", {&Material::baseColor, pathtracer::gfx::ImageRole::Colour}},
-        {"normalTexture", {&Material::normal, pathtracer::gfx::ImageRole::Data}},
-        {"bumpTexture", {&Material::bump, pathtracer::gfx::ImageRole::Data}},
-        {"roughnessTexture", {&Material::roughness, pathtracer::gfx::ImageRole::Data}},
-        {"specularTexture", {&Material::specular, pathtracer::gfx::ImageRole::Colour}},
-    };
-    // A slot opens at its input type's channel count and role, so a file shared by two kinds of slot is opened once per kind.
-    using Key = std::tuple<std::string, int, pathtracer::gfx::ImageRole, std::optional<std::string>>;
-    const auto keyOf = [](const std::string& slot, const pathtracer::config::TextureConfig& texture) {
-        const Slot& bound = kSlots.at(slot);
-        const int channels =
-            std::holds_alternative<ScalarSlot>(bound.member) ? pathtracer::gfx::kScalarChannels : pathtracer::gfx::kRgbChannels;
-        return Key{texture.path, channels, bound.role, texture.colorSpace};
-    };
-    // Everything validated and opened before any instance changes, each distinct key once however many slots share it.
-    std::map<Key, TextureHandle> loaded;
-    for (const auto& [nodeName, slots] : textures) {
-        for (const auto& [slot, texture] : slots) {
-            if (!kSlots.contains(slot)) {
-                std::cerr << "bindSceneTextures: '" << nodeName << "' names unknown slot '" << slot << "'\n";
+    // Every binding resolved and every image opened before any instance changes, each distinct image once.
+    std::map<std::pair<std::string, std::string>, ResolvedBinding> resolved;
+    std::map<TextureKey, OpenedTexture> loaded;
+    for (const auto& [nodeName, inputs] : textures) {
+        for (const auto& [name, texture] : inputs) {
+            const std::string where = "'" + nodeName + "' " + name;
+            std::variant<ResolvedBinding, std::string> binding = resolveBinding(name, texture);
+            if (const std::string* fault = std::get_if<std::string>(&binding)) {
+                std::cerr << "bindSceneTextures: " << where << ": " << *fault << "\n";
                 return false;
             }
-            Key key = keyOf(slot, texture);
-            if (loaded.contains(key)) {
-                continue;
-            }
-            TextureHandle opened = pathtracer::gfx::openTexture(assetRoot + "/" + texture.path, std::get<1>(key), std::get<2>(key),
-                                                                pathtracer::gfx::TextureWrap::Repeat, texture.colorSpace);
-            if (!opened) {
-                std::cerr << "bindSceneTextures: '" << nodeName << "' texture '" << texture.path << "' failed to load\n";
+            const ResolvedBinding& images = std::get<ResolvedBinding>(binding);
+            if ((images.image && !openImage(loaded, *images.image, assetRoot, where)) ||
+                (images.bump && !openImage(loaded, *images.bump, assetRoot, where))) {
                 return false;
             }
-            loaded.emplace(std::move(key), std::move(opened));
+            resolved.emplace(std::pair{nodeName, name}, images);
         }
     }
     for (MeshInstance& instance : instances) {
         if (const auto it = textures.find(instance.name); it != textures.end()) {
-            for (const auto& [slot, texture] : it->second) {
-                const TextureHandle& bound = loaded.at(keyOf(slot, texture));
-                std::visit([&](auto member) { instance.material.*member = bound; }, kSlots.at(slot).member);
+            for (const auto& entry : it->second) {
+                assignBinding(instance.material, entry.first, resolved.at({instance.name, entry.first}), loaded);
             }
         }
     }
     return true;
-}
-
-std::optional<std::vector<PathTraceSettings>> resolvePerInstanceSettings(
-    const PathTraceSettings& base, const std::vector<MeshInstance>& instances,
-    const std::map<std::string, std::string>& materialOverrides, const std::string& assetRoot) {
-    if (!everyKeyNamesAnInstance(materialOverrides, instances, "resolvePerInstanceSettings", "materialOverrides")) {
-        return std::nullopt;
-    }
-
-    std::map<std::string, pathtracer::config::MaterialConfig> overrideMaterialsByPath;
-    for (const auto& [nodeName, path] : materialOverrides) {
-        if (overrideMaterialsByPath.contains(path)) {
-            continue;
-        }
-        std::optional<pathtracer::config::MaterialConfig> overrideMaterial =
-            pathtracer::config::loadMaterialConfig(assetRoot + "/" + path);
-        if (!overrideMaterial) {
-            std::cerr << "resolvePerInstanceSettings: materialOverrides entry '" << path
-                      << "' failed to load\n";
-            return std::nullopt;
-        }
-        overrideMaterialsByPath.emplace(path, std::move(*overrideMaterial));
-    }
-
-    std::vector<PathTraceSettings> perInstanceSettings;
-    perInstanceSettings.reserve(instances.size());
-    for (const MeshInstance& instance : instances) {
-        PathTraceSettings settings = base;
-        if (const auto overrideIt = materialOverrides.find(instance.name);
-            overrideIt != materialOverrides.end()) {
-            const pathtracer::config::MaterialConfig& overrideMaterial =
-                overrideMaterialsByPath.at(overrideIt->second);
-            settings.bumpStrength = overrideMaterial.bumpStrength;
-            settings.roughnessMin = overrideMaterial.roughnessMin;
-            settings.roughnessMax = overrideMaterial.roughnessMax;
-            settings.diffuseColour = overrideMaterial.diffuseColour;
-            settings.ior = overrideMaterial.ior;
-            settings.abbe = overrideMaterial.abbe;
-            settings.transmissionFactor = overrideMaterial.transmissionFactor;
-            settings.metallicFactor = overrideMaterial.metallicFactor;
-            settings.roughnessFactor = overrideMaterial.roughnessFactor;
-            settings.diffuseRoughness = overrideMaterial.diffuseRoughness;
-            settings.transmissionColor = overrideMaterial.transmissionColor;
-            settings.transmissionDepth = overrideMaterial.transmissionDepth;
-            settings.edgeTint = overrideMaterial.edgeTint;
-            settings.shadingModel = overrideMaterial.shadingModel;
-        }
-        perInstanceSettings.push_back(settings);
-    }
-    return perInstanceSettings;
 }
 
 std::vector<QuadLight> buildQuadLights(const std::vector<pathtracer::config::QuadLightConfig>& lights,
@@ -174,28 +268,13 @@ glm::mat4 rootTransformOf(const pathtracer::config::ModelConfig& model) {
     return placementTransform(model.position, model.rotation);
 }
 
-PathTraceSettings baseSettingsOf(const pathtracer::config::ProfileConfig& profile,
-                                 const pathtracer::config::MaterialConfig& material, int samplesPerPixel) {
+PathTraceSettings baseSettingsOf(const pathtracer::config::ProfileConfig& profile, int samplesPerPixel) {
     return PathTraceSettings{
         .samplesPerPixel = samplesPerPixel,
         .maxBounces = profile.pathTracer.maxBounces,
         .russianRouletteStartBounce = profile.pathTracer.russianRouletteStartBounce,
         .aoMaxDistance = profile.pathTracer.aoMaxDistance,
         .lookaheadDistance = profile.pathTracer.lookaheadDistance,
-        .bumpStrength = material.bumpStrength,
-        .roughnessMin = material.roughnessMin,
-        .roughnessMax = material.roughnessMax,
-        .diffuseColour = material.diffuseColour,
-        .ior = material.ior,
-        .abbe = material.abbe,
-        .transmissionFactor = material.transmissionFactor,
-        .metallicFactor = material.metallicFactor,
-        .roughnessFactor = material.roughnessFactor,
-        .diffuseRoughness = material.diffuseRoughness,
-        .transmissionColor = material.transmissionColor,
-        .transmissionDepth = material.transmissionDepth,
-        .edgeTint = material.edgeTint,
-        .shadingModel = material.shadingModel,
     };
 }
 

@@ -44,8 +44,7 @@ public:
     PathTraceDriver(const EmbreeAccel& accel, const std::vector<ShadingTriangle>& shadingTriangles,
                      const std::vector<MeshInstance>& instances,
                      const std::vector<int>& instanceLightIndex,
-                     const EnvironmentMap& environmentMap, const std::vector<QuadLight>& quadLights,
-                     const std::vector<PathTraceSettings>& perInstanceSettings);
+                     const EnvironmentMap& environmentMap, const std::vector<QuadLight>& quadLights);
     ~PathTraceDriver();
 
     PathTraceDriver(const PathTraceDriver&) = delete;
@@ -87,7 +86,6 @@ private:
     const std::vector<int>& instanceLightIndex_;
     const EnvironmentMap& environmentMap_;
     const std::vector<QuadLight>& quadLights_;
-    const std::vector<PathTraceSettings>& perInstanceSettings_;
 
     std::mutex requestMutex_;
     // Camera has no default constructor, so this cannot be a plain Request. nullopt until the first requestTrace().

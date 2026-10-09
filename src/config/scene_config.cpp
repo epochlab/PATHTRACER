@@ -7,6 +7,8 @@
 #include <initializer_list>
 #include <iostream>
 #include <string_view>
+#include <type_traits>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -34,7 +36,39 @@ std::optional<std::string> optionalString(const nlohmann::json& object, const ch
     return it == object.end() ? std::nullopt : std::optional(it->get<std::string>());
 }
 
-// The optional "textures" block: node -> slot -> a path string, or {path, colorSpace} under a closed key set.
+// "r", "g" or "b" as a channel offset; any other value a json error, a typo never silently reading R.
+int channelIndex(const nlohmann::json& value) {
+    const std::string name = value.get<std::string>();
+    constexpr std::string_view kChannels = "rgb";
+    const std::size_t index = kChannels.find(name);
+    if (name.size() != 1 || index == std::string_view::npos) {
+        throw nlohmann::json::type_error::create(302, "texture channel '" + name + "' is not one of r, g, b", &value);
+    }
+    return static_cast<int>(index);
+}
+
+// One binding: a path string, or {path, colorSpace, channel, bump: {path, height}} under a closed key set.
+std::optional<TextureConfig> parseTexture(const nlohmann::json& binding, const std::string& path) {
+    if (binding.is_string()) {
+        return TextureConfig{binding.get<std::string>(), std::nullopt, 0, std::nullopt};
+    }
+    if (!onlyKnownKeys(binding, {"path", "colorSpace", "channel", "bump"}, path, "texture")) {
+        return std::nullopt;
+    }
+    TextureConfig texture{optionalString(binding, "path"), optionalString(binding, "colorSpace"), 0, std::nullopt};
+    if (const auto it = binding.find("channel"); it != binding.end()) {
+        texture.channel = channelIndex(*it);
+    }
+    if (const auto it = binding.find("bump"); it != binding.end()) {
+        if (!onlyKnownKeys(*it, {"path", "height"}, path, "bump")) {
+            return std::nullopt;
+        }
+        texture.bump = BumpConfig{it->at("path").get<std::string>(), toFloat(it->at("height"))};
+    }
+    return texture;
+}
+
+// The optional "textures" block: node -> OpenPBR input name -> binding. Input names are checked where the inputs are known.
 std::optional<std::map<std::string, std::map<std::string, TextureConfig>>> parseTextures(const nlohmann::json& j, const std::string& path) {
     std::map<std::string, std::map<std::string, TextureConfig>> textures;
     const auto it = j.find("textures");
@@ -43,14 +77,11 @@ std::optional<std::map<std::string, std::map<std::string, TextureConfig>>> parse
     }
     for (const auto& [node, slots] : it->get<std::map<std::string, nlohmann::json>>()) {
         for (const auto& [slot, binding] : slots.get<std::map<std::string, nlohmann::json>>()) {
-            if (binding.is_string()) {
-                textures[node][slot] = TextureConfig{binding.get<std::string>(), std::nullopt};
-                continue;
-            }
-            if (!onlyKnownKeys(binding, {"path", "colorSpace"}, path, "texture")) {
+            std::optional<TextureConfig> texture = parseTexture(binding, path);
+            if (!texture) {
                 return std::nullopt;
             }
-            textures[node][slot] = TextureConfig{binding.at("path").get<std::string>(), optionalString(binding, "colorSpace")};
+            textures[node][slot] = std::move(*texture);
         }
     }
     return textures;
@@ -96,87 +127,21 @@ std::optional<std::vector<QuadLightConfig>> parseQuadLights(const nlohmann::json
     return lights;
 }
 
-// Authored material bounds. Every field here reaches the BSDF unclamped, where out-of-range input is NaN or a negative lobe weight.
-bool validMaterialConfig(const MaterialConfig& m, const std::string& path) {
-    bool ok = true;
-    // Negated comparisons throughout, as parseQuadLights uses: a NaN fails every one of them instead of slipping through.
-    const auto unit = [&](const char* name, float v) {
-        if (!(v >= 0.0F && v <= 1.0F)) {
-            std::cerr << "loadMaterialConfig: " << path << ": " << name << " is " << v << ", expected [0,1]\n";
-            ok = false;
-        }
-    };
-    const auto unitRgb = [&](const char* name, const glm::vec3& v) {
-        if (!glm::all(glm::greaterThanEqual(v, glm::vec3(0.0F))) || !glm::all(glm::lessThanEqual(v, glm::vec3(1.0F)))) {
-            std::cerr << "loadMaterialConfig: " << path << ": " << name << " is (" << v.x << ", " << v.y << ", " << v.z
-                      << "), expected [0,1] per channel\n";
-            ok = false;
-        }
-    };
-    const auto atLeast = [&](const char* name, float v, float low) {
-        if (!(v >= low)) {
-            std::cerr << "loadMaterialConfig: " << path << ": " << name << " is " << v << ", expected >= " << low << "\n";
-            ok = false;
-        }
-    };
-
-    // Energy fractions: metallic and transmissionFactor weight lobe probabilities, which glm::mix extrapolates negative outside [0,1].
-    unit("roughnessMin", m.roughnessMin);
-    unit("roughnessMax", m.roughnessMax);
-    unit("metallicFactor", m.metallicFactor);
-    unit("transmissionFactor", m.transmissionFactor);
-    // EON's quartic albedo fit and eonUniformMixWeight's pow(r, 0.1) are defined on [0,1] only; a negative r makes that pow NaN.
-    unit("diffuseRoughness", m.diffuseRoughness);
-    // Reflectance, transmittance and Gulbrandsen edgetint are all fractions; above 1 the EON albedo inversion leaves rho unbounded.
-    unitRgb("diffuseColour", m.diffuseColour);
-    unitRgb("transmissionColor", m.transmissionColor);
-    unitRgb("edgeTint", m.edgeTint);
-    // Not bounded above: it multiplies the texture sample before the roughnessMin/Max clamp, which bounds the result anyway.
-    atLeast("roughnessFactor", m.roughnessFactor, 0.0F);
-    // A negative depth is rejected rather than treated as "no medium", which is what transmissionDepth == 0 already means.
-    atLeast("transmissionDepth", m.transmissionDepth, 0.0F);
-    // abbe <= 0 is the documented "no dispersion" case cauchyIor tests for, so only a non-finite value is wrong here.
-    atLeast("abbe", m.abbe, 0.0F);
-    // Denominator of dielectricF0's (ior-1)/(ior+1) and the etaI/etaT ratio every dielectric lobe divides by.
-    if (!(m.ior > 0.0F)) {
-        std::cerr << "loadMaterialConfig: " << path << ": ior is " << m.ior << ", expected > 0\n";
-        ok = false;
-    }
-    // A height either way (negative reads the map as depth), so sign is free; only a non-finite value would reach normalize() as NaN.
-    if (!std::isfinite(m.bumpStrength)) {
-        std::cerr << "loadMaterialConfig: " << path << ": bumpStrength is not finite\n";
-        ok = false;
-    }
-    // resolveRoughness clamps with these as lo/hi, and std::clamp has undefined behaviour when lo > hi.
-    if (!(m.roughnessMin <= m.roughnessMax)) {
-        std::cerr << "loadMaterialConfig: " << path << ": roughnessMin " << m.roughnessMin << " exceeds roughnessMax "
-                  << m.roughnessMax << "\n";
-        ok = false;
-    }
-    return ok;
-}
-
-// A constant material scatters nothing, so any BSDF key would be silently dead: rejected rather than ignored.
-std::optional<MaterialConfig> parseConstantMaterial(const nlohmann::json& j, const std::string& path) {
-    for (const auto& item : j.items()) {
-        if (item.key() != "shadingModel" && item.key() != "diffuseColour") {
-            std::cerr << "loadMaterialConfig: " << path << ": '" << item.key() << "' has no effect on a constant material\n";
-            return std::nullopt;
+// One input's constant: in its specification range per channel, and a volumetric switch at its zero default.
+template <typename T>
+bool validInput(const pathtracer::scene::InputSpec& spec, const T& value, const T& fallback, const std::string& path) {
+    const glm::vec3 channels(value);
+    for (int c = 0; c < (std::is_same_v<T, float> ? 1 : 3); ++c) {
+        if (!pathtracer::scene::inRange(channels[c], spec.range)) {
+            std::cerr << "loadMaterialConfig: " << path << ": " << spec.name << " " << channels[c] << " is outside its OpenPBR range\n";
+            return false;
         }
     }
-    // BSDF fields at identity: renderGBuffer still resolves them for G-buffer AOVs, and resolveRoughness clamps by min <= max.
-    MaterialConfig material{
-        .bumpStrength = 0.0F,
-        .roughnessMin = 0.0F,
-        .roughnessMax = 1.0F,
-        .diffuseColour = j.value("diffuseColour", glm::vec3(1.0F)),
-        .roughnessFactor = 1.0F,
-        .shadingModel = pathtracer::scene::ShadingModel::Constant,
-    };
-    if (!validMaterialConfig(material, path)) {
-        return std::nullopt;
+    if (spec.requiresVolumes && value != fallback) {
+        std::cerr << "loadMaterialConfig: " << path << ": " << spec.name << " requires volumetric transport\n";
+        return false;
     }
-    return material;
+    return true;
 }
 
 }  // namespace
@@ -244,32 +209,34 @@ std::optional<MaterialConfig> loadMaterialConfig(const std::string& path) {
         nlohmann::json j;
         file >> j;
 
-        const auto shadingModel = j.value("shadingModel", std::string("standard"));
-        if (shadingModel == "constant") {
-            return parseConstantMaterial(j, path);
+        // Closed key set: a legacy or misspelt key would otherwise load as the input's default, silently.
+        const MaterialConfig defaults;
+        std::vector<std::string_view> names;
+        pathtracer::scene::forEachInput([&](const pathtracer::scene::InputSpec& spec, const auto&) { names.push_back(spec.name); },
+                                        defaults);
+        for (const auto& item : j.items()) {
+            if (std::find(names.begin(), names.end(), item.key()) == names.end()) {
+                std::cerr << "loadMaterialConfig: " << path << ": '" << item.key() << "' is not an OpenPBR input\n";
+                return std::nullopt;
+            }
         }
-        if (shadingModel != "standard") {
-            std::cerr << "loadMaterialConfig: " << path << ": unknown shadingModel '" << shadingModel
-                      << "', expected 'standard' or 'constant'\n";
-            return std::nullopt;
-        }
-
-        const MaterialConfig material{
-            toFloat(j.at("bumpStrength")),
-            toFloat(j.at("roughnessMin")),
-            toFloat(j.at("roughnessMax")),
-            j.at("diffuseColour").get<glm::vec3>(),
-            floatOr(j, "ior", 1.5F),
-            floatOr(j, "abbe", 0.0F),
-            floatOr(j, "transmissionFactor", 0.0F),
-            floatOr(j, "metallicFactor", 0.0F),
-            toFloat(j.at("roughnessFactor")),
-            floatOr(j, "diffuseRoughness", 0.0F),
-            j.value("transmissionColor", glm::vec3(1.0F)),
-            floatOr(j, "transmissionDepth", 0.0F),
-            j.value("edgeTint", glm::vec3(1.0F)),
-        };
-        if (!validMaterialConfig(material, path)) {
+        MaterialConfig material;
+        bool ok = true;
+        pathtracer::scene::forEachInput(
+            [&](const pathtracer::scene::InputSpec& spec, auto& value, const auto& fallback) {
+                const auto it = j.find(spec.name);
+                if (it == j.end()) {
+                    return;
+                }
+                if constexpr (std::is_same_v<std::decay_t<decltype(value)>, float>) {
+                    value = toFloat(*it);
+                } else {
+                    value = it->template get<glm::vec3>();
+                }
+                ok = validInput(spec, value, fallback, path) && ok;
+            },
+            material, defaults);
+        if (!ok) {
             return std::nullopt;
         }
         return material;

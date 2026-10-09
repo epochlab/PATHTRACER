@@ -105,7 +105,7 @@ private:
     };
 
     HeadlessRenderer(std::string assetRoot, pathtracer::config::ProfileConfig profile, pathtracer::config::SceneConfig scene,
-                     Geometry geometry, std::vector<pathtracer::scene::PathTraceSettings> perInstanceSettings,
+                     Geometry geometry,
                      pathtracer::scene::PathTraceSettings baseSettings,
                      std::shared_ptr<const pathtracer::gfx::ImageTexture> environmentTexture,
                      const pathtracer::scene::Camera& defaultCamera);
@@ -137,7 +137,6 @@ private:
     // The rotations geometry_ is built for, compared per request so an unchanged pose costs nothing.
     glm::vec3 builtRootRotationDegrees_;
     std::vector<glm::vec3> builtLightRotationsDegrees_;
-    std::vector<pathtracer::scene::PathTraceSettings> perInstanceSettings_;
     pathtracer::scene::PathTraceSettings baseSettings_;
     pathtracer::scene::EnvironmentMap environmentMap_;
     pathtracer::scene::Camera defaultCamera_;

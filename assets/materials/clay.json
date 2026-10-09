@@ -1,9 +1,6 @@
 {
-    "diffuseColour": [1.0, 1.0, 1.0],
-    "roughnessFactor": 0.5,
-    "roughnessMin": 0.045,
-    "roughnessMax": 1.0,
-    "ior": 1.55,
-    "bumpStrength": 0.0,
-    "diffuseRoughness": 0.3
+    "base_color": [1.0, 1.0, 1.0],
+    "base_diffuse_roughness": 0.3,
+    "specular_roughness": 0.5,
+    "specular_ior": 1.55
 }

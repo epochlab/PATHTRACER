@@ -22,19 +22,24 @@ struct LineProximity {
 [[nodiscard]] pathtracer::gfx::TextureFootprint primaryHitFootprint(const ShadingTriangle& triangle, const Ray& ray, float t,
                                                                     const glm::mat2x3& dirFootprint);
 
-// glTF core order: baseColorFactor * baseColor * COLOR_0 (commutative). vertexColour is white with no COLOR_0 attribute.
-[[nodiscard]] glm::vec3 resolveBaseColor(const Material& material, glm::vec2 uv, const pathtracer::gfx::TextureFootprint& footprint,
-                                          const glm::vec3& vertexColour, const PathTraceSettings& settings);
+// The surface inputs at a shading point, filtered ones prefiltered over footprint; COLOR_0 tints base_color. Others keep defaults.
+[[nodiscard]] OpenPbrInputs<Constant> resolveInputs(const Material& material, glm::vec2 uv,
+                                                   const pathtracer::gfx::TextureFootprint& footprint, const glm::vec3& vertexColour);
 
-// heroChannel: the RGB channel a dispersive path committed to, setting the wavelength ior resolves at; nullopt keeps the d-line ior.
-[[nodiscard]] BsdfParams resolveBsdfParams(const Material& material, glm::vec2 uv, const pathtracer::gfx::TextureFootprint& footprint,
-                                            const glm::vec3& vertexColour,
-                                            const PathTraceSettings& settings,
-                                            std::optional<int> heroChannel);
+// A positive dispersion scale on a transmissive base: the path must commit to one wavelength there.
+[[nodiscard]] bool isDispersive(const OpenPbrInputs<Constant>& inputs);
+
+// The dielectric's index ratio: heroChannel's wavelength disperses specular_ior, then specular_weight modulates it (OpenPBR).
+[[nodiscard]] float modulatedIor(const OpenPbrInputs<Constant>& inputs, std::optional<int> heroChannel);
+
+// The base substrate's BSDF, its dielectric at modulatedIor.
+[[nodiscard]] BsdfParams bsdfParamsOf(const OpenPbrInputs<Constant>& inputs, std::optional<int> heroChannel);
+
+// emission_luminance * emission_color at a hit: scene-linear radiance, one unit a luminance of 1 cd/m^2; both inputs filtered.
+[[nodiscard]] glm::vec3 emittedRadiance(const Material& material, glm::vec2 uv, const pathtracer::gfx::TextureFootprint& footprint);
 
 // Gram-Schmidt re-orthogonalized tangent frame, normal- and bump-mapped. triangle: the hit's corners, whose edges carry dP/duv.
-[[nodiscard]] ShadingFrame buildShadingFrame(const ShadingTriangle& triangle, const ShadingVertex& shading,
-                                              const Material& material, const PathTraceSettings& settings);
+[[nodiscard]] ShadingFrame buildShadingFrame(const ShadingTriangle& triangle, const ShadingVertex& shading, const Material& material);
 
 [[nodiscard]] glm::vec3 geometricNormalOf(const ShadingTriangle& tri);
 

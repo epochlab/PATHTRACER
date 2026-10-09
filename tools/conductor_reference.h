@@ -7,28 +7,22 @@
 // Double-precision conductor Fresnel references shared by tools. Never include src/scene/bsdf.* here: the oracle-independence rule.
 namespace tools::reference {
 
-// Gulbrandsen 2014 eq 12 and 2 as printed, the LITERAL k^2 rather than bsdf.cpp's factored form, then textbook complex Fresnel in double.
-inline std::complex<double> referenceConductorIor(double r, double g) {
-    r = std::clamp(r, 1e-4, 0.9999);   // matches bsdf.cpp's kMinReflectivity/kMaxReflectivity
-    g = std::clamp(g, 0.0, 1.0);
-    const double sqrtR = std::sqrt(r);
-    const double nMin = (1.0 - r) / (1.0 + r);
-    const double nMax = (1.0 + sqrtR) / (1.0 - sqrtR);
-    const double n = (nMin * g) + ((1.0 - g) * nMax);
-    const double k2 = ((((n + 1.0) * (n + 1.0)) * r) - ((n - 1.0) * (n - 1.0))) / (1.0 - r);
-    return {n, std::sqrt(std::max(0.0, k2))};
+// OpenPBR's F82-tint metal Fresnel in double, transcribed from the specification: Schlick less a mu(1-mu)^6 term fit at mu-bar = 1/7.
+inline constexpr double kMuBar = 1.0 / 7.0;
+
+inline double referenceF82(double f0, double tint, double mu) {
+    const auto schlick = [f0](double c) { return f0 + ((1.0 - f0) * std::pow(1.0 - c, 5.0)); };
+    const double correction = (mu * std::pow(1.0 - mu, 6.0)) / (kMuBar * std::pow(1.0 - kMuBar, 6.0));
+    return schlick(mu) - (correction * (schlick(kMuBar) - (tint * schlick(kMuBar))));
 }
 
+// Textbook complex Fresnel for a conductor of complex index eta, unpolarized, in double.
 inline double referenceConductorFresnelAt(const std::complex<double>& eta, double cosTheta) {
     const double c = std::clamp(cosTheta, 0.0, 1.0);
     const std::complex<double> cosThetaT = std::sqrt(1.0 - ((1.0 - (c * c)) / (eta * eta)));
     const std::complex<double> rParallel = ((eta * c) - cosThetaT) / ((eta * c) + cosThetaT);
     const std::complex<double> rPerpendicular = (c - (eta * cosThetaT)) / (c + (eta * cosThetaT));
     return 0.5 * (std::norm(rParallel) + std::norm(rPerpendicular));
-}
-
-inline double referenceConductorFresnel(double r, double g, double cosTheta) {
-    return referenceConductorFresnelAt(referenceConductorIor(r, g), cosTheta);
 }
 
 // Cosine-weighted average Fresnel by composite Simpson: the integrand is analytic on [0,1], so the O(h^4) error here is ~1e-13.

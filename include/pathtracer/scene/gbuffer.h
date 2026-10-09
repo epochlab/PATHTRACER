@@ -41,8 +41,7 @@ struct GBuffer {
 // Row-parallel over disjoint rows, through the path tracer's own accel and bounce-0 sampling; previousCamera sets motionVector's origin.
 void renderGBuffer(const Camera& camera, const Camera& previousCamera, const EmbreeAccel& accel,
                    const std::vector<ShadingTriangle>& shadingTriangles, const std::vector<MeshInstance>& instances,
-                   const std::vector<PathTraceSettings>& perInstanceSettings,
-                   const std::vector<AabbBounds>& instanceBounds, int width, int height, ThreadPool& threadPool,
+                   float lookaheadDistance, const std::vector<AabbBounds>& instanceBounds, int width, int height, ThreadPool& threadPool,
                    GBuffer& out);
 
 }  // namespace pathtracer::scene

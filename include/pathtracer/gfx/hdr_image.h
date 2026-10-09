@@ -76,9 +76,10 @@ struct TextureGradient {
 // A scene image served by OIIO's TextureSystem: cached at its stored format, MIP-mapped and filtered. Defined where OIIO is.
 struct ImageTexture;
 
-// A linear EXR's leading `channels` (R or RGB) as a texture; nullptr, logged, on failure. Colour converts to the working space once.
+// A linear EXR's `channels` from R, G, B starting channelOffset in; nullptr, logged, on failure. Colour converts to the working space once.
 [[nodiscard]] std::shared_ptr<const ImageTexture> openTexture(const std::string& path, int channels, ImageRole role, TextureWrap wrap,
-                                                             const std::optional<std::string>& colorSpace = std::nullopt);
+                                                             const std::optional<std::string>& colorSpace = std::nullopt,
+                                                             int channelOffset = 0);
 
 // A generated working-space image as a texture: what a procedural source or a fixture has in place of a file.
 [[nodiscard]] std::shared_ptr<const ImageTexture> makeTexture(const HdrImage& image, TextureWrap wrap);

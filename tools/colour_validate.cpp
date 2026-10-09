@@ -13,6 +13,7 @@
 #include "conductor_reference.h"
 #include "pathtracer/config/scene_config.h"
 #include "pathtracer/scene/bsdf.h"
+#include "pathtracer/scene/gbuffer_shading.h"
 #include "pathtracer/scene/cie.h"
 #include "pathtracer/scene/cone_space.h"
 #include "colorchecker.h"
@@ -78,49 +79,36 @@ PT_CHECK(rec709_matrix_reproduces_primaries_and_white, Fast, Exact) {
     PT_EXPECT(ctx, greyError <= kDoubleRoundoff, detail);
 }
 
-double rendererAverage(const pathtracer::scene::BsdfParams& params, int channel) {
-    return tools::reference::cosineAverageFresnel(
-        [&](double mu) { return static_cast<double>(pathtracer::scene::fresnelAtViewAngle(params, static_cast<float>(mu))[channel]); });
-}
-
-// chrome.json must be metal_fit's exact output; shading it must match CIE-projected measured chromium at normal incidence and on average.
+// chrome.json must be metal_fit's exact output; shading it must meet CIE-projected measured chromium at mu = 1 and mu-bar = 1/7.
 PT_CHECK(chrome_matches_measured_chromium, Fast, Exact) {
     ctx.plan(12);
     const auto table = tools::metal_fit::loadNkTable(kChromiumTable);
     const auto material =
         pathtracer::config::loadMaterialConfig((std::filesystem::path(ASSET_ROOT_DIR) / "materials" / "chrome.json").string());
-    const auto fit = table ? tools::metal_fit::fitGulbrandsen(*table, Interpolation::Wavelength) : std::nullopt;
+    const auto fit = table ? tools::metal_fit::fitF82(*table, Interpolation::Wavelength) : std::nullopt;
     if (!fit || !material) {
         for (int i = 0; i < 12; ++i) {
             PT_EXPECT(ctx, false, "chromium table, fit or chrome.json unavailable");
         }
         return;
     }
-    const pathtracer::scene::BsdfParams params{.baseColor = material->diffuseColour,
-                                           .metallic = material->metallicFactor,
-                                           .roughness = material->roughnessFactor,
-                                           .f0 = material->diffuseColour,
-                                           .edgeTint = material->edgeTint,
-                                           .ior = material->ior,
-                                           .transmissionFactor = 0.0F,
-                                           .diffuseRoughness = 0.0F,
-                                           .diffuseRho = material->diffuseColour,
-                                           .transmissionTint = glm::vec3(1.0F)};
+    const pathtracer::scene::BsdfParams params = pathtracer::scene::bsdfParamsOf(*material, std::nullopt);
     const glm::vec3 normal = pathtracer::scene::fresnelAtViewAngle(params, 1.0F);
+    const glm::vec3 grazing = pathtracer::scene::fresnelAtViewAngle(params, static_cast<float>(tools::reference::kMuBar));
     char detail[200];
     for (int c = 0; c < 3; ++c) {
-        std::snprintf(detail, sizeof(detail), "chrome.json diffuseColour[%d] %.9g != metal_fit %.9g; re-run metal_fit", c,
-                      material->diffuseColour[c], static_cast<float>(fit->reflectivity[c]));
-        PT_EXPECT(ctx, material->diffuseColour[c] == static_cast<float>(fit->reflectivity[c]), detail);
-        std::snprintf(detail, sizeof(detail), "chrome.json edgeTint[%d] %.9g != metal_fit %.9g; re-run metal_fit", c,
-                      material->edgeTint[c], static_cast<float>(fit->edgeTint[c]));
-        PT_EXPECT(ctx, material->edgeTint[c] == static_cast<float>(fit->edgeTint[c]), detail);
-        const double normalError = std::abs(normal[c] - fit->reflectivity[c]);
+        std::snprintf(detail, sizeof(detail), "chrome.json base_color[%d] %.9g != metal_fit %.9g; re-run metal_fit", c,
+                      material->baseColor[c], static_cast<float>(fit->baseColor[c]));
+        PT_EXPECT(ctx, material->baseColor[c] == static_cast<float>(fit->baseColor[c]), detail);
+        std::snprintf(detail, sizeof(detail), "chrome.json specular_color[%d] %.9g != metal_fit %.9g; re-run metal_fit", c,
+                      material->specularColor[c], static_cast<float>(fit->specularColor[c]));
+        PT_EXPECT(ctx, material->specularColor[c] == static_cast<float>(fit->specularColor[c]), detail);
+        const double normalError = std::abs(normal[c] - fit->baseColor[c]);
         std::snprintf(detail, sizeof(detail), "channel %d renderer R(mu=1) off the CIE target by %.3e", c, normalError);
         PT_EXPECT(ctx, normalError <= kFloatResolution, detail);
-        const double averageError = std::abs(rendererAverage(params, c) - fit->averageTarget[c]);
-        std::snprintf(detail, sizeof(detail), "channel %d renderer average off the CIE target by %.3e", c, averageError);
-        PT_EXPECT(ctx, averageError <= kFloatResolution, detail);
+        const double grazingError = std::abs(grazing[c] - fit->atMuBar[c]);
+        std::snprintf(detail, sizeof(detail), "channel %d renderer R(mu=1/7) off the CIE target by %.3e", c, grazingError);
+        PT_EXPECT(ctx, grazingError <= kFloatResolution, detail);
     }
 }
 
@@ -141,14 +129,12 @@ PT_CHECK(nk_table_and_fit_reject_invalid_input, Fast, Exact) {
     PT_EXPECT(ctx, !loadText("engine_colour_k.csv", "0.30,1,1\n0.90,1,-0.1\n"), "negative k accepted");
     PT_EXPECT(ctx, !loadText("engine_colour_n.csv", "0.30,0,1\n0.90,1,1\n"), "zero n accepted");
     PT_EXPECT(ctx, !loadText("engine_colour_row.csv", "0.30,1,1\n0.90 1 1\n"), "malformed row accepted");
-    // n = 0.01, k = 100 reflects 1 - 4e-6 at normal incidence, above the 0.9999 bsdf.cpp would clamp it to.
+    // n = 0.01, k = 100 reflects 1 - 4e-6 at normal incidence: F82 has no reflectivity domain to leave, so a near-perfect mirror fits.
     const auto mirror = loadText("engine_colour_mirror.csv", "0.30,0.01,100\n0.90,0.01,100\n");
-    PT_EXPECT(ctx, mirror && !tools::metal_fit::fitGulbrandsen(*mirror, Interpolation::Wavelength),
-                  "reflectivity above the Gulbrandsen domain accepted");
-    // A dielectric stepping from n = 1.2 to n = 10 at 555 nm projects to an average below every edgeTint at its reflectivity.
-    const auto step = loadText("engine_colour_step.csv", "0.30,1.2,0\n0.55,1.2,0\n0.56,10,0\n0.90,10,0\n");
-    PT_EXPECT(ctx, step && !tools::metal_fit::fitGulbrandsen(*step, Interpolation::Wavelength),
-                  "average outside the edgeTint range accepted");
+    PT_EXPECT(ctx, mirror && tools::metal_fit::fitF82(*mirror, Interpolation::Wavelength), "a near-perfect mirror was rejected");
+    // Black below 555 nm and a mirror above: a spectral step whose Rec.709 projection leaves [0, 1], which no base_color represents.
+    const auto step = loadText("engine_colour_step.csv", "0.30,1,0\n0.55,1,0\n0.56,0.01,100\n0.90,0.01,100\n");
+    PT_EXPECT(ctx, step && !tools::metal_fit::fitF82(*step, Interpolation::Wavelength), "an out-of-gamut base_color was accepted");
 }
 
 // Interior property: two intervals from either end, where no boundary point enters the stencil, Sprague reproduces any quartic exactly.

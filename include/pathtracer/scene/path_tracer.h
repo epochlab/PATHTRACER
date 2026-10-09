@@ -43,25 +43,6 @@ struct PathTraceSettings {
     float rrMinProb = 0.05F;  // floor: stops a near-zero-throughput path being killed with near-certainty
     // Exactly 1.0: a path at full throughput must never be terminated; a lower cap costs more in variance than the deep paths it saves.
     float rrMaxProb = 1.0F;
-    // From the scene's material file (SceneConfig::materialPath) -- see resolveRoughness/buildShadingFrame.
-    float bumpStrength;
-    float roughnessMin;
-    float roughnessMax;
-    // Global material override from the scene's material file (SceneConfig::materialPath) -- see resolveBsdfParams.
-    glm::vec3 diffuseColour;
-    float ior;
-    float abbe = 0.0F;  // Abbe number pairing with ior for dispersion; 0 = none, see bsdf.h's cauchyIor
-    float transmissionFactor;
-    float metallicFactor;
-    float roughnessFactor;
-    float diffuseRoughness;  // EON rough-diffuse parameter r in [0,1]; 0 = Lambertian, see bsdf.h's BsdfParams
-    // The transmission lobe's only tint (transmissionFactor>0), realized in volume or on surface by transmissionDepth. See bsdf.h.
-    glm::vec3 transmissionColor = glm::vec3(1.0F);
-    float transmissionDepth = 0.0F;
-    // Gulbrandsen 2014 edgetint for the conductor lobe; 1 = white edge, see bsdf.h's BsdfParams.
-    glm::vec3 edgeTint = glm::vec3(1.0F);
-    // Constant short-circuits tracePath to emit resolveBaseColor and terminate; see material.h's ShadingModel.
-    ShadingModel shadingModel = ShadingModel::Standard;
 };
 
 // Stops either side of unity the readout is exact over: the next binade above the +/-13.95 EV the exposure controls reach.
@@ -137,7 +118,6 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                        const std::vector<MeshInstance>& instances,
                        const std::vector<int>& instanceLightIndex, const LightSet& lights,
                        int width, int height, bool showSky, const PathTraceSettings& settings,
-                       const std::vector<PathTraceSettings>& perInstanceSettings,
                        std::uint32_t scrambleSeed, int sampleBase, int sampleCount,
                        const std::atomic<std::uint64_t>& generation,
                        std::uint64_t requestedGeneration, ThreadPool& threadPool,

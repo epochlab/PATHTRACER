@@ -44,8 +44,12 @@ namespace {
 using pathtracer::scene::BsdfParams;
 using pathtracer::scene::Camera;
 using pathtracer::scene::EmbreeAccel;
+using pathtracer::scene::Constant;
 using pathtracer::scene::EnvironmentMap;
+using pathtracer::scene::forEachInput;
+using pathtracer::scene::InputSpec;
 using pathtracer::scene::Material;
+using pathtracer::scene::OpenPbrInputs;
 using pathtracer::scene::MeshInstance;
 using pathtracer::scene::PathTraceSettings;
 using pathtracer::scene::ShadingTriangle;
@@ -89,7 +93,7 @@ struct TestScene {
 };
 
 // One quad in the z=0 plane facing +Z, wound counter-clockwise as seen from +Z so geometricNormalOf gives (0,0,1).
-TestScene makeQuadScene(float roughness, glm::vec3 f0) {
+TestScene makeQuadScene(float roughness) {
     const glm::vec3 normal(0.0F, 0.0F, 1.0F);
     const glm::vec4 tangent(1.0F, 0.0F, 0.0F, 1.0F);
     const auto vertex = [&](float x, float y) {
@@ -104,12 +108,12 @@ TestScene makeQuadScene(float roughness, glm::vec3 f0) {
     scene.worldTriangles = {Triangle{v0.position, v1.position, v2.position},
                              Triangle{v0.position, v2.position, v3.position}};
     scene.shadingTriangles = {ShadingTriangle{v0, v1, v2, 0}, ShadingTriangle{v0, v2, v3, 0}};
-    scene.instances = {MeshInstance{makeMaterial(roughness, f0), glm::mat4(1.0F), ""}};
+    scene.instances = {MeshInstance{makeMaterial(roughness), glm::mat4(1.0F), ""}};
     return scene;
 }
 
 // Two parallel quads with opposing geometric normals, front at +Z and back at -Z, so a camera ray enters the front and exits the back.
-TestScene makeSlabScene(float roughness, glm::vec3 f0, float thickness) {
+TestScene makeSlabScene(float roughness, float thickness) {
     const glm::vec4 tangent(1.0F, 0.0F, 0.0F, 1.0F);
     const auto vertex = [&](float x, float y, float z, float nz) {
         return ShadingVertex{glm::vec3(x, y, z), glm::vec3(0.0F, 0.0F, nz), glm::vec2(0.5F, 0.5F),
@@ -132,13 +136,13 @@ TestScene makeSlabScene(float roughness, glm::vec3 f0, float thickness) {
                              Triangle{bv0.position, bv2.position, bv3.position}};
     scene.shadingTriangles = {ShadingTriangle{fv0, fv1, fv2, 0}, ShadingTriangle{fv0, fv2, fv3, 0},
                                ShadingTriangle{bv0, bv1, bv2, 0}, ShadingTriangle{bv0, bv2, bv3, 0}};
-    scene.instances = {MeshInstance{makeMaterial(roughness, f0), glm::mat4(1.0F), ""}};
+    scene.instances = {MeshInstance{makeMaterial(roughness), glm::mat4(1.0F), ""}};
     return scene;
 }
 
 // The quad above plus an opaque wall at wallX facing -X, the only scene here where a non-transmissive path reaches a second surface.
-TestScene makeCornerScene(float roughness, glm::vec3 f0, float wallX = 1.0F) {
-    TestScene scene = makeQuadScene(roughness, f0);
+TestScene makeCornerScene(float roughness, float wallX = 1.0F) {
+    TestScene scene = makeQuadScene(roughness);
     const glm::vec3 wallNormal(-1.0F, 0.0F, 0.0F);
     const glm::vec4 wallTangent(0.0F, 1.0F, 0.0F, 1.0F);
     const auto vertex = [&](float y, float z) {
@@ -158,8 +162,7 @@ TestScene makeCornerScene(float roughness, glm::vec3 f0, float wallX = 1.0F) {
 }
 
 // UV sphere, poles on Y so the camera reads the tessellated equator; curvature is the point, as flat quads zero transmissionOffsetEpsilon.
-TestScene makeSphereScene(float roughness, glm::vec3 f0, int slices = kSphereSlices,
-                           int stacks = kSphereStacks) {
+TestScene makeSphereScene(float roughness, int slices = kSphereSlices, int stacks = kSphereStacks) {
     const auto vertexAt = [&](int stack, int slice) {
         const float phi = kPi * static_cast<float>(stack) / static_cast<float>(stacks);
         const float theta = 2.0F * kPi * static_cast<float>(slice) / static_cast<float>(slices);
@@ -187,12 +190,12 @@ TestScene makeSphereScene(float roughness, glm::vec3 f0, int slices = kSphereSli
             }
         }
     }
-    scene.instances = {MeshInstance{makeMaterial(roughness, f0), glm::mat4(1.0F), ""}};
+    scene.instances = {MeshInstance{makeMaterial(roughness), glm::mat4(1.0F), ""}};
     return scene;
 }
 
-// Two coplanar quads meeting at x=0, one MeshInstance each with identical Materials: only the resolved perInstanceSettings entry differs.
-TestScene makeTwoInstanceScene(float roughness, glm::vec3 f0) {
+// Two coplanar quads meeting at x=0, one MeshInstance each with identical Materials, which a check then edits apart.
+TestScene makeTwoInstanceScene(float roughness) {
     const glm::vec3 normal(0.0F, 0.0F, 1.0F);
     const glm::vec4 tangent(1.0F, 0.0F, 0.0F, 1.0F);
     const auto vertex = [&](float x, float y) {
@@ -213,28 +216,35 @@ TestScene makeTwoInstanceScene(float roughness, glm::vec3 f0) {
     TestScene scene;
     addQuad(scene, -kQuadExtent, 0.0F, 0);
     addQuad(scene, 0.0F, kQuadExtent, 1);
-    scene.instances = {MeshInstance{makeMaterial(roughness, f0), glm::mat4(1.0F), ""},
-                        MeshInstance{makeMaterial(roughness, f0), glm::mat4(1.0F), ""}};
+    scene.instances = {MeshInstance{makeMaterial(roughness), glm::mat4(1.0F), ""},
+                        MeshInstance{makeMaterial(roughness), glm::mat4(1.0F), ""}};
     return scene;
 }
 
-// Only `metallic` travels through PathTraceSettings; roughness and f0 reach the renderer through the material's shared 1x1 textures.
-PathTraceSettings makeSettings(int maxBounces, int rrStartBounce, float metallic,
-                               float transmission = 0.0F) {
+// The integrator's limits alone: a check's surface is its scene's per-instance materials, as a scene file's is.
+PathTraceSettings makeSettings(int maxBounces, int rrStartBounce) {
     PathTraceSettings settings{};
     settings.samplesPerPixel = kSamplesPerPixel;
     settings.maxBounces = maxBounces;
     settings.russianRouletteStartBounce = rrStartBounce;
-    settings.bumpStrength = 0.0F;
-    settings.roughnessMin = 0.0F;
-    settings.roughnessMax = 1.0F;
-    settings.diffuseColour = glm::vec3(1.0F);
-    settings.ior = 1.5F;
-    settings.transmissionFactor = transmission;
-    settings.metallicFactor = metallic;
-    settings.roughnessFactor = 1.0F;
     return settings;
 }
+
+// Every instance's material edited alike, on a copy: the geometry, and the accel built from it, stay shared with the source.
+template <typename Edit>
+TestScene withSurface(TestScene scene, Edit edit) {
+    for (MeshInstance& instance : scene.instances) {
+        edit(instance.material);
+    }
+    return scene;
+}
+
+// The surfaces the checks share: a metal of the scene's roughness, and a clear dielectric that transmits everything it does not reflect.
+const auto metallic = [](float metalness) { return [metalness](Material& material) { material.baseMetalness = metalness; }; };
+const auto transmissive = [](Material& material) { material.transmissionWeight = 1.0F; };
+
+// Index-matched, so fresnelDielectric is exactly 0 and a non-metallic, non-transmissive surface is EON alone: f = base_color/pi at r = 0.
+const auto indexMatched = [](Material& material) { material.specularIor = 1.0F; };
 
 Camera makeCamera() {
     return Camera(glm::vec3(0.0F, 0.0F, 5.0F), glm::vec3(0.0F), Camera::FilmBack{36.0F, 24.0F},
@@ -261,11 +271,10 @@ glm::vec3 centreMean(const pathtracer::gfx::HdrImage& image) {
                        (kImageSize / 2) + 2);
 }
 
-// Runs one renderPathTraced pass with an explicit per-instance settings vector, the only way to give two instances different materials.
-pathtracer::scene::PathTraceResult renderPassPerInstance(
-    const TestScene& scene, const EnvironmentMap& env, const PathTraceSettings& settings,
-    const std::vector<PathTraceSettings>& perInstanceSettings, EmbreeAccel& accel,
-    pathtracer::scene::ThreadPool& pool, bool showSky, std::uint32_t scrambleSeed = 7U) {
+// Runs one renderPathTraced pass over the scene's own per-instance materials.
+pathtracer::scene::PathTraceResult renderPass(const TestScene& scene, const EnvironmentMap& env, const PathTraceSettings& settings,
+                                              EmbreeAccel& accel, pathtracer::scene::ThreadPool& pool, bool showSky,
+                                              std::uint32_t scrambleSeed = 7U) {
     const std::atomic<std::uint64_t> generation{1};
     pathtracer::scene::PathTraceResult result =
         pathtracer::scene::makePathTraceResult(kImageSize, kImageSize);
@@ -276,20 +285,10 @@ pathtracer::scene::PathTraceResult renderPassPerInstance(
     pathtracer::debug::PassStats stats;  // required by renderPathTraced; this tool checks radiance, not throughput
     pathtracer::scene::renderPathTraced(makeCamera(), accel, scene.shadingTriangles, scene.instances,
                                      instanceLightIndex, lights, kImageSize, kImageSize, showSky,
-                                     settings, perInstanceSettings, scrambleSeed, /*sampleBase=*/0,
+                                     settings, scrambleSeed, /*sampleBase=*/0,
                                      /*sampleCount=*/settings.samplesPerPixel, generation,
                                      /*requestedGeneration=*/1U, pool, stats, result);
     return result;
-}
-
-// The same pass with every instance on one material, which is what every check but checkPerInstanceMaterials wants.
-pathtracer::scene::PathTraceResult renderPass(const TestScene& scene, const EnvironmentMap& env,
-                                           const PathTraceSettings& settings, EmbreeAccel& accel,
-                                           pathtracer::scene::ThreadPool& pool, bool showSky,
-                                           std::uint32_t scrambleSeed = 7U) {
-    return renderPassPerInstance(
-        scene, env, settings, std::vector<PathTraceSettings>(scene.instances.size(), settings), accel,
-        pool, showSky, scrambleSeed);
 }
 
 // Centre-region mean radiance of one pass.
@@ -303,16 +302,15 @@ struct Case {
     const char* name;
     float roughness;
     float metallic;
-    glm::vec3 f0;
 };
 
 PT_CHECK(depth_and_russian_roulette_invariance, Slow, Statistical) {
     // Roughness restricted to values where the uniform-hemisphere reference converges, the same limitation nee_validate documents.
     const std::array<Case, 4> cases{{
-        {"diffuse (metallic 0, rough 1.0)", 1.0F, 0.0F, glm::vec3(0.04F)},
-        {"glossy dielectric (rough 0.35)", 0.35F, 0.0F, glm::vec3(0.04F)},
-        {"rough conductor (rough 0.5)", 0.5F, 1.0F, glm::vec3(1.0F)},
-        {"rough conductor (rough 0.25)", 0.25F, 1.0F, glm::vec3(1.0F)},
+        {"diffuse (metallic 0, rough 1.0)", 1.0F, 0.0F},
+        {"glossy dielectric (rough 0.35)", 0.35F, 0.0F},
+        {"rough metal (rough 0.5)", 0.5F, 1.0F},
+        {"rough metal (rough 0.25)", 0.25F, 1.0F},
     }};
 
     // Depth invariance is exact up to Monte Carlo noise, so it gets the tighter bound; absolute agreement is looser, its reference noisier.
@@ -329,7 +327,7 @@ PT_CHECK(depth_and_russian_roulette_invariance, Slow, Statistical) {
     std::cout << "  case                              maxB=0    maxB=1    RR on    reference\n";
 
     for (const Case& testCase : cases) {
-        const TestScene scene = makeQuadScene(testCase.roughness, testCase.f0);
+        const TestScene scene = withSurface(makeQuadScene(testCase.roughness), metallic(testCase.metallic));
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         if (!accel.has_value()) {
             std::cerr << "integrator_validate: FAILED to build Embree scene for " << testCase.name << '\n';
@@ -338,22 +336,16 @@ PT_CHECK(depth_and_russian_roulette_invariance, Slow, Statistical) {
         }
 
         // rrStartBounce far above maxBounces disables Russian roulette for the first two renders, so depth invariance sheds that variance.
-        const float loDepth0 = renderCentre(
-            scene, env, makeSettings(0, 999, testCase.metallic),
-            *accel, pool);
-        const float loDepth1 = renderCentre(
-            scene, env, makeSettings(1, 999, testCase.metallic),
-            *accel, pool);
+        const float loDepth0 = renderCentre(scene, env, makeSettings(0, 999), *accel, pool);
+        const float loDepth1 = renderCentre(scene, env, makeSettings(1, 999), *accel, pool);
         // RR from bounce 0, same scene: reweighting by 1/p must leave the expectation unchanged.
-        const float loRoulette = renderCentre(
-            scene, env, makeSettings(1, 0, testCase.metallic),
-            *accel, pool);
+        const float loRoulette = renderCentre(scene, env, makeSettings(1, 0), *accel, pool);
 
-        const BsdfParams params{glm::vec3(1.0F),      testCase.metallic, testCase.roughness,
-                                 testCase.f0,          glm::vec3(1.0F),   /*ior=*/1.5F,
-                                 /*transmissionFactor=*/0.0F, /*diffuseRoughness=*/0.0F,
-                                 pathtracer::scene::eonAlbedoInversion(glm::vec3(1.0F), 0.0F),
-                                 /*transmissionTint=*/glm::vec3(1.0F)};
+        OpenPbrInputs<Constant> inputs;
+        inputs.baseColor = glm::vec3(1.0F);
+        inputs.baseMetalness = testCase.metallic;
+        inputs.specularRoughness = testCase.roughness;
+        const BsdfParams params = tools::fixtures::paramsOf(inputs);
         const float reference = referenceLo(params, glm::vec3(0.0F, 0.0F, 1.0F), kReferenceSamples,
                                              referenceRng);
 
@@ -400,7 +392,7 @@ PT_CHECK(transmissive_slab_energy, Slow, Statistical) {
     ctx.plan(static_cast<int>(2 * roughnesses.size()));
     const EnvironmentMap env = makeUniformEnvironment();
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
-    PathTraceSettings settings = makeSettings(kSlabBounces, 999, /*metallic=*/0.0F, /*transmission=*/1.0F);
+    PathTraceSettings settings = makeSettings(kSlabBounces, 999);
     settings.samplesPerPixel = kSamplesPerPixel / tools::stats::kReplicates;
 
     std::cout << "integrator_validate: white non-absorbing slab, uniform L0=1, Embree render vs BSDF-only walk\n";
@@ -408,16 +400,15 @@ PT_CHECK(transmissive_slab_energy, Slow, Statistical) {
         char label[64];
         std::snprintf(label, sizeof(label), "slab r=%g", static_cast<double>(roughness));
         const std::uint64_t rowSeed = ctx.subSeed(label);
-        const TestScene scene = makeSlabScene(roughness, glm::vec3(0.04F), kThickness);
+        const TestScene scene = withSurface(makeSlabScene(roughness, kThickness), transmissive);
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         PT_EXPECT(ctx, accel.has_value(), "failed to build the Embree slab scene");
         if (!accel.has_value()) {
             continue;
         }
-        // The shading params the integrator resolves for this material: white, fully transmissive, the settings' ior.
-        const glm::vec3 white(1.0F);
-        const pathtracer::scene::BsdfParams params{white, 0.0F, roughness, glm::vec3(0.04F), white, settings.ior,
-                                                1.0F, 0.0F, pathtracer::scene::eonAlbedoInversion(white, 0.0F), white};
+        // The shading params the integrator resolves for this material, through the same resolution.
+        const pathtracer::scene::BsdfParams params =
+            pathtracer::scene::bsdfParamsOf(resolveInputs(scene.instances[0].material, glm::vec2(0.5F), {}, glm::vec3(1.0F)), std::nullopt);
         tools::stats::Welford render;
         tools::stats::Welford walk;
         for (int r = 0; r < tools::stats::kReplicates; ++r) {
@@ -454,17 +445,14 @@ PT_CHECK(transmissive_sphere_energy, Slow, Statistical) {
 
     std::cout << "integrator_validate: white non-absorbing glass sphere, uniform L0=1 (1.0 = invisible)\n";
     for (float roughness : roughnesses) {
-        const TestScene scene =
-            makeSphereScene(roughness, glm::vec3(0.04F));
+        const TestScene scene = withSurface(makeSphereScene(roughness), transmissive);
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         if (!accel.has_value()) {
             std::cerr << "integrator_validate: FAILED to build Embree sphere scene\n";
             finish(ctx, false, "transmissive_sphere_energy failed; see the rows above");
             return;
         }
-        const float lo = renderCentre(
-            scene, env, makeSettings(kSphereBounces, 999, /*metallic=*/0.0F, /*transmission=*/1.0F),
-            *accel, pool);
+        const float lo = renderCentre(scene, env, makeSettings(kSphereBounces, 999), *accel, pool);
         std::cout << "  roughness " << roughness << "   Lo " << lo << '\n';
         if (std::fabs(lo - 1.0F) > kTolerance) {
             std::cerr << "integrator_validate: FAILED glass sphere transparency at roughness=" << roughness
@@ -488,18 +476,19 @@ PT_CHECK(transmissive_sphere_energy, Slow, Statistical) {
     }};
     std::cout << "  dispersive (per channel, the one-sample hero-channel estimator)\n";
     for (const DispersiveGlass& glass : dispersive) {
-        const TestScene scene = makeSphereScene(0.02F, glm::vec3(0.04F));
+        const TestScene scene = withSurface(makeSphereScene(0.02F), [&](Material& material) {
+            transmissive(material);
+            material.specularIor = glass.ior;
+            material.transmissionDispersionAbbeNumber = glass.abbe;
+            material.transmissionDispersionScale = 1.0F;
+        });
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         if (!accel.has_value()) {
             std::cerr << "integrator_validate: FAILED to build Embree sphere scene\n";
             finish(ctx, false, "transmissive_sphere_energy failed; see the rows above");
             return;
         }
-        PathTraceSettings settings =
-            makeSettings(kSphereBounces, 999, /*metallic=*/0.0F, /*transmission=*/1.0F);
-        settings.ior = glass.ior;
-        settings.abbe = glass.abbe;
-        const glm::vec3 lo = centreMean(renderPass(scene, env, settings, *accel, pool, true).beauty);
+        const glm::vec3 lo = centreMean(renderPass(scene, env, makeSettings(kSphereBounces, 999), *accel, pool, true).beauty);
         std::cout << "    " << glass.name << " (ior " << glass.ior << ", abbe " << glass.abbe << ")   Lo ["
                   << lo.x << ", " << lo.y << ", " << lo.z << "]\n";
         for (int c = 0; c < 3; ++c) {
@@ -545,22 +534,22 @@ PT_CHECK(beer_lambert_absorption, Slow, Statistical) {
 
     std::cout << "integrator_validate: Beer-Lambert absorption through an index-matched medium\n";
     for (const AbsorptionCase& testCase : cases) {
-        const TestScene scene =
-            testCase.sphere
-                ? makeSphereScene(0.02F, glm::vec3(0.04F))
-                : makeSlabScene(0.02F, glm::vec3(0.04F), kSlabThickness);
+        const TestScene scene = withSurface(testCase.sphere ? makeSphereScene(0.02F) : makeSlabScene(0.02F, kSlabThickness),
+                                            [&](Material& material) {
+                                                transmissive(material);
+                                                indexMatched(material);
+                                                material.transmissionColor = colour;
+                                                material.transmissionDepth = testCase.depth;
+                                                material.transmissionDispersionAbbeNumber = testCase.abbe > 0.0F ? testCase.abbe : 20.0F;
+                                                material.transmissionDispersionScale = testCase.abbe > 0.0F ? 1.0F : 0.0F;
+                                            });
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         if (!accel.has_value()) {
             std::cerr << "integrator_validate: FAILED to build Embree scene for " << testCase.name << '\n';
             finish(ctx, false, "beer_lambert_absorption failed; see the rows above");
             return;
         }
-        PathTraceSettings settings = makeSettings(kBounces, 999, /*metallic=*/0.0F, /*transmission=*/1.0F);
-        settings.ior = 1.0F;
-        settings.abbe = testCase.abbe;
-        settings.transmissionColor = colour;
-        settings.transmissionDepth = testCase.depth;
-        const glm::vec3 lo = centreMean(renderPass(scene, env, settings, *accel, pool, true).beauty);
+        const glm::vec3 lo = centreMean(renderPass(scene, env, makeSettings(kBounces, 999), *accel, pool, true).beauty);
 
         std::cout << "  " << testCase.name;
         for (std::size_t pad = std::string(testCase.name).size(); pad < 36; ++pad) {
@@ -606,9 +595,12 @@ PT_CHECK(on_surface_transmission_tint, Slow, Statistical) {
 
     std::cout << "integrator_validate: on-surface transmission tint at transmissionDepth 0\n";
     for (const TintCase& testCase : cases) {
-        const TestScene scene = testCase.sphere
-                                     ? makeSphereScene(0.02F, glm::vec3(0.04F))
-                                     : makeSlabScene(0.02F, glm::vec3(0.04F), kSlabThickness);
+        const TestScene scene = withSurface(testCase.sphere ? makeSphereScene(0.02F) : makeSlabScene(0.02F, kSlabThickness),
+                                            [&](Material& material) {
+                                                transmissive(material);
+                                                indexMatched(material);
+                                                material.transmissionColor = colour;
+                                            });
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         if (!accel.has_value()) {
             std::cerr << "integrator_validate: FAILED to build Embree scene for " << testCase.name
@@ -616,11 +608,7 @@ PT_CHECK(on_surface_transmission_tint, Slow, Statistical) {
             finish(ctx, false, "on_surface_transmission_tint failed; see the rows above");
             return;
         }
-        PathTraceSettings settings = makeSettings(kBounces, 999, /*metallic=*/0.0F, /*transmission=*/1.0F);
-        settings.ior = 1.0F;
-        settings.transmissionColor = colour;
-        settings.transmissionDepth = 0.0F;
-        const glm::vec3 lo = centreMean(renderPass(scene, env, settings, *accel, pool, true).beauty);
+        const glm::vec3 lo = centreMean(renderPass(scene, env, makeSettings(kBounces, 999), *accel, pool, true).beauty);
 
         std::cout << "  " << testCase.name;
         for (std::size_t pad = std::string(testCase.name).size(); pad < 36; ++pad) {
@@ -644,15 +632,15 @@ PT_CHECK(on_surface_transmission_tint, Slow, Statistical) {
     return;
 }
 
-// Per-instance material binding, integrator side: two coplanar quads distinguished only by a per-instance diffuseColour.
+// Per-instance material binding, integrator side: two coplanar quads distinguished only by each instance's base_color.
 PT_CHECK(per_instance_materials, Slow, Statistical) {
     constexpr float kRoughness = 1.0F;
-    constexpr float kDominance = 4.0F;   // the off-channel is the white specular coat, not zero, so this is a ratio test, not an equality
+    constexpr float kDominance = 4.0F;   // the off-channel is the white glossy layer, not zero, so this is a ratio test, not an equality
     constexpr float kSwapTolerance = 0.02F;
     const glm::vec3 red(1.0F, 0.0F, 0.0F);
     const glm::vec3 blue(0.0F, 0.0F, 1.0F);
 
-    const TestScene scene = makeTwoInstanceScene(kRoughness, glm::vec3(0.04F));
+    const TestScene scene = makeTwoInstanceScene(kRoughness);
     std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
     if (!accel.has_value()) {
         std::cerr << "integrator_validate: FAILED to build Embree two-instance scene\n";
@@ -662,14 +650,11 @@ PT_CHECK(per_instance_materials, Slow, Statistical) {
 
     const EnvironmentMap env = makeUniformEnvironment();
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
-    const PathTraceSettings base = makeSettings(1, 999, /*metallic=*/0.0F);
-
     const auto render = [&](const glm::vec3& left, const glm::vec3& right) {
-        std::vector<PathTraceSettings> perInstance(2, base);
-        perInstance[0].diffuseColour = left;
-        perInstance[1].diffuseColour = right;
-        const pathtracer::gfx::HdrImage beauty =
-            renderPassPerInstance(scene, env, base, perInstance, *accel, pool, /*showSky=*/true).beauty;
+        TestScene coloured = scene;
+        coloured.instances[0].material.baseColor = left;
+        coloured.instances[1].material.baseColor = right;
+        const pathtracer::gfx::HdrImage beauty = renderPass(coloured, env, makeSettings(1, 999), *accel, pool, /*showSky=*/true).beauty;
         return std::pair{regionMean(beauty, 2, 6, 6, 10), regionMean(beauty, 10, 6, 14, 10)};
     };
 
@@ -689,14 +674,14 @@ PT_CHECK(per_instance_materials, Slow, Statistical) {
                   << leftRed.x << ", " << leftRed.z << "] and the right (instanceIndex 1) read ["
                   << rightBlue.x << ", " << rightBlue.z
                   << "] in (r, b). Each instance's triangles must resolve to its own "
-                     "perInstanceSettings entry; a swap or a constant index lands here.\n";
+                     "material; a swap or a constant index lands here.\n";
         ok = false;
     }
-    // Swapping the vector must swap the picture: each block is compared against the other assignment's opposite block.
+    // Swapping the materials must swap the picture: each block is compared against the other assignment's opposite block.
     if (std::fabs(leftRed.x - rightRed.x) > kSwapTolerance ||
         std::fabs(rightBlue.z - leftBlue.z) > kSwapTolerance) {
         std::cerr << "integrator_validate: FAILED per-instance material binding under swap -- "
-                     "exchanging the two perInstanceSettings entries must exchange the two blocks' "
+                     "exchanging the two instances' base_color must exchange the two blocks' "
                      "readings, but red measured " << leftRed.x << " on the left and " << rightRed.x
                   << " on the right, blue " << rightBlue.z << " then " << leftBlue.z << ".\n";
         ok = false;
@@ -705,28 +690,29 @@ PT_CHECK(per_instance_materials, Slow, Statistical) {
     return;
 }
 
-// A constant surface returns texel x diffuseColour to a camera ray whatever lights the scene: the measured value is the authored one.
-PT_CHECK(constant_surface_returns_texel, Fast, Exact) {
+// An emission-only surface returns emission_luminance x emission_color to a camera ray whatever lights the scene: the authored value.
+PT_CHECK(emission_returns_luminance_times_colour, Fast, Exact) {
     constexpr int kTexelSamples = 16;
     constexpr int kEnvWidth = 64;
     constexpr int kEnvHeight = 32;
-    const glm::vec3 texel(0.2F, 0.5F, 0.8F);
-    const glm::vec3 tint(0.5F, 0.25F, 1.0F);
-    const glm::vec3 expected = texel * tint;
+    const glm::vec3 colour(0.2F, 0.5F, 0.8F);
+    constexpr float kLuminance = 2.5F;
+    const glm::vec3 expected = kLuminance * colour;
 
-    TestScene scene = makeTwoInstanceScene(1.0F, glm::vec3(0.04F));
-    scene.instances[0].material.baseColor = texel;
+    TestScene scene = makeTwoInstanceScene(1.0F);
+    Material& emitter = scene.instances[0].material;
+    emitter.baseWeight = 0.0F;
+    emitter.specularWeight = 0.0F;
+    emitter.emissionLuminance = kLuminance;
+    emitter.emissionColor = colour;
     std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
     if (!accel.has_value()) {
         finish(ctx, false, "failed to build the Embree two-instance scene");
         return;
     }
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
-    PathTraceSettings base = makeSettings(1, 999, /*metallic=*/0.0F);
+    PathTraceSettings base = makeSettings(1, 999);
     base.samplesPerPixel = kTexelSamples;
-    std::vector<PathTraceSettings> perInstance(2, base);
-    perInstance[0].shadingModel = pathtracer::scene::ShadingModel::Constant;
-    perInstance[0].diffuseColour = tint;
 
     const EnvironmentMap black = tools::fixtures::makeEnvironment(
         kEnvWidth, kEnvHeight, std::vector<float>(static_cast<std::size_t>(kEnvWidth) * kEnvHeight * pathtracer::gfx::kRgbChannels, 0.0F));
@@ -738,24 +724,24 @@ PT_CHECK(constant_surface_returns_texel, Fast, Exact) {
     ctx.plan(2);
     for (const auto& [name, env] : {std::pair{"black", &black}, std::pair{"uniform L0=1", &uniform}}) {
         const glm::vec3 mean =
-            regionMean(renderPassPerInstance(scene, *env, base, perInstance, *accel, pool, true).beauty, 2, 6, 6, 10);
+            regionMean(renderPass(scene, *env, base, *accel, pool, true).beauty, 2, 6, 6, 10);
         const float maxError = std::max({std::fabs(mean.x - expected.x), std::fabs(mean.y - expected.y),
                                          std::fabs(mean.z - expected.z)});
         char detail[288];
         std::snprintf(detail, sizeof(detail),
-                      "%s environment: constant surface read (%.7f, %.7f, %.7f), expected texel x tint (%.7f, %.7f, %.7f), "
-                      "max error %.3e vs %.3e -- lighting reached an unlit surface",
+                      "%s environment: emitter read (%.7f, %.7f, %.7f), expected luminance x colour (%.7f, %.7f, %.7f), "
+                      "max error %.3e vs %.3e -- lighting reached a surface with no BSDF",
                       name, mean.x, mean.y, mean.z, expected.x, expected.y, expected.z, maxError, tolerance);
         std::cout << "  " << detail << '\n';
         PT_EXPECT(ctx, maxError <= tolerance, detail);
     }
 }
 
-// Furnace equivalence: a floor under a constant ceiling of value L0 and a uniform-L0 sky sees L0 everywhere, as under the sky alone.
-PT_CHECK(constant_surface_emits_indirect, Slow, Statistical) {
+// Furnace equivalence: a floor under an emitting ceiling of radiance L0 and a uniform-L0 sky sees L0 everywhere, as under the sky alone.
+PT_CHECK(emission_reaches_indirect, Slow, Statistical) {
     // Above the camera's z=5, so primary rays reach the floor; the floor then sees the ceiling over all but its grazing horizon.
     constexpr float kCeilingHeight = 10.0F;
-    TestScene enclosed = makeQuadScene(1.0F, glm::vec3(0.04F));
+    TestScene enclosed = makeQuadScene(1.0F);
     const glm::vec3 down(0.0F, 0.0F, -1.0F);
     const glm::vec4 tangent(1.0F, 0.0F, 0.0F, 1.0F);
     const auto vertex = [&](float x, float y) {
@@ -770,9 +756,13 @@ PT_CHECK(constant_surface_emits_indirect, Slow, Statistical) {
     enclosed.worldTriangles.push_back(Triangle{c0.position, c2.position, c1.position});
     enclosed.shadingTriangles.push_back(ShadingTriangle{c0, c3, c2, 1});
     enclosed.shadingTriangles.push_back(ShadingTriangle{c0, c2, c1, 1});
-    // makeMaterial's white baseColor matches the sky's L0 = 1.
-    enclosed.instances.push_back(MeshInstance{makeMaterial(1.0F, glm::vec3(0.04F)), glm::mat4(1.0F), ""});
-    const TestScene open = makeQuadScene(1.0F, glm::vec3(0.04F));
+    // Emission alone, white at luminance 1, matching the sky's L0 = 1.
+    Material ceiling;
+    ceiling.baseWeight = 0.0F;
+    ceiling.specularWeight = 0.0F;
+    ceiling.emissionLuminance = 1.0F;
+    enclosed.instances.push_back(MeshInstance{ceiling, glm::mat4(1.0F), ""});
+    const TestScene open = makeQuadScene(1.0F);
 
     std::optional<EmbreeAccel> enclosedAccel = EmbreeAccel::build(enclosed.worldTriangles);
     std::optional<EmbreeAccel> openAccel = EmbreeAccel::build(open.worldTriangles);
@@ -782,19 +772,17 @@ PT_CHECK(constant_surface_emits_indirect, Slow, Statistical) {
     }
     const EnvironmentMap env = makeUniformEnvironment();
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
-    PathTraceSettings settings = makeSettings(1, 999, /*metallic=*/0.0F);
+    PathTraceSettings settings = makeSettings(1, 999);
     settings.samplesPerPixel = kSamplesPerPixel / tools::stats::kReplicates;
-    std::vector<PathTraceSettings> perInstance(2, settings);
-    perInstance[1].shadingModel = pathtracer::scene::ShadingModel::Constant;
 
-    const std::uint64_t rowSeed = ctx.subSeed("constant ceiling");
+    const std::uint64_t rowSeed = ctx.subSeed("emitting ceiling");
     tools::stats::Welford enclosedMean;
     tools::stats::Welford openMean;
     for (int r = 0; r < tools::stats::kReplicates; ++r) {
         // Disjoint seeds keep the two estimators independent, as Welch's band assumes.
         const auto seed = static_cast<std::uint32_t>(rowSeed + r);
         const glm::vec3 a = regionMean(
-            renderPassPerInstance(enclosed, env, settings, perInstance, *enclosedAccel, pool, true, seed).beauty, 0, 0,
+            renderPass(enclosed, env, settings, *enclosedAccel, pool, true, seed).beauty, 0, 0,
             kImageSize, kImageSize);
         const glm::vec3 b = regionMean(renderPass(open, env, settings, *openAccel, pool, true,
                                                   seed + tools::stats::kReplicates).beauty,
@@ -806,132 +794,60 @@ PT_CHECK(constant_surface_emits_indirect, Slow, Statistical) {
     const tools::stats::Band band = tools::stats::differenceBand(enclosedMean, openMean, ctx.alpha());
     char detail[320];
     std::snprintf(detail, sizeof(detail),
-                  "constant ceiling %.5f, open sky %.5f, difference %+.3e vs +/-%.3e -- below means indirect rays miss the "
-                  "constant emission, above means NEE double-counts it",
+                  "emitting ceiling %.5f, open sky %.5f, difference %+.3e vs +/-%.3e -- below means indirect rays miss the "
+                  "surface emission, above means NEE double-counts it",
                   enclosedMean.mean(), openMean.mean(), difference, band.halfWidth());
     std::cout << "integrator_validate: " << detail << '\n';
     ctx.plan(1);
     PT_EXPECT(ctx, band.contains(difference), detail);
 }
 
-// Per-instance material binding, resolution side: resolvePerInstanceSettings maps each materialOverrides glTF node name onto its instance.
+// Every OpenPBR input of two materials equal, compared bitwise as the binding copies them.
+bool sameMaterial(const Material& a, const Material& b) {
+    bool same = true;
+    forEachInput([&](const InputSpec&, const auto& x, const auto& y) { same = same && x == y; }, a, b);
+    return same;
+}
+
+// Material binding: applySceneMaterials gives every instance materialPath's constants and a named node its override, atomically.
 PT_CHECK(material_binding_resolution, Fast, Exact) {
     const std::string assetRoot = ASSET_ROOT_DIR;
-    const std::optional<pathtracer::config::MaterialConfig> glass =
-        pathtracer::config::loadMaterialConfig(assetRoot + "/materials/glass.json");
-    if (!glass.has_value()) {
-        std::cerr << "integrator_validate: FAILED to load materials/glass.json\n";
-        finish(ctx, false, "material_binding_resolution failed; see the rows above");
+    const std::optional<pathtracer::config::MaterialConfig> clay = pathtracer::config::loadMaterialConfig(assetRoot + "/materials/clay.json");
+    const std::optional<pathtracer::config::MaterialConfig> glass = pathtracer::config::loadMaterialConfig(assetRoot + "/materials/glass.json");
+    ctx.plan(7);
+    PT_EXPECT(ctx, clay.has_value() && glass.has_value(), "materials/clay.json or materials/glass.json failed to load");
+    if (!clay.has_value() || !glass.has_value()) {
         return;
     }
+    const Material clayMaterial = pathtracer::scene::materialOf(*clay);
+    const Material glassMaterial = pathtracer::scene::materialOf(*glass);
+    // Non-vacuity: two shipped materials that resolved alike would let a dropped override pass unseen.
+    PT_EXPECT(ctx, !sameMaterial(clayMaterial, glassMaterial), "clay.json and glass.json resolve to the same inputs");
 
-    // How many of the 14 copied fields match the material file; a count, so a coinciding base setting does not read as a success.
-    const auto matchingFields = [](const PathTraceSettings& s,
-                                    const pathtracer::config::MaterialConfig& m) {
-        return static_cast<int>(s.bumpStrength == m.bumpStrength) +
-               static_cast<int>(s.roughnessMin == m.roughnessMin) +
-               static_cast<int>(s.roughnessMax == m.roughnessMax) +
-               static_cast<int>(s.diffuseColour == m.diffuseColour) +
-               static_cast<int>(s.ior == m.ior) +
-               static_cast<int>(s.abbe == m.abbe) +
-               static_cast<int>(s.transmissionFactor == m.transmissionFactor) +
-               static_cast<int>(s.metallicFactor == m.metallicFactor) +
-               static_cast<int>(s.roughnessFactor == m.roughnessFactor) +
-               static_cast<int>(s.diffuseRoughness == m.diffuseRoughness) +
-               static_cast<int>(s.transmissionColor == m.transmissionColor) +
-               static_cast<int>(s.transmissionDepth == m.transmissionDepth) +
-               static_cast<int>(s.edgeTint == m.edgeTint) +
-               static_cast<int>(s.shadingModel == m.shadingModel);
+    const auto makeInstances = [] {
+        return std::vector<MeshInstance>{MeshInstance{makeMaterial(1.0F), glm::mat4(1.0F), "alpha"},
+                                         MeshInstance{makeMaterial(1.0F), glm::mat4(1.0F), "beta"},
+                                         MeshInstance{makeMaterial(1.0F), glm::mat4(1.0F), "gamma"}};
     };
-    constexpr int kMaterialFields = 14;
+    std::vector<MeshInstance> instances = makeInstances();
+    const bool applied =
+        pathtracer::scene::applySceneMaterials(instances, "materials/clay.json", {{"beta", "materials/glass.json"}}, assetRoot);
+    PT_EXPECT(ctx, applied && sameMaterial(instances[1].material, glassMaterial), "the override keyed on 'beta' did not reach instance 1");
+    PT_EXPECT(ctx, applied && sameMaterial(instances[0].material, clayMaterial) && sameMaterial(instances[2].material, clayMaterial),
+              "an instance not named by the override lost materialPath's constants");
 
-    const std::vector<MeshInstance> instances = {
-        MeshInstance{makeMaterial(1.0F, glm::vec3(0.04F)), glm::mat4(1.0F), "alpha"},
-        MeshInstance{makeMaterial(1.0F, glm::vec3(0.04F)), glm::mat4(1.0F), "beta"},
-        MeshInstance{makeMaterial(1.0F, glm::vec3(0.04F)), glm::mat4(1.0F), "gamma"}};
-    // Sentinel values, deliberately unlike glass.json in every field: nothing here is rendered, so they need only be distinguishable.
-    PathTraceSettings base = makeSettings(1, 999, /*metallic=*/1.0F);
-    base.bumpStrength = 0.25F;
-    base.roughnessMin = 0.2F;
-    base.roughnessMax = 0.9F;
-    base.diffuseColour = glm::vec3(0.3F, 0.4F, 0.5F);
-    base.ior = 1.33F;
-    // Required, not cosmetic: glass.json declared no abbe then, so it loaded as the 0.0 default makeSettings also uses.
-    base.abbe = 40.0F;
-    base.roughnessFactor = 0.75F;
-    base.diffuseRoughness = 0.6F;
-    base.transmissionColor = glm::vec3(0.5F);
-    base.transmissionDepth = 2.0F;
-    // glass.json omits edgeTint, loading as the [1,1,1] default PathTraceSettings also uses: without a sentinel the non-vacuity gate fires.
-    base.edgeTint = glm::vec3(0.4F, 0.5F, 0.6F);
-    // glass.json is standard, the PathTraceSettings default: Constant is the only sentinel that makes the model's copy observable.
-    base.shadingModel = pathtracer::scene::ShadingModel::Constant;
-
-    bool ok = true;
-    std::cout << "integrator_validate: materialOverrides resolution (3 instances, 1 overridden)\n";
-
-    // Non-vacuity: the base must differ from the override in every field, so each field's copy is independently observable.
-    if (matchingFields(base, *glass) != 0) {
-        std::cerr << "integrator_validate: FAILED material binding setup -- the base settings already "
-                     "agree with glass.json on " << matchingFields(base, *glass)
-                  << " field(s), so a dropped copy of those fields would be invisible here. Change "
-                     "the sentinel values above, or glass.json has moved onto them.\n";
-        finish(ctx, false, "material_binding_resolution failed; see the rows above");
-        return;
-    }
-
-    const std::optional<std::vector<PathTraceSettings>> resolved =
-        pathtracer::scene::resolvePerInstanceSettings(base, instances,
-                                                   {{"beta", "materials/glass.json"}}, assetRoot);
-    if (!resolved.has_value() || resolved->size() != instances.size()) {
-        std::cerr << "integrator_validate: FAILED material binding -- a valid override was rejected, "
-                     "or returned the wrong number of entries.\n";
-        finish(ctx, false, "material_binding_resolution failed; see the rows above");
-        return;
-    }
-    std::cout << "  entry 0/1/2 fields matching glass: " << matchingFields((*resolved)[0], *glass) << '/'
-              << matchingFields((*resolved)[1], *glass) << '/'
-              << matchingFields((*resolved)[2], *glass) << "   (expected 0/" << kMaterialFields
-              << "/0 of " << kMaterialFields << ")\n";
-    if (matchingFields((*resolved)[1], *glass) != kMaterialFields) {
-        std::cerr << "integrator_validate: FAILED material binding -- the override keyed on 'beta' "
-                     "reached instance 1 with only "
-                  << matchingFields((*resolved)[1], *glass) << " of " << kMaterialFields
-                  << " fields carried across. Every field the material file defines must be copied, "
-                     "not merely the ones a render happens to look at.\n";
-        ok = false;
-    }
-    // Zero, not "not all": the base differs from glass everywhere, so a match is a field written onto an instance the override omits.
-    if (matchingFields((*resolved)[0], *glass) != 0 || matchingFields((*resolved)[2], *glass) != 0) {
-        std::cerr << "integrator_validate: FAILED material binding -- an override keyed on 'beta' "
-                     "leaked onto an instance not named by it; instances 0 and 2 matched "
-                  << matchingFields((*resolved)[0], *glass) << " and "
-                  << matchingFields((*resolved)[2], *glass)
-                  << " of glass.json's fields, and must keep the scene-wide material.\n";
-        ok = false;
-    }
-
-    // Both rejection paths: a scene that silently renders the wrong material is worse than one that refuses to start.
-    std::cout << "  the two stderr diagnostics below are expected: they are the function under test "
-                 "refusing a bad scene\n";
-    if (pathtracer::scene::resolvePerInstanceSettings(base, instances,
-                                                   {{"delta", "materials/glass.json"}}, assetRoot)
-            .has_value()) {
-        std::cerr << "integrator_validate: FAILED material binding -- an override key matching no "
-                     "instance name was accepted; a typo must abort the scene, not render it "
-                     "silently with the wrong material.\n";
-        ok = false;
-    }
-    if (pathtracer::scene::resolvePerInstanceSettings(base, instances,
-                                                   {{"beta", "materials/does_not_exist.json"}},
-                                                   assetRoot)
-            .has_value()) {
-        std::cerr << "integrator_validate: FAILED material binding -- an override naming an "
-                     "unloadable material file was accepted.\n";
-        ok = false;
-    }
-    finish(ctx, ok, "material_binding_resolution failed; see the rows above");
-    return;
+    // Every rejection path, each leaving the instances untouched: a scene that renders the wrong material is worse than one that refuses.
+    std::cout << "  the stderr diagnostics below are expected: they are the function under test refusing a bad scene\n";
+    std::vector<MeshInstance> untouched = makeInstances();
+    PT_EXPECT(ctx, !pathtracer::scene::applySceneMaterials(untouched, "materials/clay.json", {{"delta", "materials/glass.json"}}, assetRoot),
+              "an override key matching no instance name was accepted");
+    PT_EXPECT(ctx, !pathtracer::scene::applySceneMaterials(untouched, "materials/clay.json", {{"beta", "materials/does_not_exist.json"}},
+                                                           assetRoot),
+              "an override naming an unloadable material file was accepted");
+    PT_EXPECT(ctx,
+              !pathtracer::scene::applySceneMaterials(untouched, "materials/does_not_exist.json", {}, assetRoot) &&
+                  sameMaterial(untouched[0].material, makeMaterial(1.0F)),
+              "an unloadable materialPath was accepted, or a rejected scene still changed an instance");
 }
 
 // buildQuadLights places a centred quad emitting local -Z by sceneTransform * T * Rz * Ry * Rx, its edges w and h, perpendicular.
@@ -993,7 +909,7 @@ PT_CHECK(quad_light_placement, Fast, Exact) {
     PT_EXPECT(ctx, migrationError <= kTolerance, detail);
 }
 
-// Texture binding: bindSceneTextures fills exactly the named nodes' named slots, atomically, and rejects every bad entry.
+// Texture binding: bindSceneTextures fills exactly the named nodes' named inputs, atomically, and rejects every bad entry.
 PT_CHECK(texture_binding_resolution, Fast, Exact) {
     const std::filesystem::path root = std::filesystem::temp_directory_path();
     const std::string exr = "engine_integrator_scene_texture.exr";
@@ -1003,63 +919,94 @@ PT_CHECK(texture_binding_resolution, Fast, Exact) {
                                                    pathtracer::gfx::ImageRole::Colour);
     // "beta" owns two primitives, as a multi-primitive glTF node does: an override must reach both.
     const auto makeInstances = [] {
-        return std::vector<MeshInstance>{MeshInstance{makeMaterial(1.0F, glm::vec3(0.04F)), glm::mat4(1.0F), "alpha"},
-                                         MeshInstance{makeMaterial(1.0F, glm::vec3(0.04F)), glm::mat4(1.0F), "beta"},
-                                         MeshInstance{makeMaterial(1.0F, glm::vec3(0.04F)), glm::mat4(1.0F), "beta"}};
+        return std::vector<MeshInstance>{MeshInstance{makeMaterial(1.0F), glm::mat4(1.0F), "alpha"},
+                                         MeshInstance{makeMaterial(1.0F), glm::mat4(1.0F), "beta"},
+                                         MeshInstance{makeMaterial(1.0F), glm::mat4(1.0F), "beta"}};
     };
     using pathtracer::config::TextureConfig;
     const auto apply = [&](std::vector<MeshInstance>& instances,
                            const std::map<std::string, std::map<std::string, TextureConfig>>& textures) {
         return pathtracer::scene::bindSceneTextures(instances, textures, root.string());
     };
-    const TextureConfig file{exr, std::nullopt};
+    const TextureConfig file{exr, std::nullopt, 0, std::nullopt};
     const auto texelOf = [](const TextureHandle* handle) { return pathtracer::gfx::sampleTexture(**handle, glm::vec2(0.5F)); };
     const auto channelsOf = [](const TextureHandle* handle) { return pathtracer::gfx::readTexels(**handle).value().channels; };
     const glm::vec3 rgb = texel;
-    // The scalar slot holds R alone: had the cache handed it the RGB lookup, its texel would read (0.25, 0.5, 0.75).
+    // The scalar input holds R alone: had the cache handed it the RGB lookup, its texel would read (0.25, 0.5, 0.75).
     const glm::vec3 red(texel.r, 0.0F, 0.0F);
+    // A packed glTF metallic-roughness map binds a scalar input to G: the channel offset reaches the lookup as R.
+    const glm::vec3 green(texel.g, 0.0F, 0.0F);
 
-    ctx.plan(14);
+    ctx.plan(20);
     PT_EXPECT(ctx, written, "could not write the override EXR");
     std::vector<MeshInstance> instances = makeInstances();
-    PT_EXPECT(ctx, apply(instances, {{"beta", {{"baseColorTexture", file}, {"roughnessTexture", file}}}}),
+    const TextureConfig packed{exr, std::nullopt, 1, std::nullopt};
+    PT_EXPECT(ctx, apply(instances, {{"beta", {{"base_color", file}, {"specular_roughness", file}, {"base_metalness", packed}}}}),
               "a valid override was rejected");
     const TextureHandle* baseColor1 = std::get_if<TextureHandle>(&instances[1].material.baseColor);
     const TextureHandle* baseColor2 = std::get_if<TextureHandle>(&instances[2].material.baseColor);
-    const TextureHandle* roughness1 = std::get_if<TextureHandle>(&instances[1].material.roughness);
-    const TextureHandle* roughness2 = std::get_if<TextureHandle>(&instances[2].material.roughness);
+    const TextureHandle* roughness1 = std::get_if<TextureHandle>(&instances[1].material.specularRoughness);
+    const TextureHandle* roughness2 = std::get_if<TextureHandle>(&instances[2].material.specularRoughness);
+    const TextureHandle* metalness1 = std::get_if<TextureHandle>(&instances[1].material.baseMetalness);
     PT_EXPECT(ctx, baseColor1 && baseColor2 && texelOf(baseColor1) == rgb && texelOf(baseColor2) == rgb,
-              "baseColorTexture did not reach both of beta's primitives");
+              "base_color did not reach both of beta's primitives");
     PT_EXPECT(ctx, roughness1 && roughness2 && texelOf(roughness1) == red && texelOf(roughness2) == red,
-              "roughnessTexture did not reach both of beta's primitives as R alone");
+              "specular_roughness did not reach both of beta's primitives as R alone");
+    PT_EXPECT(ctx, metalness1 && texelOf(metalness1) == green, "base_metalness bound to channel g did not read G");
     // One file in an RGB and a scalar slot: each must hold its own channel count, not whichever open the cache kept first.
     PT_EXPECT(ctx, baseColor1 && roughness1 && channelsOf(baseColor1) == pathtracer::gfx::kRgbChannels &&
                        channelsOf(roughness1) == pathtracer::gfx::kScalarChannels,
-              "a file shared by an RGB and a scalar slot was stored at one channel count for both");
+              "a file shared by an RGB and a scalar input was stored at one channel count for both");
     // One open per (file, channel count, role): beta's two primitives must share one texture, not open a 4K file each.
     PT_EXPECT(ctx, baseColor1 && baseColor2 && roughness1 && roughness2 && *baseColor1 == *baseColor2 &&
                        *roughness1 == *roughness2,
               "beta's primitives hold separate copies of one decoded texture");
-    // An unbound slot stays the neutral constant, not a texture: shading then filters nothing for it.
-    PT_EXPECT(ctx, instances[1].material.normal == Material{}.normal, "an unnamed slot on an overridden node changed");
-    PT_EXPECT(ctx, instances[0].material.baseColor == Material{}.baseColor,
-              "the override leaked onto alpha, which it does not name");
+    // An unbound input stays its constant, not a texture: shading then filters nothing for it.
+    PT_EXPECT(ctx, instances[1].material.specularIor == makeMaterial(1.0F).specularIor && !instances[1].material.geometryNormal.map,
+              "an unnamed input on an overridden node changed");
+    PT_EXPECT(ctx, instances[0].material.baseColor == makeMaterial(1.0F).baseColor, "the override leaked onto alpha, which it does not name");
 
     std::cout << "  the stderr diagnostics below are expected: they are the function under test refusing a bad scene\n";
     std::vector<MeshInstance> untouched = makeInstances();
-    PT_EXPECT(ctx, !apply(untouched, {{"delta", {{"baseColorTexture", file}}}}), "a key naming no node was accepted");
-    // aoTexture is the retired baked-AO slot: AO is ray-traced, so binding it must fail rather than load a map nothing reads.
-    PT_EXPECT(ctx, !apply(untouched, {{"beta", {{"aoTexture", file}}}}), "the retired aoTexture slot was accepted");
-    PT_EXPECT(ctx, !apply(untouched, {{"beta", {{"baseColorTexture", TextureConfig{"does_not_exist.exr", std::nullopt}}}}}),
+    PT_EXPECT(ctx, !apply(untouched, {{"delta", {{"base_color", file}}}}), "a key naming no node was accepted");
+    // A pre-OpenPBR slot name binds nothing: rejected rather than loading a map no input reads.
+    PT_EXPECT(ctx, !apply(untouched, {{"beta", {{"baseColorTexture", file}}}}), "a retired slot name was accepted");
+    PT_EXPECT(ctx, !apply(untouched, {{"beta", {{"base_color", TextureConfig{"does_not_exist.exr", std::nullopt, 0, std::nullopt}}}}}),
               "a missing texture file was accepted");
     // A normal map is data: naming a colour space for it asks for a conversion that would corrupt every direction it encodes.
-    PT_EXPECT(ctx, !apply(untouched, {{"beta", {{"normalTexture", TextureConfig{exr, "ACEScg"}}}}}),
-              "a colour space on a data slot was accepted");
+    PT_EXPECT(ctx, !apply(untouched, {{"beta", {{"geometry_normal", TextureConfig{exr, "ACEScg", 0, std::nullopt}}}}}),
+              "a colour space on a data input was accepted");
+    // A channel picks one of a scalar input's R, G, B; a colour input reads all three, and only geometry_normal takes a bump.
+    PT_EXPECT(ctx, !apply(untouched, {{"beta", {{"base_color", TextureConfig{exr, std::nullopt, 1, std::nullopt}}}}}),
+              "a channel on a colour input was accepted");
+    PT_EXPECT(ctx, !apply(untouched, {{"beta", {{"base_weight", TextureConfig{exr, std::nullopt, 0, pathtracer::config::BumpConfig{exr, 1.0F}}}}}}),
+              "a bump on an input other than geometry_normal was accepted");
+    // Volumetric switches need transport this renderer lacks: binding one must fail, not render as if it were zero.
+    PT_EXPECT(ctx, !apply(untouched, {{"beta", {{"subsurface_weight", file}}}}), "a texture on a volumetric switch was accepted");
     // alpha is valid and sorts first, so a non-atomic implementation would have bound it before beta's missing file failed.
-    PT_EXPECT(ctx, !apply(untouched, {{"alpha", {{"baseColorTexture", file}}}, {"beta", {{"baseColorTexture", TextureConfig{"missing.exr", std::nullopt}}}}}),
+    PT_EXPECT(ctx, !apply(untouched, {{"alpha", {{"base_color", file}}}, {"beta", {{"base_color", TextureConfig{"missing.exr", std::nullopt, 0, std::nullopt}}}}}),
               "a scene with one bad entry was accepted");
-    PT_EXPECT(ctx, untouched[0].material.baseColor == Material{}.baseColor,
+    PT_EXPECT(ctx, untouched[0].material.baseColor == makeMaterial(1.0F).baseColor,
               "a rejected scene still rebound alpha: validation must finish before any instance changes");
+
+    // A texel past base_color's [0, 1] is an encoding excursion: bound with a warning, then clamped into the range at every lookup.
+    const std::string excursion = "engine_integrator_scene_excursion.exr";
+    const std::string nonFinite = "engine_integrator_scene_nonfinite.exr";
+    const bool excursionWritten =
+        pathtracer::gfx::writeExr((root / excursion).string(), {1, 1, pathtracer::gfx::kRgbChannels, {1.5F, -0.25F, 0.5F}},
+                                  pathtracer::gfx::ImageRole::Colour);
+    const bool nonFiniteWritten = pathtracer::gfx::writeExr(
+        (root / nonFinite).string(), {1, 1, pathtracer::gfx::kRgbChannels, {std::numeric_limits<float>::infinity(), 0.0F, 0.0F}},
+        pathtracer::gfx::ImageRole::Colour);
+    std::vector<MeshInstance> clamped = makeInstances();
+    const bool excursionBound =
+        excursionWritten && apply(clamped, {{"alpha", {{"base_color", TextureConfig{excursion, std::nullopt, 0, std::nullopt}}}}});
+    const glm::vec3 resolved = resolveInputs(clamped[0].material, glm::vec2(0.5F), {}, glm::vec3(1.0F)).baseColor;
+    PT_EXPECT(ctx, excursionBound && resolved == glm::vec3(1.0F, 0.0F, 0.5F), "an out-of-range base_color texel was not clamped into [0, 1]");
+    PT_EXPECT(ctx, nonFiniteWritten && !apply(untouched, {{"alpha", {{"base_color", TextureConfig{nonFinite, std::nullopt, 0, std::nullopt}}}}}),
+              "a texture with a non-finite texel was bound");
+    std::filesystem::remove(root / excursion);
+    std::filesystem::remove(root / nonFinite);
     std::filesystem::remove(root / exr);
 }
 
@@ -1076,13 +1023,13 @@ PT_CHECK(transport_aov_partition, Slow, Exact) {
         float metallic;
         float transmission;
         int maxBounces;
-        float abbe;
+        float abbe;  // 0: no dispersion
     };
     // The dispersive row is here because the hero channel is the one mechanism writing different values into channels of one throughput.
     const std::array<PartitionCase, 7> cases{{
         {"quad diffuse (rough 1.0)", Geometry::Quad, 1.0F, 0.0F, 0.0F, 1, 0.0F},
         {"quad glossy dielectric (rough 0.35)", Geometry::Quad, 0.35F, 0.0F, 0.0F, 1, 0.0F},
-        {"quad rough conductor (rough 0.5)", Geometry::Quad, 0.5F, 1.0F, 0.0F, 2, 0.0F},
+        {"quad rough metal (rough 0.5)", Geometry::Quad, 0.5F, 1.0F, 0.0F, 2, 0.0F},
         {"corner diffuse (rough 1.0)", Geometry::Corner, 1.0F, 0.0F, 0.0F, 4, 0.0F},
         {"slab smooth glass (rough 0.02)", Geometry::Slab, 0.02F, 0.0F, 1.0F, 8, 0.0F},
         {"slab rough glass (rough 0.4)", Geometry::Slab, 0.4F, 0.0F, 1.0F, 8, 0.0F},
@@ -1095,23 +1042,23 @@ PT_CHECK(transport_aov_partition, Slow, Exact) {
 
     std::cout << "integrator_validate: transport buckets partition beauty (showSky off)\n";
     for (const PartitionCase& testCase : cases) {
-        const TestScene scene =
-            testCase.geometry == Geometry::Slab
-                ? makeSlabScene(testCase.roughness, glm::vec3(0.04F), 0.5F)
-                : testCase.geometry == Geometry::Corner
-                      ? makeCornerScene(testCase.roughness, glm::vec3(0.04F))
-                      : makeQuadScene(testCase.roughness, glm::vec3(0.04F));
+        const TestScene geometry = testCase.geometry == Geometry::Slab     ? makeSlabScene(testCase.roughness, 0.5F)
+                                   : testCase.geometry == Geometry::Corner ? makeCornerScene(testCase.roughness)
+                                                                           : makeQuadScene(testCase.roughness);
+        const TestScene scene = withSurface(geometry, [&](Material& material) {
+            material.baseMetalness = testCase.metallic;
+            material.transmissionWeight = testCase.transmission;
+            material.transmissionDispersionScale = testCase.abbe > 0.0F ? 1.0F : 0.0F;
+            material.transmissionDispersionAbbeNumber = testCase.abbe > 0.0F ? testCase.abbe : 20.0F;
+        });
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         if (!accel.has_value()) {
             std::cerr << "integrator_validate: FAILED to build Embree scene for " << testCase.name << '\n';
             finish(ctx, false, "transport_aov_partition failed; see the rows above");
             return;
         }
-        PathTraceSettings settings =
-            makeSettings(testCase.maxBounces, 999, testCase.metallic, testCase.transmission);
-        settings.abbe = testCase.abbe;
         const pathtracer::scene::PathTraceResult result =
-            renderPass(scene, env, settings, *accel, pool, /*showSky=*/false);
+            renderPass(scene, env, makeSettings(testCase.maxBounces, 999), *accel, pool, /*showSky=*/false);
 
         float worstGap = 0.0F;
         float worstBeauty = 0.0F;
@@ -1174,11 +1121,11 @@ void appendLightGeometry(TestScene& scene, const pathtracer::scene::QuadLight& l
     scene.shadingTriangles.push_back(ShadingTriangle{p00, p10, p11, instanceIndex});
     scene.shadingTriangles.push_back(ShadingTriangle{p00, p11, p01, instanceIndex});
     scene.instances.push_back(
-        MeshInstance{makeMaterial(1.0F, glm::vec3(0.0F)), glm::mat4(1.0F), "light"});
+        MeshInstance{makeMaterial(1.0F), glm::mat4(1.0F), "light"});
     instanceLightIndex.push_back(quadIndex);
 }
 
-// Like renderPassPerInstance, but for scenes carrying real light-set state: an explicit environment pointer and emitter instances/quads.
+// Like renderPass, but for scenes carrying real light-set state: an explicit environment pointer and emitter instances/quads.
 pathtracer::scene::PathTraceResult renderPassWithLights(const TestScene& scene,
                                                      const std::vector<int>& instanceLightIndex,
                                                      const std::vector<pathtracer::scene::QuadLight>& quads,
@@ -1189,11 +1136,10 @@ pathtracer::scene::PathTraceResult renderPassWithLights(const TestScene& scene,
     const std::atomic<std::uint64_t> generation{1};
     pathtracer::scene::PathTraceResult result = pathtracer::scene::makePathTraceResult(kImageSize, kImageSize);
     const pathtracer::scene::LightSet lights(env, /*envRotationDegrees=*/glm::vec3(0.0F), /*envExposure=*/1.0F, quads);
-    const std::vector<PathTraceSettings> perInstanceSettings(scene.instances.size(), settings);
     pathtracer::debug::PassStats stats;  // required by renderPathTraced; this tool checks radiance, not throughput
     pathtracer::scene::renderPathTraced(makeCamera(), accel, scene.shadingTriangles, scene.instances,
                                      instanceLightIndex, lights, kImageSize, kImageSize, showSky,
-                                     settings, perInstanceSettings, /*scrambleSeed=*/7U, /*sampleBase=*/0,
+                                     settings, /*scrambleSeed=*/7U, /*sampleBase=*/0,
                                      /*sampleCount=*/settings.samplesPerPixel, generation,
                                      /*requestedGeneration=*/1U, pool, stats, result);
     return result;
@@ -1218,7 +1164,7 @@ PT_CHECK(rough_transmission_tint, Slow, Exact) {
 
     std::cout << "integrator_validate: rough transmission tint at transmissionDepth 0 (ior 1.5, one interface)\n";
     for (float roughness : roughnesses) {
-        TestScene scene = makeQuadScene(roughness, glm::vec3(0.04F));
+        TestScene scene = withSurface(makeQuadScene(roughness), transmissive);
         std::vector<int> instanceLightIndex(scene.instances.size(), -1);
         appendLightGeometry(scene, light, /*quadIndex=*/0, instanceLightIndex);
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
@@ -1229,12 +1175,10 @@ PT_CHECK(rough_transmission_tint, Slow, Exact) {
             return;
         }
         const auto render = [&](const glm::vec3& colour) {
-            PathTraceSettings settings =
-                makeSettings(kBounces, 999, /*metallic=*/0.0F, /*transmission=*/1.0F);
-            settings.transmissionColor = colour;
-            settings.transmissionDepth = 0.0F;
-            return centreMean(renderPassWithLights(scene, instanceLightIndex, quads, /*env=*/nullptr,
-                                                    settings, *accel, pool, /*showSky=*/false)
+            TestScene tinted = scene;
+            tinted.instances[0].material.transmissionColor = colour;
+            return centreMean(renderPassWithLights(tinted, instanceLightIndex, quads, /*env=*/nullptr, makeSettings(kBounces, 999), *accel,
+                                                    pool, /*showSky=*/false)
                                    .beauty);
         };
         const glm::vec3 opaqueTint = render(glm::vec3(0.0F));
@@ -1283,13 +1227,6 @@ PT_CHECK(rough_transmission_tint, Slow, Exact) {
     return;
 }
 
-// Exactly zero specular at every angle: ior=1 zeroes fresnelDielectric, diffuseRoughness=0 is EON's Lambertian limit, so f = baseColor/pi.
-PathTraceSettings makeLambertianSettings(int maxBounces) {
-    PathTraceSettings settings = makeSettings(maxBounces, 999, /*metallic=*/0.0F, /*transmission=*/0.0F);
-    settings.ior = 1.0F;
-    return settings;
-}
-
 // Lambert (1760) / Baum, Rushmeier & Winget 1989 polygon form factor, summing over EDGES rather than Girard's internal angles.
 float lambertPolygonIrradiance(const std::array<glm::vec3, 4>& vertices, const glm::vec3& p,
                                 const glm::vec3& n, float radiance) {
@@ -1309,7 +1246,7 @@ float lambertPolygonIrradiance(const std::array<glm::vec3, 4>& vertices, const g
 }
 
 // The receiver: makeQuadScene's own z=0 quad facing +Z, reused so every analytic reference below describes the same surface.
-TestScene makeLambertianFloor() { return makeQuadScene(/*roughness=*/1.0F, glm::vec3(0.0F)); }
+TestScene makeLambertianFloor() { return withSurface(makeQuadScene(/*roughness=*/1.0F), indexMatched); }
 
 // A one-sided quad light facing -Z at the receiver, offset in x so its non-emitting back face stays out of the camera's view cone.
 pathtracer::scene::QuadLight makeOverheadLight(bool twoSided = false) {
@@ -1352,7 +1289,7 @@ PT_CHECK(quad_light_irradiance_and_occlusion, Slow, Statistical) {
         const std::vector<pathtracer::scene::QuadLight> quads{testCase.light};
         const glm::vec3 lo = centreMean(renderPassWithLights(scene, instanceLightIndex, quads,
                                                               /*env=*/nullptr,
-                                                              makeLambertianSettings(0), *accel, pool,
+                                                              makeSettings(0, 999), *accel, pool,
                                                               /*showSky=*/false)
                                              .beauty);
 
@@ -1389,7 +1326,7 @@ PT_CHECK(quad_light_irradiance_and_occlusion, Slow, Statistical) {
         }
         const std::vector<pathtracer::scene::QuadLight> quads{light};
         const glm::vec3 lo = centreMean(renderPassWithLights(scene, instanceLightIndex, quads,
-                                                              /*env=*/nullptr, makeLambertianSettings(0),
+                                                              /*env=*/nullptr, makeSettings(0, 999),
                                                               *accel, pool, /*showSky=*/false)
                                              .beauty);
         std::cout << "  one-sided (light behind, facing away)   rendered [" << lo.x << ", " << lo.y
@@ -1423,8 +1360,7 @@ PT_CHECK(quad_light_irradiance_and_occlusion, Slow, Statistical) {
         scene.worldTriangles.push_back(Triangle{w0.position, w2.position, w3.position});
         scene.shadingTriangles.push_back(ShadingTriangle{w0, w1, w2, wallInstance});
         scene.shadingTriangles.push_back(ShadingTriangle{w0, w2, w3, wallInstance});
-        scene.instances.push_back(
-            MeshInstance{makeMaterial(1.0F, glm::vec3(0.0F)), glm::mat4(1.0F), "wall"});
+        scene.instances.push_back(MeshInstance{makeLambertianFloor().instances[0].material, glm::mat4(1.0F), "wall"});
         instanceLightIndex.push_back(-1);
 
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
@@ -1435,7 +1371,7 @@ PT_CHECK(quad_light_irradiance_and_occlusion, Slow, Statistical) {
         }
         const std::vector<pathtracer::scene::QuadLight> quads{light};
         const glm::vec3 lo = centreMean(renderPassWithLights(scene, instanceLightIndex, quads,
-                                                              /*env=*/nullptr, makeLambertianSettings(0),
+                                                              /*env=*/nullptr, makeSettings(0, 999),
                                                               *accel, pool, /*showSky=*/false)
                                              .beauty);
         std::cout << "  occluded (opaque wall between light and receiver)   rendered [" << lo.x << ", "
@@ -1472,7 +1408,7 @@ PT_CHECK(quad_light_visibility_on_curved_receiver, Slow, Exact) {
                                     {"coarse (32x16, equator edge 0.196)", 32, 16}}};
 
     for (const Row& row : rows) {
-        TestScene scene = makeSphereScene(/*roughness=*/1.0F, glm::vec3(0.0F), row.slices, row.stacks);
+        TestScene scene = withSurface(makeSphereScene(/*roughness=*/1.0F, row.slices, row.stacks), indexMatched);
         std::vector<int> instanceLightIndex(scene.instances.size(), -1);
         appendLightGeometry(scene, light, /*quadIndex=*/0, instanceLightIndex);
 
@@ -1485,7 +1421,7 @@ PT_CHECK(quad_light_visibility_on_curved_receiver, Slow, Exact) {
         const std::vector<pathtracer::scene::QuadLight> quads{light};
         // Whole frame, not centreMean: (0,0,1) is a vertex, where the terminator offset vanishes and the failure is weakest.
         const pathtracer::scene::PathTraceResult result = renderPassWithLights(
-            scene, instanceLightIndex, quads, /*env=*/nullptr, makeLambertianSettings(0), *accel, pool,
+            scene, instanceLightIndex, quads, /*env=*/nullptr, makeSettings(0, 999), *accel, pool,
             /*showSky=*/false);
         const float shadow = regionMean(result.shadow, 0, 0, kImageSize, kImageSize).x;
         std::cout << "  " << row.name << "   shadow " << shadow << "\n";
@@ -1552,7 +1488,7 @@ PT_CHECK(quad_light_inverse_square, Slow, Statistical) {
         const std::vector<pathtracer::scene::QuadLight> quads{row.light};
         const glm::vec3 lo = centreMean(renderPassWithLights(scene, instanceLightIndex, quads,
                                                               /*env=*/nullptr,
-                                                              makeLambertianSettings(0), *accel, pool,
+                                                              makeSettings(0, 999), *accel, pool,
                                                               /*showSky=*/false)
                                              .beauty);
         const float renderedIrradiance = lo.x * kPi;
@@ -1642,7 +1578,7 @@ float aoTolerance(float expected) {
 bool checkAoRow(const char* label, const TestScene& scene, const EnvironmentMap& env,
                  float aoMaxDistance, float expected, EmbreeAccel& accel,
                  pathtracer::scene::ThreadPool& pool) {
-    PathTraceSettings settings = makeLambertianSettings(/*maxBounces=*/0);
+    PathTraceSettings settings = makeSettings(/*maxBounces=*/0, 999);
     settings.samplesPerPixel = kAoSamplesPerPixel;
     settings.aoMaxDistance = aoMaxDistance;
     const pathtracer::gfx::HdrImage& ao = renderPass(scene, env, settings, accel, pool, true).ao;
@@ -1672,7 +1608,7 @@ PT_CHECK(ambient_occlusion_analytic, Slow, Statistical) {
     std::cout << "integrator_validate: ambient occlusion vs analytic cosine-weighted visibility\n";
     const EnvironmentMap env = makeUniformEnvironment();
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
-    const TestScene openScene = makeQuadScene(1.0F, glm::vec3(0.04F));
+    const TestScene openScene = makeQuadScene(1.0F);
     std::optional<EmbreeAccel> openAccel = EmbreeAccel::build(openScene.worldTriangles);
     if (!openAccel.has_value()) {
         std::cerr << "integrator_validate: FAILED to build Embree scene for the unoccluded AO plane\n";
@@ -1682,7 +1618,7 @@ PT_CHECK(ambient_occlusion_analytic, Slow, Statistical) {
     // The first row initialises the accumulator; later rows keep `check(...) && ok`, so no row is ever short-circuited away.
     bool ok = checkAoRow("unoccluded plane", openScene, env, kAoWallDistance, 1.0F, *openAccel, pool);
 
-    const TestScene corner = makeCornerScene(1.0F, glm::vec3(0.04F), kAoWallDistance);
+    const TestScene corner = makeCornerScene(1.0F, kAoWallDistance);
     std::optional<EmbreeAccel> cornerAccel = EmbreeAccel::build(corner.worldTriangles);
     if (!cornerAccel.has_value()) {
         std::cerr << "integrator_validate: FAILED to build Embree scene for the AO corner\n";
@@ -1708,7 +1644,7 @@ PT_CHECK(ambient_occlusion_distance_bound, Slow, Statistical) {
     const EnvironmentMap env = makeUniformEnvironment();
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
 
-    const TestScene corner = makeCornerScene(1.0F, glm::vec3(0.04F), kAoWallDistance);
+    const TestScene corner = makeCornerScene(1.0F, kAoWallDistance);
     std::optional<EmbreeAccel> accel = EmbreeAccel::build(corner.worldTriangles);
     if (!accel.has_value()) {
         std::cerr << "integrator_validate: FAILED to build Embree scene for the AO distance bound\n";
@@ -1734,13 +1670,13 @@ PT_CHECK(alpha_is_filtered_primary_coverage, Fast, Exact) {
     // A pixel's support reaches kFilterRadius = 1.5 px from its centre c + 0.5: columns 0-6 see only the plane, 9-15 only the sky.
     constexpr int kLastOpaque = 6;
     constexpr int kFirstClear = 9;
-    TestScene scene = makeTwoInstanceScene(1.0F, glm::vec3(0.04F));
+    TestScene scene = makeTwoInstanceScene(1.0F);
     scene.worldTriangles.resize(2);
     scene.shadingTriangles.resize(2);
     scene.instances.resize(1);
     std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
     const EnvironmentMap env = makeUniformEnvironment();
-    PathTraceSettings settings = makeSettings(1, 1, 0.0F);
+    PathTraceSettings settings = makeSettings(1, 1);
     settings.samplesPerPixel = 16;
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     const pathtracer::scene::PathTraceResult hidden = renderPass(scene, env, settings, *accel, pool, /*showSky=*/false);
@@ -1802,33 +1738,48 @@ PT_CHECK(primary_hits_filter_minified_textures, Fast, Exact) {
     TestScene scene;
     scene.worldTriangles = {Triangle{v0.position, v1.position, v2.position}, Triangle{v0.position, v2.position, v3.position}};
     scene.shadingTriangles = {ShadingTriangle{v0, v1, v2, 0}, ShadingTriangle{v0, v2, v3, 0}};
-    Material material = makeMaterial(1.0F, glm::vec3(0.04F));
-    material.baseColor = tools::fixtures::makeTexture(kChecker, kChecker, pathtracer::gfx::kRgbChannels, checker);
+    const TextureHandle checkerTexture = tools::fixtures::makeTexture(kChecker, kChecker, pathtracer::gfx::kRgbChannels, checker);
+    // Emission alone, so Beauty is the filtered emission_color lookup itself, splatted; the G-buffer's Albedo reads base_color.
+    Material material = makeMaterial(1.0F);
+    material.baseWeight = 0.0F;
+    material.specularWeight = 0.0F;
+    material.emissionLuminance = 1.0F;
+    material.emissionColor = checkerTexture;
     scene.instances = {MeshInstance{material, glm::mat4(1.0F), ""}};
+    TestScene albedoScene = scene;
+    albedoScene.instances[0].material = makeMaterial(1.0F);
+    albedoScene.instances[0].material.baseColor = checkerTexture;
+    // The same checker on a lobe-shaping input, which the classification point-samples: each pixel reads one texel, 0 or 1.
+    std::vector<float> scalarChecker;
+    for (std::size_t texel = 0; texel < checker.size(); texel += pathtracer::gfx::kRgbChannels) {
+        scalarChecker.push_back(checker[texel]);
+    }
+    albedoScene.instances[0].material.specularRoughness =
+        tools::fixtures::makeTexture(kChecker, kChecker, pathtracer::gfx::kScalarChannels, std::move(scalarChecker));
     std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
     const EnvironmentMap env = makeUniformEnvironment();
-    // Constant emits the filtered base colour and nothing else, so Beauty is the lookup itself, splatted.
-    PathTraceSettings settings = makeSettings(0, 1, 0.0F);
-    settings.shadingModel = pathtracer::scene::ShadingModel::Constant;
+    PathTraceSettings settings = makeSettings(0, 1);
     settings.samplesPerPixel = 16;
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     const pathtracer::scene::PathTraceResult traced = renderPass(scene, env, settings, *accel, pool, /*showSky=*/false);
-    const std::vector<PathTraceSettings> perInstance(1, settings);
     pathtracer::scene::GBuffer gbuffer;
-    pathtracer::scene::renderGBuffer(camera, camera, *accel, scene.shadingTriangles, scene.instances, perInstance,
+    pathtracer::scene::renderGBuffer(camera, camera, *accel, albedoScene.shadingTriangles, albedoScene.instances, settings.lookaheadDistance,
                                      pathtracer::scene::computeInstanceBounds(scene.shadingTriangles, 1), kImageSize, kImageSize, pool,
                                      gbuffer);
     // 16 texels per stratum select levels 3-4, every one exactly 0.5; the blend and the splat's (sum w) fl(1/sum w) round a few ulp.
     const float bound = 8.0F * std::numeric_limits<float>::epsilon() * 0.5F;
     float worstBeauty = 0.0F;
     float worstAlbedo = 0.0F;
+    int unfilteredRoughness = 0;
     for (std::size_t pixel = 0; pixel < static_cast<std::size_t>(kImageSize) * kImageSize; ++pixel) {
         const glm::vec3 beauty = traced.beauty.rgb(pixel);
         const glm::vec3 albedo = gbuffer.albedo.rgb(pixel);
         worstBeauty = std::max({worstBeauty, std::abs(beauty.r - 0.5F), std::abs(beauty.g - 0.5F), std::abs(beauty.b - 0.5F)});
         worstAlbedo = std::max({worstAlbedo, std::abs(albedo.r - 0.5F), std::abs(albedo.g - 0.5F), std::abs(albedo.b - 0.5F)});
+        // A point lookup near a texel centre reads within a sliver of 0 or 1; the footprint's mean is 0.5.
+        unfilteredRoughness += std::abs(gbuffer.roughness.texels[pixel] - 0.5F) > 0.25F ? 1 : 0;
     }
-    ctx.plan(2);
+    ctx.plan(3);
     char detail[160];
     // Point lookups of a 0/1 checker would leave 16 samples' mean about 1/8 from 0.5: these bounds hold only if bounce 0 filtered.
     std::snprintf(detail, sizeof(detail), "Beauty is %.3g from the checker's mean 0.5, over %.3g", static_cast<double>(worstBeauty),
@@ -1837,6 +1788,9 @@ PT_CHECK(primary_hits_filter_minified_textures, Fast, Exact) {
     std::snprintf(detail, sizeof(detail), "Albedo is %.3g from the checker's mean 0.5, over %.3g", static_cast<double>(worstAlbedo),
                   static_cast<double>(bound));
     PT_EXPECT(ctx, worstAlbedo <= bound, detail);
+    std::snprintf(detail, sizeof(detail), "%d of %d pixels read specular_roughness as a single texel; a lobe-shaping input was filtered",
+                  unfilteredRoughness, kImageSize * kImageSize);
+    PT_EXPECT(ctx, unfilteredRoughness == kImageSize * kImageSize, detail);
 }
 
 // Radiance only inside one end column, 1/8 px clear of its edges: the column across the seam is lit if, and only if, the filter wraps.
@@ -1869,7 +1823,7 @@ PT_CHECK(omnidirectional_film_filter_reaches_across_the_seam, Fast, Exact) {
         const std::vector<pathtracer::scene::QuadLight> noQuads;
         const pathtracer::scene::LightSet lights(&env, /*envRotationDegrees=*/glm::vec3(0.0F), /*envExposure=*/1.0F, noQuads);
         pathtracer::debug::PassStats stats;
-        pathtracer::scene::renderPathTraced(camera, *accel, {}, {}, {}, lights, kWidth, kHeight, /*showSky=*/true, settings, {}, 7U,
+        pathtracer::scene::renderPathTraced(camera, *accel, {}, {}, {}, lights, kWidth, kHeight, /*showSky=*/true, settings, 7U,
                                             /*sampleBase=*/0, settings.samplesPerPixel, generation, /*requestedGeneration=*/1U, pool,
                                             stats, result);
         // The column across the seam, within the filter's 1.5 px of the band, and the next one in, beyond it.

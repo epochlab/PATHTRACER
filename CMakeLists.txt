@@ -246,7 +246,7 @@ target_include_directories(albedo_table PRIVATE include)
 pathtracer_target_defaults(albedo_table)
 target_link_libraries(albedo_table PRIVATE glm::glm)
 
-# Measured conductor (lambda, n, k) to a material JSON's reflectivity/edgeTint. No -march=native or IPO, for albedo_table's reason.
+# Measured conductor (lambda, n, k) to a metal JSON's base_color/specular_color. No -march=native or IPO, for albedo_table's reason.
 add_library(metal_fit_core OBJECT tools/metal_fit.cpp)
 target_include_directories(metal_fit_core PUBLIC include tools)
 pathtracer_target_defaults(metal_fit_core)

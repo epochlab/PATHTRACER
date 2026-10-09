@@ -3,6 +3,42 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## OpenPBR Surface: parameterisation and base substrate
+
+The surface was a hybrid of glTF metallic-roughness, a Gulbrandsen conductor and per-instance `PathTraceSettings`
+multipliers. It is now OpenPBR Surface v1.1.1: one set of inputs under their specification names, a base substrate that
+mixes complete metal and dielectric bases, and emission. Evidence is in `results/openpbr/pr1`.
+
+- feat!: material JSON holds OpenPBR inputs by their specification names (`base_color`, `specular_roughness`, ...), each
+  at its specification default when omitted. Unknown keys are refused, so a pre-OpenPBR file fails loudly. Every constant
+  is checked against its hard range; `subsurface_weight` and `transmission_scatter` accept only zero, as both need
+  volumetric transport.
+- feat!: scene `textures` bind any OpenPBR input by name: a path, or `{path, colorSpace, channel, bump}`. A bound texture
+  replaces the constant. `channel` reads G or B of a packed glTF metallic-roughness map. `geometry_normal` takes a normal
+  map, a bump `{path, height}` in metres, or both. A non-finite texel is refused; a texel outside its input's range is
+  reported at bind and clamped at lookup, as shipped textures overshoot by quantisation or gamut.
+- feat!: `base_metalness` mixes the two bases linearly, so metal is weighted once. The metal is F82-tint (Hoffman 2023):
+  F0 = `base_weight * base_color`, tint `specular_color`, scaled by `specular_weight`. Its Kulla-Conty F_avg is closed form,
+  and its albedo is exact through a third table channel, E = F0 a + b - k c.
+- feat!: the dielectric's `specular_weight` modulates its index per the specification, and `specular_color` tints its
+  reflection from above only. The glossy-diffuse layer couples by Kelemen's reciprocal albedo scaling with the exact-Fresnel
+  escape table, replacing the Schlick split's Fresnel-ratio rescale. The translucent base's multiple-scattering split is a
+  property of the interface, so every lobe is linear in its mix weight.
+- feat!: lobe selection is one energy-proportional rule for every strategy, with no clamped probabilities.
+- feat!: emission is `emission_luminance * emission_color`, one scene-linear unit being 1 cd/m^2. A hit adds it at MIS
+  weight 1, as surfaces are not in the light set. The constant shading model is retired: `materials/emission.json` is its
+  OpenPBR form, and a vertex with a zero BSDF ends the path.
+- feat!: dispersion is V_d = `transmission_dispersion_abbe_number / transmission_dispersion_scale`; scale 0 is none.
+  Transmittance through the interior is `transmission_color^(t / transmission_depth)`, exact at colour 0 with no log.
+- refactor!: `PathTraceSettings` holds integrator limits only; per-instance materials live on `MeshInstance` and
+  `perInstanceSettings` is gone from the integrator, driver, G-buffer, headless renderer and viewer.
+- refactor: `tools/albedo_table.cpp` bakes the F82 channel and widens the index-ratio axis to OpenPBR's [1/3, 3].
+  `tools/metal_fit` fits measured metals to (`base_color`, `specular_color`), exact at mu = 1 and 1/7; chrome is refit.
+- test: `bsdf_validate` adds `metal_fresnel`, `fractional_metal_is_linear`, `specular_weight_modulates_f0`,
+  `specular_color_tints_reflection_only` and `glossy_diffuse_coupling`, and checks the F82 table channel. `io_validate`
+  generates its float-overflow rows from the OpenPBR input table. `integrator_validate` checks bindings, channel offsets,
+  clamping, refusal of non-finite texels, emission and per-input footprint classification.
+
 ## MIP-filtered primary hits from ray differentials
 
 Every lookup read MIP level 0 at a point, so a texture minified far below a pixel aliased in the G-buffer's single

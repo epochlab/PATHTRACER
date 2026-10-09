@@ -1,12 +1,9 @@
 {
-    "diffuseColour": [1.0, 1.0, 1.0],
-    "roughnessFactor": 0.02,
-    "roughnessMin": 0.01,
-    "roughnessMax": 1.0,
-    "ior": 1.5168,
-    "abbe": 64.17,
-    "transmissionFactor": 1.0,
-    "bumpStrength": 0.0,
-    "transmissionColor": [0.96, 0.98, 1.0],
-    "transmissionDepth": 0.4
+    "specular_roughness": 0.02,
+    "specular_ior": 1.5168,
+    "transmission_weight": 1.0,
+    "transmission_color": [0.96, 0.98, 1.0],
+    "transmission_depth": 0.4,
+    "transmission_dispersion_scale": 1.0,
+    "transmission_dispersion_abbe_number": 64.17
 }

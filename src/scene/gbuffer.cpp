@@ -223,23 +223,23 @@ std::optional<glm::vec3> nearBoxEdge(const std::vector<ViewBox>& boxes, const Pi
 
 // Resolves every surface field for one hit pixel: tracePath's bounce-0 sampling calls, never lighting or BSDF. Returns worldPos.
 glm::vec3 shadeHit(GBuffer& result, int x, int y, const Hit& hit, const PixelRay& pixel, const ShadingTriangle& triangle,
-              const Material& material, const PathTraceSettings& settings) {
+              const Material& material, float lookaheadDistance) {
     const ShadingVertex shading = interpolateShading(triangle, hit.u, hit.v);
     const pathtracer::gfx::TextureFootprint footprint = primaryHitFootprint(triangle, pixel.ray, hit.t, pixel.dirPerPixel);
-    const ShadingFrame frame = buildShadingFrame(triangle, shading, material, settings);
-    const BsdfParams params = resolveBsdfParams(material, shading.uv, footprint, shading.colour, settings, std::nullopt);
+    const ShadingFrame frame = buildShadingFrame(triangle, shading, material);
+    const OpenPbrInputs<Constant> inputs = resolveInputs(material, shading.uv, footprint, shading.colour);
     writeTexel(result.depth, x, y, hit.t);
-    writeTexel(result.lookahead, x, y, std::clamp(1.0F - (hit.t / settings.lookaheadDistance), 0.0F, 1.0F));
+    writeTexel(result.lookahead, x, y, std::clamp(1.0F - (hit.t / lookaheadDistance), 0.0F, 1.0F));
     writeTexel(result.worldPos, x, y, shading.position);
     writeTexel(result.uv, x, y, glm::fract(shading.uv));
     writeTexel(result.normal, x, y, frame[2]);
     writeTexel(result.geomNormal, x, y, glm::normalize(shading.normal));
-    writeTexel(result.albedo, x, y, params.baseColor);
-    writeTexel(result.metallic, x, y, params.metallic);
-    writeTexel(result.roughness, x, y, params.roughness);
+    writeTexel(result.albedo, x, y, inputs.baseWeight * inputs.baseColor);
+    writeTexel(result.metallic, x, y, inputs.baseMetalness);
+    writeTexel(result.roughness, x, y, inputs.specularRoughness);
     writeTexel(result.tangent, x, y, frame[0]);
     writeTexel(result.objectId, x, y, falseColorForId(triangle.instanceIndex));
-    writeTexel(result.iorAov, x, y, settings.ior);
+    writeTexel(result.iorAov, x, y, modulatedIor(inputs, std::nullopt));
     if (nearTriangleEdge(triangle, pixel)) {
         writeTexel(result.wireframe, x, y, kWireframeColor);
     }
@@ -251,7 +251,7 @@ struct GBufferScene {
     const EmbreeAccel& accel;
     const std::vector<ShadingTriangle>& shadingTriangles;
     const std::vector<MeshInstance>& instances;
-    const std::vector<PathTraceSettings>& perInstanceSettings;
+    float lookaheadDistance;
 };
 
 // x_now - x_previous by one projection of one point on both sides, so identical cameras give exactly zero; a miss moves by rotation.
@@ -282,8 +282,7 @@ void renderPixel(GBuffer& result, const GBufferView& view, const GBufferScene& s
     if (hit) {
         const ShadingTriangle& triangle = scene.shadingTriangles[static_cast<std::size_t>(hit->triangleIndex)];
         const auto instance = static_cast<std::size_t>(triangle.instanceIndex);
-        seen = glm::vec4(shadeHit(result, x, y, *hit, *pixel, triangle, scene.instances[instance].material,
-                                  scene.perInstanceSettings[instance]),
+        seen = glm::vec4(shadeHit(result, x, y, *hit, *pixel, triangle, scene.instances[instance].material, scene.lookaheadDistance),
                          1.0F);
     }
     writeMotion(result, view, x, y, seen);
@@ -324,8 +323,7 @@ void clearRow(GBuffer& result, int y) {
 
 void renderGBuffer(const Camera& camera, const Camera& previousCamera, const EmbreeAccel& accel,
                    const std::vector<ShadingTriangle>& shadingTriangles, const std::vector<MeshInstance>& instances,
-                   const std::vector<PathTraceSettings>& perInstanceSettings,
-                   const std::vector<AabbBounds>& instanceBounds, int width, int height, ThreadPool& threadPool,
+                   float lookaheadDistance, const std::vector<AabbBounds>& instanceBounds, int width, int height, ThreadPool& threadPool,
                    GBuffer& result) {
     ensureLanes(result, width, height);
     ++result.generation;
@@ -342,7 +340,7 @@ void renderGBuffer(const Camera& camera, const Camera& previousCamera, const Emb
             view.boxes.push_back(viewBox(instanceBounds[i], camera.position(), falseColorForId(static_cast<int>(i))));
         }
     }
-    const GBufferScene scene{accel, shadingTriangles, instances, perInstanceSettings};
+    const GBufferScene scene{accel, shadingTriangles, instances, lookaheadDistance};
     threadPool.parallelFor(height, [&](int y) {
         clearRow(result, y);
         for (int x = 0; x < width; ++x) {

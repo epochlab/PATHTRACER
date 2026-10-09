@@ -281,7 +281,7 @@ bool writeDisplayPng(const std::string& path, const HdrImage& image) {
 }
 
 std::shared_ptr<const ImageTexture> openTexture(const std::string& path, int channels, ImageRole role, TextureWrap wrap,
-                                                const std::optional<std::string>& colorSpace) {
+                                                const std::optional<std::string>& colorSpace, int channelOffset) {
     const std::unique_ptr<OIIO::ImageInput> input = OIIO::ImageInput::open(path);
     if (!input) {
         std::cerr << "openTexture: " << OIIO::geterror() << '\n';
@@ -295,10 +295,12 @@ std::shared_ptr<const ImageTexture> openTexture(const std::string& path, int cha
     if (!run) {
         return nullptr;
     }
-    if (run->count < channels) {
-        std::cerr << "openTexture: " << path << " has " << run->count << " of the " << channels << " R, G, B channels its slot reads\n";
+    if (run->count < channelOffset + channels) {
+        std::cerr << "openTexture: " << path << " has " << run->count << " of the " << channelOffset + channels
+                  << " R, G, B channels its input reads\n";
         return nullptr;
     }
+    const int first = run->first + channelOffset;
     if (role == ImageRole::Data && colorSpace) {
         std::cerr << "openTexture: " << path << " is read as data, so it takes no colour space\n";
         return nullptr;
@@ -311,14 +313,14 @@ std::shared_ptr<const ImageTexture> openTexture(const std::string& path, int cha
     // A tiled, MIP-mapped EXR already in the working space is what the cache serves best: read in place at its own format.
     if (inWorkingSpace && spec.tile_width > 0 && input->seek_subimage(0, 1)) {
         textureSystem().invalidate(OIIO::ustring(path));
-        return textureOf(path, run->first, channels, wrap);
+        return textureOf(path, first, channels, wrap);
     }
     // Anything else is made into one, maketx's auto-tx: a scanline EXR through the cache decodes whole on first touch, serialised per file.
     const std::filesystem::path derived = derivedTexturePath(OIIO::Strutil::fmt::format(
         "{}|{}|{}|{}+{}|{}|{}|{}", std::filesystem::absolute(path).string(), std::filesystem::last_write_time(path).time_since_epoch().count(),
-        std::filesystem::file_size(path), run->first, channels, source.value_or("data"), kOcioSceneColorSpace, kOcioConfigName));
+        std::filesystem::file_size(path), first, channels, source.value_or("data"), kOcioSceneColorSpace, kOcioConfigName));
     if (!std::filesystem::exists(derived)) {
-        std::optional<HdrImage> image = readChannels(*input, path, run->first, channels);
+        std::optional<HdrImage> image = readChannels(*input, path, first, channels);
         // OIIO's in-cache transform reads only tiled files, at the tile's own format, under its default config: converted here instead.
         if (!image || (!inWorkingSpace && !toWorkingSpace(*source, path, *image)) || !allFinite(image->texels, path) ||
             !writeDerivedTexture(derived, *image, storageFor(spec.format, *image))) {

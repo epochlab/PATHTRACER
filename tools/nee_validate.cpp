@@ -48,13 +48,13 @@ using tools::fixtures::makeUniformEnvironment;
 using tools::fixtures::referenceLo;
 using tools::fixtures::sampleUniformHemisphere;
 
-BsdfParams makeParams(float roughness, float metallic) {
-    const glm::vec3 baseColor(1.0F);  // worst case: full white albedo
-    const glm::vec3 f0 = glm::mix(glm::vec3(0.04F), baseColor, metallic);
-    return BsdfParams{baseColor,   metallic, roughness, f0, /*edgeTint=*/glm::vec3(1.0F),
-                       /*ior=*/1.5F, /*transmissionFactor=*/0.0F, /*diffuseRoughness=*/0.0F,
-                       pathtracer::scene::eonAlbedoInversion(baseColor, 0.0F),
-                       /*transmissionTint=*/glm::vec3(1.0F)};
+// A white base, worst case for albedo, at the given metalness and specular_roughness; every other input at its OpenPBR default.
+BsdfParams makeParams(float roughness, float metalness) {
+    pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant> inputs;
+    inputs.baseColor = glm::vec3(1.0F);
+    inputs.baseMetalness = metalness;
+    inputs.specularRoughness = roughness;
+    return tools::fixtures::paramsOf(inputs);
 }
 
 // Dim background with one bright patch: a uniform map gives linear CDFs, where a mis-scaled Jacobian or an off-by-one bin would pass.
