@@ -35,11 +35,12 @@
 
 namespace {
 
-using pathtracer::scene::BsdfParams;
+using pathtracer::scene::Constant;
 using pathtracer::scene::EnvironmentMap;
 using pathtracer::scene::LightSample;
 using pathtracer::scene::LightSet;
 using pathtracer::scene::LobeType;
+using pathtracer::scene::OpenPbrInputs;
 using pathtracer::scene::QuadLight;
 using pathtracer::scene::Sampler;
 
@@ -49,12 +50,12 @@ using tools::fixtures::referenceLo;
 using tools::fixtures::sampleUniformHemisphere;
 
 // A white base, worst case for albedo, at the given metalness and specular_roughness; every other input at its OpenPBR default.
-BsdfParams makeParams(float roughness, float metalness) {
-    pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant> inputs;
+OpenPbrInputs<Constant> makeParams(float roughness, float metalness) {
+    OpenPbrInputs<Constant> inputs;
     inputs.baseColor = glm::vec3(1.0F);
     inputs.baseMetalness = metalness;
     inputs.specularRoughness = roughness;
-    return tools::fixtures::paramsOf(inputs);
+    return inputs;
 }
 
 // Dim background with one bright patch: a uniform map gives linear CDFs, where a mis-scaled Jacobian or an off-by-one bin would pass.
@@ -152,7 +153,7 @@ PT_CHECK(environment_pdf_tracks_stored_luminance, Fast, Exact) {
 }
 
 // MIS-combined NEE + BSDF estimator mirroring tracePath: power heuristic, and with no geometry both strategies reach the environment.
-float misCombinedLo(const BsdfParams& params, const glm::vec3& wo, const EnvironmentMap& env,
+float misCombinedLo(const OpenPbrInputs<Constant>& params, const glm::vec3& wo, const EnvironmentMap& env,
                      int sampleCount, std::uint32_t seed) {
     glm::vec3 accum(0.0F);
     for (int i = 0; i < sampleCount; ++i) {
@@ -168,7 +169,7 @@ float misCombinedLo(const BsdfParams& params, const glm::vec3& wo, const Environ
                 const float lightPdf2 = lightSample.pdf * lightSample.pdf;
                 const float bsdfPdf2 = bsdfPdf * bsdfPdf;
                 const float misWeight = lightPdf2 / (lightPdf2 + bsdfPdf2);
-                accum += bsdfValue * lightSample.direction.z * misWeight / lightSample.pdf;
+                accum += bsdfValue * misWeight / lightSample.pdf;
             }
         }
 
@@ -342,7 +343,7 @@ PT_CHECK(mis_agreement_environment, Slow, Statistical) {
                 char label[96];
                 std::snprintf(label, sizeof(label), "env r=%g m=%g n=%g", static_cast<double>(roughness),
                               static_cast<double>(metallic), static_cast<double>(ndotV));
-                const BsdfParams params = makeParams(roughness, metallic);
+                const OpenPbrInputs<Constant> params = makeParams(roughness, metallic);
                 const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
 
                 const std::uint64_t rowSeed = ctx.subSeed(label);
@@ -444,22 +445,22 @@ PT_CHECK(quad_light_solid_angle, Slow, Statistical) {
     PT_EXPECT(ctx, rect->solidAngle > 0.0F, "a valid rectangle must subtend positive solid angle");
 }
 
-// referenceLo's method over the directions the quad subtends: Lo = integral of evaluateBsdf * Le * cos, with Le constant where visible.
-float referenceLoQuad(const BsdfParams& params, const glm::vec3& wo, const QuadLight& quad,
+// referenceLo's method over the directions the quad subtends: Lo = integral of the cosine-weighted evaluateBsdf * Le, Le constant.
+float referenceLoQuad(const OpenPbrInputs<Constant>& params, const glm::vec3& wo, const QuadLight& quad,
                        const glm::vec3& p, int sampleCount, std::mt19937& rng) {
     constexpr float kUniformPdf = 1.0F / (2.0F * kPi);
     glm::vec3 accum(0.0F);
     for (int i = 0; i < sampleCount; ++i) {
         const glm::vec3 wi = sampleUniformHemisphere(rng);
         if (directionHitsQuad(quad, p, wi)) {
-            accum += pathtracer::scene::evaluateBsdf(params, wo, wi) * wi.z * quad.radiance / kUniformPdf;
+            accum += pathtracer::scene::evaluateBsdf(params, wo, wi) * quad.radiance / kUniformPdf;
         }
     }
     return std::max({accum.x, accum.y, accum.z}) / static_cast<float>(sampleCount);
 }
 
 // Mirrors misCombinedLo with LightSet({quad}) and directionHitsQuad for "always reaches it": a BSDF ray can miss a finite rectangle.
-float misCombinedLoQuad(const BsdfParams& params, const glm::vec3& wo, const QuadLight& quad,
+float misCombinedLoQuad(const OpenPbrInputs<Constant>& params, const glm::vec3& wo, const QuadLight& quad,
                          const glm::vec3& p, int sampleCount, std::uint32_t seed) {
     const std::vector<QuadLight> quads{quad};
     const LightSet lights(nullptr, glm::vec3(0.0F), 1.0F, quads);
@@ -476,8 +477,7 @@ float misCombinedLoQuad(const BsdfParams& params, const glm::vec3& wo, const Qua
                 const float lightPdf2 = lightSample->pdf * lightSample->pdf;
                 const float bsdfPdf2 = bsdfPdf * bsdfPdf;
                 const float misWeight = lightPdf2 / (lightPdf2 + bsdfPdf2);
-                accum += bsdfValue * lightSample->direction.z * misWeight * lightSample->radiance /
-                         lightSample->pdf;
+                accum += bsdfValue * misWeight * lightSample->radiance / lightSample->pdf;
             }
         }
 
@@ -517,7 +517,7 @@ PT_CHECK(mis_agreement_quad_light, Slow, Statistical) {
                 char label[96];
                 std::snprintf(label, sizeof(label), "quad r=%g m=%g n=%g", static_cast<double>(roughness),
                               static_cast<double>(metallic), static_cast<double>(ndotV));
-                const BsdfParams params = makeParams(roughness, metallic);
+                const OpenPbrInputs<Constant> params = makeParams(roughness, metallic);
                 const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
 
                 const std::uint64_t rowSeed = ctx.subSeed(label);

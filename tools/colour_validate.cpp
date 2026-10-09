@@ -13,7 +13,6 @@
 #include "conductor_reference.h"
 #include "pathtracer/config/scene_config.h"
 #include "pathtracer/scene/bsdf.h"
-#include "pathtracer/scene/gbuffer_shading.h"
 #include "pathtracer/scene/cie.h"
 #include "pathtracer/scene/cone_space.h"
 #include "colorchecker.h"
@@ -92,9 +91,9 @@ PT_CHECK(chrome_matches_measured_chromium, Fast, Exact) {
         }
         return;
     }
-    const pathtracer::scene::BsdfParams params = pathtracer::scene::bsdfParamsOf(*material, std::nullopt);
-    const glm::vec3 normal = pathtracer::scene::fresnelAtViewAngle(params, 1.0F);
-    const glm::vec3 grazing = pathtracer::scene::fresnelAtViewAngle(params, static_cast<float>(tools::reference::kMuBar));
+    const pathtracer::scene::BsdfClosure closure = pathtracer::scene::makeBsdfClosure(*material, glm::vec3(0.0F, 0.0F, 1.0F));
+    const glm::vec3 normal = pathtracer::scene::fresnelAtViewAngle(closure, 1.0F);
+    const glm::vec3 grazing = pathtracer::scene::fresnelAtViewAngle(closure, static_cast<float>(tools::reference::kMuBar));
     char detail[200];
     for (int c = 0; c < 3; ++c) {
         std::snprintf(detail, sizeof(detail), "chrome.json base_color[%d] %.9g != metal_fit %.9g; re-run metal_fit", c,

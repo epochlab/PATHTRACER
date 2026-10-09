@@ -29,12 +29,6 @@ struct LineProximity {
 // A positive dispersion scale on a transmissive base: the path must commit to one wavelength there.
 [[nodiscard]] bool isDispersive(const OpenPbrInputs<Constant>& inputs);
 
-// The dielectric's index ratio: heroChannel's wavelength disperses specular_ior, then specular_weight modulates it (OpenPBR).
-[[nodiscard]] float modulatedIor(const OpenPbrInputs<Constant>& inputs, std::optional<int> heroChannel);
-
-// The base substrate's BSDF, its dielectric at modulatedIor.
-[[nodiscard]] BsdfParams bsdfParamsOf(const OpenPbrInputs<Constant>& inputs, std::optional<int> heroChannel);
-
 // emission_luminance * emission_color at a hit: scene-linear radiance, one unit a luminance of 1 cd/m^2; both inputs filtered.
 [[nodiscard]] glm::vec3 emittedRadiance(const Material& material, glm::vec2 uv, const pathtracer::gfx::TextureFootprint& footprint);
 

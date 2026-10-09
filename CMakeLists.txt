@@ -149,12 +149,14 @@ add_library(pathtracer_core STATIC
     src/scene/bsdf.cpp
     src/scene/camera.cpp
     src/scene/embree_accel.cpp
+    src/scene/eon.cpp
     src/scene/environment_map.cpp
     src/scene/gbuffer_shading.cpp
     src/scene/gltf_loader.cpp
     src/scene/lens.cpp
     src/scene/light.cpp
     src/scene/material_binding.cpp
+    src/scene/microfacet.cpp
     src/scene/path_trace_driver.cpp
     src/scene/path_tracer.cpp
     src/scene/gbuffer.cpp

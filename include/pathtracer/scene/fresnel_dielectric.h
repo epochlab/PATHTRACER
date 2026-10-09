@@ -4,7 +4,7 @@
 #include <cmath>
 #include <utility>
 
-// The dielectric interface predicate, shared by bsdf.cpp and the albedo-table generator, which cannot link it. Header-only.
+// The dielectric interface predicate, shared by microfacet.cpp and the albedo-table generator, which cannot link it. Header-only.
 namespace pathtracer::scene {
 
 // Snell in cos^2 (Walter 2007 eq. 40); never forms 1-cos^2, which rounds to 1.0F below cos 2^-12 and falsely reports TIR. r<=1 cannot TIR.
