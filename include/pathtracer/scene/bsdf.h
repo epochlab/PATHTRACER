@@ -48,6 +48,15 @@ struct MsTransmitRow {
     float scale;
 };
 
+// OpenPBR's thin film over a base slab's Fresnel: weight 0 where absent or zero-thick; ambient-side index 1, or the coat's n_c with C.
+struct FilmLayer {
+    float weight = 0.0F;   // thin_film_weight, mixing the filmed and bare Fresnel
+    float thicknessNm;
+    float ior;             // thin_film_ior
+    float coatWeight;      // the medium on the film's ambient side is a statistical mix of the ambient and the coat
+    float coatIor;
+};
+
 // OpenPBR's metal slab at one wo: GGX with the F82-tint Fresnel (Hoffman 2023) and its Kulla-Conty lobe (Kulla & Conty 2017).
 struct ConductorSlab {
     float roughness;
@@ -59,6 +68,10 @@ struct ConductorSlab {
     float msScaleWo;       // (1 - E(mu_o)) / (pi * (1 - Eavg)), the wo half of the Kulla-Conty lobe
     float singleEnergy;    // single-scattering albedo at wo, channel mean, the selection mass before weighting
     float multiEnergy;
+    glm::vec3 albedo;      // E(mu_o) per channel, single plus multiple scattering
+    FilmLayer film;
+    glm::vec3 filmEta;     // the conductor's complex index under the film, Gulbrandsen 2014 from base_color and specular_color
+    glm::vec3 filmKappa;
 };
 
 // A GGX dielectric interface at one wo (OpenPBR's specular slab): reflection, refraction and their escape-table multiple scattering.
@@ -77,12 +90,15 @@ struct DielectricSlab {
     EscapeRow row;           // forward eta etaI/etaT
     MsTransmitRow reflectShape;   // escape-deficit shape at the forward eta, sampling the multiple scattering leaving on wo's side
     MsTransmitRow transmitShape;  // the same at the reciprocal eta, for multiple scattering leaving refracted
-    float reflectSingle;     // R_ss(mu_o); F(mu_o) when smooth
-    float transmitSingle;    // T_ss(mu_o); 1 - F(mu_o) when smooth
+    glm::vec3 reflectSingle;   // R_ss(mu_o), the film's through the kernel rule; F(mu_o) when smooth
+    glm::vec3 transmitSingle;  // T_ss(mu_o) of the bare interface, a selection mass; 1 - F(mu_o) when smooth, the delta's value
     float multiReflect;      // the escape deficit at mu_o times the reflected share of the mean escape, Ravg/(Ravg + Tavg)
     float multiReflectScaleWo;  // multiReflect / (pi * (1 - Eavg)), the wo half of the reflected multiple-scattering lobe
     float multiTransmit;     // the same deficit's transmitted share
     float etaSq;             // (etaI/etaT)^2, the radiance compression refraction carries
+    FilmLayer film;
+    float baseIor;           // the base's own index n_b, the film's substrate from outside and its incident medium from inside
+    bool fromBase;           // wo inside the base: the film is met from below
 };
 
 // OpenPBR's diffuse slab at one wo: EON (Portsmouth, Kutz, Hill 2025) with its clipped-LTC/uniform sampling state.

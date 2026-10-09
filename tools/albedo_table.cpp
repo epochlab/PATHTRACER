@@ -8,7 +8,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <iostream>
+#include <limits>
 #include <atomic>
 #include <string>
 #include <thread>
@@ -44,6 +46,11 @@ constexpr double kEtaMax = 3.0;
 
 // Gauss-Legendre nodes per transmit panel, in phi and each psi panel; verifyTransmit reports the residual against a doubled rule.
 constexpr int kTransmitNodes = 48;
+
+// The reflection kernel's Gauss rules over x = dot(wo, h): E[F] for any Fresnel of x, the thin film's among them, on a coarse grid.
+constexpr int kKernelRoughnessRes = 32;
+constexpr int kKernelMuRes = 32;
+constexpr int kKernelOrder = 8;
 
 double smithRadical(double cosTheta, double alpha) {
     const double alpha2 = alpha * alpha;
@@ -102,16 +109,10 @@ GaussLegendre gaussLegendre(int n) {
     return quadrature;
 }
 
-Split reflectAlbedo(double mu, double alpha, const GaussLegendre& phiRule, const GaussLegendre& psiRule) {
-    // alpha = 0 is the smooth mirror, every facet the macro normal: E(F) = F(mu) exactly, where the measure below degenerates.
-    if (alpha == 0.0) {
-        const double fc = std::pow(1.0 - mu, 5.0);
-        return {1.0 - fc, fc, mu * fc * (1.0 - mu)};
-    }
+// Every node of the reflect measure at (mu, alpha > 0): visit(weight, dot(wo, h)), the weight carrying D, G2 and the Jacobian.
+template <typename Visit>
+void forEachReflectNode(double mu, double alpha, const GaussLegendre& phiRule, const GaussLegendre& psiRule, Visit visit) {
     const double sinTv = std::sqrt(std::max(0.0, 1.0 - (mu * mu)));
-    double a = 0.0;
-    double b = 0.0;
-    double c = 0.0;
     // phi is even about 0, so half the circle is integrated and doubled; the panels meet at pi/2, resolving the |cos phi| < mu layer.
     for (int panel = 0; panel < 2; ++panel) {
         const double phiBase = 0.5 * kPi * panel;
@@ -125,16 +126,29 @@ Split reflectAlbedo(double mu, double alpha, const GaussLegendre& phiRule, const
                 const double thetaH = std::atan(alpha * std::tan(psi));
                 const double woDotH = radius * std::cos(thetaH - delta);
                 const double wiZ = radius * std::cos((2.0 * thetaH) - delta);
-                const double weight = phiRule.weight[p] * psiRule.weight[s] * psiMax *
-                                       (woDotH / std::cos(thetaH)) * smithG2OverCosO(mu, wiZ, alpha) *
-                                       std::sin(psi) * std::cos(psi);
-                const double fc = std::pow(std::clamp(1.0 - woDotH, 0.0, 1.0), 5.0);
-                a += weight * (1.0 - fc);
-                b += weight * fc;
-                c += weight * woDotH * std::pow(std::clamp(1.0 - woDotH, 0.0, 1.0), 6.0);
+                visit(phiRule.weight[p] * psiRule.weight[s] * psiMax * (woDotH / std::cos(thetaH)) * smithG2OverCosO(mu, wiZ, alpha) *
+                          std::sin(psi) * std::cos(psi),
+                      woDotH);
             }
         }
     }
+}
+
+Split reflectAlbedo(double mu, double alpha, const GaussLegendre& phiRule, const GaussLegendre& psiRule) {
+    // alpha = 0 is the smooth mirror, every facet the macro normal: E(F) = F(mu) exactly, where the measure below degenerates.
+    if (alpha == 0.0) {
+        const double fc = std::pow(1.0 - mu, 5.0);
+        return {1.0 - fc, fc, mu * fc * (1.0 - mu)};
+    }
+    double a = 0.0;
+    double b = 0.0;
+    double c = 0.0;
+    forEachReflectNode(mu, alpha, phiRule, psiRule, [&](double weight, double woDotH) {
+        const double fc = std::pow(std::clamp(1.0 - woDotH, 0.0, 1.0), 5.0);
+        a += weight * (1.0 - fc);
+        b += weight * fc;
+        c += weight * woDotH * std::pow(std::clamp(1.0 - woDotH, 0.0, 1.0), 6.0);
+    });
     // The 1/mu is inside smithG2OverCosO, which lets mu = 0 be a node; never 0/0, psiMax being unreachable on panel one and 0 on panel two.
     return {a, b, c};
 }
@@ -272,6 +286,10 @@ struct AlbedoTable {
     std::vector<float> msCdf;
     std::vector<float> msTransmitDensity;  // [roughnessIndex][muIndex][etaIndex], the transmitted twin, unnormalised
     std::vector<float> msTransmitCdf;
+    std::vector<float> kernelNode;    // [roughnessIndex][muIndex][order], the reflect kernel's Gauss nodes in x = dot(wo, h)
+    std::vector<float> kernelWeight;
+    std::vector<float> averageNode;   // the Gauss rule of 2 mu dmu on [0, 1], the hemispherical average's
+    std::vector<float> averageWeight;
 };
 
 // The reflect table's mu axis, uniform in sqrt(mu); node 0 is mu = 0 itself, where E = 1 exactly and buildReflect asserts it on every row.
@@ -465,6 +483,202 @@ void buildTransmitMultipleScatteringShape(AlbedoTable& table) {
     }
 }
 
+
+// --- Gauss rules of positive measures: E[F] = sum w_i F(x_i), exact for polynomials of degree 2n - 1 (Golub & Welsch 1969).
+struct GaussRule {
+    std::array<double, kKernelOrder> node{};
+    std::array<double, kKernelOrder> weight{};
+};
+
+// Eigen-decomposition of a small symmetric matrix by cyclic Jacobi rotations (Golub & Van Loan 8.5), converged to double precision.
+void symmetricEigen(std::array<std::array<double, kKernelOrder>, kKernelOrder>& a, std::array<std::array<double, kKernelOrder>, kKernelOrder>& v) {
+    for (int i = 0; i < kKernelOrder; ++i) {
+        for (int j = 0; j < kKernelOrder; ++j) {
+            v[i][j] = i == j ? 1.0 : 0.0;
+        }
+    }
+    for (int sweep = 0; sweep < 64; ++sweep) {
+        double off = 0.0;
+        double norm = 0.0;
+        for (int i = 0; i < kKernelOrder; ++i) {
+            for (int j = 0; j < kKernelOrder; ++j) {
+                (j > i ? off : norm) += a[i][j] * a[i][j];
+            }
+        }
+        // Converged once the off-diagonal mass is below double precision of the matrix's own: rotations past it only rotate rounding.
+        const double epsilon = std::numeric_limits<double>::epsilon();
+        if (off <= epsilon * epsilon * norm) {
+            return;
+        }
+        for (int p = 0; p < kKernelOrder; ++p) {
+            for (int q = p + 1; q < kKernelOrder; ++q) {
+                if (a[p][q] == 0.0) {
+                    continue;
+                }
+                const double theta = (a[q][q] - a[p][p]) / (2.0 * a[p][q]);
+                const double t = std::copysign(1.0, theta) / (std::abs(theta) + std::sqrt((theta * theta) + 1.0));
+                const double c = 1.0 / std::sqrt((t * t) + 1.0);
+                const double sn = t * c;
+                for (int k = 0; k < kKernelOrder; ++k) {
+                    const double akp = a[k][p];
+                    const double akq = a[k][q];
+                    a[k][p] = (c * akp) - (sn * akq);
+                    a[k][q] = (sn * akp) + (c * akq);
+                }
+                for (int k = 0; k < kKernelOrder; ++k) {
+                    const double apk = a[p][k];
+                    const double aqk = a[q][k];
+                    a[p][k] = (c * apk) - (sn * aqk);
+                    a[q][k] = (sn * apk) + (c * aqk);
+                }
+                for (int k = 0; k < kKernelOrder; ++k) {
+                    const double vkp = v[k][p];
+                    const double vkq = v[k][q];
+                    v[k][p] = (c * vkp) - (sn * vkq);
+                    v[k][q] = (sn * vkp) + (c * vkq);
+                }
+            }
+        }
+    }
+    std::cerr << "albedo_table: Jacobi rotations did not converge\n";
+    std::exit(EXIT_FAILURE);
+}
+
+// A discrete positive measure's Gauss rule: Lanczos (Gragg & Harrod 1984) to the Jacobi matrix, nodes its eigenvalues, weights v_0^2.
+GaussRule gaussRuleOf(const std::vector<double>& x, const std::vector<double>& w) {
+    double total = 0.0;
+    for (const double weight : w) {
+        total += weight;
+    }
+    const std::size_t n = x.size();
+    std::vector<std::vector<double>> q(1, std::vector<double>(n));
+    for (std::size_t j = 0; j < n; ++j) {
+        q[0][j] = std::sqrt(w[j] / total);
+    }
+    std::array<double, kKernelOrder> alpha{};
+    std::array<double, kKernelOrder> beta{};
+    int order = 0;
+    for (; order < kKernelOrder; ++order) {
+        std::vector<double> v(n);
+        for (std::size_t j = 0; j < n; ++j) {
+            v[j] = x[j] * q[static_cast<std::size_t>(order)][j];
+        }
+        // Two passes of Gram-Schmidt against every earlier vector: classical Lanczos alone loses orthogonality as nodes converge.
+        for (int pass = 0; pass < 2; ++pass) {
+            for (std::size_t k = 0; k < q.size(); ++k) {
+                double dot = 0.0;
+                for (std::size_t j = 0; j < n; ++j) {
+                    dot += q[k][j] * v[j];
+                }
+                if (pass == 0 && k == static_cast<std::size_t>(order)) {
+                    alpha[static_cast<std::size_t>(order)] = dot;
+                }
+                for (std::size_t j = 0; j < n; ++j) {
+                    v[j] -= dot * q[k][j];
+                }
+            }
+        }
+        double norm = 0.0;
+        for (const double value : v) {
+            norm += value * value;
+        }
+        norm = std::sqrt(norm);
+        // The measure's support is exhausted to double precision: the rule is exact with the nodes found so far.
+        if (order + 1 == kKernelOrder || !(norm > 1e-14 * std::max(1.0, std::abs(alpha[static_cast<std::size_t>(order)])))) {
+            ++order;
+            break;
+        }
+        beta[static_cast<std::size_t>(order) + 1] = norm;
+        for (double& value : v) {
+            value /= norm;
+        }
+        q.push_back(v);
+    }
+    std::array<std::array<double, kKernelOrder>, kKernelOrder> jacobi{};
+    std::array<std::array<double, kKernelOrder>, kKernelOrder> vectors{};
+    for (int i = 0; i < order; ++i) {
+        jacobi[i][i] = alpha[static_cast<std::size_t>(i)];
+        if (i + 1 < order) {
+            jacobi[i][i + 1] = jacobi[i + 1][i] = beta[static_cast<std::size_t>(i) + 1];
+        }
+    }
+    symmetricEigen(jacobi, vectors);
+    GaussRule rule;
+    std::vector<std::pair<double, double>> nodes;
+    for (int i = 0; i < order; ++i) {
+        nodes.emplace_back(jacobi[i][i], total * vectors[0][i] * vectors[0][i]);
+    }
+    std::sort(nodes.begin(), nodes.end());
+    for (int i = 0; i < kKernelOrder; ++i) {
+        const auto& [node, weight] = nodes[static_cast<std::size_t>(std::min(i, order - 1))];
+        rule.node[static_cast<std::size_t>(i)] = node;
+        rule.weight[static_cast<std::size_t>(i)] = i < order ? weight : 0.0;
+    }
+    return rule;
+}
+
+// The reflect kernel's rule at (mu, alpha): alpha = 0 is the mirror, its measure the single point x = mu, E[F] = F(mu).
+GaussRule kernelRule(double mu, double alpha, const GaussLegendre& phiRule, const GaussLegendre& psiRule) {
+    if (alpha == 0.0) {
+        GaussRule rule;
+        rule.node.fill(mu);
+        rule.weight[0] = 1.0;
+        return rule;
+    }
+    std::vector<double> x;
+    std::vector<double> w;
+    forEachReflectNode(mu, alpha, phiRule, psiRule, [&](double weight, double woDotH) {
+        x.push_back(woDotH);
+        w.push_back(weight);
+    });
+    return gaussRuleOf(x, w);
+}
+
+// The worst |rule - measure| over two probes per node of the grid: a dielectric Fresnel, smooth, and cos(6 pi x), a film's fringes.
+double buildKernel(AlbedoTable& table, int nodes) {
+    const GaussLegendre rule = gaussLegendre(nodes);
+    const auto cells = static_cast<std::size_t>(kKernelRoughnessRes) * kKernelMuRes * kKernelOrder;
+    table.kernelNode.assign(cells, 0.0F);
+    table.kernelWeight.assign(cells, 0.0F);
+    std::vector<double> worstByRow(kKernelRoughnessRes, 0.0);
+    parallelRows(kKernelRoughnessRes, [&](int ri) {
+        const double alpha = gridAlpha(ri, kKernelRoughnessRes);
+        for (int mi = 0; mi < kKernelMuRes; ++mi) {
+            const double t = static_cast<double>(mi) / (kKernelMuRes - 1);
+            const double mu = t * t;
+            const GaussRule gauss = kernelRule(mu, alpha, rule, rule);
+            const auto base = static_cast<std::size_t>(((ri * kKernelMuRes) + mi) * kKernelOrder);
+            for (int k = 0; k < kKernelOrder; ++k) {
+                table.kernelNode[base + static_cast<std::size_t>(k)] = static_cast<float>(gauss.node[static_cast<std::size_t>(k)]);
+                table.kernelWeight[base + static_cast<std::size_t>(k)] = static_cast<float>(gauss.weight[static_cast<std::size_t>(k)]);
+            }
+            if (alpha == 0.0) {
+                continue;
+            }
+            for (const auto& probe : {std::function<double(double)>([](double x) { return fresnelDielectric(static_cast<float>(x), 1.0F, 1.5F); }),
+                                      std::function<double(double)>([](double x) { return std::cos(6.0 * kPi * x); })}) {
+                double exact = 0.0;
+                forEachReflectNode(mu, alpha, rule, rule, [&](double weight, double woDotH) { exact += weight * probe(woDotH); });
+                double ruled = 0.0;
+                for (int k = 0; k < kKernelOrder; ++k) {
+                    ruled += gauss.weight[static_cast<std::size_t>(k)] * probe(gauss.node[static_cast<std::size_t>(k)]);
+                }
+                worstByRow[static_cast<std::size_t>(ri)] = std::max(worstByRow[static_cast<std::size_t>(ri)], std::abs(ruled - exact));
+            }
+        }
+    });
+    // The hemispherical average 2 int F(mu) mu dmu as a rule of its own, from a fine Gauss-Legendre discretisation of 2 mu dmu.
+    std::vector<double> x(rule.node.begin(), rule.node.end());
+    std::vector<double> w(rule.node.size());
+    for (std::size_t j = 0; j < w.size(); ++j) {
+        w[j] = 2.0 * rule.weight[j] * rule.node[j];
+    }
+    const GaussRule average = gaussRuleOf(x, w);
+    table.averageNode.assign(average.node.begin(), average.node.end());
+    table.averageWeight.assign(average.weight.begin(), average.weight.end());
+    return *std::max_element(worstByRow.begin(), worstByRow.end());
+}
+
 // Largest disagreement between the shipped reflect rule and one at doubled order, over the grid and means: the rule's own measured error.
 struct Residual {
     double value;
@@ -558,7 +772,7 @@ void writeArray(std::ofstream& out, const char* name, const std::vector<float>& 
 }
 
 bool writeInc(const std::string& path, const AlbedoTable& table, double residual, int transmitNodes,
-              double transmitResidual) {
+              double transmitResidual, double kernelResidual) {
     std::ofstream out(path);
     if (!out) {
         std::cerr << "albedo_table: cannot write " << path << "\n";
@@ -591,7 +805,10 @@ bool writeInc(const std::string& path, const AlbedoTable& table, double residual
            "// kMsTransmitDensity/kMsTransmitCdf are the same shape for the transmitted twin, carrying the escape\n"
            "// table's eta axis and stored UNNORMALISED: microfacet.cpp blends four rows over (roughness, eta) and\n"
            "// divides by the blended total, so the sampled shape is the raw-deficit interpolation escapeAlbedo\n"
-           "// performs and a numerically zero row cannot contribute a unit-mass shape of amplified noise.\n";
+           "// performs and a numerically zero row cannot contribute a unit-mass shape of amplified noise.\n"
+           "// kKernelNode/kKernelWeight are the reflect kernel's Gauss rules over x = dot(wo, h) on a roughness x sqrt(mu) grid:\n"
+           "// E[F] = sum w F(x) for any Fresnel F, exact to degree 2n - 1; worst probe residual "
+        << kernelResidual << ". kAverageNode/kAverageWeight are the rule of 2 mu dmu.\n";
     out << "\nconstexpr int kAlbedoRoughnessRes = " << kAlbedoRoughnessRes << ";\n"
         << "constexpr int kAlbedoMuRes = " << kAlbedoMuRes << ";\n"
         << "constexpr int kMsReflectMuRes = " << kMsReflectMuRes << ";\n"
@@ -599,7 +816,10 @@ bool writeInc(const std::string& path, const AlbedoTable& table, double residual
         << "constexpr int kTransmitMuRes = " << kTransmitMuRes << ";\n"
         << "constexpr int kEtaRes = " << kEtaRes << ";\n"
         << "constexpr float kEtaMin = " << etaMin << ";\n"
-        << "constexpr float kEtaMax = " << etaMax << ";\n";
+        << "constexpr float kEtaMax = " << etaMax << ";\n"
+        << "constexpr int kKernelRoughnessRes = " << kKernelRoughnessRes << ";\n"
+        << "constexpr int kKernelMuRes = " << kKernelMuRes << ";\n"
+        << "constexpr int kKernelOrder = " << kKernelOrder << ";\n";
     writeArray(out, "kAlbedoA", table.a);
     writeArray(out, "kAlbedoB", table.b);
     writeArray(out, "kAlbedoC", table.c);
@@ -618,6 +838,10 @@ bool writeInc(const std::string& path, const AlbedoTable& table, double residual
     writeArray(out, "kMsReflectCdf", table.msCdf);
     writeArray(out, "kMsTransmitDensity", table.msTransmitDensity);
     writeArray(out, "kMsTransmitCdf", table.msTransmitCdf);
+    writeArray(out, "kKernelNode", table.kernelNode);
+    writeArray(out, "kKernelWeight", table.kernelWeight);
+    writeArray(out, "kAverageNode", table.averageNode);
+    writeArray(out, "kAverageWeight", table.averageWeight);
     return out.good();
 }
 
@@ -656,7 +880,9 @@ int main(int argc, char** argv) {
     const double transmitResidual = verifyTransmit(table, transmitNodes);
     buildMultipleScatteringShape(table);
     buildTransmitMultipleScatteringShape(table);
-    if (!writeInc(outPath, table, residual.value, transmitNodes, transmitResidual)) {
+    const double kernelResidual = buildKernel(table, phiNodes);
+    std::cout << "albedo_table: kernel Gauss rules of order " << kKernelOrder << ", worst probe residual " << kernelResidual << "\n";
+    if (!writeInc(outPath, table, residual.value, transmitNodes, transmitResidual, kernelResidual)) {
         return EXIT_FAILURE;
     }
     std::cout << "albedo_table: wrote " << outPath << " (reflect " << kAlbedoRoughnessRes << "x" << kAlbedoMuRes

@@ -21,6 +21,7 @@
 #include "conductor_reference.h"
 #include "fixtures.h"
 #include "pathtracer/scene/bsdf.h"
+#include "pathtracer/scene/cie.h"
 #include "pathtracer/scene/fresnel_dielectric.h"
 #include "pathtracer/scene/sampler.h"
 
@@ -57,6 +58,14 @@ Surface paramsWith(Edit edit) {
 // The slabs' reflected Fresnel at a view cosine, through a closure facing the macro normal, as the Fresnel AOV reads it.
 glm::vec3 viewFresnel(const Surface& inputs, float cosTheta) {
     return pathtracer::scene::fresnelAtViewAngle(pathtracer::scene::makeBsdfClosure(inputs, glm::vec3(0.0F, 0.0F, 1.0F)), cosTheta);
+}
+
+// OpenPBR's thin film over the inputs: thin_film_weight, thin_film_thickness in micrometres, thin_film_ior.
+Surface filmed(Surface inputs, float weight, float thicknessUm, float ior) {
+    inputs.thinFilmWeight = weight;
+    inputs.thinFilmThickness = thicknessUm;
+    inputs.thinFilmIor = ior;
+    return inputs;
 }
 
 // specular_color defaults to white, F82's no-dip Schlick edge, so a tinted metal is a strict extension of the swept coverage.
@@ -1266,7 +1275,7 @@ PT_CHECK(glossy_diffuse_albedo_scaling, Slow, Exact) {
                 const pathtracer::scene::BsdfClosure closure = pathtracer::scene::makeBsdfClosure(params, wo);
                 const pathtracer::scene::DielectricSlab& slab = closure.dielectric;
                 // The single-scattering albedo the scaling reads, against an exact-Fresnel quadrature of the same lobe.
-                worst.table = std::max(worst.table, std::abs(slab.reflectSingle - referenceDielectricReflectAlbedo(muO, alphaAt(roughness), ior)));
+                worst.table = std::max(worst.table, std::abs(slab.reflectSingle.x - referenceDielectricReflectAlbedo(muO, alphaAt(roughness), ior)));
                 // The reflection the closure evaluates must carry the energy the scaling removes: int f_spec = E_spec.
                 const double reflected = simpson(0.0, 1.0, kPanels, [&](double mu) {
                     const double sine = std::sqrt(std::max(0.0, 1.0 - (mu * mu)));
@@ -1275,14 +1284,14 @@ PT_CHECK(glossy_diffuse_albedo_scaling, Slow, Exact) {
                         return static_cast<double>(pathtracer::scene::evaluateBsdfSplit(closure, wi).specular.x);
                     });
                 });
-                worst.closure = std::max(worst.closure, std::abs(reflected - (slab.reflectSingle + slab.multiReflect)));
+                worst.closure = std::max(worst.closure, std::abs(reflected - (slab.reflectSingle.x + slab.multiReflect)));
                 // diffuse / (EON * mu_i) is the weight itself, the same at every wi; the reference EON is independent of the shipped one.
                 for (double muI : cosines) {
                     const float sinI = std::sqrt(std::max(0.0F, 1.0F - static_cast<float>(muI * muI)));
                     const glm::vec3 wi(sinI * std::cos(1.1F), sinI * std::sin(1.1F), static_cast<float>(muI));
                     const double measured = pathtracer::scene::evaluateBsdfSplit(closure, wi).diffuse.x /
                                             (static_cast<double>(referenceEon(rho, kDiffuseRoughness, wi, wo).x) * muI);
-                    const double expected = 1.0 - (slab.reflectSingle + slab.multiReflect);
+                    const double expected = 1.0 - (slab.reflectSingle.x + slab.multiReflect);
                     worst.invariance = std::max(worst.invariance, std::abs(measured - expected) / expected);
                 }
             }
@@ -2136,6 +2145,7 @@ struct ChiSquareCase {
     float coatRoughness = 0.0F;
     float fuzz = 0.0F;
     float fuzzRoughness = 0.5F;
+    float filmThickness = 0.0F;  // micrometres; a film of weight 1 where positive
 };
 
 PT_CHECK(sampling_chi_square, Slow, Statistical) {
@@ -2149,8 +2159,8 @@ PT_CHECK(sampling_chi_square, Slow, Statistical) {
     constexpr double kMinExpected = 5.0;
     constexpr std::uint32_t kSeed = 0x9E3779B9U;
 
-    // Transmissive rows sit either side of the interface; the coated and fuzzed rows put each layer's lobe and masses in the draw.
-    const std::array<ChiSquareCase, 17> cases = {{
+    // Transmissive rows sit either side of the interface; coated, fuzzed and filmed rows put each layer's lobe and masses in the draw.
+    const std::array<ChiSquareCase, 19> cases = {{
         {0.2F, 0.0F, 1.0F, 0.8F},  {0.2F, 0.0F, 1.0F, -0.6F},
         {0.4F, 0.0F, 1.0F, 0.8F},  {0.4F, 0.0F, 1.0F, -0.6F},
         {0.7F, 0.0F, 1.0F, 0.8F},  {0.7F, 0.0F, 1.0F, -0.6F},
@@ -2159,6 +2169,7 @@ PT_CHECK(sampling_chi_square, Slow, Statistical) {
         {0.5F, 0.0F, 0.0F, 0.5F},  {1.0F, 0.0F, 0.0F, 0.5F},
         {0.5F, 0.0F, 0.0F, 0.6F, 1.0F, 0.3F}, {0.3F, 1.0F, 0.0F, 0.7F, 0.5F, 0.6F}, {0.4F, 0.0F, 1.0F, 0.8F, 1.0F, 0.2F},
         {0.5F, 0.0F, 0.0F, 0.6F, 0.0F, 0.0F, 1.0F, 0.5F}, {0.3F, 1.0F, 0.0F, 0.4F, 0.5F, 0.3F, 0.7F, 0.8F},
+        {0.4F, 0.0F, 1.0F, 0.7F, 0.0F, 0.0F, 0.0F, 0.5F, 0.5F}, {0.3F, 1.0F, 0.0F, 0.6F, 0.0F, 0.0F, 0.0F, 0.5F, 0.4F},
     }};
     // The suite's corrected significance, split across the grid by Sidak so the independent cases share it.
     ctx.plan(1);
@@ -2172,6 +2183,7 @@ PT_CHECK(sampling_chi_square, Slow, Statistical) {
         params.coatRoughness = testCase.coatRoughness;
         params.fuzzWeight = testCase.fuzz;
         params.fuzzRoughness = testCase.fuzzRoughness;
+        params = filmed(params, testCase.filmThickness > 0.0F ? 1.0F : 0.0F, testCase.filmThickness, 1.33F);
         const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (testCase.ndotV * testCase.ndotV))), 0.0F, testCase.ndotV);
 
         std::vector<double> expected(static_cast<std::size_t>(kCosBins) * kPhiBins + 1, 0.0);
@@ -2726,6 +2738,171 @@ PT_CHECK(fuzzed_white_furnace, Slow, Statistical) {
         }
     }
     finish(ctx, ok, "fuzzed_white_furnace failed; see the rows above");
+}
+
+
+// --- OpenPBR's thin film: Belcour & Barla 2017's Airy reflectance in the base's Fresnel, its spectrum integrated in Rec.709.
+
+// Gulbrandsen 2014's (n, k) from reflectance r and edge tint g, transcribed apart from the shading path's for the reference below.
+std::complex<double> referenceConductorIor(double r, double g) {
+    const double n = (g * (1.0 - r) / (1.0 + r)) + ((1.0 - g) * (1.0 + std::sqrt(r)) / (1.0 - std::sqrt(r)));
+    return {n, std::sqrt(std::max(((r * (n + 1.0) * (n + 1.0)) - ((n - 1.0) * (n - 1.0))) / (1.0 - r), 0.0))};
+}
+
+// The exact film: per wavelength the all-order Airy amplitude (r12 + r23 e^{i d}) / (1 + r12 r23 e^{i d}), integrated by CIE 015 in D65.
+glm::dvec3 referenceFilm(double cosTheta, double filmIor, double thicknessNm, const std::array<std::complex<double>, 3>& substrate) {
+    using complex = std::complex<double>;
+    const double sin2 = 1.0 - (cosTheta * cosTheta);
+    const complex cosFilm = std::sqrt(complex(1.0 - (sin2 / (filmIor * filmIor))));
+    glm::dvec3 rec709(0.0);
+    for (int c = 0; c < 3; ++c) {
+        const complex n3 = substrate[static_cast<std::size_t>(c)];
+        const complex cos3 = std::sqrt(1.0 - (sin2 / (n3 * n3)));
+        const auto amplitudes = [](complex na, complex ca, complex nb, complex cb) {
+            return std::pair{((na * ca) - (nb * cb)) / ((na * ca) + (nb * cb)), ((nb * ca) - (na * cb)) / ((nb * ca) + (na * cb))};
+        };
+        const auto [r12s, r12p] = amplitudes(1.0, cosTheta, filmIor, cosFilm);
+        const auto [r23s, r23p] = amplitudes(filmIor, cosFilm, n3, cos3);
+        pathtracer::scene::cie::Spectrum reflectance{};
+        for (int i = 0; i < pathtracer::scene::cie::kSampleCount; ++i) {
+            const complex phase = std::exp(complex(0.0, 4.0 * kPiDouble * filmIor * thicknessNm / pathtracer::scene::cie::wavelengthNm(i)) * cosFilm);
+            const complex rs = (r12s + (r23s * phase)) / (1.0 + (r12s * r23s * phase));
+            const complex rp = (r12p + (r23p * phase)) / (1.0 + (r12p * r23p * phase));
+            reflectance[static_cast<std::size_t>(i)] = 0.5 * (std::norm(rs) + std::norm(rp));
+        }
+        rec709[c] = pathtracer::scene::cie::reflectanceToRec709(reflectance)[c];
+    }
+    return rec709;
+}
+
+// The film's reflectance against the exact spectral reference: the converged series and the tabulated transforms against every order.
+PT_CHECK(thin_film_against_spectral_reference, Fast, Exact) {
+    // The series converges below float resolution; the 2 nm transform table's interpolation is what remains: measured 3.3e-6 and 1.7e-5.
+    constexpr double kDielectricTolerance = 1e-4;
+    constexpr double kConductorTolerance = 1e-4;
+    bool ok = true;
+    double worstDielectric = 0.0;
+    double worstConductor = 0.0;
+    for (double filmIor : {1.33, 1.8}) {
+        for (double thickness : {0.1, 0.3, 0.5, 1.0}) {
+            for (float cosine : {1.0F, 0.7F, 0.3F}) {
+                const Surface glass = filmed(makeParams(0.0F, 0.0F, 0.0F), 1.0F, static_cast<float>(thickness), static_cast<float>(filmIor));
+                const glm::dvec3 measured(viewFresnel(glass, cosine));
+                const glm::dvec3 expected = referenceFilm(cosine, filmIor, thickness * 1000.0, {1.5, 1.5, 1.5});
+                const double error = maxChannel(glm::vec3(glm::abs(measured - expected)));
+                worstDielectric = std::max(worstDielectric, error);
+                const glm::vec3 r(0.9F, 0.6F, 0.3F);
+                const glm::vec3 g(0.8F, 0.5F, 0.9F);
+                Surface metal = filmed(makeParams(0.0F, 1.0F, 0.0F), 1.0F, static_cast<float>(thickness), static_cast<float>(filmIor));
+                metal.baseColor = r;
+                metal.specularColor = g;
+                const glm::dvec3 metallic(viewFresnel(metal, cosine));
+                const glm::dvec3 reference = referenceFilm(cosine, filmIor, thickness * 1000.0,
+                                                           {referenceConductorIor(r.x, g.x), referenceConductorIor(r.y, g.y), referenceConductorIor(r.z, g.z)});
+                worstConductor = std::max(worstConductor, static_cast<double>(maxChannel(glm::vec3(glm::abs(metallic - reference)))));
+                if (!(error <= kDielectricTolerance) || !(maxChannel(glm::vec3(glm::abs(metallic - reference))) <= kConductorTolerance)) {
+                    std::cerr << "bsdf_validate: FAILED thin film at n=" << filmIor << " d=" << thickness << "um cos=" << cosine << ": glass "
+                              << measured.x << " vs " << expected.x << ", metal " << metallic.x << " vs " << reference.x << '\n';
+                    ok = false;
+                }
+            }
+        }
+    }
+    std::cout << "bsdf_validate: thin film vs spectral reference, worst over glass " << worstDielectric << ", over metal " << worstConductor << '\n';
+    finish(ctx, ok, "thin_film_against_spectral_reference failed; see the rows above");
+}
+
+// thin_film_weight 0, and a film of zero thickness, are no film: every value, density and draw bit-identical to the bare base.
+PT_CHECK(thin_film_identity, Fast, Exact) {
+    constexpr int kDraws = 64;
+    const std::array<Surface, 3> bases = {makeParams(0.4F, 0.0F, 0.0F), makeParams(0.3F, 1.0F, 0.0F), makeParams(0.2F, 0.0F, 1.0F)};
+    bool ok = true;
+    for (const Surface& base : bases) {
+        for (const Surface& inert : {filmed(base, 0.0F, 0.5F, 1.8F), filmed(base, 1.0F, 0.0F, 1.8F)}) {
+            for (float muO : {1.0F, 0.5F, -0.6F}) {
+                for (float muI : {1.0F, 0.3F, -0.6F}) {
+                    const auto [wo, wi] = pairAt(muO, muI);
+                    const pathtracer::scene::BsdfEval a = pathtracer::scene::evaluateBsdfSplit(base, wo, wi);
+                    const pathtracer::scene::BsdfEval b = pathtracer::scene::evaluateBsdfSplit(inert, wo, wi);
+                    ok = ok && a.total() == b.total() && a.pdf == b.pdf;
+                }
+                const auto [wo, unused] = pairAt(muO, 1.0F);
+                for (int i = 0; i < kDraws; ++i) {
+                    pathtracer::scene::Sampler first(0, 0, i, kDraws, 81U);
+                    pathtracer::scene::Sampler second(0, 0, i, kDraws, 81U);
+                    const auto a = pathtracer::scene::sampleBsdf(base, wo, first);
+                    const auto b = pathtracer::scene::sampleBsdf(inert, wo, second);
+                    ok = ok && a.has_value() == b.has_value() &&
+                         (!a || (a->wiLocal == b->wiLocal && a->throughputWeight == b->throughputWeight && a->pdf == b->pdf));
+                }
+            }
+        }
+    }
+    finish(ctx, ok, "a weightless or zero-thickness film changed the base");
+}
+
+// A non-absorbing film over a perfect conductor reflects everything: the Airy series' incoherent term is 1 and its orders vanish.
+PT_CHECK(thin_film_over_perfect_conductor, Fast, Exact) {
+    constexpr float kTolerance = 1e-6F;
+    float worst = 0.0F;
+    for (float thickness : {0.1F, 0.5F, 2.0F}) {
+        for (float cosine : {1.0F, 0.6F, 0.2F, 0.0F}) {
+            const glm::vec3 f = viewFresnel(filmed(makeParams(0.0F, 1.0F, 0.0F), 1.0F, thickness, 1.5F), cosine);
+            worst = std::max(worst, maxChannel(glm::abs(f - 1.0F)));
+        }
+    }
+    finish(ctx, worst <= kTolerance, "a film over a perfect mirror did not reflect exactly all the light");
+}
+
+// A filmed base over a white substrate conserves energy: the film only moves light between reflection and transmission.
+PT_CHECK(filmed_white_furnace, Slow, Statistical) {
+    constexpr int kSampleCount = 200000;
+    constexpr float kTolerance = 0.02F;
+    const std::array<Surface, 3> bases = {makeParams(0.4F, 0.0F, 0.0F), makeParams(0.8F, 0.0F, 0.0F), makeParams(0.3F, 1.0F, 0.0F)};
+    bool ok = true;
+    std::uint32_t seed = 65000;
+    for (const Surface& base : bases) {
+        for (float thickness : {0.3F, 0.7F}) {
+            for (float ndotV : {1.0F, 0.5F, 0.2F}) {
+                const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
+                const glm::vec3 lo = furnaceLo(filmed(base, 1.0F, thickness, 1.33F), wo, kSampleCount, ++seed);
+                if (!withinBand(lo, 1.0F, kTolerance)) {
+                    std::cerr << "bsdf_validate: FAILED filmed furnace at metal=" << base.baseMetalness << " roughness=" << base.specularRoughness
+                              << " d=" << thickness << "um ndotV=" << ndotV << " Lo=[" << minChannel(lo) << ", " << maxChannel(lo) << "]\n";
+                    ok = false;
+                }
+            }
+        }
+    }
+    finish(ctx, ok, "filmed_white_furnace failed; see the rows above");
+}
+
+// The film's reflected energy, the kernel's Gauss rule over its Fresnel, is what the lobe integrates to: albedo scaling stays exact.
+PT_CHECK(filmed_albedo_matches_lobe, Slow, Exact) {
+    // The rule's own order-8 residual plus its bilinear blend across the 32 x 32 grid, at Simpson's resolution of the lobe.
+    constexpr double kTolerance = 3e-3;
+    constexpr int kPanels = 256;
+    double worst = 0.0;
+    for (float roughness : {0.3F, 0.6F, 1.0F}) {
+        for (float thickness : {0.3F, 0.8F}) {
+            for (float mu : {1.0F, 0.6F, 0.25F}) {
+                const Surface surface = filmed(makeParams(roughness, 0.0F, 0.0F), 1.0F, thickness, 1.33F);
+                const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (mu * mu))), 0.0F, mu);
+                const pathtracer::scene::BsdfClosure closure = pathtracer::scene::makeBsdfClosure(surface, wo);
+                const glm::dvec3 integral = simpson(0.0, 1.0, kPanels, [&](double z) {
+                    const double sine = std::sqrt(std::max(0.0, 1.0 - (z * z)));
+                    return simpson(0.0, 2.0 * kPiDouble, kPanels, [&](double phi) {
+                        const glm::vec3 wi(static_cast<float>(sine * std::cos(phi)), static_cast<float>(sine * std::sin(phi)), static_cast<float>(z));
+                        return glm::dvec3(pathtracer::scene::evaluateBsdfSplit(closure, wi).specular);
+                    });
+                });
+                const glm::dvec3 albedo(closure.dielectric.reflectSingle + closure.dielectric.multiReflect);
+                worst = std::max(worst, static_cast<double>(maxChannel(glm::vec3(glm::abs(integral - albedo)))));
+            }
+        }
+    }
+    std::cout << "bsdf_validate: filmed albedo vs integrated lobe, worst " << worst << '\n';
+    finish(ctx, worst <= kTolerance, "a filmed interface's albedo does not match the energy its lobe reflects");
 }
 
 PT_CHECK_MAIN("bsdf")
