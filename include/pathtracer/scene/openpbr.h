@@ -55,6 +55,11 @@ struct OpenPbrInputs {
     In<float> subsurfaceRadius = 1.0F;
     In<glm::vec3> subsurfaceRadiusScale = glm::vec3(1.0F, 0.5F, 0.25F);
     In<float> subsurfaceScatterAnisotropy = 0.0F;
+    In<float> coatWeight = 0.0F;
+    In<glm::vec3> coatColor = glm::vec3(1.0F);
+    In<float> coatRoughness = 0.0F;
+    In<float> coatIor = 1.6F;
+    In<float> coatDarkening = 1.0F;
     In<float> emissionLuminance = 0.0F;
     In<glm::vec3> emissionColor = glm::vec3(1.0F);
 };
@@ -85,6 +90,11 @@ void forEachInput(Visit&& visit, Inputs&... inputs) {
     visit(InputSpec{"subsurface_radius", NonNegative, kData, false, InputUse::Volume}, inputs.subsurfaceRadius...);
     visit(InputSpec{"subsurface_radius_scale", Unit, kData, false, InputUse::Volume}, inputs.subsurfaceRadiusScale...);
     visit(InputSpec{"subsurface_scatter_anisotropy", Signed, kData, false, InputUse::Volume}, inputs.subsurfaceScatterAnisotropy...);
+    visit(InputSpec{"coat_weight", Unit, kData, false}, inputs.coatWeight...);
+    visit(InputSpec{"coat_color", Unit, kColour, false}, inputs.coatColor...);
+    visit(InputSpec{"coat_roughness", Unit, kData, false}, inputs.coatRoughness...);
+    visit(InputSpec{"coat_ior", Positive, kData, false}, inputs.coatIor...);
+    visit(InputSpec{"coat_darkening", Unit, kData, false}, inputs.coatDarkening...);
     visit(InputSpec{"emission_luminance", NonNegative, kData, true, InputUse::Emission}, inputs.emissionLuminance...);
     visit(InputSpec{"emission_color", NonNegative, kColour, true, InputUse::Emission}, inputs.emissionColor...);
 }

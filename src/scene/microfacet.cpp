@@ -254,7 +254,7 @@ glm::vec3 multiScatterTint(const glm::vec3& fresnelAvg, float deficitAvg) {
 
 // Probability the interface's VNDF technique reflects about a facet (Walter 2007 5.3), by the facet's tinted and refracting energies.
 float facetReflectProbability(const DielectricSlab& slab, float fresnel) {
-    if (slab.refractWeight == 0.0F) {
+    if (slab.refractWeight == 0.0F || slab.deltaRefraction) {
         return 1.0F;
     }
     const float reflect = slab.tintMean * fresnel;
@@ -341,43 +341,110 @@ ConductorSlab makeConductorSlab(float roughness, const glm::vec3& f0, const glm:
     return slab;
 }
 
-DielectricSlab makeDielectricSlab(float roughness, float etaI, float etaT, const glm::vec3& tint, float refractWeight,
-                                  const glm::vec3& transmitTint, float muO) {
+// The interface's reflection at mu by the escape tables at the Fresnel ratio: single scattering, and the reflected multiple scattering.
+struct InterfaceReflection {
+    float single;
+    float multi;
+    float deficit;
+    EscapeMean mean;
+};
+
+InterfaceReflection interfaceReflection(const EscapeRow& row, float roughness, float eta, float mu) {
+    const float deficit = escapeAt(kEscapeDeficit, row, mu);
+    const EscapeMean mean = escapeMean(roughness, eta);
+    return {escapeAt(kEscapeReflect, row, mu), mean.deficit > 0.0F ? deficit * mean.reflectShare : 0.0F, deficit, mean};
+}
+
+DielectricSlab makeDielectricSlab(const InterfaceInputs& interface, float muO) {
     DielectricSlab slab{};
-    slab.alpha = alphaForRoughness(roughness);
-    slab.etaI = etaI;
-    slab.etaT = etaT;
-    slab.tint = tint;
-    slab.tintMean = channelMean(tint);
-    slab.refractWeight = refractWeight;
-    slab.transmitTint = transmitTint;
-    slab.etaSq = (etaI / etaT) * (etaI / etaT);
-    // Index-matched, the interface is invisible: nothing reflects and everything passes undeviated, at every roughness.
-    if (etaI == etaT) {
+    slab.alpha = alphaForRoughness(interface.roughness);
+    slab.etaI = interface.etaI;
+    slab.etaT = interface.etaT;
+    slab.fresnelEtaI = interface.fresnelEtaI;
+    slab.fresnelEtaT = interface.fresnelEtaT;
+    slab.tint = interface.tint;
+    slab.tintMean = channelMean(interface.tint);
+    slab.refractWeight = interface.refractWeight;
+    slab.transmitTint = interface.transmitTint;
+    slab.etaSq = (interface.etaI / interface.etaT) * (interface.etaI / interface.etaT);
+    // Index-matched media refract undeviated at every roughness: no facet can bend the ray, so refraction is a delta.
+    slab.deltaRefraction = isSmooth(slab.alpha) || interface.etaI == interface.etaT;
+    // A Fresnel-matched interface reflects exactly nothing: no table's interpolation residual may read as reflection.
+    if (isIndexMatched(slab)) {
         slab.transmitSingle = 1.0F;
         return slab;
     }
     if (isSmooth(slab.alpha)) {
-        slab.reflectSingle = fresnelDielectric(muO, etaI, etaT);
+        // A mirror past the geometric critical angle reflects all: no refracted direction exists to carry 1 - F.
+        const bool tir = cos2Transmitted(muO, interface.etaI / interface.etaT) < 0.0F;
+        slab.reflectSingle = tir ? 1.0F : fresnelDielectric(muO, interface.fresnelEtaI, interface.fresnelEtaT);
         slab.transmitSingle = 1.0F - slab.reflectSingle;
         return slab;
     }
-    const float eta = etaI / etaT;
-    slab.row = escapeRow(roughness, eta);
-    slab.reflectSingle = escapeAt(kEscapeReflect, slab.row, muO);
-    slab.transmitSingle = escapeAt(kEscapeTransmit, slab.row, muO);
-    slab.reflectShape = msTransmitRow(roughness, eta);
-    slab.transmitShape = msTransmitRow(roughness, 1.0F / eta);
+    const float eta = interface.fresnelEtaI / interface.fresnelEtaT;
+    slab.row = escapeRow(interface.roughness, eta);
+    slab.reflectShape = msTransmitRow(interface.roughness, eta);
+    slab.transmitShape = msTransmitRow(interface.roughness, 1.0F / eta);
     // The interface's own multiple scattering, a property of the interface alone: OpenPBR mixes whole BSDFs, so each stays linear.
-    const float deficit = escapeAt(kEscapeDeficit, slab.row, muO);
-    const EscapeMean mean = escapeMean(roughness, eta);
+    const InterfaceReflection reflection = interfaceReflection(slab.row, interface.roughness, eta, muO);
+    slab.reflectSingle = reflection.single;
+    slab.transmitSingle = escapeAt(kEscapeTransmit, slab.row, muO);
     // A zero mean deficit or a shape with no density has no energy to carry: the lobe vanishes, its exact limit, with no 0/0 to form.
-    if (mean.deficit > 0.0F && slab.reflectShape.scale > 0.0F) {
-        slab.multiReflect = deficit * mean.reflectShare;
-        slab.multiReflectScaleWo = slab.multiReflect / (kPi * mean.deficit);
+    if (reflection.multi > 0.0F && slab.reflectShape.scale > 0.0F) {
+        slab.multiReflect = reflection.multi;
+        slab.multiReflectScaleWo = slab.multiReflect / (kPi * reflection.mean.deficit);
     }
-    slab.multiTransmit = slab.transmitShape.scale > 0.0F ? deficit * (1.0F - mean.reflectShare) : 0.0F;
+    // Undeviated refraction (index-matched media) is a delta: its multiple scattering has no far-side lobe distinct from it.
+    if (!slab.deltaRefraction && slab.transmitShape.scale > 0.0F) {
+        slab.multiTransmit = reflection.deficit * (1.0F - reflection.mean.reflectShare);
+    }
     return slab;
+}
+
+float reflectionAlbedo(float roughness, float etaI, float etaT, float mu) {
+    if (etaI == etaT) {
+        return 0.0F;
+    }
+    if (isSmooth(alphaForRoughness(roughness))) {
+        return fresnelDielectric(mu, etaI, etaT);
+    }
+    const float eta = etaI / etaT;
+    const InterfaceReflection reflection = interfaceReflection(escapeRow(roughness, eta), roughness, eta, mu);
+    return reflection.single + (msTransmitRow(roughness, eta).scale > 0.0F ? reflection.multi : 0.0F);
+}
+
+glm::vec3 conductorAlbedo(float roughness, const glm::vec3& f0, const glm::vec3& tint, float scale, float mu) {
+    const glm::vec3 k = f82Weight(f0, tint);
+    if (isSmooth(alphaForRoughness(roughness))) {
+        return scale * fresnelF82(mu, f0, k);
+    }
+    const AlbedoSplit split = directionalAlbedo(mu, roughness);
+    const float deficitAvg = averageAlbedo(roughness).deficit;
+    const glm::vec3 multi = deficitAvg > 0.0F ? multiScatterTint(scale * metalFresnelAvg(f0, tint), deficitAvg) * split.deficit : glm::vec3(0.0F);
+    return (scale * split.at(f0, k)) + multi;
+}
+
+namespace {
+
+// The classical closed form for unpolarised light entering n > 1 from outside, in double: its terms cancel to O((n-1)^2) as n -> 1.
+double externalFresnelAverage(double n) {
+    const double n2 = n * n;
+    const double n4 = n2 * n2;
+    return 0.5 + ((n - 1.0) * ((3.0 * n) + 1.0) / (6.0 * (n + 1.0) * (n + 1.0))) +
+           ((n2 * (n2 - 1.0) * (n2 - 1.0)) / ((n2 + 1.0) * (n2 + 1.0) * (n2 + 1.0)) * std::log((n - 1.0) / (n + 1.0))) -
+           ((2.0 * n * n2 * (n2 + (2.0 * n) - 1.0)) / ((n2 + 1.0) * (n4 - 1.0))) +
+           ((8.0 * n4 * (n4 + 1.0)) / ((n2 + 1.0) * (n4 - 1.0) * (n4 - 1.0)) * std::log(n));
+}
+
+}  // namespace
+
+float fresnelAverage(float eta) {
+    if (eta == 1.0F) {
+        return 0.0F;
+    }
+    // Entering a rarer medium is the denser side's internal reflection: 1 - F_int = (1 - F_ext) / n^2 by etendue, n = 1/eta.
+    const double n = eta;
+    return static_cast<float>(n > 1.0 ? externalFresnelAverage(n) : 1.0 - ((1.0 - externalFresnelAverage(1.0 / n)) * n * n));
 }
 
 ConductorEval evaluateConductor(const ConductorSlab& slab, const glm::vec3& wo, const glm::vec3& wi) {
@@ -399,15 +466,18 @@ ConductorEval evaluateConductor(const ConductorSlab& slab, const glm::vec3& wo, 
 
 DielectricEval evaluateDielectric(const DielectricSlab& slab, const glm::vec3& wo, const glm::vec3& wi) {
     DielectricEval eval{};
-    // An invisible or smooth interface scatters by deltas alone, and a smooth one has no multiple scattering.
-    if (isIndexMatched(slab) || isSmooth(slab.alpha)) {
+    // A smooth interface scatters by deltas alone; a Fresnel-matched one reflects nothing and refracts by a delta.
+    if (isSmooth(slab.alpha)) {
         return eval;
     }
     if (wi.z > 0.0F) {
+        if (isIndexMatched(slab)) {
+            return eval;
+        }
         const glm::vec3 h = glm::normalize(wo + wi);
         const float woDotH = glm::dot(wo, h);
         const float d = distributionGGX(h, slab.alpha);
-        const float fresnel = fresnelDielectric(woDotH, slab.etaI, slab.etaT);
+        const float fresnel = fresnelDielectric(woDotH, slab.fresnelEtaI, slab.fresnelEtaT);
         eval.reflect = slab.tint * (d * smithVisibility(wo.z, wi.z, slab.alpha) * fresnel * wi.z);
         eval.pdfSingle = 0.25F * d * smithG1OverCos(wo.z, slab.alpha) * facetReflectProbability(slab, fresnel);
         // Kulla-Conty's form over the escape deficit, share_R (1-E(mu_o))(1-E(mu_i))/(pi(1-Eavg)): symmetric, so reflection is reciprocal.
@@ -418,7 +488,7 @@ DielectricEval evaluateDielectric(const DielectricSlab& slab, const glm::vec3& w
         return eval;
     }
     // A zero refractWeight passes the interface's transmission to the diffuse below: nothing leaves on the far side.
-    if (slab.refractWeight == 0.0F) {
+    if (slab.refractWeight == 0.0F || slab.deltaRefraction) {
         return eval;
     }
     // The transmitted share of multiple scattering for any far-side wi: its value is its energy times its own density, eta^2-compressed.
@@ -442,7 +512,7 @@ DielectricEval evaluateDielectric(const DielectricSlab& slab, const glm::vec3& w
     const float denom = woDotH + (etaR * wiDotH);
     const float denom2 = denom * denom;
     const float d = distributionGGX(ht, slab.alpha);
-    const float fresnel = fresnelDielectric(woDotH, slab.etaI, slab.etaT);
+    const float fresnel = fresnelDielectric(woDotH, slab.fresnelEtaI, slab.fresnelEtaT);
     // D*G2*|wi.h|*(wo.h)/(wo.z*denom^2), with G2/(wo.z*|wi.z|) taken as 4*smithVisibility and |wi.z| the cosine weight.
     const float value = (4.0F * d * smithVisibility(wo.z, -wi.z, slab.alpha) * -wiDotH * woDotH * -wi.z) / denom2;
     const float vndfPdf = d * woDotH * smithG1OverCos(wo.z, slab.alpha);
@@ -466,7 +536,7 @@ glm::vec3 sampleConductorMulti(const ConductorSlab& slab, glm::vec2 u) {
 std::optional<InterfaceSample> sampleDielectricSingle(const DielectricSlab& slab, const glm::vec3& wo, glm::vec2 u, float uSplit) {
     const glm::vec3 h = sampleGGXVNDF(wo, slab.alpha, u);
     const float woDotH = glm::dot(wo, h);
-    if (uSplit >= facetReflectProbability(slab, fresnelDielectric(woDotH, slab.etaI, slab.etaT))) {
+    if (uSplit >= facetReflectProbability(slab, fresnelDielectric(woDotH, slab.fresnelEtaI, slab.fresnelEtaT))) {
         glm::vec3 wi;
         if (!refractAbout(wo, h, slab.etaI / slab.etaT, wi) || wi.z >= 0.0F) {
             return std::nullopt;

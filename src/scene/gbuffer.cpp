@@ -226,7 +226,7 @@ glm::vec3 shadeHit(GBuffer& result, int x, int y, const Hit& hit, const PixelRay
               const Material& material, float lookaheadDistance) {
     const ShadingVertex shading = interpolateShading(triangle, hit.u, hit.v);
     const pathtracer::gfx::TextureFootprint footprint = primaryHitFootprint(triangle, pixel.ray, hit.t, pixel.dirPerPixel);
-    const ShadingFrame frame = buildShadingFrame(triangle, shading, material);
+    const ShadingFrame frame = buildShadingFrame(triangle, shading, material.geometryNormal);
     const OpenPbrInputs<Constant> inputs = resolveInputs(material, shading.uv, footprint, shading.colour);
     writeTexel(result.depth, x, y, hit.t);
     writeTexel(result.lookahead, x, y, std::clamp(1.0F - (hit.t / lookaheadDistance), 0.0F, 1.0F));

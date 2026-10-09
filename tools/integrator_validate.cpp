@@ -722,7 +722,19 @@ PT_CHECK(emission_returns_luminance_times_colour, Fast, Exact) {
     const float tolerance = static_cast<float>(kTexelSamples + 16) * std::numeric_limits<float>::epsilon() *
                             std::max({expected.x, expected.y, expected.z});
 
-    ctx.plan(2);
+    ctx.plan(4);
+    // A clear coat absorbs nothing, so it leaves emission bit for bit; a tinted one can only take light away, never add it.
+    TestScene clear = scene;
+    clear.instances[0].material.coatWeight = 1.0F;
+    TestScene tinted = scene;
+    tinted.instances[0].material.coatWeight = 0.5F;
+    tinted.instances[0].material.coatColor = glm::vec3(0.25F, 0.5F, 0.81F);
+    const glm::vec3 open = regionMean(renderPass(scene, black, base, *accel, pool, true).beauty, 2, 6, 6, 10);
+    const glm::vec3 throughClear = regionMean(renderPass(clear, black, base, *accel, pool, true).beauty, 2, 6, 6, 10);
+    const glm::vec3 throughTint = regionMean(renderPass(tinted, black, base, *accel, pool, true).beauty, 2, 6, 6, 10);
+    PT_EXPECT(ctx, throughClear == open, "a clear coat changed the emission beneath it");
+    PT_EXPECT(ctx, glm::all(glm::lessThan(throughTint, open)) && glm::all(glm::greaterThan(throughTint, 0.5F * open)),
+              "a half-weight tinted coat must dim emission, by at most its weight: (1-C) + C*T with 0 < T < 1");
     for (const auto& [name, env] : {std::pair{"black", &black}, std::pair{"uniform L0=1", &uniform}}) {
         const glm::vec3 mean =
             regionMean(renderPass(scene, *env, base, *accel, pool, true).beauty, 2, 6, 6, 10);
@@ -938,7 +950,7 @@ PT_CHECK(texture_binding_resolution, Fast, Exact) {
     // A packed glTF metallic-roughness map binds a scalar input to G: the channel offset reaches the lookup as R.
     const glm::vec3 green(texel.g, 0.0F, 0.0F);
 
-    ctx.plan(20);
+    ctx.plan(22);
     PT_EXPECT(ctx, written, "could not write the override EXR");
     std::vector<MeshInstance> instances = makeInstances();
     const TextureConfig packed{exr, std::nullopt, 1, std::nullopt};
@@ -966,6 +978,13 @@ PT_CHECK(texture_binding_resolution, Fast, Exact) {
     PT_EXPECT(ctx, instances[1].material.specularIor == makeMaterial(1.0F).specularIor && !instances[1].material.geometryNormal.map,
               "an unnamed input on an overridden node changed");
     PT_EXPECT(ctx, instances[0].material.baseColor == makeMaterial(1.0F).baseColor, "the override leaked onto alpha, which it does not name");
+    // geometry_coat_normal is the coat's own normal input: a bump on it reaches the coat's sources and leaves the base's alone.
+    std::vector<MeshInstance> coatBumped = makeInstances();
+    PT_EXPECT(ctx, apply(coatBumped, {{"alpha", {{"geometry_coat_normal", TextureConfig{std::nullopt, std::nullopt, 0, pathtracer::config::BumpConfig{exr, 0.01F}}}}}}),
+              "a bump on geometry_coat_normal was rejected");
+    PT_EXPECT(ctx, coatBumped[0].material.geometryCoatNormal.height && coatBumped[0].material.geometryCoatNormal.heightMetres == 0.01F &&
+                       !coatBumped[0].material.geometryNormal.height,
+              "geometry_coat_normal's bump did not reach the coat's normal input alone");
 
     std::cout << "  the stderr diagnostics below are expected: they are the function under test refusing a bad scene\n";
     std::vector<MeshInstance> untouched = makeInstances();
@@ -977,11 +996,11 @@ PT_CHECK(texture_binding_resolution, Fast, Exact) {
     // A normal map is data: naming a colour space for it asks for a conversion that would corrupt every direction it encodes.
     PT_EXPECT(ctx, !apply(untouched, {{"beta", {{"geometry_normal", TextureConfig{exr, "ACEScg", 0, std::nullopt}}}}}),
               "a colour space on a data input was accepted");
-    // A channel picks one of a scalar input's R, G, B; a colour input reads all three, and only geometry_normal takes a bump.
+    // A channel picks one of a scalar input's R, G, B; a colour input reads all three, and only a normal input takes a bump.
     PT_EXPECT(ctx, !apply(untouched, {{"beta", {{"base_color", TextureConfig{exr, std::nullopt, 1, std::nullopt}}}}}),
               "a channel on a colour input was accepted");
     PT_EXPECT(ctx, !apply(untouched, {{"beta", {{"base_weight", TextureConfig{exr, std::nullopt, 0, pathtracer::config::BumpConfig{exr, 1.0F}}}}}}),
-              "a bump on an input other than geometry_normal was accepted");
+              "a bump on an input other than a normal input was accepted");
     // Volumetric switches need transport this renderer lacks: binding one must fail, not render as if it were zero.
     PT_EXPECT(ctx, !apply(untouched, {{"beta", {{"subsurface_weight", file}}}}), "a texture on a volumetric switch was accepted");
     // alpha is valid and sorts first, so a non-atomic implementation would have bound it before beta's missing file failed.

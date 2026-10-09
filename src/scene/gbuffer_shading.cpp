@@ -78,19 +78,31 @@ bool isDispersive(const OpenPbrInputs<Constant>& inputs) {
     return inputs.transmissionDispersionScale > 0.0F && inputs.transmissionWeight > 0.0F && inputs.baseMetalness < 1.0F;
 }
 
-glm::vec3 emittedRadiance(const Material& material, glm::vec2 uv, const pathtracer::gfx::TextureFootprint& footprint) {
+glm::vec3 emittedRadiance(const Material& material, const ShadingTriangle& triangle, const ShadingVertex& shading, const glm::vec3& wo,
+                          const pathtracer::gfx::TextureFootprint& footprint) {
     // Most surfaces emit nothing: a zero luminance needs no colour lookup.
-    const float luminance = evaluate(material.emissionLuminance, uv, footprint, InputRange::NonNegative);
-    return luminance > 0.0F ? luminance * evaluate(material.emissionColor, uv, footprint, InputRange::NonNegative) : glm::vec3(0.0F);
+    const float luminance = evaluate(material.emissionLuminance, shading.uv, footprint, InputRange::NonNegative);
+    if (!(luminance > 0.0F)) {
+        return glm::vec3(0.0F);
+    }
+    const glm::vec3 emitted = luminance * evaluate(material.emissionColor, shading.uv, footprint, InputRange::NonNegative);
+    // OpenPBR's coat over the emitter: lerp(1, T_coat, C), one pass along wo through the coat; its inputs point-sampled as at a vertex.
+    const float coatWeight = evaluate(material.coatWeight, shading.uv, {}, InputRange::Unit);
+    if (!(coatWeight > 0.0F)) {
+        return emitted;
+    }
+    const float mu = std::abs(glm::dot(buildShadingFrame(triangle, shading, material.geometryCoatNormal)[2], wo));
+    const glm::vec3 transmittance = coatTransmittance(evaluate(material.coatColor, shading.uv, {}, InputRange::Unit),
+                                                      evaluate(material.coatIor, shading.uv, {}, InputRange::Positive), mu);
+    return emitted * (glm::vec3(1.0F - coatWeight) + (coatWeight * transmittance));
 }
 
-ShadingFrame buildShadingFrame(const ShadingTriangle& triangle, const ShadingVertex& shading, const Material& material) {
+ShadingFrame buildShadingFrame(const ShadingTriangle& triangle, const ShadingVertex& shading, const NormalInput& geometryNormal) {
     const glm::vec3 normal = glm::normalize(shading.normal);
     glm::vec3 tangent = glm::vec3(shading.tangent);
     tangent = glm::normalize(tangent - (glm::dot(tangent, normal) * normal));
     const glm::vec3 bitangent = glm::cross(normal, tangent) * shading.tangent.w;
 
-    const NormalInput& geometryNormal = material.geometryNormal;
     glm::vec3 mappedNormal = normal;
     if (geometryNormal.map) {
         // Point-sampled like the bump below: a filtered normal shortens and shades flatter (Toksvig 2005), +13% on the minified stump.

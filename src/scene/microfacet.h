@@ -24,14 +24,32 @@ namespace pathtracer::scene {
 // The conductor slab at wo: f0 = base_weight * base_color, specular_color the F82 tint, specular_weight the Fresnel scale.
 [[nodiscard]] ConductorSlab makeConductorSlab(float roughness, const glm::vec3& f0, const glm::vec3& tint, float scale, float muO);
 
-// The dielectric interface at wo between etaI (wo's side) and etaT; refractWeight and the tints as DielectricSlab documents.
-[[nodiscard]] DielectricSlab makeDielectricSlab(float roughness, float etaI, float etaT, const glm::vec3& tint, float refractWeight,
-                                                const glm::vec3& transmitTint, float muO);
+// One dielectric interface: geometry ratio etaI/etaT bends refraction, the Fresnel ratio sets R and T (OpenPBR's coat moves it alone).
+struct InterfaceInputs {
+    float roughness;
+    float etaI;
+    float etaT;
+    float fresnelEtaI;
+    float fresnelEtaT;
+    glm::vec3 tint;
+    float refractWeight;
+    glm::vec3 transmitTint;
+};
+
+// The dielectric interface at wo; refractWeight and the tints as DielectricSlab documents.
+[[nodiscard]] DielectricSlab makeDielectricSlab(const InterfaceInputs& interface, float muO);
+
+// An interface's untinted reflection albedo at mu, single plus multiple scattering, from the side etaI faces.
+[[nodiscard]] float reflectionAlbedo(float roughness, float etaI, float etaT, float mu);
+
+// The conductor slab's directional albedo per channel at mu, single plus Kulla-Conty multiple scattering.
+[[nodiscard]] glm::vec3 conductorAlbedo(float roughness, const glm::vec3& f0, const glm::vec3& tint, float scale, float mu);
 
 // The interface's reflection albedo at wo, single plus multiple scattering, untinted: E_spec of OpenPBR's albedo scaling.
 [[nodiscard]] inline float reflectAlbedo(const DielectricSlab& slab) { return slab.reflectSingle + slab.multiReflect; }
 
-[[nodiscard]] inline bool isIndexMatched(const DielectricSlab& slab) { return slab.etaI == slab.etaT; }
+// Fresnel-matched: the interface reflects nothing at any angle.
+[[nodiscard]] inline bool isIndexMatched(const DielectricSlab& slab) { return slab.fresnelEtaI == slab.fresnelEtaT; }
 
 // A slab's cosine-weighted value at wi and the density of each of its techniques there, unweighted by selection mass.
 struct ConductorEval {
