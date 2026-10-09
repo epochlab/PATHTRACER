@@ -42,6 +42,13 @@ struct EscapeRow {
     std::array<float, 4> weight;
 };
 
+// The four (roughness, anisotropy) rows of the anisotropic tables about one slab, each row's node alphas setting its azimuth axis.
+struct AnisoRows {
+    std::array<int, 4> row;
+    std::array<float, 4> weight;
+    std::array<glm::vec2, 4> alpha;
+};
+
 // An escape row over the escape-deficit shape, with the reciprocal of its blended total; scale 0 where the shape holds no energy.
 struct MsTransmitRow {
     EscapeRow row;
@@ -60,7 +67,9 @@ struct FilmLayer {
 // OpenPBR's metal slab at one wo: GGX with the F82-tint Fresnel (Hoffman 2023) and its Kulla-Conty lobe (Kulla & Conty 2017).
 struct ConductorSlab {
     float roughness;
-    float alpha;
+    float anisotropy;      // specular_roughness_anisotropy, selecting the 4D tables over the isotropic ones
+    AnisoRows rows;        // where anisotropy > 0, the tables' rows about (roughness, anisotropy), for the deficit at wi
+    glm::vec2 alpha;       // (alpha_t, alpha_b) along the frame's tangent and bitangent
     glm::vec3 f0;          // base_weight * base_color
     glm::vec3 k;           // F82's correction weight, fit so F(1/7) = specular_color * Schlick(1/7)
     float scale;           // specular_weight
@@ -76,7 +85,7 @@ struct ConductorSlab {
 
 // A GGX dielectric interface at one wo (OpenPBR's specular slab): reflection, refraction and their escape-table multiple scattering.
 struct DielectricSlab {
-    float alpha;
+    glm::vec2 alpha;       // (alpha_t, alpha_b) along the frame's tangent and bitangent
     float etaI;            // the media either side, wo's first: refraction bends by etaI/etaT
     float etaT;
     float fresnelEtaI;     // the ratio Fresnel and the escape tables read; OpenPBR's coat moves it toward n_b/n_c, not the bend
@@ -147,13 +156,14 @@ struct BsdfClosure {
     FuzzSlab fuzz;             // built where fuzzWeight > 0 and wo is outside
     float fuzzRoughness;
     float belowFuzz;
-    // OpenPBR's coat: coat_weight of the surface, a dielectric slab in the frame toCoat takes the mirrored base frame to.
+    // OpenPBR's coat: coat_weight of the surface, a dielectric slab in the frame toCoat takes the mirrored base frame to, x its tangent.
     float coatWeight = 0.0F;
     glm::mat3 toCoat;
     DielectricSlab coat;       // built where coatWeight > 0 and wo is outside
     glm::vec3 coatColor;       // coat_color, the coat's squared normal-incidence transmittance
     float coatIor;
     float coatRoughness;
+    float coatAnisotropy;
     // The base under the coat: reflection weighs baseBare + baseUnder * T(mu_i), entering refraction transmitUnder (OpenPBR).
     glm::vec3 baseBare;
     glm::vec3 baseUnder;
@@ -168,10 +178,11 @@ struct BsdfClosure {
     std::array<float, kTechniqueCount> mass{};  // selection probabilities: each technique's energy at wo over the total, or all zero
 };
 
-// Resolved inputs, wo, a hero RGB band dispersing specular_ior and geometry_coat_normal in the base frame build it. No sampler draws.
+// Resolved inputs, wo, a hero RGB band dispersing specular_ior and the coat's normal and tangent in the base frame build it. No draws.
 [[nodiscard]] BsdfClosure makeBsdfClosure(const OpenPbrInputs<Constant>& inputs, const glm::vec3& woLocal,
                                           std::optional<int> heroChannel = std::nullopt,
-                                          const glm::vec3& coatNormalLocal = glm::vec3(0.0F, 0.0F, 1.0F));
+                                          const glm::vec3& coatNormalLocal = glm::vec3(0.0F, 0.0F, 1.0F),
+                                          const glm::vec3& coatTangentLocal = glm::vec3(1.0F, 0.0F, 0.0F));
 
 // A vertex whose every strategy is massless has a zero BSDF: it can only emit, so neither NEE nor a continuation carries light from it.
 [[nodiscard]] inline bool scatters(const BsdfClosure& closure) {

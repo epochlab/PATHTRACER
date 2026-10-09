@@ -2146,6 +2146,9 @@ struct ChiSquareCase {
     float fuzz = 0.0F;
     float fuzzRoughness = 0.5F;
     float filmThickness = 0.0F;  // micrometres; a film of weight 1 where positive
+    float anisotropy = 0.0F;     // specular_roughness_anisotropy
+    float coatAnisotropy = 0.0F;
+    float woAzimuth = 0.0F;      // wo's azimuth from the tangent, which only an anisotropic lobe distinguishes
 };
 
 PT_CHECK(sampling_chi_square, Slow, Statistical) {
@@ -2160,7 +2163,7 @@ PT_CHECK(sampling_chi_square, Slow, Statistical) {
     constexpr std::uint32_t kSeed = 0x9E3779B9U;
 
     // Transmissive rows sit either side of the interface; coated, fuzzed and filmed rows put each layer's lobe and masses in the draw.
-    const std::array<ChiSquareCase, 19> cases = {{
+    const std::array<ChiSquareCase, 24> cases = {{
         {0.2F, 0.0F, 1.0F, 0.8F},  {0.2F, 0.0F, 1.0F, -0.6F},
         {0.4F, 0.0F, 1.0F, 0.8F},  {0.4F, 0.0F, 1.0F, -0.6F},
         {0.7F, 0.0F, 1.0F, 0.8F},  {0.7F, 0.0F, 1.0F, -0.6F},
@@ -2170,6 +2173,9 @@ PT_CHECK(sampling_chi_square, Slow, Statistical) {
         {0.5F, 0.0F, 0.0F, 0.6F, 1.0F, 0.3F}, {0.3F, 1.0F, 0.0F, 0.7F, 0.5F, 0.6F}, {0.4F, 0.0F, 1.0F, 0.8F, 1.0F, 0.2F},
         {0.5F, 0.0F, 0.0F, 0.6F, 0.0F, 0.0F, 1.0F, 0.5F}, {0.3F, 1.0F, 0.0F, 0.4F, 0.5F, 0.3F, 0.7F, 0.8F},
         {0.4F, 0.0F, 1.0F, 0.7F, 0.0F, 0.0F, 0.0F, 0.5F, 0.5F}, {0.3F, 1.0F, 0.0F, 0.6F, 0.0F, 0.0F, 0.0F, 0.5F, 0.4F},
+        {0.6F, 1.0F, 0.0F, 0.7F, 0.0F, 0.0F, 0.0F, 0.5F, 0.0F, 0.8F, 0.0F, 0.6F}, {0.5F, 0.0F, 0.0F, 0.6F, 0.0F, 0.0F, 0.0F, 0.5F, 0.0F, 0.9F, 0.0F, 1.0F},
+        {0.6F, 0.0F, 1.0F, 0.8F, 0.0F, 0.0F, 0.0F, 0.5F, 0.0F, 0.6F, 0.0F, 0.6F}, {0.6F, 0.0F, 1.0F, -0.6F, 0.0F, 0.0F, 0.0F, 0.5F, 0.0F, 0.6F, 0.0F, 0.6F},
+        {0.5F, 1.0F, 0.0F, 0.7F, 1.0F, 0.5F, 0.0F, 0.5F, 0.0F, 0.0F, 0.8F, 0.6F},
     }};
     // The suite's corrected significance, split across the grid by Sidak so the independent cases share it.
     ctx.plan(1);
@@ -2184,7 +2190,10 @@ PT_CHECK(sampling_chi_square, Slow, Statistical) {
         params.fuzzWeight = testCase.fuzz;
         params.fuzzRoughness = testCase.fuzzRoughness;
         params = filmed(params, testCase.filmThickness > 0.0F ? 1.0F : 0.0F, testCase.filmThickness, 1.33F);
-        const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (testCase.ndotV * testCase.ndotV))), 0.0F, testCase.ndotV);
+        params.specularRoughnessAnisotropy = testCase.anisotropy;
+        params.coatRoughnessAnisotropy = testCase.coatAnisotropy;
+        const float sinV = std::sqrt(std::max(0.0F, 1.0F - (testCase.ndotV * testCase.ndotV)));
+        const glm::vec3 wo(sinV * std::cos(testCase.woAzimuth), sinV * std::sin(testCase.woAzimuth), testCase.ndotV);
 
         std::vector<double> expected(static_cast<std::size_t>(kCosBins) * kPhiBins + 1, 0.0);
         double mass = 0.0;
@@ -2254,6 +2263,7 @@ PT_CHECK(sampling_chi_square, Slow, Statistical) {
         }
         std::cerr << "bsdf_validate: FAILED sampling chi-square at roughness=" << testCase.roughness
                   << " metallic=" << testCase.metallic << " transmission=" << testCase.transmission << " coat=" << testCase.coat << " fuzz=" << testCase.fuzz
+                  << " anisotropy=" << testCase.anisotropy << " coatAnisotropy=" << testCase.coatAnisotropy
                   << " ndotV=" << testCase.ndotV << " chi2=" << chiSquare << " dof=" << dof << " p=" << p
                   << " (threshold " << perCase << ", sampled mass " << mass << ")\n";
         ok = false;
@@ -2903,6 +2913,157 @@ PT_CHECK(filmed_albedo_matches_lobe, Slow, Exact) {
     }
     std::cout << "bsdf_validate: filmed albedo vs integrated lobe, worst " << worst << '\n';
     finish(ctx, worst <= kTolerance, "a filmed interface's albedo does not match the energy its lobe reflects");
+}
+
+// specular_roughness_anisotropy and coat_roughness_anisotropy over the inputs.
+Surface anisotropic(Surface inputs, float anisotropy, float coatAnisotropy) {
+    inputs.specularRoughnessAnisotropy = anisotropy;
+    inputs.coatRoughnessAnisotropy = coatAnisotropy;
+    return inputs;
+}
+
+// The direction at cosine mu and azimuth phi from the tangent.
+glm::vec3 directionAt(float mu, float phi) {
+    const float sine = std::sqrt(std::max(0.0F, 1.0F - (mu * mu)));
+    return {sine * std::cos(phi), sine * std::sin(phi), mu};
+}
+
+// White metal, glossy-diffuse and a coat over white metal at every anisotropy regime, a = 1 the one-dimensional lobe, across azimuth.
+PT_CHECK(anisotropic_white_furnace, Slow, Statistical) {
+    constexpr int kSampleCount = 200000;
+    constexpr float kTolerance = 0.02F;
+    bool ok = true;
+    std::uint32_t seed = 67000;
+    for (float anisotropy : {0.25F, 0.5F, 0.9F, 1.0F}) {
+        for (float roughness : {0.4F, 1.0F}) {
+            const std::array<std::pair<const char*, Surface>, 3> surfaces = {{
+                {"metal", anisotropic(makeParams(roughness, 1.0F, 0.0F), anisotropy, 0.0F)},
+                {"glossy-diffuse", anisotropic(makeParams(roughness, 0.0F, 0.0F), anisotropy, 0.0F)},
+                {"coated metal", anisotropic(coated(makeParams(0.4F, 1.0F, 0.0F), 1.0F, glm::vec3(1.0F), roughness, 1.5F, 1.0F), 0.0F, anisotropy)},
+            }};
+            for (const auto& [label, surface] : surfaces) {
+                for (float phi : {0.0F, 0.25F * kPi, 0.5F * kPi}) {
+                    for (float mu : {0.8F, 0.35F}) {
+                        const glm::vec3 lo = furnaceLo(surface, directionAt(mu, phi), kSampleCount, ++seed);
+                        if (!withinBand(lo, 1.0F, kTolerance)) {
+                            std::cerr << "bsdf_validate: FAILED anisotropic " << label << " furnace at roughness=" << roughness
+                                      << " anisotropy=" << anisotropy << " phi=" << phi << " mu=" << mu << " Lo=[" << minChannel(lo) << ", "
+                                      << maxChannel(lo) << "]\n";
+                            ok = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    finish(ctx, ok, "anisotropic_white_furnace failed; see the rows above");
+}
+
+// Anisotropic GGX and its Kulla-Conty lobe are symmetric in (wo, wi) at any azimuth: f(wo, wi) = f(wi, wo) for metal and dielectric.
+PT_CHECK(anisotropic_reciprocity, Fast, Exact) {
+    constexpr float kRelativeTolerance = 1e-4F;
+    bool ok = true;
+    for (float anisotropy : {0.5F, 0.9F, 1.0F}) {
+        for (float roughness : {0.3F, 0.7F, 1.0F}) {
+            for (float metallic : {0.0F, 1.0F}) {
+                const Surface params = anisotropic(makeParams(roughness, metallic, 0.0F), anisotropy, 0.0F);
+                for (float muA : {0.9F, 0.5F, 0.2F}) {
+                    for (float muB : {0.8F, 0.4F, 0.15F}) {
+                        const glm::vec3 wo = directionAt(muA, 0.3F);
+                        const glm::vec3 wi = directionAt(muB, 1.9F);
+                        const glm::vec3 f = pathtracer::scene::evaluateBsdfSplit(params, wo, wi).specular / muB;
+                        const glm::vec3 g = pathtracer::scene::evaluateBsdfSplit(params, wi, wo).specular / muA;
+                        const float scale = std::max(maxChannel(f), maxChannel(g));
+                        if (!(maxChannel(glm::abs(f - g)) <= kRelativeTolerance * std::max(scale, 1e-4F))) {
+                            std::cerr << "bsdf_validate: FAILED anisotropic reciprocity at roughness=" << roughness << " anisotropy=" << anisotropy
+                                      << " metallic=" << metallic << " muO=" << muA << " muI=" << muB << " f(wo->wi)=" << f.x
+                                      << " f(wi->wo)=" << g.x << '\n';
+                            ok = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    finish(ctx, ok, "anisotropic_reciprocity failed; see the rows above");
+}
+
+// Every anisotropic draw re-evaluates to the density it was drawn at, a = 1's groove included, which no binned test can integrate.
+PT_CHECK(anisotropic_sample_density_consistency, Fast, Exact) {
+    constexpr int kSampleCount = 2000;
+    bool ok = true;
+    long long compared = 0;
+    for (float anisotropy : {0.5F, 0.9F, 1.0F}) {
+        for (float roughness : {0.3F, 0.8F}) {
+            for (float metallic : {0.0F, 1.0F}) {
+                for (float transmission : {0.0F, 1.0F}) {
+                    const Surface params = anisotropic(coated(makeParams(roughness, metallic, transmission), 0.5F, glm::vec3(1.0F), roughness,
+                                                              1.5F, 1.0F),
+                                                       anisotropy, anisotropy);
+                    for (float mu : {0.7F, 0.2F, -0.5F}) {
+                        const glm::vec3 wo = directionAt(mu, 0.7F);
+                        for (int i = 0; i < kSampleCount; ++i) {
+                            pathtracer::scene::Sampler sampler(0, 0, i, kSampleCount, 23U);
+                            const std::optional<pathtracer::scene::BsdfSample> sample = pathtracer::scene::sampleBsdf(params, wo, sampler);
+                            if (!sample.has_value() || sample->delta) {
+                                continue;
+                            }
+                            ++compared;
+                            const float reevaluated = pathtracer::scene::pdfBsdf(params, wo, sample->wiLocal);
+                            if (reevaluated != sample->pdf) {
+                                std::cerr << "bsdf_validate: FAILED anisotropic sample/pdf consistency at anisotropy=" << anisotropy
+                                          << " roughness=" << roughness << " metallic=" << metallic << " transmission=" << transmission
+                                          << " mu=" << mu << " sample->pdf=" << sample->pdf << " pdfBsdf=" << reevaluated << '\n';
+                                ok = false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    std::cout << "bsdf_validate: anisotropic sample/pdf consistency, " << compared << " draws re-evaluated\n";
+    finish(ctx, ok && compared > 0, "an anisotropic draw's density differs from its re-evaluation");
+}
+
+// The albedo each anisotropic slab reports, its selection mass and albedo-scaling weight, is the energy its lobe reflects.
+PT_CHECK(anisotropic_albedo_matches_lobe, Slow, Exact) {
+    // The 4D kernel rule's order-8 residual plus its quadrilinear blend over (r, a, sqrt(mu), phi), at Simpson's resolution of the lobe.
+    constexpr double kTolerance = 3e-3;
+    constexpr int kPanels = 512;
+    double worst = 0.0;
+    for (float anisotropy : {0.5F, 0.9F}) {
+        for (float roughness : {0.6F, 1.0F}) {
+            for (float metallic : {0.0F, 1.0F}) {
+                const Surface surface = anisotropic(metallic > 0.0F ? makeColoredMetalParams(roughness, glm::vec3(0.9F, 0.6F, 0.3F))
+                                                                    : makeParams(roughness, 0.0F, 0.0F),
+                                                    anisotropy, 0.0F);
+                for (float phi : {0.0F, 0.25F * kPi, 0.5F * kPi}) {
+                    for (float mu : {1.0F, 0.6F, 0.25F}) {
+                        const pathtracer::scene::BsdfClosure closure = pathtracer::scene::makeBsdfClosure(surface, directionAt(mu, phi));
+                        const glm::dvec3 integral = simpson(0.0, 1.0, kPanels, [&](double z) {
+                            const double sine = std::sqrt(std::max(0.0, 1.0 - (z * z)));
+                            return simpson(0.0, 2.0 * kPiDouble, kPanels, [&](double azimuth) {
+                                const glm::vec3 wi(static_cast<float>(sine * std::cos(azimuth)), static_cast<float>(sine * std::sin(azimuth)),
+                                                   static_cast<float>(z));
+                                return glm::dvec3(pathtracer::scene::evaluateBsdfSplit(closure, wi).specular);
+                            });
+                        });
+                        const glm::dvec3 albedo(metallic > 0.0F ? closure.metal.albedo
+                                                                : closure.dielectric.reflectSingle + closure.dielectric.multiReflect);
+                        const double delta = static_cast<double>(maxChannel(glm::vec3(glm::abs(integral - albedo))));
+                        if (delta > worst) {
+                            std::cout << "  roughness=" << roughness << " anisotropy=" << anisotropy << " metallic=" << metallic << " phi=" << phi
+                                      << " mu=" << mu << " |lobe - albedo|=" << delta << '\n';
+                        }
+                        worst = std::max(worst, delta);
+                    }
+                }
+            }
+        }
+    }
+    std::cout << "bsdf_validate: anisotropic albedo vs integrated lobe, worst " << worst << '\n';
+    finish(ctx, worst <= kTolerance, "an anisotropic slab's albedo does not match the energy its lobe reflects");
 }
 
 PT_CHECK_MAIN("bsdf")

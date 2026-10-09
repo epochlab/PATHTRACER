@@ -8,7 +8,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
-#include <functional>
 #include <iostream>
 #include <limits>
 #include <atomic>
@@ -51,6 +50,16 @@ constexpr int kTransmitNodes = 48;
 constexpr int kKernelRoughnessRes = 32;
 constexpr int kKernelMuRes = 32;
 constexpr int kKernelOrder = 8;
+
+// The anisotropic kernel over (r, 1 - sqrt(1 - a), sqrt(mu), sqrt(alpha_o)), each axis sized by its measured mid-cell error.
+constexpr int kAnisoRoughnessRes = 16;
+constexpr int kAnisoAnisotropyRes = 8;
+constexpr int kAnisoMuRes = 32;
+constexpr int kAnisoPhiRes = 8;
+// Gauss-Legendre nodes per axis over the VNDF's unit square and the mean deficit's (mu, phi) rules; verifyAnisotropic doubles all three.
+constexpr int kAnisoSquareNodes = 128;
+constexpr int kAnisoMeanMuNodes = 16;
+constexpr int kAnisoMeanPhiNodes = 8;
 
 double smithRadical(double cosTheta, double alpha) {
     const double alpha2 = alpha * alpha;
@@ -290,6 +299,14 @@ struct AlbedoTable {
     std::vector<float> kernelWeight;
     std::vector<float> averageNode;   // the Gauss rule of 2 mu dmu on [0, 1], the hemispherical average's
     std::vector<float> averageWeight;
+    std::vector<float> anisoNode;     // [roughness][anisotropy][mu][phi][order]
+    std::vector<float> anisoWeight;
+    std::vector<float> anisoDeficit;  // [roughness][anisotropy][mu][phi], 1 - E for unit Fresnel in double
+    std::vector<float> anisoB;        // F82's split E = F0 a + b - k c at each cell, a = 1 - deficit - b: the metal reads no rule
+    std::vector<float> anisoC;
+    std::vector<float> anisoDeficitAvg;  // [roughness][anisotropy], its cosine-weighted hemispherical mean
+    std::vector<double> anisoProbe;   // [cell][probe], each kernel probe's expectation under the raw quadrature measure, for verification
+    double anisoExcess = 0.0;         // the largest E - 1 the quadrature reached, which verifyAnisotropic bounds by its residual
 };
 
 // The reflect table's mu axis, uniform in sqrt(mu); node 0 is mu = 0 itself, where E = 1 exactly and buildReflect asserts it on every row.
@@ -304,7 +321,7 @@ double escapeMu(int index) {
     return t * t;
 }
 
-// alpha = r^2 exactly, as microfacet.cpp's alphaForRoughness: row 0 is the smooth surface itself.
+// alpha = r^2 exactly, microfacet.cpp's alphaForRoughness at zero anisotropy: row 0 is the smooth surface itself.
 double gridAlpha(int index, int resolution) {
     const double roughness = static_cast<double>(index) / static_cast<double>(resolution - 1);
     return roughness * roughness;
@@ -634,7 +651,12 @@ GaussRule kernelRule(double mu, double alpha, const GaussLegendre& phiRule, cons
     return gaussRuleOf(x, w);
 }
 
-// The worst |rule - measure| over two probes per node of the grid: a dielectric Fresnel, smooth, and cos(6 pi x), a film's fringes.
+// The kernel rules' probes: a dielectric Fresnel, smooth, and cos(6 pi x), a film's fringes.
+double probeFresnel(double x) { return fresnelDielectric(static_cast<float>(x), 1.0F, 1.5F); }
+double probeFringe(double x) { return std::cos(6.0 * kPi * x); }
+constexpr std::array<double (*)(double), 2> kKernelProbes{probeFresnel, probeFringe};
+
+// The worst |rule - measure| over the kernel probes at every node of the grid.
 double buildKernel(AlbedoTable& table, int nodes) {
     const GaussLegendre rule = gaussLegendre(nodes);
     const auto cells = static_cast<std::size_t>(kKernelRoughnessRes) * kKernelMuRes * kKernelOrder;
@@ -655,8 +677,7 @@ double buildKernel(AlbedoTable& table, int nodes) {
             if (alpha == 0.0) {
                 continue;
             }
-            for (const auto& probe : {std::function<double(double)>([](double x) { return fresnelDielectric(static_cast<float>(x), 1.0F, 1.5F); }),
-                                      std::function<double(double)>([](double x) { return std::cos(6.0 * kPi * x); })}) {
+            for (const auto probe : kKernelProbes) {
                 double exact = 0.0;
                 forEachReflectNode(mu, alpha, rule, rule, [&](double weight, double woDotH) { exact += weight * probe(woDotH); });
                 double ruled = 0.0;
@@ -677,6 +698,192 @@ double buildKernel(AlbedoTable& table, int nodes) {
     table.averageNode.assign(average.node.begin(), average.node.end());
     table.averageWeight.assign(average.weight.begin(), average.weight.end());
     return *std::max_element(worstByRow.begin(), worstByRow.end());
+}
+
+// --- The anisotropic reflect kernel, integrated over the VNDF's unit square (Heitz 2018), a measure-preserving map onto D_wo.
+
+// The anisotropy axis, uniform in 1 - sqrt(alpha_b/alpha_t), perceptual in alpha_b: nodes crowd toward a = 1, where the lobe is a groove.
+double anisoGridAnisotropy(int index) {
+    const double v = 1.0 - (static_cast<double>(index) / (kAnisoAnisotropyRes - 1));
+    return 1.0 - (v * v);
+}
+
+// OpenPBR's anisotropic roughness: alpha_t = r^2 sqrt(2 / (1 + (1 - a)^2)), alpha_b = (1 - a) alpha_t.
+glm::dvec2 anisotropicAlpha(double roughness, double anisotropy) {
+    const double tangent = roughness * roughness * std::sqrt(2.0 / (1.0 + ((1.0 - anisotropy) * (1.0 - anisotropy))));
+    return {tangent, (1.0 - anisotropy) * tangent};
+}
+
+// The azimuth axis node's phi: uniform in sqrt(alpha_o), alpha_o^2 = alpha_t^2 cos^2 phi + alpha_b^2 sin^2 phi, the roughness Smith sees.
+double anisoNodeAzimuth(const glm::dvec2& alpha, int index) {
+    const double v = static_cast<double>(index) / (kAnisoPhiRes - 1);
+    const double span = std::sqrt(alpha.x) - std::sqrt(alpha.y);
+    // An isotropic row's E has no azimuth: any spacing serves, and phi uniform is the one with no 0/0.
+    if (!(span > 0.0)) {
+        return 0.5 * kPi * v;
+    }
+    const double projected = std::pow(std::sqrt(alpha.x) - (v * span), 2.0);
+    const double sine2 = ((alpha.x * alpha.x) - (projected * projected)) / ((alpha.x * alpha.x) - (alpha.y * alpha.y));
+    return std::asin(std::sqrt(std::clamp(sine2, 0.0, 1.0)));
+}
+
+// |(ax wx, ay wy, wz)|, the Smith radical: 1 + Lambda(w) = (wz + radical) / (2 wz), anisotropic and division-free.
+double anisoRadical(const glm::dvec3& w, const glm::dvec2& alpha) {
+    return std::sqrt((alpha.x * alpha.x * w.x * w.x) + (alpha.y * alpha.y * w.y * w.y) + (w.z * w.z));
+}
+
+// Heitz 2018's VNDF draw in double; the stretch (ax wx, ay wy, wz) degenerates gracefully at alpha_b = 0, a one-dimensional GGX.
+glm::dvec3 anisoVndf(const glm::dvec3& wo, const glm::dvec2& alpha, double u1, double u2) {
+    const glm::dvec3 vh = glm::normalize(glm::dvec3(alpha.x * wo.x, alpha.y * wo.y, wo.z));
+    const double lensq = (vh.x * vh.x) + (vh.y * vh.y);
+    const glm::dvec3 t1 = lensq > 0.0 ? glm::dvec3(-vh.y, vh.x, 0.0) / std::sqrt(lensq) : glm::dvec3(1.0, 0.0, 0.0);
+    const glm::dvec3 t2 = glm::cross(vh, t1);
+    const double r = std::sqrt(u1);
+    const double phi = 2.0 * kPi * u2;
+    const double t1p = r * std::cos(phi);
+    const double s = 0.5 * (1.0 + vh.z);
+    const double t2p = ((1.0 - s) * std::sqrt(std::max(0.0, 1.0 - (t1p * t1p)))) + (s * r * std::sin(phi));
+    const glm::dvec3 nh = (t1p * t1) + (t2p * t2) + (std::sqrt(std::max(0.0, 1.0 - (t1p * t1p) - (t2p * t2p))) * vh);
+    return glm::normalize(glm::dvec3(alpha.x * nh.x, alpha.y * nh.y, std::max(0.0, nh.z)));
+}
+
+// The anisotropic kernel's nodes at wo: x = dot(wo, h) under weight G2/G1 = wi.z (wo.z + R_o) / (wi.z R_o + wo.z R_i), finite at wo.z = 0.
+template <typename Visit>
+void forEachAnisoNode(const glm::dvec3& wo, const glm::dvec2& alpha, const GaussLegendre& rule, Visit visit) {
+    const double radicalO = anisoRadical(wo, alpha);
+    for (std::size_t i = 0; i < rule.node.size(); ++i) {
+        for (std::size_t j = 0; j < rule.node.size(); ++j) {
+            const glm::dvec3 h = anisoVndf(wo, alpha, rule.node[i], rule.node[j]);
+            const double woDotH = glm::dot(wo, h);
+            const glm::dvec3 wi = (2.0 * woDotH * h) - wo;
+            if (!(wi.z > 0.0)) {
+                continue;
+            }
+            const double ratio = wi.z * (wo.z + radicalO) / ((wi.z * radicalO) + (wo.z * anisoRadical(wi, alpha)));
+            visit(rule.weight[i] * rule.weight[j] * ratio, woDotH);
+        }
+    }
+}
+
+// The anisotropic tables at squareNodes^2 VNDF nodes per cell, and each (roughness, anisotropy) mean by (muNodes, phiNodes) Gauss rules.
+void buildAnisotropicKernel(AlbedoTable& table, int squareNodes, int muNodes, int phiNodes) {
+    const GaussLegendre square = gaussLegendre(squareNodes);
+    const GaussLegendre muRule = gaussLegendre(muNodes);
+    const GaussLegendre phiRule = gaussLegendre(phiNodes);
+    const auto cellCount = static_cast<std::size_t>(kAnisoRoughnessRes) * kAnisoAnisotropyRes * kAnisoMuRes * kAnisoPhiRes;
+    table.anisoNode.assign(cellCount * kKernelOrder, 0.0F);
+    table.anisoWeight.assign(cellCount * kKernelOrder, 0.0F);
+    table.anisoDeficit.assign(cellCount, 0.0F);
+    table.anisoB.assign(cellCount, 0.0F);
+    table.anisoC.assign(cellCount, 0.0F);
+    table.anisoDeficitAvg.assign(static_cast<std::size_t>(kAnisoRoughnessRes) * kAnisoAnisotropyRes, 0.0F);
+    table.anisoProbe.assign(cellCount * kKernelProbes.size(), 0.0);
+    std::vector<double> excessByRow(static_cast<std::size_t>(kAnisoRoughnessRes) * kAnisoAnisotropyRes, 0.0);
+    parallelRows(kAnisoRoughnessRes * kAnisoAnisotropyRes, [&](int row) {
+        const int ri = row / kAnisoAnisotropyRes;
+        const int ai = row % kAnisoAnisotropyRes;
+        const glm::dvec2 alpha = anisotropicAlpha(static_cast<double>(ri) / (kAnisoRoughnessRes - 1), anisoGridAnisotropy(ai));
+        double& excess = excessByRow[static_cast<std::size_t>(row)];
+        // E's raw measure at (mu, phi): its total, and, where asked, its Gauss rule, F82's split (b, c) and the probes' expectations.
+        const auto measureAt = [&](double mu, double phi, GaussRule* rule, double* split, double* probes) {
+            const double sine = std::sqrt(std::max(0.0, 1.0 - (mu * mu)));
+            const glm::dvec3 wo(sine * std::cos(phi), sine * std::sin(phi), mu);
+            // The smooth surface is its mirror: one node at mu, E[F] = F(mu), no deficit.
+            if (alpha.x == 0.0) {
+                if (rule != nullptr) {
+                    rule->node.fill(mu);
+                    rule->weight.fill(0.0);
+                    rule->weight[0] = 1.0;
+                    split[0] = std::pow(1.0 - mu, 5.0);
+                    split[1] = mu * std::pow(1.0 - mu, 6.0);
+                    for (std::size_t p = 0; p < kKernelProbes.size(); ++p) {
+                        probes[p] = kKernelProbes[p](mu);
+                    }
+                }
+                return 1.0;
+            }
+            std::vector<double> x;
+            std::vector<double> w;
+            double total = 0.0;
+            forEachAnisoNode(wo, alpha, square, [&](double weight, double woDotH) {
+                total += weight;
+                if (rule != nullptr) {
+                    x.push_back(woDotH);
+                    w.push_back(weight);
+                    const double m = std::clamp(1.0 - woDotH, 0.0, 1.0);
+                    split[0] += weight * std::pow(m, 5.0);
+                    split[1] += weight * woDotH * std::pow(m, 6.0);
+                    for (std::size_t p = 0; p < kKernelProbes.size(); ++p) {
+                        probes[p] += weight * kKernelProbes[p](woDotH);
+                    }
+                }
+            });
+            if (rule != nullptr) {
+                *rule = gaussRuleOf(x, w);
+            }
+            excess = std::max(excess, total - 1.0);
+            return total;
+        };
+        // A passive microsurface reflects at most what it receives: E past 1 is quadrature error, asserted within the residual by main.
+        const auto deficitOfTotal = [](double total) { return std::max(1.0 - total, 0.0); };
+        for (int mi = 0; mi < kAnisoMuRes; ++mi) {
+            const double t = static_cast<double>(mi) / (kAnisoMuRes - 1);
+            for (int pi = 0; pi < kAnisoPhiRes; ++pi) {
+                const double phi = anisoNodeAzimuth(alpha, pi);
+                const auto cell = static_cast<std::size_t>((((((ri * kAnisoAnisotropyRes) + ai) * kAnisoMuRes) + mi) * kAnisoPhiRes) + pi);
+                GaussRule rule;
+                std::array<double, 2> split{};
+                table.anisoDeficit[cell] =
+                    static_cast<float>(deficitOfTotal(measureAt(t * t, phi, &rule, split.data(), &table.anisoProbe[cell * kKernelProbes.size()])));
+                table.anisoB[cell] = static_cast<float>(split[0]);
+                table.anisoC[cell] = static_cast<float>(split[1]);
+                for (int k = 0; k < kKernelOrder; ++k) {
+                    table.anisoNode[(cell * kKernelOrder) + static_cast<std::size_t>(k)] = static_cast<float>(rule.node[static_cast<std::size_t>(k)]);
+                    table.anisoWeight[(cell * kKernelOrder) + static_cast<std::size_t>(k)] = static_cast<float>(rule.weight[static_cast<std::size_t>(k)]);
+                }
+            }
+        }
+        // (1/pi) int (1 - E) cos dw over the hemisphere: four symmetric quadrants, each 2 int_0^{pi/2} int_0^1 (1 - E) mu dmu dphi / pi.
+        double mean = 0.0;
+        for (std::size_t p = 0; p < phiRule.node.size(); ++p) {
+            for (std::size_t m = 0; m < muRule.node.size(); ++m) {
+                const double mu = muRule.node[m];
+                mean += phiRule.weight[p] * muRule.weight[m] * 2.0 * mu * deficitOfTotal(measureAt(mu, 0.5 * kPi * phiRule.node[p], nullptr, nullptr, nullptr));
+            }
+        }
+        table.anisoDeficitAvg[static_cast<std::size_t>(row)] = static_cast<float>(mean);
+    });
+    table.anisoExcess = *std::max_element(excessByRow.begin(), excessByRow.end());
+}
+
+// The anisotropic tables against a rebake at doubled rules: deficits, means, and each cell's rule against the doubled measure's probes.
+double verifyAnisotropic(const AlbedoTable& table) {
+    AlbedoTable reference;
+    buildAnisotropicKernel(reference, 2 * kAnisoSquareNodes, 2 * kAnisoMeanMuNodes, 2 * kAnisoMeanPhiNodes);
+    const auto worstOf = [](const std::vector<float>& shipped, const std::vector<float>& exact) {
+        double worst = 0.0;
+        for (std::size_t i = 0; i < shipped.size(); ++i) {
+            worst = std::max(worst, std::abs(static_cast<double>(shipped[i]) - static_cast<double>(exact[i])));
+        }
+        return worst;
+    };
+    double rule = 0.0;
+    for (std::size_t cell = 0; cell < table.anisoDeficit.size(); ++cell) {
+        for (std::size_t p = 0; p < kKernelProbes.size(); ++p) {
+            double ruled = 0.0;
+            for (std::size_t k = 0; k < static_cast<std::size_t>(kKernelOrder); ++k) {
+                const std::size_t at = (cell * kKernelOrder) + k;
+                ruled += static_cast<double>(table.anisoWeight[at]) * kKernelProbes[p](static_cast<double>(table.anisoNode[at]));
+            }
+            rule = std::max(rule, std::abs(ruled - reference.anisoProbe[(cell * kKernelProbes.size()) + p]));
+        }
+    }
+    const double deficit = worstOf(table.anisoDeficit, reference.anisoDeficit);
+    const double split = std::max(worstOf(table.anisoB, reference.anisoB), worstOf(table.anisoC, reference.anisoC));
+    const double mean = worstOf(table.anisoDeficitAvg, reference.anisoDeficitAvg);
+    std::cout << "albedo_table: anisotropic deficit residual " << deficit << ", F82 split " << split << ", mean " << mean << ", rule probes "
+              << rule << " against " << 2 * kAnisoSquareNodes << "^2 nodes; largest E - 1 " << table.anisoExcess << "\n";
+    return std::max({deficit, split, mean, rule});
 }
 
 // Largest disagreement between the shipped reflect rule and one at doubled order, over the grid and means: the rule's own measured error.
@@ -771,8 +978,8 @@ void writeArray(std::ofstream& out, const char* name, const std::vector<float>& 
     out << "\n}};\n";
 }
 
-bool writeInc(const std::string& path, const AlbedoTable& table, double residual, int transmitNodes,
-              double transmitResidual, double kernelResidual) {
+bool writeInc(const std::string& path, const AlbedoTable& table, double residual, int transmitNodes, double transmitResidual,
+              double kernelResidual, double anisoResidual) {
     std::ofstream out(path);
     if (!out) {
         std::cerr << "albedo_table: cannot write " << path << "\n";
@@ -780,35 +987,23 @@ bool writeInc(const std::string& path, const AlbedoTable& table, double residual
     }
     const std::string etaMin = floatLiteral(static_cast<float>(kEtaMin));
     const std::string etaMax = floatLiteral(static_cast<float>(kEtaMax));
-    out << "// Generated by tools/albedo_table.cpp -- do not edit. Regenerate with:\n"
-           "//   ./build/albedo_table --out src/scene/albedo_table.inc\n"
-           "// Kulla-Conty energy tables, indexed by perceptual roughness rather than alpha: E is far better\n"
-           "// distributed in sqrt(alpha), and it is what callers already hold. Every grid is edge-aligned, so\n"
-           "// roughness 0 and mu 1 are exact table entries and microfacet.cpp's lookups can interpolate on k/(res-1).\n"
-           "// BOTH mu axes are uniform in sqrt(mu), mu = (k/(res-1))^2, so nodes crowd where E climbs from its\n"
-           "// grazing limit over mu ~ alpha; microfacet.cpp indexes each of them by sqrt(mu). The reflect side's node\n"
-           "// 0 is mu = 0 itself, where E = 1 exactly for every alpha and the bake asserts that identity. The\n"
-           "// two multiple-scattering shapes below stay uniform in mu, where their piecewise-linear inversion\n"
-           "// has one step width.\n"
-           "// The reflect side splits E = F0*a + b - k*c for the F82-tint Fresnel F0 + (1-F0)(1-x)^5 - k*x(1-x)^6\n"
-           "// (OpenPBR's metal, Hoffman 2023): linear in (F0, k), so the three Fresnel-free integrals are exact.\n"
-           "// kAlbedoDeficit is 1 - E formed in double, so the Kulla-Conty lobe never cancels it in float as alpha -> 0.\n"
-           "// Roughness 0 is alpha = 0, the smooth surface, tabulated analytically: E = F(mu), R = F, T = 1 - F.\n"
-           "// Reflect side (a, b, c and their means) is exact-domain Gauss-Legendre, residual "
-        << residual << " against a doubled rule.\n"
-           "// kEscapeDeficit and kEscapeAvgDeficit are 1 - R - T and its mean formed in double: no float difference turns negative.\n"
-           "// Transmit side (r, t, deficit and their means) is Gauss-Legendre in the NDF measure at "
-        << transmitNodes << " nodes per panel, residual " << transmitResidual << " against a doubled rule.\n"
-           "// kMsReflectDensity/kMsReflectCdf are the reflected multiple-scattering lobe's sampling shape: a\n"
-           "// piecewise-linear density over mu, proportional to (1-E(mu))*mu and normalised to 1, with its exact\n"
-           "// prefix integrals. microfacet.cpp inverts the first and evaluates it for the matching pdf.\n"
-           "// kMsTransmitDensity/kMsTransmitCdf are the same shape for the transmitted twin, carrying the escape\n"
-           "// table's eta axis and stored UNNORMALISED: microfacet.cpp blends four rows over (roughness, eta) and\n"
-           "// divides by the blended total, so the sampled shape is the raw-deficit interpolation escapeAlbedo\n"
-           "// performs and a numerically zero row cannot contribute a unit-mass shape of amplified noise.\n"
-           "// kKernelNode/kKernelWeight are the reflect kernel's Gauss rules over x = dot(wo, h) on a roughness x sqrt(mu) grid:\n"
-           "// E[F] = sum w F(x) for any Fresnel F, exact to degree 2n - 1; worst probe residual "
-        << kernelResidual << ". kAverageNode/kAverageWeight are the rule of 2 mu dmu.\n";
+    out << "// Generated by tools/albedo_table.cpp, do not edit; regenerate with ./build/albedo_table --out src/scene/albedo_table.inc\n"
+           "// Kulla-Conty energy tables (Kulla & Conty 2017) over perceptual roughness, edge-aligned so r = 0 and mu = 1 are exact nodes.\n"
+           "// Every directional mu axis is uniform in sqrt(mu), nodes crowding where E climbs over mu ~ alpha; the lookups index sqrt(mu).\n"
+           "// The multiple-scattering shapes are uniform in mu, where their piecewise-linear inversion has one step width.\n"
+           "// Roughness 0 is the smooth surface, tabulated analytically: E = F(mu), R = F, T = 1 - F.\n"
+           "// kAlbedo*: F82's E = F0 a + b - k c, exact in (F0, k); node mu = 0 has E = 1, asserted per row. Residual "
+        << residual << " vs a doubled rule.\n"
+           "// kAlbedoDeficit, kEscapeDeficit and their means are 1 - E and 1 - R - T formed in double, never cancelled in float.\n"
+           "// kEscape*: the dielectric's R, T and deficit over (roughness, mu, log eta) at "
+        << transmitNodes << " nodes per panel, residual " << transmitResidual << " vs a doubled rule.\n"
+           "// kMsReflectDensity/Cdf: the conductor's (1 - E(mu)) mu lobe as a normalised piecewise-linear density with exact prefix sums.\n"
+           "// kMsTransmitDensity/Cdf: the escape deficit's shape, unnormalised so a blend of four rows divides by its own blended total.\n"
+           "// kKernelNode/Weight: Gauss rules of order " << kKernelOrder << " for E[F] over x = dot(wo, h), any Fresnel; probe residual "
+        << kernelResidual << ".\n"
+           "// kAverageNode/Weight: the Gauss rule of 2 mu dmu on [0, 1], the hemispherical average of a Fresnel with no closed form.\n"
+           "// kAniso*: rules, deficit, F82 split and mean over (r, 1 - sqrt(1 - a), sqrt(mu), sqrt(alpha_o)); residual "
+        << anisoResidual << " vs a doubled rule.\n";
     out << "\nconstexpr int kAlbedoRoughnessRes = " << kAlbedoRoughnessRes << ";\n"
         << "constexpr int kAlbedoMuRes = " << kAlbedoMuRes << ";\n"
         << "constexpr int kMsReflectMuRes = " << kMsReflectMuRes << ";\n"
@@ -819,7 +1014,11 @@ bool writeInc(const std::string& path, const AlbedoTable& table, double residual
         << "constexpr float kEtaMax = " << etaMax << ";\n"
         << "constexpr int kKernelRoughnessRes = " << kKernelRoughnessRes << ";\n"
         << "constexpr int kKernelMuRes = " << kKernelMuRes << ";\n"
-        << "constexpr int kKernelOrder = " << kKernelOrder << ";\n";
+        << "constexpr int kKernelOrder = " << kKernelOrder << ";\n"
+        << "constexpr int kAnisoRoughnessRes = " << kAnisoRoughnessRes << ";\n"
+        << "constexpr int kAnisoAnisotropyRes = " << kAnisoAnisotropyRes << ";\n"
+        << "constexpr int kAnisoMuRes = " << kAnisoMuRes << ";\n"
+        << "constexpr int kAnisoPhiRes = " << kAnisoPhiRes << ";\n";
     writeArray(out, "kAlbedoA", table.a);
     writeArray(out, "kAlbedoB", table.b);
     writeArray(out, "kAlbedoC", table.c);
@@ -842,6 +1041,12 @@ bool writeInc(const std::string& path, const AlbedoTable& table, double residual
     writeArray(out, "kKernelWeight", table.kernelWeight);
     writeArray(out, "kAverageNode", table.averageNode);
     writeArray(out, "kAverageWeight", table.averageWeight);
+    writeArray(out, "kAnisoNode", table.anisoNode);
+    writeArray(out, "kAnisoWeight", table.anisoWeight);
+    writeArray(out, "kAnisoDeficit", table.anisoDeficit);
+    writeArray(out, "kAnisoB", table.anisoB);
+    writeArray(out, "kAnisoC", table.anisoC);
+    writeArray(out, "kAnisoDeficitAvg", table.anisoDeficitAvg);
     return out.good();
 }
 
@@ -882,7 +1087,13 @@ int main(int argc, char** argv) {
     buildTransmitMultipleScatteringShape(table);
     const double kernelResidual = buildKernel(table, phiNodes);
     std::cout << "albedo_table: kernel Gauss rules of order " << kKernelOrder << ", worst probe residual " << kernelResidual << "\n";
-    if (!writeInc(outPath, table, residual.value, transmitNodes, transmitResidual, kernelResidual)) {
+    buildAnisotropicKernel(table, kAnisoSquareNodes, kAnisoMeanMuNodes, kAnisoMeanPhiNodes);
+    const double anisoResidual = verifyAnisotropic(table);
+    if (table.anisoExcess > anisoResidual) {
+        std::cerr << "albedo_table: anisotropic E exceeds 1 by " << table.anisoExcess << ", past the quadrature residual " << anisoResidual << "\n";
+        return EXIT_FAILURE;
+    }
+    if (!writeInc(outPath, table, residual.value, transmitNodes, transmitResidual, kernelResidual, anisoResidual)) {
         return EXIT_FAILURE;
     }
     std::cout << "albedo_table: wrote " << outPath << " (reflect " << kAlbedoRoughnessRes << "x" << kAlbedoMuRes

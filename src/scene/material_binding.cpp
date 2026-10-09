@@ -47,6 +47,10 @@ glm::mat4 placementTransform(const glm::vec3& position, const glm::vec3& rotatio
 const std::map<std::string_view, NormalInput Material::*> kNormalInputs = {{"geometry_normal", &Material::geometryNormal},
                                                                           {"geometry_coat_normal", &Material::geometryCoatNormal}};
 
+// The two tangent inputs, each its frame's tangent map: RGB data like a normal map, giving the anisotropy's direction.
+const std::map<std::string_view, NormalInput Material::*> kTangentInputs = {{"geometry_tangent", &Material::geometryNormal},
+                                                                           {"geometry_coat_tangent", &Material::geometryCoatNormal}};
+
 // Every input at its specification default, the instance inputNamed reads specifications and types from.
 const OpenPbrInputs<Constant> kSpecificationDefaults{};
 
@@ -104,6 +108,16 @@ std::variant<ResolvedBinding, std::string> resolveBinding(const std::string& nam
             return "binds neither a normal map nor a bump";
         }
         return resolved;
+    }
+    if (kTangentInputs.contains(name)) {
+        if (!texture.path) {
+            return "binds no path";
+        }
+        if (texture.bump || texture.channel != 0) {
+            return "a tangent map reads R, G and B, so it takes no channel and no bump";
+        }
+        return ResolvedBinding{ImageKey{{*texture.path, pathtracer::gfx::kRgbChannels, ImageRole::Data, texture.colorSpace, 0}, std::nullopt},
+                               std::nullopt};
     }
     const std::optional<NamedInput> input = inputNamed(name);
     if (!input) {
@@ -167,8 +181,16 @@ bool openImage(std::map<TextureKey, OpenedTexture>& loaded, const ImageKey& imag
 void assignBinding(Material& material, const std::string& name, const ResolvedBinding& binding,
                    const std::map<TextureKey, OpenedTexture>& loaded) {
     const auto textureOf = [&](const std::optional<ImageKey>& image) { return image ? loaded.at(image->key).texture : nullptr; };
+    // Field by field: a frame's normal and tangent inputs bind independently, in either order.
     if (const auto normal = kNormalInputs.find(name); normal != kNormalInputs.end()) {
-        material.*(normal->second) = NormalInput{textureOf(binding.image), textureOf(binding.bump), binding.bumpHeightMetres};
+        NormalInput& input = material.*(normal->second);
+        input.map = textureOf(binding.image);
+        input.height = textureOf(binding.bump);
+        input.heightMetres = binding.bumpHeightMetres;
+        return;
+    }
+    if (const auto tangent = kTangentInputs.find(name); tangent != kTangentInputs.end()) {
+        (material.*(tangent->second)).tangent = textureOf(binding.image);
         return;
     }
     forEachInput(

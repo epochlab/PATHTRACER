@@ -862,10 +862,11 @@ PT_CHECK(constant_inputs_match_unit_textures, Fast, Exact) {
     const auto within = [](glm::vec3 lookup, glm::vec3 texel) {
         return glm::all(glm::lessThanEqual(glm::abs(lookup - texel), 3.0F * std::numeric_limits<float>::epsilon() * glm::abs(texel)));
     };
-    ctx.plan(3);
+    ctx.plan(4);
     int inputMismatches = 0;
     int frameMismatches = 0;
     int bumpMismatches = 0;
+    int tangentMismatches = 0;
     for (int i = 0; i < kCases; ++i) {
         const glm::vec2 uv(wrappedUv(rng), wrappedUv(rng));
         Material textured;
@@ -910,6 +911,16 @@ PT_CHECK(constant_inputs_match_unit_textures, Fast, Exact) {
         const ShadingFrame flat = buildShadingFrame(triangle, vertex, NormalInput{});
         const ShadingFrame viaMap = buildShadingFrame(triangle, vertex, mapped.geometryNormal);
         frameMismatches += glm::all(glm::lessThanEqual(glm::abs(viaMap[2] - flat[2]), glm::vec3(8.0F * std::numeric_limits<float>::epsilon()))) ? 0 : 1;
+        // A tangent map's grey (1/2, 1/2) names no direction and keeps the mesh tangent; (1/2, 1) turns it onto the mesh bitangent.
+        const auto tangentVia = [&](const glm::vec3& encoding) {
+            NormalInput input;
+            input.tangent = unitTexture(&encoding.x, pathtracer::gfx::kRgbChannels);
+            return buildShadingFrame(triangle, vertex, input)[0];
+        };
+        const auto near = [](const glm::vec3& a, const glm::vec3& b) {
+            return glm::all(glm::lessThanEqual(glm::abs(a - b), glm::vec3(8.0F * std::numeric_limits<float>::epsilon())));
+        };
+        tangentMismatches += near(tangentVia(glm::vec3(0.5F, 0.5F, 0.5F)), flat[0]) && near(tangentVia(glm::vec3(0.5F, 1.0F, 0.5F)), flat[1]) ? 0 : 1;
         // A constant's B-spline slope is a sum of derivative weights, exactly 0, with sum |w'| <= 1: rounding leaves at most 6u|h|.
         const float height = unit(rng);
         const TextureHandle bump = unitTexture(&height, pathtracer::gfx::kScalarChannels);
@@ -917,10 +928,11 @@ PT_CHECK(constant_inputs_match_unit_textures, Fast, Exact) {
         bumpMismatches += glm::all(glm::lessThanEqual(glm::abs(slope), glm::vec2(3.0F * std::numeric_limits<float>::epsilon() * height))) ? 0 : 1;
     }
     std::cout << "gbuffer_validate: constant vs 1x1 texture over " << kCases << " cases -- " << inputMismatches << " inputs, "
-              << frameMismatches << " frame, " << bumpMismatches << " bump mismatches\n";
+              << frameMismatches << " frame, " << bumpMismatches << " bump, " << tangentMismatches << " tangent mismatches\n";
     PT_EXPECT(ctx, inputMismatches == 0, "a 1x1 texture read past 6u of its texel, or resolved inputs unlike the constants it read");
     PT_EXPECT(ctx, frameMismatches == 0, "a flat-encoded 1x1 normal map tilted the shading normal past rounding");
     PT_EXPECT(ctx, bumpMismatches == 0, "a constant bump texture's slope exceeds the rounding of its exactly-zero derivative weights");
+    PT_EXPECT(ctx, tangentMismatches == 0, "a tangent map did not keep the mesh tangent at grey or turn it onto the bitangent at (1/2, 1)");
 }
 
 // H = a*u + b*v is linear, so bilinear taps reproduce it and the true surface gradient of h = heightMetres*H is a 3x3 solve per triangle.

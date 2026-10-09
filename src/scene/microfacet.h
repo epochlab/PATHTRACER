@@ -9,18 +9,18 @@
 // GGX primitives and OpenPBR's two microfacet slabs, conductor and dielectric interface, each in its own frame with wo.z >= 0.
 namespace pathtracer::scene {
 
-// Perceptual roughness to GGX alpha, OpenPBR's alpha = r^2: every consumer reads this one mapping.
-[[nodiscard]] float alphaForRoughness(float roughness);
+// OpenPBR's (alpha_t, alpha_b) = r^2 sqrt(2/(1 + (1-a)^2)) (1, 1-a), RMS r^2: every consumer reads this one mapping.
+[[nodiscard]] glm::vec2 alphaForRoughness(float roughness, float anisotropy);
 
 // GGX's denominator pi*d^2 falls to pi*alpha^4 at its peak: below FLT_MIN it underflows and D overflows, so the lobe is a delta.
 [[nodiscard]] bool isSmooth(float alpha);
 
-// Heitz 2018 VNDF sampling; wo.z >= 0.
-[[nodiscard]] glm::vec3 sampleGGXVNDF(const glm::vec3& wo, float alpha, glm::vec2 u);
+// Heitz 2018 VNDF sampling, stretched per axis; wo.z >= 0.
+[[nodiscard]] glm::vec3 sampleGGXVNDF(const glm::vec3& wo, const glm::vec2& alpha, glm::vec2 u);
 
 // The conductor slab at wo: f0 = base_weight * base_color, specular_color the F82 tint, specular_weight the Fresnel scale.
-[[nodiscard]] ConductorSlab makeConductorSlab(float roughness, const glm::vec3& f0, const glm::vec3& tint, float scale, const FilmLayer& film,
-                                              float muO);
+[[nodiscard]] ConductorSlab makeConductorSlab(float roughness, float anisotropy, const glm::vec3& f0, const glm::vec3& tint, float scale,
+                                              const FilmLayer& film, const glm::vec3& wo);
 
 // A slab's Fresnel at a facet cosine: the conductor's F82, the interface's dielectric, each mixed with the film's by its weight.
 [[nodiscard]] glm::vec3 conductorFresnel(const ConductorSlab& slab, float cosTheta);
@@ -29,6 +29,7 @@ namespace pathtracer::scene {
 // One dielectric interface: geometry ratio etaI/etaT bends refraction, the Fresnel ratio sets R and T (OpenPBR's coat moves it alone).
 struct InterfaceInputs {
     float roughness;
+    float anisotropy;
     float etaI;
     float etaT;
     float fresnelEtaI;
@@ -42,10 +43,10 @@ struct InterfaceInputs {
 };
 
 // The dielectric interface at wo; refractWeight and the tints as DielectricSlab documents.
-[[nodiscard]] DielectricSlab makeDielectricSlab(const InterfaceInputs& interface, float muO);
+[[nodiscard]] DielectricSlab makeDielectricSlab(const InterfaceInputs& interface, const glm::vec3& wo);
 
-// An interface's untinted reflection albedo at mu, single plus multiple scattering, from the side etaI faces.
-[[nodiscard]] float reflectionAlbedo(float roughness, float etaI, float etaT, float mu);
+// An interface's untinted reflection albedo at w, single plus multiple scattering, from the side etaI faces.
+[[nodiscard]] float reflectionAlbedo(float roughness, float anisotropy, float etaI, float etaT, const glm::vec3& w);
 
 // The interface's reflection albedo at wo, single plus multiple scattering, untinted: E_spec of OpenPBR's albedo scaling.
 [[nodiscard]] inline glm::vec3 reflectAlbedo(const DielectricSlab& slab) { return slab.reflectSingle + slab.multiReflect; }

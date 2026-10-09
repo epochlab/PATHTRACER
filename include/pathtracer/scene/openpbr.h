@@ -42,6 +42,7 @@ struct OpenPbrInputs {
     In<float> specularWeight = 1.0F;
     In<glm::vec3> specularColor = glm::vec3(1.0F);
     In<float> specularRoughness = 0.3F;
+    In<float> specularRoughnessAnisotropy = 0.0F;
     In<float> specularIor = 1.5F;
     In<float> transmissionWeight = 0.0F;
     In<glm::vec3> transmissionColor = glm::vec3(1.0F);
@@ -58,6 +59,7 @@ struct OpenPbrInputs {
     In<float> coatWeight = 0.0F;
     In<glm::vec3> coatColor = glm::vec3(1.0F);
     In<float> coatRoughness = 0.0F;
+    In<float> coatRoughnessAnisotropy = 0.0F;
     In<float> coatIor = 1.6F;
     In<float> coatDarkening = 1.0F;
     In<float> fuzzWeight = 0.0F;
@@ -83,6 +85,7 @@ void forEachInput(Visit&& visit, Inputs&... inputs) {
     visit(InputSpec{"specular_weight", NonNegative, kData, false}, inputs.specularWeight...);
     visit(InputSpec{"specular_color", Unit, kColour, true}, inputs.specularColor...);
     visit(InputSpec{"specular_roughness", Unit, kData, false}, inputs.specularRoughness...);
+    visit(InputSpec{"specular_roughness_anisotropy", Unit, kData, false}, inputs.specularRoughnessAnisotropy...);
     visit(InputSpec{"specular_ior", Positive, kData, false}, inputs.specularIor...);
     visit(InputSpec{"transmission_weight", Unit, kData, true}, inputs.transmissionWeight...);
     visit(InputSpec{"transmission_color", Unit, kColour, false}, inputs.transmissionColor...);
@@ -99,6 +102,7 @@ void forEachInput(Visit&& visit, Inputs&... inputs) {
     visit(InputSpec{"coat_weight", Unit, kData, false}, inputs.coatWeight...);
     visit(InputSpec{"coat_color", Unit, kColour, false}, inputs.coatColor...);
     visit(InputSpec{"coat_roughness", Unit, kData, false}, inputs.coatRoughness...);
+    visit(InputSpec{"coat_roughness_anisotropy", Unit, kData, false}, inputs.coatRoughnessAnisotropy...);
     visit(InputSpec{"coat_ior", Positive, kData, false}, inputs.coatIor...);
     visit(InputSpec{"coat_darkening", Unit, kData, false}, inputs.coatDarkening...);
     visit(InputSpec{"fuzz_weight", Unit, kData, true}, inputs.fuzzWeight...);
