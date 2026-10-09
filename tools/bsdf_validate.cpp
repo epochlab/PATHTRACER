@@ -341,7 +341,9 @@ struct WhiteFurnaceCase {
 PT_CHECK(white_furnace_two_sided, Slow, Statistical) {
     constexpr int kSampleCount = 400000;
     constexpr float kTolerance = 0.02F;
-    const std::array<WhiteFurnaceCase, 14> cases = {{
+    const std::array<WhiteFurnaceCase, 16> cases = {{
+        {0.0F, 1.0F, false},
+        {0.0F, 0.4F, false},
         {0.05F, 1.0F, false},
         {0.05F, 0.4F, false},
         {0.25F, 1.0F, false},
@@ -810,7 +812,7 @@ std::optional<glm::vec3> deltaTransmitThroughput(const BsdfParams& params, const
 // The transmission-tint convention, the only instrument that sees it: every other transmissive case runs at baseColor 1, where they agree.
 PT_CHECK(transmission_tint, Fast, Exact) {
     constexpr float kUlpBand = 1e-6F;
-    constexpr float kSmoothRoughness = 0.005F;   // below bsdf.cpp's smooth threshold, so transmission is the delta branch
+    constexpr float kSmoothRoughness = 0.0F;   // the smooth interface, so transmission is the delta branch
     const glm::vec3 baseColour(0.2F, 0.5F, 0.9F);
     const glm::vec3 tint(0.3F, 0.6F, 0.9F);
     const glm::vec3 white(1.0F);
@@ -869,7 +871,7 @@ PT_CHECK(transmission_tint, Fast, Exact) {
             assertRow("rough ", roughness, ndotV, rough(white, white), rough(baseColour, white),
                        rough(white, tint), rough(baseColour, tint));
         }
-        // The delta branch is selected by being below the smooth threshold, not by the roughness sweep, so it is measured once.
+        // The delta branch is the smooth interface, not a point of the roughness sweep, so it is measured once.
         const auto smooth = [&](const glm::vec3& bc, const glm::vec3& tn) {
             return deltaTransmitThroughput(makeTransmissiveTintParams(kSmoothRoughness, bc, tn), wo,
                                             seed)
@@ -1022,10 +1024,7 @@ auto gaussLegendre(double lower, double upper, F f) -> decltype(f(lower)) {
 // Composite Simpson over [lower, upper] with an even panel count, on any value type with + and scalar *.
 
 // bsdf.cpp's roughness floor, mirrored so every reference evaluates the alpha the lobe ships at rather than an unclamped one.
-double alphaAt(double roughness) {
-    constexpr double kMinAlpha = 0.02 * 0.02;
-    return std::max(roughness * roughness, kMinAlpha);
-}
+double alphaAt(double roughness) { return roughness * roughness; }
 
 // F82-split directional albedo (a, b, c): E(F0, k) = F0*a + b - k*c, and a + b = E.
 glm::dvec3 referenceDirectionalAlbedo(double mu, double alpha) {
@@ -1075,10 +1074,12 @@ void recordWorst(InterpolationError& error, double delta, double roughness, doub
 
 // Worst over the three F82 channels of the shipped lookup against the reference, at one (mu, roughness).
 double directionalAlbedoError(double mu, double roughness) {
-    const glm::dvec3 shipped(pathtracer::scene::directionalAlbedoSplit(static_cast<float>(mu), static_cast<float>(roughness)));
+    const glm::dvec4 shipped(pathtracer::scene::directionalAlbedoSplit(static_cast<float>(mu), static_cast<float>(roughness)));
     const glm::dvec3 exact = referenceDirectionalAlbedo(mu, alphaAt(roughness));
-    const glm::dvec3 error = glm::abs(shipped - exact);
-    return std::max({error.x, error.y, error.z});
+    const glm::dvec3 error = glm::abs(glm::dvec3(shipped) - exact);
+    // The deficit channel is 1 - E as baked, clipped at 0, so it is measured against the same quantity.
+    const double deficitError = std::abs(shipped.w - std::max(1.0 - (exact.x + exact.y), 0.0));
+    return std::max({error.x, error.y, error.z, deficitError});
 }
 
     // Evenly spread node indices over [first, last]: the "held on exact nodes" coordinate, where that axis adds no interpolation error.
@@ -1112,7 +1113,8 @@ PT_CHECK(albedo_table_interpolation, Slow, Exact) {
     constexpr double kControlTolerance = 5e-5;
     constexpr double kRoughnessAxisTolerance = 1e-3;
     constexpr double kMuAxisTolerance = 3.7e-3;
-    constexpr double kFirstMuCellTolerance = 3.1e-3;
+    // In E*mu: measured worst 7.1e-8 at roughness 1/255, where the grazing layer (width ~alpha) is narrower than the cell.
+    constexpr double kFirstMuCellTolerance = 1.2e-7;
     constexpr double kAverageAlbedoTolerance = 8e-6;
     // Fractions across the first mu cell: the layer sits at the mu = 0 edge, so where the worst falls depends on its width vs the cell's.
     const std::array<double, 4> firstCellFractions = {0.2, 0.4, 0.6, 0.8};
@@ -1159,14 +1161,15 @@ PT_CHECK(albedo_table_interpolation, Slow, Exact) {
         muRows[static_cast<std::size_t>(k)] = row;
     });
 
-    // First mu cell: dense in roughness, on exact nodes there, so what is left is the cell alone.
+    // First mu cell: dense in roughness, on exact nodes there, so what is left is the cell alone, measured as energy sees it.
     std::vector<InterpolationError> firstCellRows(static_cast<std::size_t>(res.x));
     parallelRows(res.x, ctx.threads(), [&](int ri) {
         const double roughness = pathtracer::scene::albedoGridRoughness(static_cast<float>(ri));
         InterpolationError row{0.0, roughness, 0.0};
         for (double fraction : firstCellFractions) {
             const double mu = pathtracer::scene::albedoGridMu(static_cast<float>(fraction));
-            recordWorst(row, directionalAlbedoError(mu, roughness), roughness, mu);
+            // In E*mu, the projected-solid-angle integrand every albedo integral sums, as the cell carries energy.
+            recordWorst(row, directionalAlbedoError(mu, roughness) * mu, roughness, mu);
         }
         firstCellRows[static_cast<std::size_t>(ri)] = row;
     });
@@ -1175,9 +1178,10 @@ PT_CHECK(albedo_table_interpolation, Slow, Exact) {
     std::vector<InterpolationError> averageRows(static_cast<std::size_t>(res.x - 1));
     parallelRows(res.x - 1, ctx.threads(), [&](int ri) {
         const double roughness = pathtracer::scene::albedoGridRoughness(static_cast<float>(ri) + 0.5F);
-        const glm::dvec3 shipped(pathtracer::scene::averageAlbedoSplit(static_cast<float>(roughness)));
-        const glm::dvec3 error = glm::abs(shipped - referenceAverageAlbedo(alphaAt(roughness)));
-        const double delta = std::max({error.x, error.y, error.z});
+        const glm::dvec4 shipped(pathtracer::scene::averageAlbedoSplit(static_cast<float>(roughness)));
+        const glm::dvec3 exact = referenceAverageAlbedo(alphaAt(roughness));
+        const glm::dvec3 error = glm::abs(glm::dvec3(shipped) - exact);
+        const double delta = std::max({error.x, error.y, error.z, std::abs(shipped.w - std::max(1.0 - (exact.x + exact.y), 0.0))});
         averageRows[static_cast<std::size_t>(ri)] = {delta, roughness, -1.0};
     });
 
@@ -1193,7 +1197,7 @@ PT_CHECK(albedo_table_interpolation, Slow, Exact) {
         {"control: both axes on nodes    ", reduce(controlRows), kControlTolerance},
         {"roughness axis, mu on nodes    ", reduce(roughnessRows), kRoughnessAxisTolerance},
         {"mu axis cells 1..n, r on nodes ", reduce(muRows), kMuAxisTolerance},
-        {"first mu cell, r on nodes      ", reduce(firstCellRows), kFirstMuCellTolerance},
+        {"first mu cell in E*mu, r on nodes", reduce(firstCellRows), kFirstMuCellTolerance},
         {"Eavg lerp, 1-D in roughness    ", reduce(averageRows), kAverageAlbedoTolerance},
     }};
 
@@ -1573,7 +1577,6 @@ PT_CHECK(dielectric_fresnel, Fast, Exact) {
     constexpr double kFresnelTolerance = 4.7e-7;
     // Normal incidence is an exact identity, not a fit: referenceDielectricFresnel(1, n) is ((n-1)/(n+1))^2, both polarisations equal.
     constexpr double kNormalIncidenceTolerance = 3e-8;
-    constexpr float kMinAlpha = 0.02F * 0.02F;   // bsdf.cpp's roughness floor, mirrored so K uses the alpha the lobe actually used
     const std::array<double, 4> iors = {1.1, 1.5, 1.5168, 2.5};   // 1.5168 is glass.json's own N-BK7 value
     const std::array<float, 3> roughnesses = {0.02F, 0.05F, 0.1F};
     const std::array<float, 14> cosines = {1.0F,  0.9F,  0.7F,  0.5F,  0.35F, 0.25F, 0.15F,
@@ -1586,7 +1589,7 @@ PT_CHECK(dielectric_fresnel, Fast, Exact) {
     for (double ior : iors) {
         for (float roughness : roughnesses) {
             const double alpha =
-                std::max(static_cast<double>(roughness) * roughness, static_cast<double>(kMinAlpha));
+                static_cast<double>(roughness) * roughness;
             const BsdfParams params = paramsWith([&](OpenPbrInputs<Constant>& inputs) {
                 inputs.specularRoughness = roughness;
                 inputs.specularIor = static_cast<float>(ior);
@@ -1814,7 +1817,7 @@ PT_CHECK(index_matched_transmission, Fast, Exact) {
     // Not throughput == tint: sampleBsdf returns f/pdf, so a draw carries tint/P; chromaticity is the noise-free invariant instead.
     constexpr float kChromaticityTolerance = 1.2e-7F;
     constexpr int kRoughDraws = 4096;
-    constexpr float kSmoothRoughness = 0.02F;   // alpha 4e-4, below bsdf.cpp's kSmoothAlpha: the delta branch
+    constexpr float kSmoothRoughness = 0.0F;   // the smooth interface: the delta branch
     constexpr float kRoughRoughness = 0.3F;     // alpha 0.09, comfortably above it: the refractAbout branch
     // Reaches 1e-5 as checkIndexMatchedCoat does: 2.44e-4 is 2^-12, and every row at or below it returned nullopt on the pre-fix code.
     const std::array<float, 8> cosines = {1.0F,     0.7F,          0.1F,   1e-3F,
@@ -2046,7 +2049,7 @@ PT_CHECK(tir_predicate_agreement, Fast, Exact) {
     // Enough draws that reachability is not one lucky selection: just outside the cone ~26% transmit (1068/4096 at ior 1.33).
     constexpr int kDraws = 4096;
     // Angular resolution is set by the finest offset below: a divergence moving the critical cosine less would fall between rows.
-    constexpr float kSmoothRoughness = 0.02F;  // below bsdf.cpp's kSmoothAlpha: the delta branch
+    constexpr float kSmoothRoughness = 0.0F;  // the smooth interface: the delta branch
     const std::array<double, 3> iors = {1.33, 1.5, 2.4};
     const std::array<double, 4> offsets = {1e-3, 1e-2, 0.1, 0.25};
 
@@ -2229,6 +2232,56 @@ PT_CHECK(sampling_chi_square, Slow, Statistical) {
     return;
 }
 
+// Roughness 0 reflects as a delta (OpenPBR's smooth limit): every reflection draw is the mirror at pdf 0, and there is no continuous value.
+PT_CHECK(smooth_reflection_is_a_delta, Fast, Exact) {
+    constexpr int kDraws = 256;
+    const std::array<float, 3> ndotVs = {1.0F, 0.6F, 0.2F};
+    struct SmoothCase {
+        const char* name;
+        BsdfParams params;
+        bool onlyStrategy;  // a lone strategy is drawn with probability 1, so its throughput is the Fresnel itself
+    };
+    const std::array<SmoothCase, 4> cases{{
+        {"white metal", makeParams(0.0F, 1.0F, 0.0F), true},
+        {"tinted metal", makeColoredMetalParams(0.0F, glm::vec3(0.9F, 0.6F, 0.3F)), true},
+        {"glossy dielectric", makeParams(0.0F, 0.0F, 0.0F), false},
+        {"glass", makeParams(0.0F, 0.0F, 1.0F), false},
+    }};
+    bool ok = true;
+    int reflections = 0;
+    for (const SmoothCase& testCase : cases) {
+        for (float ndotV : ndotVs) {
+            const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
+            const glm::vec3 mirror(-wo.x, -wo.y, wo.z);
+            const glm::vec3 fresnel = pathtracer::scene::fresnelAtViewAngle(testCase.params, ndotV);
+            if (!(maxChannel(pathtracer::scene::evaluateBsdfSplit(testCase.params, wo, mirror).specular) == 0.0F)) {
+                std::cerr << "bsdf_validate: FAILED " << testCase.name << " at ndotV=" << ndotV << " has a continuous mirror value\n";
+                ok = false;
+            }
+            for (int i = 0; i < kDraws; ++i) {
+                pathtracer::scene::Sampler sampler(0, 0, i, kDraws, 4242U);
+                const std::optional<pathtracer::scene::BsdfSample> sample = pathtracer::scene::sampleBsdf(testCase.params, wo, sampler);
+                if (!sample.has_value() || sample->type != pathtracer::scene::LobeType::SpecularReflection) {
+                    continue;
+                }
+                ++reflections;
+                const bool exactFresnel = !testCase.onlyStrategy || sample->throughputWeight == fresnel;
+                if (!sample->delta || sample->pdf != 0.0F || sample->wiLocal != mirror || !exactFresnel) {
+                    std::cerr << "bsdf_validate: FAILED " << testCase.name << " at ndotV=" << ndotV << ": delta " << sample->delta << " pdf "
+                              << sample->pdf << " throughput " << sample->throughputWeight.x << " vs F " << fresnel.x << '\n';
+                    ok = false;
+                    break;
+                }
+            }
+        }
+    }
+    if (reflections == 0) {
+        std::cerr << "bsdf_validate: FAILED smooth reflection -- no reflection was drawn, so nothing was asserted\n";
+        ok = false;
+    }
+    finish(ctx, ok, "smooth_reflection_is_a_delta failed; see the rows above");
+}
+
 // fresnelAtMicrofacet, the Fresnel AOV's estimator: the half-vector must come from sampleBsdf's VNDF, and E[F(wo.wh)] varies with alpha.
 PT_CHECK(microfacet_fresnel, Slow, Statistical) {
     ctx.plan(3);
@@ -2245,12 +2298,12 @@ PT_CHECK(microfacet_fresnel, Slow, Statistical) {
         return glm::vec3(sum / static_cast<double>(kDraws));
     };
 
-    // 0.02 is the roughness kMinAlpha floors alpha at (bsdf.cpp), so this is the smoothest surface the BSDF admits.
+    // Roughness 0, the smooth surface: its visible normals are the macro normal, so E[F] is the macro Fresnel exactly.
     bool smoothOk = true;
     float worstSmooth = 0.0F;
     for (const float ndotV : {0.1F, 0.4F, 0.7F, 1.0F}) {
         for (const float metallic : {0.0F, 1.0F}) {
-            const BsdfParams params = makeParams(0.02F, metallic, 0.0F);
+            const BsdfParams params = makeParams(0.0F, metallic, 0.0F);
             const glm::vec3 mean = expectation(params, ndotV);
             const glm::vec3 macro = fresnelAtViewAngle(params, ndotV);
             for (int c = 0; c < 3; ++c) {
@@ -2258,11 +2311,10 @@ PT_CHECK(microfacet_fresnel, Slow, Statistical) {
             }
         }
     }
-    // The residual is the half-vector's O(alpha) tilt at alpha = 4e-4, not sampling noise; 1e-3 is an order above it.
-    smoothOk = worstSmooth < 1e-3F;
+    // Exact: every draw returns the macro Fresnel itself, and a double sum of identical floats divides back to it.
+    smoothOk = worstSmooth == 0.0F;
     char smoothDetail[192];
-    std::snprintf(smoothDetail, sizeof(smoothDetail),
-                  "worst |E[F(wo.wh)] - F(n.wo)| at the roughness floor is %.3e, which must be below 1e-3",
+    std::snprintf(smoothDetail, sizeof(smoothDetail), "worst |E[F(wo.wh)] - F(n.wo)| on the smooth surface is %.3e, which must be 0",
                   static_cast<double>(worstSmooth));
     PT_EXPECT(ctx, smoothOk, smoothDetail);
 

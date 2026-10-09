@@ -3,6 +3,24 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## OpenPBR smooth reflection: specular_roughness 0 is a delta
+
+A roughness floor (alpha >= 4e-4) made a mirror a very narrow GGX lobe, and only transmission became a delta below a fixed
+alpha of 1e-3. Alpha is now exactly roughness^2, and a surface is smooth where GGX's peak denominator pi*alpha^4 underflows
+a normal float: in practice roughness 0, the specification's smooth limit. Evidence is in `results/openpbr/pr2`.
+
+- feat!: smooth reflection, metal and dielectric alike, samples the mirror direction at pdf 0 carrying the reflection
+  Fresnel over its selection mass; the continuous lobe and NEE see no value there. `BsdfSample::delta` marks every delta
+  draw, so the integrator's MIS keys on it rather than on a zero pdf.
+- feat!: `fresnelAtMicrofacet` returns the macro Fresnel on a smooth surface, its only facet being the normal.
+- feat!: roughness 0 is tabulated analytically (E = F, R = F, T = 1 - F), and the deficit 1 - E is baked in double as
+  `kAlbedoDeficit`/`kAlbedoAvgDeficit`, so Kulla-Conty never cancels it in float as alpha -> 0. A smooth row's lobe
+  vanishes exactly. The reflected multiple-scattering shape of a deficit-free row inherits the nearest resolved row's.
+- feat!: `glass.json` is smooth (`specular_roughness` 0).
+- test: `bsdf_validate smooth_reflection_is_a_delta`; the white furnace adds roughness 0; the Fresnel AOV is exact on a
+  smooth surface. The table's first mu cell is measured in E*mu, the measure energy sees: below alpha ~ 1e-4 the grazing
+  layer is narrower than one cell.
+
 ## OpenPBR Surface: parameterisation and base substrate
 
 The surface was a hybrid of glTF metallic-roughness, a Gulbrandsen conductor and per-instance `PathTraceSettings`

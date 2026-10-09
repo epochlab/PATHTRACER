@@ -171,7 +171,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
 
     // MIS state for the previous bounce's BSDF sample: reweights this bounce's miss against NEE's pdf so neither double-counts.
     float lastBsdfPdf = 0.0F;
-    // A delta lobe has no density for NEE to double-count, so its miss takes full weight; only the smooth-glass branch gives pdf 0.
+    // A delta lobe has no density for NEE to double-count, so its miss takes full weight: smooth reflection and refraction alike.
     bool lastSampleWasDelta = false;
     // The previous vertex's shading position, not ray.origin: MIS needs the pdf NEE would have had, taken from shading.position.
     glm::vec3 lastShadingPosition(0.0F);
@@ -382,7 +382,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
         }
 
         lastBsdfPdf = sample->pdf;
-        lastSampleWasDelta = lastBsdfPdf <= 0.0F;
+        lastSampleWasDelta = sample->delta;
         lastShadingPosition = shading.position;
 
         const glm::vec3 wiWorld = frame * sample->wiLocal;

@@ -13,7 +13,7 @@ namespace pathtracer::scene {
 struct BsdfParams {
     float metalness;            // base_metalness: the metal and dielectric bases mix linearly, so metal is weighted once
     float transmissionWeight;   // transmission_weight: the dielectric base's translucent share, the rest glossy-diffuse
-    float roughness;            // specular_roughness, every microfacet lobe's; alpha = roughness^2, floored to avoid a delta lobe
+    float roughness;            // specular_roughness, every microfacet lobe's; alpha = roughness^2, a delta lobe at 0
     glm::vec3 metalF0;          // base_weight * base_color, the metal's normal-incidence reflectance
     // specular_color: the metal's F82 tint, and the dielectric's reflection tint for light arriving from above.
     glm::vec3 specularColor;
@@ -29,15 +29,16 @@ struct BsdfParams {
 // Orthonormal shading basis, columns (tangent, bitangent, normal): frame * local is world, world * frame its transpose, local.
 using ShadingFrame = glm::mat3;
 
-// Which lobe sampleBsdf drew from; path_tracer.cpp buckets the transport AOVs by it. Transmission is delta only below the smooth threshold.
+// Which lobe sampleBsdf drew from; path_tracer.cpp buckets the transport AOVs by it.
 enum class LobeType { Diffuse, SpecularReflection, Transmission };
 
 struct BsdfSample {
     glm::vec3 wiLocal;            // sampled direction, local shading frame
     glm::vec3 throughputWeight;   // f(wi)*|cosThetaI| / pdf(wi)
     LobeType type;
-    // The mixture density wiLocal was drawn from, equal to pdfBsdf's. Zero for the smooth-glass delta branch, which MIS keys on.
+    // The mixture density wiLocal was drawn from, equal to pdfBsdf's; zero for a delta branch.
     float pdf;
+    bool delta;  // a smooth reflection or refraction: no density for NEE to share, so MIS gives its continuation full weight
 };
 
 // The BSDF's continuous lobes at one wi, split by transport type in one pass.
@@ -76,7 +77,6 @@ struct LobeProbabilities {
     float metalWeight;           // metalness * specular_weight, scaling the metal's F82 Fresnel
     glm::vec3 metalF0;
     glm::vec3 metalK;            // F82's correction weight per channel, fit so F(1/7) = specular_color * Schlick(1/7)
-    float albedoWo;              // E(mu_o, roughness), Fresnel-free single scattering
     float msReflectScaleWo;      // (1 - E(mu_o)) / (pi * (1 - Eavg)), the wo half of the Kulla-Conty lobe
     // Opaque multiple scattering per unit (1 - E(mu_o))(1 - E(mu_i)): the metal and glossy-diffuse Kulla-Conty tints, weighted.
     glm::vec3 msReflectTint;
@@ -139,9 +139,9 @@ struct BsdfClosure {
 [[nodiscard]] glm::vec3 metalFresnelAvg(const glm::vec3& f0, const glm::vec3& tint);
 [[nodiscard]] float dielectricFresnelAvg(float ior);
 
-// F82-split directional albedo E = F0*a + b - k*c, as (a, b, c), and its cosine-weighted mean.
-[[nodiscard]] glm::vec3 directionalAlbedoSplit(float mu, float roughness);
-[[nodiscard]] glm::vec3 averageAlbedoSplit(float roughness);
+// F82-split directional albedo E = F0*a + b - k*c and the deficit 1 - E, as (a, b, c, 1 - E), and its cosine-weighted mean.
+[[nodiscard]] glm::vec4 directionalAlbedoSplit(float mu, float roughness);
+[[nodiscard]] glm::vec4 averageAlbedoSplit(float roughness);
 
 // The grid those two index. mu is uniform in sqrt(mu), so never assume k/(res-1).
 [[nodiscard]] glm::ivec2 albedoGridRes();

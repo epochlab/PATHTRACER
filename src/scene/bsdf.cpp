@@ -12,12 +12,14 @@ namespace pathtracer::scene {
 namespace {
 
 constexpr float kPi = 3.14159265F;
-constexpr float kMinAlpha = 0.02F * 0.02F;  // roughness floor, avoids a degenerate GGX delta lobe
 
 // Perceptual roughness to GGX alpha, in one place: the three consumers must agree, or the Fresnel AOV reports an unevaluated term.
-float alphaForRoughness(float roughness) { return std::max(roughness * roughness, kMinAlpha); }
+float alphaForRoughness(float roughness) { return roughness * roughness; }
 
-// GGX D, cancellation-free (Filament 4.4.2); no denominator floor, kPi*d*d >= 8e-14. A floor here once cut D by 124340x at roughness 0.02.
+// GGX's denominator pi*d^2 falls to pi*alpha^4 at its peak: below FLT_MIN it underflows and D overflows, so the lobe is a delta.
+bool isSmooth(float alpha) { return alpha * alpha * alpha * alpha < std::numeric_limits<float>::min(); }
+
+// GGX D, cancellation-free (Filament 4.4.2); no denominator floor, isSmooth keeping pi*d^2 >= pi*alpha^4 a normal float.
 float distributionGGX(const glm::vec3& nh, float alpha) {
     const float alpha2 = alpha * alpha;
     const float d = (alpha2 * nh.z * nh.z) + (nh.x * nh.x) + (nh.y * nh.y);
@@ -93,37 +95,49 @@ bool refractAbout(const glm::vec3& wo, const glm::vec3& ht, float eta, glm::vec3
 
 float lerp1(float a, float b, float t) { return a + ((b - a) * t); }
 
-// F82-split albedo: E(F0, k) = F0*a + b - k*c for the metal's F82-tint Fresnel, and a+b = E, the Fresnel-free single scattering.
+// F82-split albedo: E(F0, k) = F0*a + b - k*c for the metal's F82-tint Fresnel, a+b = E, and the deficit 1 - E as baked in double.
 struct AlbedoSplit {
     float a;
     float b;
     float c;
-    [[nodiscard]] float total() const { return a + b; }
+    float deficit;
     [[nodiscard]] glm::vec3 at(const glm::vec3& f0, const glm::vec3& k) const { return (f0 * a) + b - (k * c); }
 };
 
-// Bilinear lookup indexed by sqrt(mu), matching the generator's grid: E reaches its plateau over mu ~ alpha, under a cell if uniform.
-AlbedoSplit directionalAlbedo(float mu, float roughness) {
+// The bilinear cell of the reflect tables, indexed by sqrt(mu): E reaches its plateau over mu ~ alpha, under a cell if uniform.
+struct AlbedoCell {
+    int i0;
+    int i1;
+    float mt;
+    float rt;
+    template <typename Table>
+    [[nodiscard]] float read(const Table& table) const {
+        return lerp1(lerp1(table[i0], table[i0 + 1], mt), lerp1(table[i1], table[i1 + 1], mt), rt);
+    }
+};
+
+AlbedoCell albedoCell(float mu, float roughness) {
     const float rf = std::clamp(roughness, 0.0F, 1.0F) * (kAlbedoRoughnessRes - 1);
     const float mf = std::sqrt(std::clamp(mu, 0.0F, 1.0F)) * (kAlbedoMuRes - 1);
     const int r0 = std::min(static_cast<int>(rf), kAlbedoRoughnessRes - 2);
     const int m0 = std::min(static_cast<int>(mf), kAlbedoMuRes - 2);
-    const float rt = rf - static_cast<float>(r0);
-    const float mt = mf - static_cast<float>(m0);
-    const int i0 = (r0 * kAlbedoMuRes) + m0;
-    const int i1 = ((r0 + 1) * kAlbedoMuRes) + m0;
-    const auto bilinear = [&](const auto& table) {
-        return lerp1(lerp1(table[i0], table[i0 + 1], mt), lerp1(table[i1], table[i1 + 1], mt), rt);
-    };
-    return {bilinear(kAlbedoA), bilinear(kAlbedoB), bilinear(kAlbedoC)};
+    return {(r0 * kAlbedoMuRes) + m0, ((r0 + 1) * kAlbedoMuRes) + m0, mf - static_cast<float>(m0), rf - static_cast<float>(r0)};
 }
+
+AlbedoSplit directionalAlbedo(float mu, float roughness) {
+    const AlbedoCell cell = albedoCell(mu, roughness);
+    return {cell.read(kAlbedoA), cell.read(kAlbedoB), cell.read(kAlbedoC), cell.read(kAlbedoDeficit)};
+}
+
+// The wi side needs the deficit alone: one table read, not four.
+float directionalDeficit(float mu, float roughness) { return albedoCell(mu, roughness).read(kAlbedoDeficit); }
 
 AlbedoSplit averageAlbedo(float roughness) {
     const float rf = std::clamp(roughness, 0.0F, 1.0F) * (kAlbedoRoughnessRes - 1);
     const int r0 = std::min(static_cast<int>(rf), kAlbedoRoughnessRes - 2);
     const float rt = rf - static_cast<float>(r0);
-    return {lerp1(kAlbedoAvgA[r0], kAlbedoAvgA[r0 + 1], rt), lerp1(kAlbedoAvgB[r0], kAlbedoAvgB[r0 + 1], rt),
-            lerp1(kAlbedoAvgC[r0], kAlbedoAvgC[r0 + 1], rt)};
+    const auto lerpRow = [&](const auto& table) { return lerp1(table[r0], table[r0 + 1], rt); };
+    return {lerpRow(kAlbedoAvgA), lerpRow(kAlbedoAvgB), lerpRow(kAlbedoAvgC), lerpRow(kAlbedoAvgDeficit)};
 }
 
 // --- Reflected multiple-scattering lobe; cosine sampling costs up to +17.3 relative variance at low roughness.
@@ -320,14 +334,14 @@ glm::vec3 metalFresnelAvg(const glm::vec3& f0, const glm::vec3& tint) {
 }
 
 // External linkage: checkAlbedoTableInterpolation is the only instrument that sees the .inc's interpolation error.
-glm::vec3 directionalAlbedoSplit(float mu, float roughness) {
+glm::vec4 directionalAlbedoSplit(float mu, float roughness) {
     const AlbedoSplit split = directionalAlbedo(mu, roughness);
-    return {split.a, split.b, split.c};
+    return {split.a, split.b, split.c, split.deficit};
 }
 
-glm::vec3 averageAlbedoSplit(float roughness) {
+glm::vec4 averageAlbedoSplit(float roughness) {
     const AlbedoSplit split = averageAlbedo(roughness);
-    return {split.a, split.b, split.c};
+    return {split.a, split.b, split.c, split.deficit};
 }
 
 // The grid the two lookups index, described rather than transcribed. Both axes edge-aligned, so 0 and res-1 are exact endpoints.
@@ -468,24 +482,21 @@ float pdfEon(const glm::vec3& wiLocal, const LobeProbabilities& lobes) {
            ((1.0F - pUniform) * cltcPdf(lobes.eonLtcM, lobes.eonLtcBasisT, lobes.eonLtcS, wiLocal));
 }
 
-// Kulla-Conty tint: the share of (1-E) energy surviving repeated bounces, each attenuated by Favg. Exactly 1 at Favg=1.
-float multiScatterTint(float fresnelAvg, float albedoAvg) {
-    return (fresnelAvg * fresnelAvg * albedoAvg) / (1.0F - (fresnelAvg * (1.0F - albedoAvg)));
+// Kulla-Conty tint from the mean deficit 1 - Eavg: the share of (1-E) energy surviving repeated bounces. Exactly 1 at Favg=1.
+float multiScatterTint(float fresnelAvg, float deficitAvg) {
+    return (fresnelAvg * fresnelAvg * (1.0F - deficitAvg)) / (1.0F - (fresnelAvg * deficitAvg));
 }
 
-glm::vec3 multiScatterTint(const glm::vec3& fresnelAvg, float albedoAvg) {
-    return {multiScatterTint(fresnelAvg.x, albedoAvg), multiScatterTint(fresnelAvg.y, albedoAvg),
-            multiScatterTint(fresnelAvg.z, albedoAvg)};
+glm::vec3 multiScatterTint(const glm::vec3& fresnelAvg, float deficitAvg) {
+    return {multiScatterTint(fresnelAvg.x, deficitAvg), multiScatterTint(fresnelAvg.y, deficitAvg),
+            multiScatterTint(fresnelAvg.z, deficitAvg)};
 }
 
 float channelMean(const glm::vec3& v) { return (v.x + v.y + v.z) / 3.0F; }
 
-// Below this the GGX transmission lobe is a delta (PBRT's EffectivelySmooth); kMinAlpha sits inside it, so smooth glass stays exact.
-constexpr float kSmoothAlpha = 1e-3F;
-
 // ior == 1 is a delta at every roughness: the half-vector normalizes zero, NaN on 7783 of 7783 transmission draws at roughness 0.1.
 bool transmissionIsRough(const BsdfParams& params, float alpha) {
-    return params.transmissionWeight > 0.0F && alpha >= kSmoothAlpha && params.ior != 1.0F;
+    return params.transmissionWeight > 0.0F && !isSmooth(alpha) && params.ior != 1.0F;
 }
 
 struct LobeEval {
@@ -500,17 +511,17 @@ glm::vec3 transmitMultiScatter(const BsdfParams& params, float mu, float msPdf, 
 }
 
 // The glossy-diffuse layer's reflection albedo at mu: its tinted single scattering plus Kulla-Conty, the energy the diffuse loses.
-glm::vec3 glossyAlbedo(const LobeProbabilities& lobes, float mu, float albedo) {
-    return lobes.dielectricTint * (escapeAt(kEscapeReflect, lobes.dielectricRow, mu) + (lobes.glossyFms * (1.0F - albedo)));
+glm::vec3 glossyAlbedo(const LobeProbabilities& lobes, float mu, float deficit) {
+    return lobes.dielectricTint * (escapeAt(kEscapeReflect, lobes.dielectricRow, mu) + (lobes.glossyFms * deficit));
 }
 
 LobeEval evaluateDiffuseLobe(const BsdfParams& params, const glm::vec3& wo, const glm::vec3& wi, const LobeProbabilities& lobes,
-                             float albedoWi) {
+                             float deficitWi) {
     if (wi.z <= 0.0F || wo.z <= 0.0F) {
         return {glm::vec3(0.0F), 0.0F};
     }
     const glm::vec3 f = evaluateEon(params.diffuseRho, params.diffuseRoughness, wi, wo);
-    return {f * lobes.diffuseCouplingWo * (1.0F - glossyAlbedo(lobes, wi.z, albedoWi)), pdfEon(wi, lobes)};
+    return {f * lobes.diffuseCouplingWo * (1.0F - glossyAlbedo(lobes, wi.z, deficitWi)), pdfEon(wi, lobes)};
 }
 
 // Every reflection Fresnel at a facet: the metal's F82 and the tinted dielectric, mixed by metalness (OpenPBR's base substrate).
@@ -528,7 +539,7 @@ float facetReflectProbability(float cosTheta, float fDielectric, const LobeProba
 }
 
 // Single scatter D*G2*F/(4*ndotV*ndotL) plus multiple scattering, and the VNDF pdf (Heitz 2018 eq.3) times its Jacobian.
-LobeEval evaluateSpecularLobe(const glm::vec3& wo, const glm::vec3& wi, float alpha, const LobeProbabilities& lobes, float albedoWi) {
+LobeEval evaluateSpecularLobe(const glm::vec3& wo, const glm::vec3& wi, float alpha, const LobeProbabilities& lobes, float deficitWi) {
     if (wo.z <= 0.0F || wi.z <= 0.0F) {
         return {glm::vec3(0.0F), 0.0F};
     }
@@ -541,7 +552,7 @@ LobeEval evaluateSpecularLobe(const glm::vec3& wo, const glm::vec3& wi, float al
     const float fDielectric = fresnelDielectric(woDotNh, lobes.etaI, lobes.etaT);
     const glm::vec3 singleScatter = d * smithVisibility(wo.z, wi.z, alpha) * reflectedFresnel(lobes, woDotNh, fDielectric);
     // Kulla & Conty 2017: (1-E(mu_o))(1-E(mu_i))/(pi(1-Eavg)), symmetric in wo and wi, so the lobe stays reciprocal.
-    glm::vec3 multiScatter = lobes.msReflectTint * (lobes.msReflectScaleWo * (1.0F - albedoWi));
+    glm::vec3 multiScatter = lobes.msReflectTint * (lobes.msReflectScaleWo * deficitWi);
     if (lobes.reflectShape.scale > 0.0F) {
         multiScatter += lobes.dielectricTint * (lobes.transmitWeight * (1.0F - lobes.transmitShare) *
                                                 std::max(1.0F - lobes.escapeWo, 0.0F) * msTransmitPdf(wi.z, lobes.reflectShape) / wi.z);
@@ -562,7 +573,7 @@ struct StrategyEnergies {
 };
 
 // The wo-side frame of the base substrate: orientation, mix weights, the metal's F82 state and the Kulla-Conty wo half.
-LobeProbabilities baseState(const BsdfParams& params, float sign, const AlbedoSplit& splitWo, float albedoAvg) {
+LobeProbabilities baseState(const BsdfParams& params, float sign, const AlbedoSplit& splitWo, float deficitAvg) {
     const bool exiting = sign < 0.0F && params.transmissionWeight > 0.0F;
     LobeProbabilities lobes{};
     lobes.etaI = exiting ? params.ior : 1.0F;
@@ -575,20 +586,19 @@ LobeProbabilities baseState(const BsdfParams& params, float sign, const AlbedoSp
     lobes.metalWeight = params.metalness * params.specularWeight;
     lobes.metalF0 = params.metalF0;
     lobes.metalK = f82Weight(params.metalF0, params.specularColor);
-    lobes.albedoWo = splitWo.total();
-    // 1 - Eavg > 0 at every tabulated roughness, the generator asserting a positive deficit on every row.
-    lobes.msReflectScaleWo = (1.0F - splitWo.total()) / (kPi * (1.0F - albedoAvg));
+    // A zero mean deficit, the smooth row, has every deficit zero: the lobe vanishes, its exact limit, with no 0/0 to form.
+    lobes.msReflectScaleWo = deficitAvg > 0.0F ? splitWo.deficit / (kPi * deficitAvg) : 0.0F;
     return lobes;
 }
 
 // The reflecting strategies: metal and dielectric single scattering, their Kulla-Conty tints, and the glossy layer's diffuse coupling.
 void addReflection(LobeProbabilities& lobes, StrategyEnergies& energies, const BsdfParams& params, const glm::vec3& wo,
-                   const AlbedoSplit& splitWo, float albedoAvg) {
+                   const AlbedoSplit& splitWo, float deficitAvg) {
     const float eta = lobes.etaI / lobes.etaT;
     if (lobes.metalWeight > 0.0F) {
         energies.specular += channelMean(lobes.metalWeight * splitWo.at(lobes.metalF0, lobes.metalK));
         lobes.msReflectTint +=
-            params.metalness * multiScatterTint(params.specularWeight * metalFresnelAvg(params.metalF0, params.specularColor), albedoAvg);
+            params.metalness * multiScatterTint(params.specularWeight * metalFresnelAvg(params.metalF0, params.specularColor), deficitAvg);
     }
     // Index-matched, the interface reflects exactly nothing: an all-zero row, so no table's interpolation residual reads as reflection.
     if (lobes.dielectricWeight > 0.0F && params.ior != 1.0F) {
@@ -597,17 +607,17 @@ void addReflection(LobeProbabilities& lobes, StrategyEnergies& energies, const B
     }
     const float glossyWeight = lobes.dielectricWeight - lobes.transmitWeight;
     if (glossyWeight > 0.0F) {
-        lobes.glossyFms = multiScatterTint(dielectricFresnelAvg(params.ior), albedoAvg);
+        lobes.glossyFms = multiScatterTint(dielectricFresnelAvg(params.ior), deficitAvg);
         lobes.msReflectTint += glossyWeight * lobes.dielectricTint * lobes.glossyFms;
         // Kelemen and Szirmay-Kalos 2001: the reciprocal coupling, whose mean is 1 - Eavg; a layer reflecting all of it leaves none.
         const float meanReflect = params.ior != 1.0F ? averageEscapeAlbedo(params.roughness, eta).reflect : 0.0F;
-        const glm::vec3 meanAlbedo = lobes.dielectricTint * (meanReflect + (lobes.glossyFms * (1.0F - albedoAvg)));
-        const glm::vec3 transmitted = 1.0F - glossyAlbedo(lobes, wo.z, splitWo.total());
+        const glm::vec3 meanAlbedo = lobes.dielectricTint * (meanReflect + (lobes.glossyFms * deficitAvg));
+        const glm::vec3 transmitted = 1.0F - glossyAlbedo(lobes, wo.z, splitWo.deficit);
         for (int c = 0; c < 3; ++c) {
             lobes.diffuseCouplingWo[c] = meanAlbedo[c] < 1.0F ? glossyWeight * transmitted[c] / (1.0F - meanAlbedo[c]) : 0.0F;
         }
     }
-    energies.msReflect = channelMean(lobes.msReflectTint) * (1.0F - splitWo.total());
+    energies.msReflect = channelMean(lobes.msReflectTint) * splitWo.deficit;
     energies.diffuse = channelMean(params.diffuseRho * lobes.diffuseCouplingWo);
 }
 
@@ -648,10 +658,10 @@ void addTransmission(LobeProbabilities& lobes, StrategyEnergies& energies, const
 // Each strategy's mass is its energy at wo over the total; a massless strategy is never drawn, and a black vertex draws nothing.
 LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::vec3& wo, float sign, float alpha) {
     const AlbedoSplit splitWo = directionalAlbedo(wo.z, params.roughness);
-    const float albedoAvg = averageAlbedo(params.roughness).total();
-    LobeProbabilities lobes = baseState(params, sign, splitWo, albedoAvg);
+    const float deficitAvg = averageAlbedo(params.roughness).deficit;
+    LobeProbabilities lobes = baseState(params, sign, splitWo, deficitAvg);
     StrategyEnergies energies;
-    addReflection(lobes, energies, params, wo, splitWo, albedoAvg);
+    addReflection(lobes, energies, params, wo, splitWo, deficitAvg);
     if (lobes.transmitWeight > 0.0F) {
         addTransmission(lobes, energies, params, wo, transmissionIsRough(params, alpha));
     }
@@ -719,9 +729,10 @@ BsdfEval evaluateContinuousLobes(const BsdfParams& params, const glm::vec3& wo, 
                 (lobes.specular * transmission.pdf) + (lobes.msTransmit * msPdf)};
     }
     // One wi-side table read serves the Kulla-Conty lobe and the diffuse coupling; with neither drawable it is never needed.
-    const float albedoWi = lobes.msReflect > 0.0F || lobes.diffuse > 0.0F ? directionalAlbedo(wi.z, params.roughness).total() : 1.0F;
-    const LobeEval specular = evaluateSpecularLobe(wo, wi, alpha, lobes, albedoWi);
-    const LobeEval diffuse = lobes.diffuse > 0.0F ? evaluateDiffuseLobe(params, wo, wi, lobes, albedoWi) : LobeEval{glm::vec3(0.0F), 0.0F};
+    const float deficitWi = lobes.msReflect > 0.0F || lobes.diffuse > 0.0F ? directionalDeficit(wi.z, params.roughness) : 0.0F;
+    // A smooth surface's reflection is a delta: no continuous value for NEE or a continuous strategy to meet.
+    const LobeEval specular = isSmooth(alpha) ? LobeEval{glm::vec3(0.0F), 0.0F} : evaluateSpecularLobe(wo, wi, alpha, lobes, deficitWi);
+    const LobeEval diffuse = lobes.diffuse > 0.0F ? evaluateDiffuseLobe(params, wo, wi, lobes, deficitWi) : LobeEval{glm::vec3(0.0F), 0.0F};
     float pdf = (lobes.specular * specular.pdf) + (lobes.diffuse * diffuse.pdf);
     if (lobes.msReflect > 0.0F) {
         pdf += lobes.msReflect * msReflectPdf(wi.z, params.roughness);
@@ -739,7 +750,7 @@ std::optional<BsdfSample> weighSample(const BsdfClosure& closure, const glm::vec
     if (!(eval.pdf > 0.0F)) {
         return std::nullopt;
     }
-    return BsdfSample{glm::vec3(wi.x, wi.y, wi.z * closure.sign), (eval.total() * std::abs(wi.z)) / eval.pdf, type, eval.pdf};
+    return BsdfSample{glm::vec3(wi.x, wi.y, wi.z * closure.sign), (eval.total() * std::abs(wi.z)) / eval.pdf, type, eval.pdf, false};
 }
 
 // VNDF single scatter, refracting about the sampled facet too (Walter 2007), split by facetReflectProbability without another draw.
@@ -798,7 +809,15 @@ std::optional<BsdfSample> sampleDeltaTransmission(const BsdfClosure& closure) {
     // Non-symmetric radiance compression for camera-originated transport (Veach 1997 sec. 5.2): eta^2 = (etaI/etaT)^2.
     const glm::vec3 throughput = closure.params.transmissionTint * (lobes.transmitPhysicalValue / lobes.transmit) * (eta * eta);
     // pdf 0: a delta lobe has no density for NEE to double-count against, which is exactly the test path_tracer.cpp's MIS weighting makes.
-    return BsdfSample{glm::vec3(wt.x, wt.y, wt.z * closure.sign), throughput, LobeType::Transmission, 0.0F};
+    return BsdfSample{glm::vec3(wt.x, wt.y, wt.z * closure.sign), throughput, LobeType::Transmission, 0.0F, true};
+}
+
+// Smooth reflection: the mirror carries every reflection Fresnel at mu_o, metal and tinted dielectric, divided by its selection mass.
+std::optional<BsdfSample> sampleDeltaReflection(const BsdfClosure& closure) {
+    const glm::vec3& wo = closure.wo;
+    const LobeProbabilities& lobes = closure.lobes;
+    const glm::vec3 fresnel = reflectedFresnel(lobes, wo.z, fresnelDielectric(wo.z, lobes.etaI, lobes.etaT));
+    return BsdfSample{glm::vec3(-wo.x, -wo.y, wo.z * closure.sign), fresnel / lobes.specular, LobeType::SpecularReflection, 0.0F, true};
 }
 
 }  // namespace
@@ -813,6 +832,10 @@ glm::vec3 fresnelAtViewAngle(const BsdfParams& params, float cosTheta) {
 glm::vec3 fresnelAtMicrofacet(const BsdfParams& params, const glm::vec3& woLocal, glm::vec2 u) {
     // sampleGGXVNDF's +z-hemisphere precondition. Only dot(wo, wh) is read and reflecting leaves it unchanged, so the flip needs no undo.
     const glm::vec3 wo(woLocal.x, woLocal.y, std::abs(woLocal.z));
+    // A smooth surface's only facet is the macro normal, where the visible-normal distribution collapses to a delta.
+    if (isSmooth(alphaForRoughness(params.roughness))) {
+        return fresnelAtViewAngle(params, wo.z);
+    }
     const glm::vec3 wh = sampleGGXVNDF(wo, alphaForRoughness(params.roughness), u);
     // Clamped, not raw: fresnelDielectric swaps etaI/etaT below zero, so a negative dot would report the exiting-side term.
     return fresnelAtViewAngle(params, std::max(glm::dot(wo, wh), 0.0F));
@@ -847,7 +870,7 @@ std::optional<BsdfSample> sampleBsdf(const BsdfClosure& closure, Sampler& sample
     const LobeProbabilities& lobes = closure.lobes;
     const float lobeU = sampler.next1D();
     if (lobeU < lobes.specular) {
-        return sampleVndfStrategy(closure, lobeU, sampler);
+        return isSmooth(closure.alpha) ? sampleDeltaReflection(closure) : sampleVndfStrategy(closure, lobeU, sampler);
     }
     // The reflection sub-ranges are prefix sums of one expression, so they partition it exactly: a massless strategy is never reached.
     if (lobeU < lobes.specular + lobes.diffuse + lobes.msReflect + lobes.msReflectTransmissive) {
