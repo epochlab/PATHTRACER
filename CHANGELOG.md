@@ -3,6 +3,23 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## OpenPBR fuzz
+
+OpenPBR's fuzz layer: the volumetric SGGX sheen, fitted by linearly transformed cosines (Zeltner, Burley and Chiang 2022),
+over the coated base. With `fuzz_weight` 0 every shipped scene is bit-identical. Evidence, with white, red-velvet and
+coated fuzz over cornell's clay, is in `results/openpbr/pr5`.
+
+- feat: `fuzz_weight`, `fuzz_color` and `fuzz_roughness`, listed in `principled.json` at their defaults; weight and colour
+  are footprint-filtered, roughness point-sampled.
+- feat: the fuzz is `F fuzz_color f_fuzz + (1 - F E_fuzz(wo)) f_coated-base`, the albedo scaling untinted as the
+  specification states; from inside only leaving transmission crosses it. Its normal is `lerp(base, coat, C)`, normalised.
+- feat: the LTC is evaluated and sampled exactly as the authors' reference, from their published 32 x 32 coefficient
+  table, vendored unmodified as `third_party/ltc-sheen` (Apache-2.0, pinned `9262411`) and compiled through a two-name shim.
+- feat: emission under the fuzz is further reduced by `1 - F E_fuzz`, what the fuzz reflects back.
+- refactor: EON's azimuth frame is shared with the fuzz as `toAzimuthFrame`.
+- test: `fuzz_weight_zero_is_identity`, `fuzz_table_matches_published` (every node against the file),
+  `fuzz_ltc_normalisation` (density 1, value E_fuzz), `fuzzed_white_furnace`, fuzzed chi-square rows, emission under fuzz.
+
 ## OpenPBR coat
 
 OpenPBR's coat layer: a GGX dielectric over the whole base, `layer(coat, base)`, with the specification's absorption,

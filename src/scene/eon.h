@@ -7,6 +7,9 @@
 // OpenPBR's diffuse slab: EON (Portsmouth, Kutz, Hill 2025, JCGT 14(1)), ported from the paper's GLSL, never hand-derived.
 namespace pathtracer::scene {
 
+// Rows of the frame turning w's azimuth onto +x about +z, where an LTC fit (EON's, the fuzz's) is expressed; any azimuth at w = +z.
+[[nodiscard]] glm::mat3 toAzimuthFrame(const glm::vec3& w);
+
 // The slab at wo for single-scattering albedo rho and base_diffuse_roughness r, its sampling state precomputed; wo.z >= 0.
 [[nodiscard]] DiffuseSlab makeDiffuseSlab(const glm::vec3& rho, float r, const glm::vec3& wo);
 

@@ -29,7 +29,7 @@ struct LineProximity {
 // A positive dispersion scale on a transmissive base: the path must commit to one wavelength there.
 [[nodiscard]] bool isDispersive(const OpenPbrInputs<Constant>& inputs);
 
-// emission_luminance * emission_color toward wo, under the coat's one-pass transmittance; one unit is 1 cd/m^2; both inputs filtered.
+// emission_luminance * emission_color toward wo through the coat and fuzz above it; one unit is 1 cd/m^2; both inputs filtered.
 [[nodiscard]] glm::vec3 emittedRadiance(const Material& material, const ShadingTriangle& triangle, const ShadingVertex& shading,
                                         const glm::vec3& wo, const pathtracer::gfx::TextureFootprint& footprint);
 

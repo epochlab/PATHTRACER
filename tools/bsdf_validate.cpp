@@ -2134,6 +2134,8 @@ struct ChiSquareCase {
     float ndotV;
     float coat = 0.0F;
     float coatRoughness = 0.0F;
+    float fuzz = 0.0F;
+    float fuzzRoughness = 0.5F;
 };
 
 PT_CHECK(sampling_chi_square, Slow, Statistical) {
@@ -2147,8 +2149,8 @@ PT_CHECK(sampling_chi_square, Slow, Statistical) {
     constexpr double kMinExpected = 5.0;
     constexpr std::uint32_t kSeed = 0x9E3779B9U;
 
-    // Transmissive rows sit either side of the interface; the last three put a coat over each base kind, its lobe and masses drawn.
-    const std::array<ChiSquareCase, 15> cases = {{
+    // Transmissive rows sit either side of the interface; the coated and fuzzed rows put each layer's lobe and masses in the draw.
+    const std::array<ChiSquareCase, 17> cases = {{
         {0.2F, 0.0F, 1.0F, 0.8F},  {0.2F, 0.0F, 1.0F, -0.6F},
         {0.4F, 0.0F, 1.0F, 0.8F},  {0.4F, 0.0F, 1.0F, -0.6F},
         {0.7F, 0.0F, 1.0F, 0.8F},  {0.7F, 0.0F, 1.0F, -0.6F},
@@ -2156,8 +2158,9 @@ PT_CHECK(sampling_chi_square, Slow, Statistical) {
         {0.3F, 1.0F, 0.0F, 0.7F},  {0.8F, 1.0F, 0.0F, 0.7F},
         {0.5F, 0.0F, 0.0F, 0.5F},  {1.0F, 0.0F, 0.0F, 0.5F},
         {0.5F, 0.0F, 0.0F, 0.6F, 1.0F, 0.3F}, {0.3F, 1.0F, 0.0F, 0.7F, 0.5F, 0.6F}, {0.4F, 0.0F, 1.0F, 0.8F, 1.0F, 0.2F},
+        {0.5F, 0.0F, 0.0F, 0.6F, 0.0F, 0.0F, 1.0F, 0.5F}, {0.3F, 1.0F, 0.0F, 0.4F, 0.5F, 0.3F, 0.7F, 0.8F},
     }};
-    // The suite's corrected significance, split across the grid by Sidak so twelve independent cases share it.
+    // The suite's corrected significance, split across the grid by Sidak so the independent cases share it.
     ctx.plan(1);
     const double perCase = tools::stats::sidak(ctx.alpha(), static_cast<int>(cases.size()));
 
@@ -2167,6 +2170,8 @@ PT_CHECK(sampling_chi_square, Slow, Statistical) {
         Surface params = makeParams(testCase.roughness, testCase.metallic, testCase.transmission);
         params.coatWeight = testCase.coat;
         params.coatRoughness = testCase.coatRoughness;
+        params.fuzzWeight = testCase.fuzz;
+        params.fuzzRoughness = testCase.fuzzRoughness;
         const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (testCase.ndotV * testCase.ndotV))), 0.0F, testCase.ndotV);
 
         std::vector<double> expected(static_cast<std::size_t>(kCosBins) * kPhiBins + 1, 0.0);
@@ -2236,7 +2241,7 @@ PT_CHECK(sampling_chi_square, Slow, Statistical) {
             continue;
         }
         std::cerr << "bsdf_validate: FAILED sampling chi-square at roughness=" << testCase.roughness
-                  << " metallic=" << testCase.metallic << " transmission=" << testCase.transmission << " coat=" << testCase.coat
+                  << " metallic=" << testCase.metallic << " transmission=" << testCase.transmission << " coat=" << testCase.coat << " fuzz=" << testCase.fuzz
                   << " ndotV=" << testCase.ndotV << " chi2=" << chiSquare << " dof=" << dof << " p=" << p
                   << " (threshold " << perCase << ", sampled mass " << mass << ")\n";
         ok = false;
@@ -2588,6 +2593,139 @@ PT_CHECK(coat_transmittance, Fast, Exact) {
                                           pathtracer::scene::coatTransmittance(color, ior, 0.9F)));
     }
     finish(ctx, ok, "coat_transmittance broke an identity: white is clear, mu = 1 gives sqrt(coat_color), grazing absorbs more");
+}
+
+
+// --- OpenPBR's fuzz: the sheen LTC of Zeltner, Burley and Chiang 2022 over the coated base, withholding what it reflects.
+Surface fuzzed(Surface inputs, float weight, const glm::vec3& color, float roughness) {
+    inputs.fuzzWeight = weight;
+    inputs.fuzzColor = color;
+    inputs.fuzzRoughness = roughness;
+    return inputs;
+}
+
+// The published table read through the same two-name shim the renderer compiles it with: the oracle is the file, not the lookup.
+namespace published {
+struct Vector3f {
+    float aInv;
+    float bInv;
+    float albedo;
+    constexpr Vector3f(float a, float b, float r) : aInv(a), bInv(b), albedo(r) {}
+};
+struct SheenLTC {
+    static const Vector3f _ltcParamTableVolume[32][32];
+};
+#include "ltc-sheen/ltc_table_sheen_volume.cpp"
+}  // namespace published
+
+// fuzz_weight 0 is no fuzz whatever its other inputs: every value, density and draw bit-identical to the unfuzzed surface.
+PT_CHECK(fuzz_weight_zero_is_identity, Fast, Exact) {
+    constexpr int kDraws = 64;
+    const std::array<Surface, 3> bases = {makeParams(0.4F, 0.0F, 0.0F), makeParams(0.3F, 0.0F, 1.0F), coated(makeColoredMetalParams(0.6F), 1.0F,
+                                                                                                             glm::vec3(0.8F), 0.2F, 1.5F, 1.0F)};
+    bool ok = true;
+    for (const Surface& base : bases) {
+        const Surface inert = fuzzed(base, 0.0F, glm::vec3(0.3F, 0.6F, 0.9F), 0.7F);
+        for (float muO : {1.0F, 0.5F, -0.6F}) {
+            for (float muI : {1.0F, 0.3F, -0.6F}) {
+                const auto [wo, wi] = pairAt(muO, muI);
+                const pathtracer::scene::BsdfEval a = pathtracer::scene::evaluateBsdfSplit(base, wo, wi);
+                const pathtracer::scene::BsdfEval b = pathtracer::scene::evaluateBsdfSplit(inert, wo, wi);
+                ok = ok && a.total() == b.total() && a.pdf == b.pdf;
+            }
+            const auto [wo, unused] = pairAt(muO, 1.0F);
+            for (int i = 0; i < kDraws; ++i) {
+                pathtracer::scene::Sampler first(0, 0, i, kDraws, 79U);
+                pathtracer::scene::Sampler second(0, 0, i, kDraws, 79U);
+                const auto a = pathtracer::scene::sampleBsdf(base, wo, first);
+                const auto b = pathtracer::scene::sampleBsdf(inert, wo, second);
+                ok = ok && a.has_value() == b.has_value() &&
+                     (!a || (a->wiLocal == b->wiLocal && a->throughputWeight == b->throughputWeight && a->pdf == b->pdf));
+            }
+        }
+    }
+    finish(ctx, ok, "fuzz_weight 0 changed a value, density or draw: an absent fuzz must not reach the layers beneath");
+}
+
+// E_fuzz at every node of the published 32x32 table is the table's own entry: [alpha][cos theta], neither axis transposed.
+PT_CHECK(fuzz_table_matches_published, Fast, Exact) {
+    // At a node the bilinear weights are 0 and 1 up to the index's float rounding; the entries are given to 1e-5.
+    constexpr float kTolerance = 1e-6F;
+    float worst = 0.0F;
+    for (int r = 0; r < 32; ++r) {
+        for (int m = 0; m < 32; ++m) {
+            const float measured = pathtracer::scene::fuzzAlbedo(static_cast<float>(r) / 31.0F, static_cast<float>(m) / 31.0F);
+            worst = std::max(worst, std::abs(measured - published::SheenLTC::_ltcParamTableVolume[r][m].albedo));
+        }
+    }
+    std::cout << "bsdf_validate: fuzz albedo against the published table, worst node error " << worst << '\n';
+    finish(ctx, worst <= kTolerance, "fuzzAlbedo does not reproduce the published sheen table at its nodes");
+}
+
+// Over a base that reflects nothing the fuzz alone remains: its density integrates to one and its value to E_fuzz(mu_o).
+PT_CHECK(fuzz_ltc_normalisation, Slow, Exact) {
+    // Simpson over the hemisphere, panels resolving the LTC's grazing lobe at the smallest roughness swept.
+    constexpr int kPanels = 256;
+    constexpr double kTolerance = 2e-3;
+    const Surface black = paramsWith([](Surface& inputs) {
+        inputs.baseWeight = 0.0F;
+        inputs.specularWeight = 0.0F;
+    });
+    bool ok = true;
+    double worst = 0.0;
+    for (float roughness : {0.2F, 0.5F, 1.0F}) {
+        for (float mu : {1.0F, 0.6F, 0.2F}) {
+            const Surface fuzz = fuzzed(black, 1.0F, glm::vec3(1.0F), roughness);
+            const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (mu * mu))), 0.0F, mu);
+            const pathtracer::scene::BsdfClosure closure = pathtracer::scene::makeBsdfClosure(fuzz, wo);
+            const auto integrate = [&](auto read) {
+                return simpson(0.0, 1.0, kPanels, [&](double z) {
+                    const double sine = std::sqrt(std::max(0.0, 1.0 - (z * z)));
+                    return simpson(0.0, 2.0 * kPiDouble, kPanels, [&](double phi) {
+                        const glm::vec3 wi(static_cast<float>(sine * std::cos(phi)), static_cast<float>(sine * std::sin(phi)), static_cast<float>(z));
+                        return static_cast<double>(read(pathtracer::scene::evaluateBsdfSplit(closure, wi)));
+                    });
+                });
+            };
+            const double pdf = integrate([](const pathtracer::scene::BsdfEval& eval) { return eval.pdf; });
+            const double albedo = integrate([](const pathtracer::scene::BsdfEval& eval) { return eval.specular.x; });
+            const double expected = pathtracer::scene::fuzzAlbedo(roughness, mu);
+            worst = std::max({worst, std::abs(pdf - 1.0), std::abs(albedo - expected)});
+            if (!(std::abs(pdf - 1.0) <= kTolerance && std::abs(albedo - expected) <= kTolerance)) {
+                std::cerr << "bsdf_validate: FAILED fuzz LTC at roughness=" << roughness << " mu=" << mu << ": pdf integral " << pdf
+                          << ", value integral " << albedo << " vs E_fuzz " << expected << '\n';
+                ok = false;
+            }
+        }
+    }
+    std::cout << "bsdf_validate: fuzz LTC normalisation, worst |integral - expected| " << worst << '\n';
+    finish(ctx, ok, "fuzz_ltc_normalisation failed; see the rows above");
+}
+
+// White fuzz over a base that reflects all conserves energy exactly: F E_fuzz + (1 - F E_fuzz) * 1.
+PT_CHECK(fuzzed_white_furnace, Slow, Statistical) {
+    constexpr int kSampleCount = 200000;
+    constexpr float kTolerance = 0.02F;
+    const std::array<Surface, 3> bases = {makeParams(0.5F, 0.0F, 0.0F), makeParams(0.3F, 1.0F, 0.0F),
+                                          coated(makeParams(0.5F, 0.0F, 0.0F), 1.0F, glm::vec3(1.0F), 0.2F, 1.5F, 1.0F)};
+    bool ok = true;
+    std::uint32_t seed = 63000;
+    for (const Surface& base : bases) {
+        for (float weight : {0.5F, 1.0F}) {
+            for (float roughness : {0.3F, 0.8F}) {
+                for (float ndotV : {1.0F, 0.5F, 0.15F}) {
+                    const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
+                    const glm::vec3 lo = furnaceLo(fuzzed(base, weight, glm::vec3(1.0F), roughness), wo, kSampleCount, ++seed);
+                    if (!withinBand(lo, 1.0F, kTolerance)) {
+                        std::cerr << "bsdf_validate: FAILED fuzzed furnace at F=" << weight << " roughness=" << roughness << " ndotV=" << ndotV
+                                  << " Lo=" << minChannel(lo) << '\n';
+                        ok = false;
+                    }
+                }
+            }
+        }
+    }
+    finish(ctx, ok, "fuzzed_white_furnace failed; see the rows above");
 }
 
 PT_CHECK_MAIN("bsdf")

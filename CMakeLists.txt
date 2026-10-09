@@ -151,6 +151,7 @@ add_library(pathtracer_core STATIC
     src/scene/embree_accel.cpp
     src/scene/eon.cpp
     src/scene/environment_map.cpp
+    src/scene/fuzz.cpp
     src/scene/gbuffer_shading.cpp
     src/scene/gltf_loader.cpp
     src/scene/lens.cpp
@@ -170,7 +171,7 @@ add_library(pathtracer_core STATIC
     $<TARGET_OBJECTS:vendored_mikktspace>)
 # include/ and the json headers are PUBLIC because every consumer includes them; cgltf, MikkTSpace and the SHA header are internal.
 target_include_directories(pathtracer_core PUBLIC include ${JSON_DIR})
-target_include_directories(pathtracer_core PRIVATE ${CGLTF_DIR} ${MIKKTSPACE_DIR} ${PATHTRACER_GENERATED_DIR})
+target_include_directories(pathtracer_core PRIVATE ${CGLTF_DIR} ${MIKKTSPACE_DIR} ${CMAKE_SOURCE_DIR}/third_party/ltc-sheen ${PATHTRACER_GENERATED_DIR})
 add_dependencies(pathtracer_core pathtracer_git_sha)
 target_compile_definitions(pathtracer_core PRIVATE ${PATHTRACER_PROVENANCE_DEFINITIONS})
 # glm gates gtx behind this; scene/rotation.h needs gtx/euler_angles' extractEulerAngleZYX, the inverse of its Rz * Ry * Rx.
