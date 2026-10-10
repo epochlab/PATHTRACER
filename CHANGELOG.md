@@ -3,6 +3,62 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## OpenPBR reference cross-check
+
+An audit of the OpenPBR stack against Adobe's openpbr-bsdf (c91aad1), used as a numerical oracle and never linked into the
+renderer. Every primitive both implement exactly agrees to float rounding. Where they differ, the specification or the
+physics decides, and Adobe's heuristics are measured in `results/openpbr/pr8/adobe_comparison.md`. Shipped scenes move
+below seed noise except rough diffuse, which is 3-4% darker. Evidence and benchmarks are in `results/openpbr/pr8`.
+
+- test: `openpbr_reference_validate`.
+  - Fresnel, F82, the specular_weight IOR, anisotropic alpha, the VNDF density, Cauchy dispersion, Gulbrandsen, EON,
+    the fuzz LTC, coat transmittance and E_F all match Adobe to float rounding.
+  - The thin film matches Adobe's spectrally integrated Airy reflectance to 1e-5.
+  - The tables' integrator under Adobe's separable G2 matches Monte Carlo through Adobe's own sampler.
+  - Under height-correlated G2 the same integrator reproduces the shipped tables at their nodes to 7e-8.
+- docs: `openpbr_reference_report` measures what is not asserted.
+  - Adobe's own tables err by up to 2.8e-3.
+  - Its average-Fresnel fit is 30% low at eta 1.05.
+  - Its darkening reads the average Fresnel where the specification states F(mu_o): coated metals at grazing differ by
+    4%, and by 0.3% with darkening off.
+- fix: in albedo scaling the diffuse rho is C (spec 673); the EON albedo inversion is gone.
+- fix: refraction's shadowing is height-correlated Smith B(1 + Lambda_o, 1 + Lambda_i) (Heitz 2014 sec. 6), in the lobe and
+  the tables. Escape means are Gauss rules panelled at the critical cosine, where a trapezoid lost 1.2e-2.
+- fix: the reflected share of an interface's multiple scattering comes from Smith random walks (Heitz et al. 2016), not
+  R_avg/(R_avg + T_avg). The walks' first order reproduces the quadrature within a Bonferroni bound.
+- fix: F82 is clamped at 0 where dark tints dip below it.
+  - The split holds only where F82 >= 0. Elsewhere E comes from the kernel rule.
+  - The hemispherical average is exact everywhere, the dip's polynomial moment removed between its zeros.
+- fix: coat darkening.
+  - r_d reads the coat-aware eta_s, and Delta = 1 at E_b = K = 1.
+  - Light the base transmits now takes the interfaced series 1/(1 - E_b K) rather than Delta (Elias 2001). A clear coat
+    over glass kept only 1 - K, about 40%, of its transmission; it now conserves energy.
+- fix: emission under a coat is lerp(1, T (1 - E_coat(mu_o)), C), the coat's Fresnel and TIR loss (spec 1152).
+- fix: dispersion.
+  - It uses the specification's lines 587.6, 486.1 and 656.3 nm, and disperses the denser side for n < 1.
+  - V_d is bounded below by the least Abbe number that keeps the longest hero band on its side of the surround, so
+    Abbe 0 is accepted.
+- fix: Gulbrandsen's k^2 is a product of non-cancelling factors, with n_max formed through 1 - r. Its error at r = 0.95
+  falls from 0.025 to 1.2e-7.
+- fix: a smooth interface checks geometric TIR before Fresnel matching. An undeviated refraction carries its transmitted
+  multiple scattering.
+- fix: the Airy loop stops at the tabulated path difference.
+- fix: NEE and continuation share one geometric side rule: reflection on wo's side, transmission across it.
+- refactor: `tools/microfacet_quadrature.h` holds the tables' integrator, generic in the shadowing model, shared by
+  `albedo_table`, `bsdf_validate` and the oracle. The rebake is byte-identical.
+- refactor: `shading_math.h` holds `kPi`, `lerp1` and `channelMean`. `MsTransmitRow` is now `EscapeShape`.
+  `kAlbedoAvgA/B/C` are removed. Log-gamma is a thread-safe Lanczos.
+- docs: specification erratum: line 1030 gives `r^4` for line 417's `2 r^4`. The roughening is homogeneous in it, so
+  nothing changes.
+- test: `layer_branch_invariants` covers 11 configurations:
+  - coat and fuzz exiting a transmissive base;
+  - film under a coat, and film met from inside;
+  - smooth tilted coat, and tilted coat under fuzz;
+  - dispersion under a coat;
+  - darkening's 0/0;
+  - the Airy series at r12 r23 -> 1.
+- test: a coated white furnace over unbent glass; clear-coat emission; exact clamped-F82 averages.
+
 ## OpenPBR anisotropy
 
 OpenPBR's `specular_roughness_anisotropy` and `coat_roughness_anisotropy`: two-axis GGX along a shading tangent, with

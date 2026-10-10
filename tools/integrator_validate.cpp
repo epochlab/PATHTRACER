@@ -31,6 +31,7 @@
 #include "pathtracer/scene/gbuffer_shading.h"
 #include "pathtracer/scene/camera.h"
 #include "pathtracer/scene/embree_accel.h"
+#include "pathtracer/scene/fresnel_dielectric.h"
 #include "pathtracer/scene/environment_map.h"
 #include "pathtracer/scene/gbuffer.h"
 #include "pathtracer/scene/gltf_loader.h"
@@ -723,7 +724,7 @@ PT_CHECK(emission_returns_luminance_times_colour, Fast, Exact) {
                             std::max({expected.x, expected.y, expected.z});
 
     ctx.plan(5);
-    // A clear coat absorbs nothing, so it leaves emission bit for bit; a tinted one can only take light away, never add it.
+    // A clear coat absorbs nothing and withholds its reflection, 1 - F(mu_o) when smooth; a tinted one also absorbs, never adds light.
     TestScene clear = scene;
     clear.instances[0].material.coatWeight = 1.0F;
     TestScene tinted = scene;
@@ -732,7 +733,13 @@ PT_CHECK(emission_returns_luminance_times_colour, Fast, Exact) {
     const glm::vec3 open = regionMean(renderPass(scene, black, base, *accel, pool, true).beauty, 2, 6, 6, 10);
     const glm::vec3 throughClear = regionMean(renderPass(clear, black, base, *accel, pool, true).beauty, 2, 6, 6, 10);
     const glm::vec3 throughTint = regionMean(renderPass(tinted, black, base, *accel, pool, true).beauty, 2, 6, 6, 10);
-    PT_EXPECT(ctx, throughClear == open, "a clear coat changed the emission beneath it");
+    // One untinted factor between 1 - F at normal incidence and 1 - F at the 36x24 mm film corner's obliquity, which bounds every pixel.
+    const float cornerMu = kFocalLengthMm / std::sqrt((kFocalLengthMm * kFocalLengthMm) + (18.0F * 18.0F) + (12.0F * 12.0F));
+    const float coatIor = pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant>{}.coatIor;  // the clear coat keeps the default
+    const glm::vec3 clearRatio = throughClear / open;
+    PT_EXPECT(ctx, std::abs(clearRatio.x - clearRatio.z) <= 1e-6F && clearRatio.x <= 1.0F - pathtracer::scene::fresnelDielectric(1.0F, 1.0F, coatIor) &&
+                       clearRatio.x >= 1.0F - pathtracer::scene::fresnelDielectric(cornerMu, 1.0F, coatIor),
+              "a clear coat must dim emission by its own untinted reflection alone, 1 - F(mu_o)");
     PT_EXPECT(ctx, glm::all(glm::lessThan(throughTint, open)) && glm::all(glm::greaterThan(throughTint, 0.5F * open)),
               "a half-weight tinted coat must dim emission, by at most its weight: (1-C) + C*T with 0 < T < 1");
     // The fuzz withholds what it reflects, 1 - F E_fuzz, untinted: a white fuzz dims emission evenly and never to black.

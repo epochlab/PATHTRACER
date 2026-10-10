@@ -476,12 +476,11 @@ PT_CHECK(material_config_rejects_malformed_input, Fast, Exact) {
         // The Fresnel reflectance divides by ior + 1, and every dielectric lobe by the index ratio.
         {"non-positive specular_ior", "engine_io_material_zeroior.json", material(",\"specular_ior\":0.0")},
         {"negative specular_weight", "engine_io_material_negweight.json", material(",\"specular_weight\":-0.5")},
-        // The EON albedo inversion leaves rho unbounded above an albedo of 1, where its multiple-scatter denominator can reach zero.
+        // base_color is a reflectance: above 1 the diffuse, and EON's multiple-scatter term with it, returns more than it receives.
         {"base_color above 1", "engine_io_material_colour.json", material(",\"base_color\":[1,2,1]")},
         {"negative transmission_depth", "engine_io_material_negdepth.json", material(",\"transmission_depth\":-1.0")},
-        // V_d = abbe / scale: a zero Abbe number is no glass, and dispersion would divide by it.
-        {"zero transmission_dispersion_abbe_number", "engine_io_material_zeroabbe.json",
-         material(",\"transmission_dispersion_abbe_number\":0.0")},
+        {"negative transmission_dispersion_abbe_number", "engine_io_material_negabbe.json",
+         material(",\"transmission_dispersion_abbe_number\":-1.0")},
         {"transmission_scatter_anisotropy below -1", "engine_io_material_anisotropy.json",
          material(",\"transmission_scatter_anisotropy\":-1.5")},
         {"negative emission_luminance", "engine_io_material_negemission.json", material(",\"emission_luminance\":-1.0")},

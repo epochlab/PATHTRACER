@@ -14,6 +14,7 @@
 #include "pathtracer/scene/gbuffer_shading.h"
 #include "pathtracer/scene/sampler.h"
 #include "pathtracer/scene/shading_scene.h"
+#include "shading_math.h"
 
 namespace pathtracer::scene {
 
@@ -65,7 +66,6 @@ std::array<float, kFilterTableSize> buildFilterTable() {
     constexpr float kA1 = 0.48829F;
     constexpr float kA2 = 0.14128F;
     constexpr float kA3 = 0.01168F;
-    constexpr float kPi = 3.14159265F;
     std::array<float, kFilterTableSize> table{};
     for (int i = 0; i < kFilterTableSize; ++i) {
         // Blackman-Harris is defined over [0,1] centred at t = 0.5, so |x| = 0 maps there and the radius to the zero end.
@@ -315,24 +315,20 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
             }
         }
 
-        // Medium toggle, co-located with the bucket since both key off a Transmission sample. Reflection and TIR leave it untouched.
-        if (sample.has_value() && sample->type == LobeType::Transmission) {
-            medium = medium.has_value() ? std::nullopt : std::make_optional(Medium{inputs.transmissionColor, inputs.transmissionDepth});
-        }
+        // One side rule for NEE and continuation alike: reflection lobes count on wo's geometric side, transmission lobes across it.
+        const bool woAbove = glm::dot(woWorld, geoNormal) > 0.0F;
 
         // NEE: sample a light, evaluate the BSDF toward it, add it MIS-weighted if unoccluded. Fired whatever lobe `sample` drew.
         const std::optional<LightSample> lightSample = lights.sample(shading.position, sampler);
         if (lightSample.has_value()) {
             const float geoCos = glm::dot(lightSample->direction, geoNormal);
-            const float shadingCos = glm::dot(lightSample->direction, frame[2]);
-            // Both sides, not just wo's: on a transmissive surface a light behind the vertex reaches the eye through the transmission lobe.
-            const bool nearSide = geoCos > 0.0F && shadingCos > 0.0F;
-            const bool farSide = geoCos < 0.0F && shadingCos < 0.0F && transmits(closure);
-            if (nearSide || farSide) {
+            // A light across the surface reaches wo only through a refracting interface: only then is the far side worth a shadow ray.
+            const bool farSide = (geoCos > 0.0F) != woAbove;
+            if (!farSide || transmits(closure)) {
                 const glm::vec3 wiLocalLight = lightSample->direction * frame;
                 // One evaluation for the value, pdf and per-lobe split, each lobe cosine-weighted about its own normal.
                 const BsdfEval eval = evaluateBsdfSplit(closure, wiLocalLight);
-                const glm::vec3 bsdfValue = eval.total();
+                const glm::vec3 bsdfValue = farSide ? eval.transmission : eval.diffuse + eval.specular;
                 if (eval.pdf > 0.0F &&
                     (bsdfValue.x > 0.0F || bsdfValue.y > 0.0F || bsdfValue.z > 0.0F)) {
                     // Offset along geoNormal toward the light's side: the far side crosses the interface, so it takes the curvature offset.
@@ -363,9 +359,12 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
                         radiance += neeContribution;
                         if (bounce == 0) {
                             // Bounce 0 splits NEE by the lobe that carried it, not sample->type, which names the continuation.
-                            directDiffuseAccum += eval.diffuse * common;
-                            directSpecularAccum += eval.specular * common;
-                            refractionAccum += eval.transmission * common;
+                            if (farSide) {
+                                refractionAccum += eval.transmission * common;
+                            } else {
+                                directDiffuseAccum += eval.diffuse * common;
+                                directSpecularAccum += eval.specular * common;
+                            }
                         } else {
                             // Deeper bounces keep the sticky bucket: which lobe carries light here no longer names the transport type.
                             addToBucket(neeContribution, /*isDirect=*/false);
@@ -386,16 +385,18 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
 
         const glm::vec3 wiWorld = frame * sample->wiLocal;
 
-        // Geometric-normal-consistency rejection, a stand-in for Schussler et al. 2017: a sample crossing to the wrong side is rejected.
-        if (sample->type != LobeType::Transmission) {
-            const bool woAbove = glm::dot(woWorld, geoNormal) > 0.0F;
-            const bool wiAbove = glm::dot(wiWorld, geoNormal) > 0.0F;
-            if (woAbove != wiAbove) {
-                break;
-            }
+        // The side rule NEE applied, a stand-in for Schussler et al. 2017: a direction keeps only the lobes its geometric side admits.
+        const bool crosses = (glm::dot(wiWorld, geoNormal) > 0.0F) != woAbove;
+        const glm::vec3 weight = crosses ? sample->transmitWeight : sample->throughputWeight - sample->transmitWeight;
+        if (weight == glm::vec3(0.0F)) {
+            break;
+        }
+        // The ray enters or leaves the medium exactly when it crosses the surface; reflection and TIR leave it untouched.
+        if (crosses) {
+            medium = medium.has_value() ? std::nullopt : std::make_optional(Medium{inputs.transmissionColor, inputs.transmissionDepth});
         }
 
-        throughput *= sample->throughputWeight;
+        throughput *= weight;
 
         if (bounce >= settings.russianRouletteStartBounce) {
             const float continueProb = std::clamp(

@@ -246,7 +246,7 @@ target_link_libraries(colorchecker_texture PRIVATE pathtracer_core)
 
 # Offline generator for albedo_table.inc. Built without -march=native or IPO: its output is committed source and must reproduce exactly.
 add_executable(albedo_table tools/albedo_table.cpp)
-target_include_directories(albedo_table PRIVATE include)
+target_include_directories(albedo_table PRIVATE include tools)
 pathtracer_target_defaults(albedo_table)
 target_link_libraries(albedo_table PRIVATE glm::glm)
 
@@ -289,6 +289,19 @@ target_compile_definitions(io_validate PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DI
 # camera_validate drives the viewer's orbit controller too; its fly input reads a Window, so that TU and GLFW link without a window.
 target_sources(camera_validate PRIVATE src/scene/debug_camera_controller.cpp src/platform/window.cpp)
 target_link_libraries(camera_validate PRIVATE glfw)
+
+# Adobe's openpbr-bsdf as a numerical oracle: its headers reach this validator alone, never pathtracer_core; src/scene for the slab API.
+add_executable(openpbr_reference_validate tools/openpbr_reference_validate.cpp $<TARGET_OBJECTS:pathtracer_check>)
+target_include_directories(openpbr_reference_validate PRIVATE tools src/scene)
+target_include_directories(openpbr_reference_validate SYSTEM PRIVATE third_party/openpbr-bsdf)
+pathtracer_target_defaults(openpbr_reference_validate NATIVE IPO)
+target_link_libraries(openpbr_reference_validate PRIVATE pathtracer_core)
+# Its companion report, Markdown on stdout for results/: where Adobe departs by design, measured rather than asserted.
+add_executable(openpbr_reference_report tools/openpbr_reference_report.cpp)
+target_include_directories(openpbr_reference_report PRIVATE tools src/scene)
+target_include_directories(openpbr_reference_report SYSTEM PRIVATE third_party/openpbr-bsdf)
+pathtracer_target_defaults(openpbr_reference_report NATIVE IPO)
+target_link_libraries(openpbr_reference_report PRIVATE pathtracer_core)
 
 # CIE 1931 module and the measured-metal fit, checked end to end against the Fresnel the renderer shades chrome.json with.
 add_executable(colour_validate tools/colour_validate.cpp
@@ -408,4 +421,5 @@ pathtracer_discover_checks(api_validate)
 pathtracer_discover_checks(c_abi_validate)
 pathtracer_discover_checks(filter_validate)
 pathtracer_discover_checks(camera_validate)
+pathtracer_discover_checks(openpbr_reference_validate)
 

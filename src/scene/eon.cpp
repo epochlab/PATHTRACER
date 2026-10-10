@@ -3,16 +3,14 @@
 #include <algorithm>
 #include <cmath>
 
+#include "shading_math.h"
+
 namespace pathtracer::scene {
 
 namespace {
 
-constexpr float kPi = 3.14159265F;
-
 constexpr float kConstant1Fon = 0.5F - (2.0F / (3.0F * kPi));
 constexpr float kConstant2Fon = (2.0F / 3.0F) - (28.0F / (15.0F * kPi));
-
-float lerp1(float a, float b, float t) { return a + ((b - a) * t); }
 
 // FON directional albedo, quartic fit (paper eq. 14): within 0.1% of the exact form and ~5x cheaper, so used exclusively.
 float evalFonAlbedoApprox(float mu, float r) {
@@ -95,15 +93,6 @@ glm::mat3 toAzimuthFrame(const glm::vec3& w) {
     const float lenSq = (w.x * w.x) + (w.y * w.y);
     const glm::vec3 x = lenSq > 0.0F ? glm::vec3(w.x, w.y, 0.0F) * (1.0F / std::sqrt(lenSq)) : glm::vec3(1.0F, 0.0F, 0.0F);
     return glm::transpose(glm::mat3(x, glm::vec3(-x.y, x.x, 0.0F), glm::vec3(0.0F, 0.0F, 1.0F)));
-}
-
-// Paper Appendix A: rho for a desired observed albedo, by the stable root not eq. 30.
-glm::vec3 eonAlbedoInversion(const glm::vec3& albedo, float r) {
-    const float eFonNormal = 1.0F / (1.0F + (kConstant1Fon * r));
-    const float avgEFon = eFonNormal * (1.0F + (kConstant2Fon * r));
-    const float a = avgEFon - eFonNormal;
-    const glm::vec3 b = glm::vec3(eFonNormal) + (albedo * (1.0F - avgEFon));
-    return (2.0F * albedo) / (b + glm::sqrt((b * b) + (4.0F * a * albedo)));
 }
 
 DiffuseSlab makeDiffuseSlab(const glm::vec3& rho, float r, const glm::vec3& wo) {

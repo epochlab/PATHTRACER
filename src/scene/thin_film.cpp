@@ -17,6 +17,7 @@ constexpr double kPi = 3.14159265358979323846;
 // Path differences tabulated to 40 um at 2 nm: past it the CIE x D65 transforms sit under 5e-3, a film incoherent there.
 constexpr double kOpdStepNm = 2.0;
 constexpr int kOpdSamples = 20001;
+constexpr float kOpdLimitNm = static_cast<float>(kOpdStepNm * (kOpdSamples - 1));
 
 // Rec.709 of the spectrum cos(2 pi o / lambda + phi) under D65 is cos(phi) C(o) - sin(phi) S(o): its exact cosine and sine transforms.
 struct Sensitivity {
@@ -57,7 +58,7 @@ const Sensitivity& sensitivity() {
 // The interference term's Rec.709 at path difference opd (nm) and phase shift per channel; zero past the table, the film incoherent.
 glm::vec3 interference(float opd, const glm::vec3& shift) {
     const float index = opd / static_cast<float>(kOpdStepNm);
-    if (!(index < static_cast<float>(kOpdSamples - 1))) {
+    if (!(opd < kOpdLimitNm)) {
         return glm::vec3(0.0F);
     }
     const Sensitivity& table = sensitivity();
@@ -104,7 +105,7 @@ void reflectionPhase(float cosTheta, float eta1, const glm::vec3& eta2, const gl
     }
 }
 
-// One polarisation's Airy series (Belcour & Barla 2017, eq. 10), summed until its geometric tail lies below float resolution.
+// One polarisation's Airy series (Belcour & Barla 2017, eq. 10), to its tail below float resolution or past the table, where terms are 0.
 glm::vec3 airy(float r12, float t121, const glm::vec3& r23, float opd, const glm::vec3& phase) {
     // At grazing the outer interface reflects all and nothing enters the film to interfere.
     if (t121 == 0.0F) {
@@ -117,8 +118,9 @@ glm::vec3 airy(float r12, float t121, const glm::vec3& r23, float opd, const glm
     const float tailScale = 2.0F * sensitivity().bound * ratio / (1.0F - ratio);
     glm::vec3 amplitude = transmitted - t121;
     glm::vec3 reflectance = r12 + transmitted;
-    for (int m = 1; tailScale * std::max({std::abs(amplitude.x), std::abs(amplitude.y), std::abs(amplitude.z)}) >=
-                    std::numeric_limits<float>::epsilon();
+    for (int m = 1; static_cast<float>(m) * opd < kOpdLimitNm &&
+                    tailScale * std::max({std::abs(amplitude.x), std::abs(amplitude.y), std::abs(amplitude.z)}) >=
+                        std::numeric_limits<float>::epsilon();
          ++m) {
         amplitude *= r123;
         reflectance += amplitude * (2.0F * interference(static_cast<float>(m) * opd, static_cast<float>(m) * phase));
@@ -174,10 +176,15 @@ ComplexIor conductorIor(const glm::vec3& reflectance, const glm::vec3& edgeTint)
             continue;
         }
         const float sqrtR = std::sqrt(r);
-        const float n = (edgeTint[i] * (1.0F - r) / (1.0F + r)) + ((1.0F - edgeTint[i]) * (1.0F + sqrtR) / (1.0F - sqrtR));
+        const float rise = 1.0F + sqrtR;
+        const float g = edgeTint[i];
+        // n_max = (1 + sqrt(r))/(1 - sqrt(r)) as (1 + sqrt(r))^2/(1 - r): 1 - r is exact near 1, where 1 - sqrt(r) cancels.
+        const float n = (g * (1.0F - r) / (1.0F + r)) + ((1.0F - g) * rise * rise / (1.0F - r));
         ior.eta[i] = n;
-        // Zero at g's bounds, where n meets a root of the numerator; rounding there can leave it an ulp negative.
-        ior.kappa[i] = std::sqrt(std::max(((r * (n + 1.0F) * (n + 1.0F)) - ((n - 1.0F) * (n - 1.0F))) / (1.0F - r), 0.0F));
+        // k^2 = (r(n+1)^2 - (n-1)^2)/(1-r) as (sqrt(r)(n+1) - (n-1))(sqrt(r)(n+1) + (n-1)), each factor rewritten free of cancellation.
+        const float vanishing = g * rise * 2.0F * sqrtR / (1.0F + r);
+        const float growing = (n * rise) - ((1.0F - r) / rise);
+        ior.kappa[i] = std::sqrt(vanishing * growing / (1.0F - r));
     }
     return ior;
 }
