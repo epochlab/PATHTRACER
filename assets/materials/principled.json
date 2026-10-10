@@ -33,5 +33,7 @@
     "emission_color": [1.0, 1.0, 1.0],
     "thin_film_weight": 0.0,
     "thin_film_thickness": 0.5,
-    "thin_film_ior": 1.4
+    "thin_film_ior": 1.4,
+    "geometry_opacity": 1.0,
+    "geometry_thin_walled": false
 }

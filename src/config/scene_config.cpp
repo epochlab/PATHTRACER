@@ -127,9 +127,9 @@ std::optional<std::vector<QuadLightConfig>> parseQuadLights(const nlohmann::json
     return lights;
 }
 
-// One input's constant: in its specification range per channel, and a volumetric switch at its zero default.
+// One input's constant: in its specification range per channel, and a bulk material's volumetric switch at its zero default.
 template <typename T>
-bool validInput(const pathtracer::scene::InputSpec& spec, const T& value, const T& fallback, const std::string& path) {
+bool validInput(const pathtracer::scene::InputSpec& spec, const T& value, const T& fallback, bool thinWalled, const std::string& path) {
     const glm::vec3 channels(value);
     for (int c = 0; c < (std::is_same_v<T, float> ? 1 : 3); ++c) {
         if (!pathtracer::scene::inRange(channels[c], spec.range)) {
@@ -137,8 +137,8 @@ bool validInput(const pathtracer::scene::InputSpec& spec, const T& value, const 
             return false;
         }
     }
-    if (spec.requiresVolumes && value != fallback) {
-        std::cerr << "loadMaterialConfig: " << path << ": " << spec.name << " requires volumetric transport\n";
+    if (spec.requiresVolumes && !thinWalled && value != fallback) {
+        std::cerr << "loadMaterialConfig: " << path << ": " << spec.name << " requires volumetric transport or geometry_thin_walled\n";
         return false;
     }
     return true;
@@ -211,7 +211,7 @@ std::optional<MaterialConfig> loadMaterialConfig(const std::string& path) {
 
         // Closed key set: a legacy or misspelt key would otherwise load as the input's default, silently.
         const MaterialConfig defaults;
-        std::vector<std::string_view> names;
+        std::vector<std::string_view> names{"geometry_thin_walled"};
         pathtracer::scene::forEachInput([&](const pathtracer::scene::InputSpec& spec, const auto&) { names.push_back(spec.name); },
                                         defaults);
         for (const auto& item : j.items()) {
@@ -221,6 +221,8 @@ std::optional<MaterialConfig> loadMaterialConfig(const std::string& path) {
             }
         }
         MaterialConfig material;
+        // Read first: whether the volumetric switches are accepted depends on it.
+        material.geometryThinWalled = j.value("geometry_thin_walled", false);
         bool ok = true;
         pathtracer::scene::forEachInput(
             [&](const pathtracer::scene::InputSpec& spec, auto& value, const auto& fallback) {
@@ -233,7 +235,7 @@ std::optional<MaterialConfig> loadMaterialConfig(const std::string& path) {
                 } else {
                     value = it->template get<glm::vec3>();
                 }
-                ok = validInput(spec, value, fallback, path) && ok;
+                ok = validInput(spec, value, fallback, material.geometryThinWalled, path) && ok;
             },
             material, defaults);
         if (!ok) {

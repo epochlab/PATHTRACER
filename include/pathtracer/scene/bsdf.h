@@ -26,6 +26,7 @@ struct BsdfSample {
     // The mixture density wiLocal was drawn from, equal to pdfBsdf's; zero for a delta branch.
     float pdf;
     bool delta;  // a smooth reflection or refraction: no density for NEE to share, so MIS gives its continuation full weight
+    bool passThrough = false;  // a smooth thin wall's undeviated transmission along -wo: a null vertex, the ray continues unchanged
 };
 
 // The BSDF's continuous lobes at one wi, cosine-weighted, f*|cos| about each lobe's own normal (Mitsuba 3's convention), by type.
@@ -121,6 +122,25 @@ struct DiffuseSlab {
     float ltcS;          // the clipped LTC's normalisation
 };
 
+// A thin wall's two parallel faces (OpenPBR's thin-walled translucent base): what its ladder of internal reflections depends on.
+struct SheetInterfaces {
+    glm::vec3 tint;    // specular_color, on reflection from the wall
+    glm::vec3 color;   // transmission_color, one crossing at normal incidence; transmission_depth has no meaning without an interior
+    float fresnelIor;  // the facing face's Fresnel ratio, the coat's shift included
+    float ior;         // the far face's ratio and the bend, specular_ior modulated by specular_weight
+    FilmLayer film;    // on the facing face
+};
+
+// The translucent share of a thin wall at one wo: its ladder's albedos over a white GGX lobe, mirrored through the wall to transmit.
+struct SheetSlab {
+    SheetInterfaces interfaces;
+    float weight;          // (1 - base_metalness) * transmission_weight
+    ConductorSlab lobe;    // f0 = tint = 1: single plus Kulla-Conty scattering integrate to 1 at every mu_o
+    glm::vec3 reflect;     // weight * specular_color * R'(mu_o)
+    glm::vec3 transmit;    // weight * T'(mu_o)
+    float reflectShare;    // mean(reflect) / mean(reflect + transmit): the side a draw from the lobe takes
+};
+
 // OpenPBR's fuzz slab at one wo: the volumetric SGGX sheen's LTC fit (Zeltner, Burley, Chiang 2022), in the fuzz frame.
 struct FuzzSlab {
     glm::vec3 color;     // fuzz_color, tinting the fuzz's own reflection alone
@@ -142,6 +162,9 @@ enum class Technique : std::uint8_t {
     DielectricMultiReflect,  // escape-table multiple scattering leaving on wo's side
     DielectricMultiTransmit, // escape-table multiple scattering leaving refracted
     Diffuse,                 // EON
+    SheetSingle,             // a thin wall's VNDF lobe, reflected or mirrored through it by side; the mirror or -wo when smooth
+    SheetMulti,              // its Kulla-Conty lobe, reflected or mirrored through the wall
+    ThinSubsurface,          // a thin wall's subsurface, an albedo-1 EON reflected or mirrored through it by its anisotropy
     Count,
 };
 inline constexpr std::size_t kTechniqueCount = static_cast<std::size_t>(Technique::Count);
@@ -151,6 +174,8 @@ struct BsdfClosure {
     glm::vec3 wo;  // woLocal mirrored into the +z hemisphere, which every slab assumes
     float sign;    // the mirror that produced wo; wiLocal crosses it on the way in and the sampled wi on the way out
     bool exiting;  // wo inside a transmissive base: only its interface faces the ray, and only transmission crosses coat and fuzz
+    bool thinWalled;  // geometry_thin_walled: no interior, so the wall is the same from either side and never exits
+    glm::vec2 baseAlpha;  // the base slabs' one (alpha_t, alpha_b), specular_roughness after the coat's roughening
     // OpenPBR's fuzz over the coated base: fuzz_weight, its slab in its own frame, and 1 - F E_fuzz(wo), what passes beneath it.
     float fuzzWeight = 0.0F;
     glm::mat3 toFuzz;
@@ -170,12 +195,18 @@ struct BsdfClosure {
     glm::vec3 baseUnder;
     glm::vec3 transmitUnder;
     float metalWeight;        // base_metalness
-    float dielectricWeight;   // 1 - base_metalness
-    // OpenPBR's albedo scaling of the diffuse under the interface: (1 - M)(1 - T)(1 - E_spec(mu_o)), zero from inside.
+    float dielectricWeight;   // the dielectric interface's share: 1 - base_metalness, times 1 - transmission_weight when thin-walled
+    // OpenPBR's albedo scaling of the diffuse under the interface: (1 - M)(1 - T)(1 - S)(1 - E_spec(mu_o)), zero from inside.
     glm::vec3 diffuseWeight = glm::vec3(0.0F);
     ConductorSlab metal;        // built where metalWeight > 0
     DielectricSlab dielectric;  // built where dielectricWeight > 0
     DiffuseSlab diffuse;        // built where its selection mass is positive
+    SheetSlab sheet;            // built where the thin wall's translucent share is positive
+    // The thin wall's subsurface under the interface, (1 - M)(1 - T) S (1 - E_spec(mu_o)) subsurface_color, reflected (1 - g)/2.
+    glm::vec3 subsurfaceWeight;
+    float subsurfaceReflectShare;
+    DiffuseSlab subsurface;     // rho = 1, built where its selection mass is positive
+    bool thinTransmission = false;  // a thin wall's sheet or subsurface transmits: light behind it reaches wo
     std::array<float, kTechniqueCount> mass{};  // selection probabilities: each technique's energy at wo over the total, or all zero
 };
 
@@ -195,10 +226,13 @@ struct BsdfClosure {
     return false;
 }
 
-// Light behind the vertex reaches wo only through a refracting interface, so NEE samples the far side only here.
+// Light behind the vertex reaches wo only through a refracting interface or a thin wall, so NEE samples the far side only here.
 [[nodiscard]] inline bool transmits(const BsdfClosure& closure) {
-    return closure.dielectricWeight > 0.0F && closure.dielectric.refractWeight > 0.0F;
+    return (closure.dielectricWeight > 0.0F && closure.dielectric.refractWeight > 0.0F) || closure.thinTransmission;
 }
+
+// A smooth thin wall's undeviated transmission toward -wo, through fuzz, coat and sheet; zero for any other closure.
+[[nodiscard]] glm::vec3 passThrough(const BsdfClosure& closure);
 
 // The continuous lobes at wiLocal, split by transport type; one call, so GGX, Fresnel and table reads are computed once.
 [[nodiscard]] BsdfEval evaluateBsdfSplit(const BsdfClosure& closure, const glm::vec3& wiLocal);

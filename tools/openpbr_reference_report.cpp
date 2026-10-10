@@ -218,6 +218,27 @@ void reportAverageFresnel() {
     }
 }
 
+void reportThinWall() {
+    std::printf("\n## Thin-walled sheet\n\n");
+    std::printf("The smooth sheet's R' and T' summed per polarisation (exact) against Adobe's window form 2R/(1+R), (1-R)/(1+R) of the\n");
+    std::printf("unpolarised R, its tint applied once and its reflection free of absorption. Clear, they agree at normal incidence\n");
+    std::printf("(asserted); off normal the polarisations part, and a tinted sheet's back-face reflections cross it twice, absorbed.\n\n");
+    std::printf("| ior | colour | mu | R' | Adobe R | T' | Adobe T |\n|---|---|---|---|---|---|---|\n");
+    for (const float ior : {1.5F, 2.4F}) {
+        for (const float color : {1.0F, 0.6F}) {
+            const scene::SheetInterfaces sheet{glm::vec3(1.0F), glm::vec3(color), ior, ior, scene::FilmLayer{}};
+            for (const float mu : {1.0F, 0.8F, 0.5F, 0.2F, 0.05F}) {
+                const scene::SheetLadder ours = scene::sheetLadder(sheet, mu);
+                const double adobeReflect = openpbr_thin_wall_fresnel(ior, mu);
+                const double adobeTransmit = (1.0 - adobeReflect) * openpbr_compute_final_transmission_tint(vec3(color), true, mu, ior).x;
+                std::printf("| %.2f | %.2f | %.2f | %.4f | %.4f | %.4f | %.4f |\n", static_cast<double>(ior), static_cast<double>(color),
+                            static_cast<double>(mu), static_cast<double>(ours.reflect.x), adobeReflect, static_cast<double>(ours.transmit.x),
+                            adobeTransmit);
+            }
+        }
+    }
+}
+
 // One OpenPBR material for both BSDFs, every input the sweep varies set on each side, and Adobe's departures that reach it.
 struct Material {
     const char* name;
@@ -248,6 +269,11 @@ OpenPBR_ResolvedInputs adobeInputs(const Surface& s) {
     a.thin_film_weight = s.thinFilmWeight;
     a.thin_film_thickness = s.thinFilmThickness;
     a.thin_film_ior = s.thinFilmIor;
+    a.transmission_color = s.transmissionColor;
+    a.subsurface_weight = s.subsurfaceWeight;
+    a.subsurface_color = s.subsurfaceColor;
+    a.subsurface_scatter_anisotropy = s.subsurfaceScatterAnisotropy;
+    a.geometry_thin_walled = s.geometryThinWalled;
     return a;
 }
 
@@ -260,7 +286,7 @@ Material material(const char* name, const char* departures, Edit edit) {
 
 // Directional albedo of both BSDFs at wo by their own importance sampling: the mean of RGB throughput weights.
 void reportAlbedoSweep() {
-    const std::array<Material, 10> materials{{
+    const std::array<Material, 12> materials{{
         material("white metal r 0.5", "separable G2", [](Surface& s) {
             s.baseMetalness = 1.0F;
             s.baseColor = glm::vec3(1.0F);
@@ -311,6 +337,18 @@ void reportAlbedoSweep() {
             s.specularRoughness = 0.4F;
             s.specularRoughnessAnisotropy = 0.8F;
         }),
+        material("thin-walled sheet r 0.3", "window form 2R/(1+R), unpolarised and absorption-free; separable G2 in the mirrored lobe", [](Surface& s) {
+            s.geometryThinWalled = true;
+            s.transmissionWeight = 1.0F;
+            s.transmissionColor = glm::vec3(0.8F);
+            s.specularRoughness = 0.3F;
+        }),
+        material("thin-walled subsurface g 0.4", "subsurface under the interface scaled by Adobe's average-Fresnel albedo", [](Surface& s) {
+            s.geometryThinWalled = true;
+            s.subsurfaceWeight = 1.0F;
+            s.subsurfaceScatterAnisotropy = 0.4F;
+            s.specularRoughness = 0.4F;
+        }),
     }};
     constexpr int kSamples = 1 << 20;
     std::printf("\n## Directional albedo through both BSDFs\n\n");
@@ -334,8 +372,9 @@ void reportAlbedoSweep() {
                 for (int s = 0; s < per; ++s) {
                     scene::Sampler sampler(0, 0, (batch * per) + s, kSamples, 0x5EEDU);
                     if (const std::optional<scene::BsdfSample> sample = scene::sampleBsdf(m.inputs, wo, sampler)) {
-                        // Entering from the ambient side the radiance compression is (1/specular_ior)^2.
-                        const glm::vec3 energy = sample->throughputWeight + (sample->transmitWeight * ((m.inputs.specularIor * m.inputs.specularIor) - 1.0F));
+                        // Entering from the ambient the radiance compression is (1/specular_ior)^2; a thin wall returns to the ambient.
+                        const float compression = m.inputs.geometryThinWalled ? 1.0F : m.inputs.specularIor * m.inputs.specularIor;
+                        const glm::vec3 energy = sample->throughputWeight + (sample->transmitWeight * (compression - 1.0F));
                         sumOurs += (energy.x + energy.y + energy.z) / 3.0;
                     }
                     vec3 direction;
@@ -374,6 +413,7 @@ int main() {
     reportTables();
     reportReflectedShare();
     reportAverageFresnel();
+    reportThinWall();
     reportAlbedoSweep();
     return 0;
 }

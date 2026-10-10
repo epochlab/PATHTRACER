@@ -16,6 +16,7 @@
 #include <optional>
 #include <random>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -964,7 +965,7 @@ PT_CHECK(texture_binding_resolution, Fast, Exact) {
     // A packed glTF metallic-roughness map binds a scalar input to G: the channel offset reaches the lookup as R.
     const glm::vec3 green(texel.g, 0.0F, 0.0F);
 
-    ctx.plan(24);
+    ctx.plan(27);
     PT_EXPECT(ctx, written, "could not write the override EXR");
     std::vector<MeshInstance> instances = makeInstances();
     const TextureConfig packed{exr, std::nullopt, 1, std::nullopt};
@@ -1024,6 +1025,18 @@ PT_CHECK(texture_binding_resolution, Fast, Exact) {
               "a bump on an input other than a normal input was accepted");
     // Volumetric switches need transport this renderer lacks: binding one must fail, not render as if it were zero.
     PT_EXPECT(ctx, !apply(untouched, {{"beta", {{"subsurface_weight", file}}}}), "a texture on a volumetric switch was accepted");
+    // A thin wall has no interior: its subsurface is a sheet the surface shades, so the same binding is accepted there.
+    std::vector<MeshInstance> sheets = makeInstances();
+    for (MeshInstance& instance : sheets) {
+        instance.material.geometryThinWalled = true;
+    }
+    PT_EXPECT(ctx, apply(sheets, {{"beta", {{"subsurface_weight", file}, {"geometry_opacity", file}}}}),
+              "subsurface_weight and geometry_opacity textures on a thin wall were rejected");
+    PT_EXPECT(ctx, std::holds_alternative<TextureHandle>(sheets[1].material.subsurfaceWeight) &&
+                       std::holds_alternative<TextureHandle>(sheets[1].material.geometryOpacity),
+              "a thin wall's subsurface_weight or geometry_opacity texture did not bind");
+    // MaterialX declares geometry_thin_walled uniform: a texture on it is refused, not read as a constant.
+    PT_EXPECT(ctx, !apply(sheets, {{"beta", {{"geometry_thin_walled", file}}}}), "a texture on the uniform geometry_thin_walled was accepted");
     // alpha is valid and sorts first, so a non-atomic implementation would have bound it before beta's missing file failed.
     PT_EXPECT(ctx, !apply(untouched, {{"alpha", {{"base_color", file}}}, {"beta", {{"base_color", TextureConfig{"missing.exr", std::nullopt, 0, std::nullopt}}}}}),
               "a scene with one bad entry was accepted");
@@ -1065,9 +1078,11 @@ PT_CHECK(transport_aov_partition, Slow, Exact) {
         float transmission;
         int maxBounces;
         float abbe;  // 0: no dispersion
+        bool thinWalled = false;
+        float opacity = 1.0F;
     };
     // The dispersive row is here because the hero channel is the one mechanism writing different values into channels of one throughput.
-    const std::array<PartitionCase, 7> cases{{
+    const std::array<PartitionCase, 9> cases{{
         {"quad diffuse (rough 1.0)", Geometry::Quad, 1.0F, 0.0F, 0.0F, 1, 0.0F},
         {"quad glossy dielectric (rough 0.35)", Geometry::Quad, 0.35F, 0.0F, 0.0F, 1, 0.0F},
         {"quad rough metal (rough 0.5)", Geometry::Quad, 0.5F, 1.0F, 0.0F, 2, 0.0F},
@@ -1075,6 +1090,9 @@ PT_CHECK(transport_aov_partition, Slow, Exact) {
         {"slab smooth glass (rough 0)", Geometry::Slab, 0.0F, 0.0F, 1.0F, 8, 0.0F},
         {"slab rough glass (rough 0.4)", Geometry::Slab, 0.4F, 0.0F, 1.0F, 8, 0.0F},
         {"slab dispersive glass (rough 0.4)", Geometry::Slab, 0.4F, 0.0F, 1.0F, 8, 64.17F},
+        // A window's pass-through at bounce 0 is a transmission vertex: what lies behind it sticks to the refraction bucket.
+        {"slab of smooth thin windows", Geometry::Slab, 0.0F, 0.0F, 1.0F, 8, 0.0F, true},
+        {"half-present quad diffuse (rough 1.0)", Geometry::Quad, 1.0F, 0.0F, 0.0F, 1, 0.0F, false, 0.5F},
     }};
 
     const EnvironmentMap env = makeUniformEnvironment();
@@ -1091,6 +1109,8 @@ PT_CHECK(transport_aov_partition, Slow, Exact) {
             material.transmissionWeight = testCase.transmission;
             material.transmissionDispersionScale = testCase.abbe > 0.0F ? 1.0F : 0.0F;
             material.transmissionDispersionAbbeNumber = testCase.abbe > 0.0F ? testCase.abbe : 20.0F;
+            material.geometryThinWalled = testCase.thinWalled;
+            material.geometryOpacity = testCase.opacity;
         });
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         if (!accel.has_value()) {
@@ -1295,6 +1315,26 @@ pathtracer::scene::QuadLight makeOverheadLight(bool twoSided = false) {
                                      glm::vec3(1.0F, 0.0F, 0.0F), glm::vec3(3.0F), twoSided};
 }
 
+// A wall at z = 1 sized to makeOverheadLight's projected footprint, not kQuadExtent, which would swallow the camera sightline.
+void appendWall(TestScene& scene, const Material& material, std::vector<int>& instanceLightIndex) {
+    const glm::vec3 wallNormal(0.0F, 0.0F, 1.0F);
+    const glm::vec4 wallTangent(1.0F, 0.0F, 0.0F, 1.0F);
+    const auto wallVertex = [&](float x, float y) {
+        return ShadingVertex{glm::vec3(x, y, 1.0F), wallNormal, glm::vec2(0.5F, 0.5F), wallTangent};
+    };
+    const ShadingVertex w0 = wallVertex(0.15F, -0.5F);
+    const ShadingVertex w1 = wallVertex(1.25F, -0.5F);
+    const ShadingVertex w2 = wallVertex(1.25F, 0.5F);
+    const ShadingVertex w3 = wallVertex(0.15F, 0.5F);
+    const int wallInstance = static_cast<int>(scene.instances.size());
+    scene.worldTriangles.push_back(Triangle{w0.position, w1.position, w2.position});
+    scene.worldTriangles.push_back(Triangle{w0.position, w2.position, w3.position});
+    scene.shadingTriangles.push_back(ShadingTriangle{w0, w1, w2, wallInstance});
+    scene.shadingTriangles.push_back(ShadingTriangle{w0, w2, w3, wallInstance});
+    scene.instances.push_back(MeshInstance{material, glm::mat4(1.0F), "wall"});
+    instanceLightIndex.push_back(-1);
+}
+
 // Irradiance against the closed form, a one-sided face reading 0 and an occluded light 0.
 PT_CHECK(quad_light_irradiance_and_occlusion, Slow, Statistical) {
     constexpr float kTolerance = 0.02F;  // Monte Carlo NEE noise at kSamplesPerPixel, not a formula slop
@@ -1380,29 +1420,13 @@ PT_CHECK(quad_light_irradiance_and_occlusion, Slow, Statistical) {
         }
     }
 
-    // The first case's light plus a wall sized to its projected footprint, not kQuadExtent, which would swallow the camera sightline.
+    // The first case's light plus a wall over its footprint.
     {
         TestScene scene = makeLambertianFloor();
         std::vector<int> instanceLightIndex(scene.instances.size(), -1);
         const pathtracer::scene::QuadLight light = makeOverheadLight();
         appendLightGeometry(scene, light, /*quadIndex=*/0, instanceLightIndex);
-
-        const glm::vec3 wallNormal(0.0F, 0.0F, 1.0F);
-        const glm::vec4 wallTangent(1.0F, 0.0F, 0.0F, 1.0F);
-        const auto wallVertex = [&](float x, float y) {
-            return ShadingVertex{glm::vec3(x, y, 1.0F), wallNormal, glm::vec2(0.5F, 0.5F), wallTangent};
-        };
-        const ShadingVertex w0 = wallVertex(0.15F, -0.5F);
-        const ShadingVertex w1 = wallVertex(1.25F, -0.5F);
-        const ShadingVertex w2 = wallVertex(1.25F, 0.5F);
-        const ShadingVertex w3 = wallVertex(0.15F, 0.5F);
-        const int wallInstance = static_cast<int>(scene.instances.size());
-        scene.worldTriangles.push_back(Triangle{w0.position, w1.position, w2.position});
-        scene.worldTriangles.push_back(Triangle{w0.position, w2.position, w3.position});
-        scene.shadingTriangles.push_back(ShadingTriangle{w0, w1, w2, wallInstance});
-        scene.shadingTriangles.push_back(ShadingTriangle{w0, w2, w3, wallInstance});
-        scene.instances.push_back(MeshInstance{makeLambertianFloor().instances[0].material, glm::mat4(1.0F), "wall"});
-        instanceLightIndex.push_back(-1);
+        appendWall(scene, makeLambertianFloor().instances[0].material, instanceLightIndex);
 
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         if (!accel.has_value()) {
@@ -1428,6 +1452,114 @@ PT_CHECK(quad_light_irradiance_and_occlusion, Slow, Statistical) {
     }
     finish(ctx, ok, "quad_light_irradiance_and_occlusion failed; see the rows above");
     return;
+}
+
+// OpenPBR's presence and a smooth thin wall between the overhead light and the floor: NEE's shadow walk and the BSDF ray agree.
+PT_CHECK(presence_and_window_transmission, Slow, Statistical) {
+    constexpr float kTolerance = 0.02F;  // Monte Carlo noise at kSamplesPerPixel, as quad_light_irradiance_and_occlusion
+    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    const pathtracer::scene::QuadLight light = makeOverheadLight();
+    const std::array<glm::vec3, 4> corners{light.origin, light.origin + light.edge0, light.origin + light.edge0 + light.edge1,
+                                           light.origin + light.edge1};
+    const float open = lambertPolygonIrradiance(corners, glm::vec3(0.0F), glm::vec3(0.0F, 0.0F, 1.0F), light.radiance.x) / kPi;
+    Material window = makeLambertianFloor().instances[0].material;
+    window.geometryThinWalled = true;
+    window.transmissionWeight = 1.0F;
+    window.specularRoughness = 0.0F;
+    window.specularIor = 1.5F;
+    // Through the window each direction keeps T'(mu): the light faces -z over a parallel floor, so both cosines are mu = dz/r.
+    pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant> sheet;
+    sheet.geometryThinWalled = true;
+    sheet.transmissionWeight = 1.0F;
+    sheet.specularRoughness = 0.0F;
+    double windowIrradiance = 0.0;
+    constexpr int kNodes = 256;
+    for (int i = 0; i < kNodes; ++i) {
+        for (int j = 0; j < kNodes; ++j) {
+            const glm::vec3 point = light.origin + (((static_cast<float>(i) + 0.5F) / kNodes) * light.edge0) +
+                                    (((static_cast<float>(j) + 0.5F) / kNodes) * light.edge1);
+            const float r = glm::length(point);
+            const float mu = point.z / r;
+            const glm::vec3 wo(std::sqrt(1.0F - (mu * mu)), 0.0F, mu);
+            const float through = pathtracer::scene::makeBsdfClosure(sheet, wo).sheet.transmit.x;
+            windowIrradiance += static_cast<double>(light.radiance.x * through * mu * mu / (r * r));
+        }
+    }
+    const float area = glm::length(glm::cross(light.edge0, light.edge1));
+    const auto throughWindow = static_cast<float>(windowIrradiance * area / (kNodes * kNodes) / kPi);
+
+    struct Case {
+        const char* name;
+        float opacity;
+        bool window;
+        int maxBounces;
+        float expected;
+    };
+    const std::array<Case, 5> cases{{
+        {"absent wall, opacity 0", 0.0F, false, 0, open},
+        {"half-present wall, opacity 0.5", 0.5F, false, 0, 0.5F * open},
+        {"smooth window, final ray past the depth cap", 1.0F, true, 0, throughWindow},
+        {"smooth window, sampled pass-through", 1.0F, true, 1, throughWindow},
+        {"half-present window", 0.5F, true, 1, 0.5F * (open + throughWindow)},
+    }};
+    bool ok = true;
+    for (const Case& c : cases) {
+        TestScene scene = makeLambertianFloor();
+        std::vector<int> instanceLightIndex(scene.instances.size(), -1);
+        appendLightGeometry(scene, light, /*quadIndex=*/0, instanceLightIndex);
+        Material wall = c.window ? window : makeLambertianFloor().instances[0].material;
+        wall.geometryOpacity = c.opacity;
+        appendWall(scene, wall, instanceLightIndex);
+        std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+        if (!accel.has_value()) {
+            finish(ctx, false, "failed to build the Embree wall scene");
+            return;
+        }
+        const std::vector<pathtracer::scene::QuadLight> quads{light};
+        const PathTraceSettings settings = makeSettings(c.maxBounces, 999);
+        const glm::vec3 lo =
+            centreMean(renderPassWithLights(scene, instanceLightIndex, quads, /*env=*/nullptr, settings, *accel, pool, false).beauty);
+        std::cout << "  " << c.name << "   rendered " << lo.x << "   reference " << c.expected << '\n';
+        if (std::fabs(lo.x - c.expected) > kTolerance * c.expected) {
+            std::cerr << "integrator_validate: FAILED " << c.name << " -- rendered " << lo.x << ", reference " << c.expected << '\n';
+            ok = false;
+        }
+    }
+    finish(ctx, ok, "presence_and_window_transmission failed; see the rows above");
+}
+
+// A bulk surface emits from its front alone; a thin wall, with no interior, emits from both faces alike.
+PT_CHECK(emission_sidedness, Fast, Exact) {
+    constexpr int kEnvWidth = 64;
+    constexpr int kEnvHeight = 32;
+    TestScene scene = makeTwoInstanceScene(1.0F);
+    Material& emitter = scene.instances[0].material;
+    emitter.baseWeight = 0.0F;
+    emitter.specularWeight = 0.0F;
+    emitter.emissionLuminance = 2.0F;
+    // Instance 0 turned away from the camera: its geometric normal is -Z, its interpolated normals untouched.
+    for (std::size_t t = 0; t < 2; ++t) {
+        std::swap(scene.shadingTriangles[t].v1, scene.shadingTriangles[t].v2);
+        std::swap(scene.worldTriangles[t].v1, scene.worldTriangles[t].v2);
+    }
+    std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+    if (!accel.has_value()) {
+        finish(ctx, false, "failed to build the Embree two-instance scene");
+        return;
+    }
+    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    PathTraceSettings settings = makeSettings(1, 999);
+    settings.samplesPerPixel = 16;
+    const EnvironmentMap black = tools::fixtures::makeEnvironment(
+        kEnvWidth, kEnvHeight, std::vector<float>(static_cast<std::size_t>(kEnvWidth) * kEnvHeight * pathtracer::gfx::kRgbChannels, 0.0F));
+    TestScene thin = scene;
+    thin.instances[0].material.geometryThinWalled = true;
+    const glm::vec3 bulk = regionMean(renderPass(scene, black, settings, *accel, pool, true).beauty, 2, 6, 6, 10);
+    const glm::vec3 both = regionMean(renderPass(thin, black, settings, *accel, pool, true).beauty, 2, 6, 6, 10);
+    std::cout << "  back face: bulk " << bulk.x << ", thin-walled " << both.x << '\n';
+    ctx.plan(2);
+    PT_EXPECT(ctx, bulk == glm::vec3(0.0F), "a bulk emitter's back face must emit nothing");
+    PT_EXPECT(ctx, std::abs(both.x - 2.0F) <= 1e-5F, "a thin-walled emitter's back face must emit its luminance");
 }
 
 // A convex receiver cannot occlude itself from a light it faces, so Shadow is exactly 0 however coarsely the sphere is tessellated.

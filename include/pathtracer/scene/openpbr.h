@@ -24,7 +24,7 @@ struct InputSpec {
     // A mix weight or reflectance factor; an input shaping a lobe (roughness, ior, a power) is point-sampled, as the pixel integrates it.
     bool filtered;
     InputUse use = InputUse::Surface;
-    // A switch for in-volume scattering, which needs volumetric transport: only its zero default is accepted.
+    // A switch for in-volume scattering, which needs volumetric transport: a bulk material accepts only its zero default.
     bool requiresVolumes = false;
 };
 
@@ -70,6 +70,9 @@ struct OpenPbrInputs {
     In<float> thinFilmWeight = 0.0F;
     In<float> thinFilmThickness = 0.5F;
     In<float> thinFilmIor = 1.4F;
+    In<float> geometryOpacity = 1.0F;
+    // Uniform in MaterialX, so never textured and outside forEachInput: a bound material reads it before its textures bind.
+    bool geometryThinWalled = false;
 };
 
 // Visits every input of one or more OpenPbrInputs in specification order, zipped: visit(spec, a.member, b.member, ...).
@@ -94,11 +97,12 @@ void forEachInput(Visit&& visit, Inputs&... inputs) {
     visit(InputSpec{"transmission_scatter_anisotropy", Signed, kData, false, InputUse::Volume}, inputs.transmissionScatterAnisotropy...);
     visit(InputSpec{"transmission_dispersion_scale", Unit, kData, false}, inputs.transmissionDispersionScale...);
     visit(InputSpec{"transmission_dispersion_abbe_number", NonNegative, kData, false}, inputs.transmissionDispersionAbbeNumber...);
-    visit(InputSpec{"subsurface_weight", Unit, kData, false, InputUse::Volume, true}, inputs.subsurfaceWeight...);
-    visit(InputSpec{"subsurface_color", Unit, kColour, false, InputUse::Volume}, inputs.subsurfaceColor...);
+    // Thin-walled, the subsurface is a translucent sheet the surface shades; its radii, a mean free path, need a volume.
+    visit(InputSpec{"subsurface_weight", Unit, kData, false, InputUse::Surface, true}, inputs.subsurfaceWeight...);
+    visit(InputSpec{"subsurface_color", Unit, kColour, false}, inputs.subsurfaceColor...);
     visit(InputSpec{"subsurface_radius", NonNegative, kData, false, InputUse::Volume}, inputs.subsurfaceRadius...);
     visit(InputSpec{"subsurface_radius_scale", Unit, kData, false, InputUse::Volume}, inputs.subsurfaceRadiusScale...);
-    visit(InputSpec{"subsurface_scatter_anisotropy", Signed, kData, false, InputUse::Volume}, inputs.subsurfaceScatterAnisotropy...);
+    visit(InputSpec{"subsurface_scatter_anisotropy", Signed, kData, false}, inputs.subsurfaceScatterAnisotropy...);
     visit(InputSpec{"coat_weight", Unit, kData, false}, inputs.coatWeight...);
     visit(InputSpec{"coat_color", Unit, kColour, false}, inputs.coatColor...);
     visit(InputSpec{"coat_roughness", Unit, kData, false}, inputs.coatRoughness...);
@@ -113,6 +117,7 @@ void forEachInput(Visit&& visit, Inputs&... inputs) {
     visit(InputSpec{"thin_film_weight", Unit, kData, true}, inputs.thinFilmWeight...);
     visit(InputSpec{"thin_film_thickness", NonNegative, kData, false}, inputs.thinFilmThickness...);
     visit(InputSpec{"thin_film_ior", Positive, kData, false}, inputs.thinFilmIor...);
+    visit(InputSpec{"geometry_opacity", Unit, kData, true}, inputs.geometryOpacity...);
 }
 
 // Membership in the range by direct comparisons, which every NaN fails; infinity fails too, past float max.

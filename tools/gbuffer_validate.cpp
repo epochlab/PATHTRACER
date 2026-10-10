@@ -660,6 +660,23 @@ PT_CHECK(bounding_box_occlusion, Fast, Exact) {
     PT_EXPECT(ctx, occluded * 2 < unoccluded, "the occluder did not hide the box edges behind it");
 }
 
+// OpenPBR's presence in the G-buffer: an absent occluder shows the surface behind it, a present one hides it, at every pixel.
+PT_CHECK(presence_walks_through_cutouts, Fast, Exact) {
+    ctx.plan(2);
+    const std::array<ShadingTriangle, 2> back = makeQuad(5.0F, glm::vec3(0.0F, 0.0F, -10.0F), 0);
+    const std::array<ShadingTriangle, 2> front = makeQuad(5.0F, glm::vec3(0.0F, 0.0F, -5.0F), 1);
+    const std::unique_ptr<Fixture> open = makeFixture({back[0], back[1]}, 2);
+    const std::unique_ptr<Fixture> cut = makeFixture({back[0], back[1], front[0], front[1]}, 2);
+    const GBuffer behind = open->render(straightOnCamera(), straightOnCamera());
+    cut->instances[1].material.geometryOpacity = 0.0F;
+    const GBuffer absent = cut->render(straightOnCamera(), straightOnCamera());
+    cut->instances[1].material.geometryOpacity = 1.0F;
+    const GBuffer present = cut->render(straightOnCamera(), straightOnCamera());
+    PT_EXPECT(ctx, absent.depth.texels == behind.depth.texels && absent.objectId.texels == behind.objectId.texels,
+              "an opacity-0 occluder changed the depth or object ID behind it");
+    PT_EXPECT(ctx, present.depth.texels != behind.depth.texels, "an opacity-1 occluder did not hide the surface behind it");
+}
+
 // One box per instance: two separated quads must draw disjoint boxes, where a single fused box would span both.
 PT_CHECK(per_instance_boxes, Fast, Exact) {
     ctx.plan(2);

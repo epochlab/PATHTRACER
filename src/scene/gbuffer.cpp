@@ -5,12 +5,14 @@
 #include <bit>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <optional>
 
 #include "pathtracer/debug/aov_routing.h"
 #include "pathtracer/scene/bsdf.h"
 #include "pathtracer/scene/false_color.h"
 #include "pathtracer/scene/gbuffer_shading.h"
+#include "pathtracer/scene/sampler.h"
 
 namespace pathtracer::scene {
 
@@ -276,7 +278,28 @@ void renderPixel(GBuffer& result, const GBufferView& view, const GBufferScene& s
     if (!pixel) {
         return;
     }
-    const std::optional<Hit> hit = scene.accel.intersect(pixel->ray);
+    std::optional<Hit> hit = scene.accel.intersect(pixel->ray);
+    // OpenPBR's presence with one uniform per pixel, fixed so the buffer is stable: a cutout shows what lies behind where u >= alpha.
+    std::optional<float> presence;
+    Ray ray = pixel->ray;
+    while (hit) {
+        const ShadingTriangle& triangle = scene.shadingTriangles[static_cast<std::size_t>(hit->triangleIndex)];
+        const Material& material = scene.instances[static_cast<std::size_t>(triangle.instanceIndex)].material;
+        const float opacity = opacityAt(material, interpolateShading(triangle, hit->u, hit->v).uv,
+                                        primaryHitFootprint(triangle, ray, hit->t, pixel->dirPerPixel));
+        if (!(opacity < 1.0F)) {
+            break;
+        }
+        if (!presence) {
+            presence = Sampler(x, y, 0, 1, 0U).next1D();
+        }
+        if (*presence < opacity) {
+            break;
+        }
+        // The same ray past the hit, so the next surface's footprint still measures from the camera.
+        ray.tMin = std::nextafter(hit->t, std::numeric_limits<float>::infinity());
+        hit = scene.accel.intersect(ray);
+    }
     // A miss sees the environment, the plane at infinity, along the ray direction (w = 0); a hit is its worldPos (w = 1).
     glm::vec4 seen(pixel->ray.dir, 0.0F);
     if (hit) {

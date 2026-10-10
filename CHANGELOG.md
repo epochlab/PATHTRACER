@@ -3,6 +3,50 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## OpenPBR geometry opacity and thin-walled
+
+The last two OpenPBR 1.1.1 inputs. `geometry_opacity` is the surface's presence, the spec's mix with the ambient
+(eq. 23). `geometry_thin_walled` makes the base a sheet with no interior: the same from either face, transmitting
+undeviated, with a translucent subsurface. Shipped scenes stay within rounding of PR8 (RMSE <= 5e-9 against seed noise
+1e-3 to 1e-1) and bench 1.00-1.02. Evidence, a demo and Adobe's departures are in `results/openpbr/pr9`.
+
+- feat: `geometry_opacity`, a filtered unit input.
+  - A path takes one presence draw per surface. An absent surface continues the same ray with no bounce and no
+    vertex.
+  - NEE and AO walk shadow rays closest-hit through crossable instances:
+    - shadow rays take (1 - alpha) + alpha * passThrough at each;
+    - AO sums the obscurance each surface contributes in proportion to its presence.
+  - Scenes without such instances keep the plain occlusion query.
+  - The G-buffer walks cutouts with one fixed presence uniform per pixel.
+- feat: `geometry_thin_walled`, a uniform bool. Binding a texture to it is refused.
+  - The translucent share is a two-face sheet. R' and T' are its ladder of internal reflections, summed per
+    polarisation with transmission_color^(1/cos theta_t) per crossing: exact for a smooth sheet, and at normal
+    incidence Adobe's 2R/(1+R).
+  - The sheet's lobe is a white GGX conductor with Kulla-Conty multiple scattering. Transmission is the reflection
+    mirrored through the wall (KC17, Adobe). A smooth sheet is two deltas, the mirror and -wo.
+  - The subsurface is an albedo-1 EON split (1 - g)/2 reflected and (1 + g)/2 transmitted, under the interface's
+    albedo scaling. `subsurface_weight`, `subsurface_color` and `subsurface_scatter_anisotropy` are accepted when
+    thin-walled; the radii still need a volume.
+  - The coat and fuzz face wo from either side. Dispersion is off, since nothing deviates. Coat darkening reads the
+    sheet's and the subsurface's reflection.
+- feat: a smooth sheet's pass-through is an MIS null vertex. Past the depth cap the final ray still crosses a window
+  by its expected share, as NEE's shadow rays do. Crossing a thin wall never toggles the medium.
+- fix: a bulk surface emits from its front alone; a thin wall emits from both faces.
+- refactor: `fresnelDielectricPolarised` and `filmReflectancePolarised` feed the unpolarised forms. FMA contraction
+  moves their results at rounding level.
+- test:
+  - bsdf: thin-wall white furnace across roughness, anisotropy, coat, fuzz, film and subsurface g in {-1, 0, 1};
+    ladder against the bounce series to 1e-5; front and back closures bit-identical; pass-through equals its delta.
+  - bsdf: chi-square rows for the rough sheet and the thin-wall subsurface, and five `layer_branch_invariants` rows.
+  - openpbr_reference_validate: tint against `openpbr_compute_final_transmission_tint`, R'(1) against
+    `openpbr_thin_wall_fresnel`, and the subsurface split.
+  - integrator: absent and half-present walls, and a smooth window at and below the depth cap, against analytic
+    irradiance to 0.04%. Emission sidedness.
+  - G-buffer presence, transport-AOV partition through windows and cutouts, loader and binding rows.
+- docs: `openpbr_reference_report` adds the sheet table and thin-walled albedo rows.
+  - Adobe's window form ignores absorption between the faces.
+  - Its subsurface takes its average-Fresnel scaling.
+
 ## OpenPBR reference cross-check
 
 An audit of the OpenPBR stack against Adobe's openpbr-bsdf (c91aad1), used as a numerical oracle and never linked into the

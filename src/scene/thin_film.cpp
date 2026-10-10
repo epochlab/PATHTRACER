@@ -128,15 +128,14 @@ glm::vec3 airy(float r12, float t121, const glm::vec3& r23, float opd, const glm
     return reflectance;
 }
 
-}  // namespace
-
-glm::vec3 filmReflectance(const ThinFilm& film, float cosTheta, float outerIor, const glm::vec3& substrateIor,
-                          const glm::vec3& substrateKappa) {
+// Each polarisation's Airy reflectance in Rec.709, unclamped: a fringe may lie outside the primaries' gamut.
+PolarisedReflectance airyReflectance(const ThinFilm& film, float cosTheta, float outerIor, const glm::vec3& substrateIor,
+                                     const glm::vec3& substrateKappa) {
     // Snell into the film; past its critical angle no light enters it, and the outer interface reflects all.
     const float ratio = outerIor / film.ior;
     const float cos2Film = 1.0F - ((1.0F - (cosTheta * cosTheta)) * ratio * ratio);
     if (!(cos2Film > 0.0F)) {
-        return glm::vec3(1.0F);
+        return {glm::vec3(1.0F), glm::vec3(1.0F)};
     }
     const float cosFilm = std::sqrt(cos2Film);
     glm::vec3 r12p;
@@ -159,10 +158,22 @@ glm::vec3 filmReflectance(const ThinFilm& film, float cosTheta, float outerIor, 
         }
     }
     const float opd = 2.0F * film.ior * cosFilm * film.thicknessNm;
-    const glm::vec3 parallel = airy(r12p.x, 1.0F - r12p.x, r23p, opd, phi23p + phi21p);
-    const glm::vec3 perpendicular = airy(r12s.x, 1.0F - r12s.x, r23s, opd, phi23s + phi21s);
-    // Each wavelength reflects within [0, 1]; a fringe more saturated than Rec.709's primaries is clipped to the RGB the renderer carries.
-    return glm::clamp(0.5F * (parallel + perpendicular), glm::vec3(0.0F), glm::vec3(1.0F));
+    return {airy(r12p.x, 1.0F - r12p.x, r23p, opd, phi23p + phi21p), airy(r12s.x, 1.0F - r12s.x, r23s, opd, phi23s + phi21s)};
+}
+
+}  // namespace
+
+// Each wavelength reflects within [0, 1]; a fringe more saturated than Rec.709's primaries is clipped to the RGB the renderer carries.
+glm::vec3 filmReflectance(const ThinFilm& film, float cosTheta, float outerIor, const glm::vec3& substrateIor,
+                          const glm::vec3& substrateKappa) {
+    const PolarisedReflectance r = airyReflectance(film, cosTheta, outerIor, substrateIor, substrateKappa);
+    return glm::clamp(0.5F * (r.parallel + r.perpendicular), glm::vec3(0.0F), glm::vec3(1.0F));
+}
+
+PolarisedReflectance filmReflectancePolarised(const ThinFilm& film, float cosTheta, float outerIor, const glm::vec3& substrateIor,
+                                              const glm::vec3& substrateKappa) {
+    const PolarisedReflectance r = airyReflectance(film, cosTheta, outerIor, substrateIor, substrateKappa);
+    return {glm::clamp(r.parallel, glm::vec3(0.0F), glm::vec3(1.0F)), glm::clamp(r.perpendicular, glm::vec3(0.0F), glm::vec3(1.0F))};
 }
 
 ComplexIor conductorIor(const glm::vec3& reflectance, const glm::vec3& edgeTint) {
