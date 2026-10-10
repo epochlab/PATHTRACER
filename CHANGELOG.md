@@ -3,6 +3,36 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Microfacet-based normal mapping
+
+Normal and bump maps now shade through Schussler, Heitz, Hanika & Dachsbacher 2017's microsurface rather than a
+substituted shading normal. Each mapped point is a V-groove of the mapped facet and a vertical mirror wall, whose
+average normal is the interpolated one. The paper's default model is used: the specular wall to second order, eq. 23,
+evaluated exactly. Light no longer leaks through the surface or reflects below it, and transport is reciprocal for a
+reciprocal facet BSDF. Unmapped meshes are bit-identical. The bumped stump is 8-9% darker: Eq. 23 stops at the second
+bounce, so light the facet sends into the wall that needs a third bounce to escape is dropped. A white diffuse facet tilted
+17 degrees keeps 84-93% of its albedo, and at 46 degrees about half. Stump bench 1.02, the others unchanged. Evidence is
+in `results/openpbr/pr10`.
+
+- feat: `NormalMappedBsdf` wraps the layered closure as the facet BSDF.
+  - lambda_p, lambda_t, the masking G1 and the wall come from eq. 8, 9 and 13, over the interpolated normal.
+  - The microsurface seen from below is the point reflection of the one above, so glass and thin walls take the model
+    from either side. Each lobe stays in its medium: reflection on wo's side of omega_g, transmission across it.
+  - Sampling is the paper's Algorithm 2 to second order: the first facet by lambda, a facet draw, then escape or the wall
+    by the masking odds. A continuous draw divides by the walk's exact density, which NEE shares. That density costs no
+    evaluation beyond eq. 23's own, since the escape odds are geometric.
+  - A second closure, at wo mirrored by the wall, is built only where lambda_t > 0.
+  - A window under a map passes -wo by its facet-first direct escape alone.
+- refactor: the integrator's geometric side rule now covers only the flat-versus-interpolated normal residual, which the
+  paper leaves open (its Fig. 18).
+- test:
+  - bsdf: eq. 23 transcribed in double (to 1e-6); reciprocity (2e-7); chi-square of the walk against its density, and its
+    mean weight against the integrated value; lobes confined to their side of omega_g; point symmetry; the limits at
+    zero tilt and past 90 degrees; pass-through under a map; the white furnace's upper bound, with the second-order loss
+    reported.
+  - integrator: a normal-mapped white plane under a uniform sky, at a 70 degree view, matches its microsurface albedo to
+    0.25% with no black texel, facet toward and away from the camera.
+
 ## OpenPBR geometry opacity and thin-walled
 
 The last two OpenPBR 1.1.1 inputs. `geometry_opacity` is the surface's presence, the spec's mix with the ambient

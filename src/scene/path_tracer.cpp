@@ -149,11 +149,13 @@ std::vector<std::uint8_t> passThroughInstances(const std::vector<MeshInstance>& 
     return may;
 }
 
-// The vertex's closure toward woWorld in its shading frame; unbound, the coat follows the interpolated normal, not the base's maps.
-BsdfClosure closureAt(const Material& material, const ShadingTriangle& triangle, const ShadingVertex& shading,
-                      const OpenPbrInputs<Constant>& inputs, const ShadingFrame& frame, const glm::vec3& woWorld, std::optional<int> hero) {
+// The vertex's BSDF toward woWorld in its frame, Schussler's microsurface where a map bends it; the coat follows its own input.
+NormalMappedBsdf closureAt(const Material& material, const ShadingTriangle& triangle, const ShadingVertex& shading,
+                           const OpenPbrInputs<Constant>& inputs, const ShadingFrame& frame, const glm::vec3& woWorld, std::optional<int> hero) {
     const ShadingFrame coatFrame = inputs.coatWeight > 0.0F ? buildShadingFrame(triangle, shading, material.geometryCoatNormal) : frame;
-    return makeBsdfClosure(inputs, woWorld * frame, hero, coatFrame[2] * frame, coatFrame[0] * frame);
+    const bool perturbed = material.geometryNormal.map || material.geometryNormal.height;
+    return makeNormalMappedBsdf(inputs, woWorld * frame, perturbed ? std::optional(glm::normalize(shading.normal) * frame) : std::nullopt, hero,
+                                coatFrame[2] * frame, coatFrame[0] * frame);
 }
 
 // The share of light a shadow ray carries to its end: (1 - alpha) + alpha * passThrough at each crossable surface, 0 at any other.
@@ -373,7 +375,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
         const glm::vec3 geoNormal = geometricNormalOf(triangle);
 
         // Built once for both estimators below: the continuation draw and NEE's evaluation share every wo-side lookup it holds.
-        const BsdfClosure closure = closureAt(material, triangle, shading, inputs, frame, woWorld, heroChannel);
+        const NormalMappedBsdf closure = closureAt(material, triangle, shading, inputs, frame, woWorld, heroChannel);
 
         // Past the cap a window still passes the final ray on to its emitter, by its expected undeviated share, as NEE's shadow rays do.
         if (capped) {
@@ -495,7 +497,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
 
         const glm::vec3 wiWorld = sample->passThrough ? ray.dir : frame * sample->wiLocal;
 
-        // The side rule NEE applied, a stand-in for Schussler et al. 2017: a direction keeps only the lobes its geometric side admits.
+        // The side rule NEE applied: Schussler's microsurface keeps lobes on omega_g's sides, this the flat face's (his Fig. 18 residual).
         const bool crosses = (glm::dot(wiWorld, geoNormal) > 0.0F) != woAbove;
         const glm::vec3 weight = crosses ? sample->transmitWeight : sample->throughputWeight - sample->transmitWeight;
         if (weight == glm::vec3(0.0F)) {
