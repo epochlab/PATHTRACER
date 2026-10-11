@@ -234,11 +234,38 @@ struct BsdfClosure {
 // A smooth thin wall's undeviated transmission toward -wo, through fuzz, coat and sheet; zero for any other closure.
 [[nodiscard]] glm::vec3 passThrough(const BsdfClosure& closure);
 
+// Schussler et al. 2017's default model (eq. 23) in the perturbed frame: facet +z and a mirror wall over the interpolated normal.
+struct NormalMappedBsdf {
+    bool perturbed = false;  // no normal or bump input: facet alone is the BSDF and every call forwards to it unchanged
+    BsdfClosure facet;       // at wo, the walk meeting the perturbed facet first; built where lambdaP > 0
+    BsdfClosure viaWall;     // at wo mirrored by the wall, the walk meeting the wall first; built where lambdaT > 0
+    glm::vec3 geometric;     // omega_g
+    glm::vec3 wall;          // omega_t: perpendicular to omega_g, in the plane of omega_g and +z, against the facet's tilt
+    float cosP;              // <omega_p, omega_g>
+    float sinP;
+    float side;              // sign <wo, omega_g>: seen from below, the microsurface is the point reflection of the one above
+    float lambdaP = 0.0F;    // the facets' shares of wo's projected area (eq. 9)
+    float lambdaT = 0.0F;
+};
+
+// The closure at wo with geometricLocal, the interpolated normal in the perturbed frame, where a normal or bump input bends it.
+[[nodiscard]] NormalMappedBsdf makeNormalMappedBsdf(const OpenPbrInputs<Constant>& inputs, const glm::vec3& woLocal,
+                                                    std::optional<glm::vec3> geometricLocal, std::optional<int> heroChannel,
+                                                    const glm::vec3& coatNormalLocal, const glm::vec3& coatTangentLocal);
+
 // The continuous lobes at wiLocal, split by transport type; one call, so GGX, Fresnel and table reads are computed once.
 [[nodiscard]] BsdfEval evaluateBsdfSplit(const BsdfClosure& closure, const glm::vec3& wiLocal);
 
 // Selects a technique by its mass and draws from it; the throughput divides by the whole mixture's density (one-sample MIS).
 [[nodiscard]] std::optional<BsdfSample> sampleBsdf(const BsdfClosure& closure, Sampler& sampler);
+
+// The microsurface's forms: eq. 23 evaluated exactly, its walk sampled with the walk's exact density, components by omega_g's side.
+[[nodiscard]] bool scatters(const NormalMappedBsdf& bsdf);
+[[nodiscard]] bool transmits(const NormalMappedBsdf& bsdf);
+[[nodiscard]] glm::vec3 passThrough(const NormalMappedBsdf& bsdf);
+[[nodiscard]] BsdfEval evaluateBsdfSplit(const NormalMappedBsdf& bsdf, const glm::vec3& wiLocal);
+[[nodiscard]] std::optional<BsdfSample> sampleBsdf(const NormalMappedBsdf& bsdf, Sampler& sampler);
+[[nodiscard]] glm::vec3 fresnelAtMicrofacet(const NormalMappedBsdf& bsdf, glm::vec2 u);
 
 // The slabs' reflected Fresnel at cosTheta = dot(h, wo), each at its layer and mix weight: coat, metal F82, tinted dielectric.
 [[nodiscard]] glm::vec3 fresnelAtViewAngle(const BsdfClosure& closure, float cosTheta);
