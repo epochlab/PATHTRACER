@@ -115,6 +115,10 @@ constexpr int kMaskPixels = kMaskSize * kMaskSize;
 constexpr std::array<std::uint16_t, kMaskPixels> kBlueNoiseRanks = {{
 #include "blue_noise_mask.inc"
 }};
+// The same construction over offset rows: void-and-cluster energy measured on the hexagonal film, not across square indices.
+constexpr std::array<std::uint16_t, kMaskPixels> kHexBlueNoiseRanks = {{
+#include "blue_noise_mask_hex.inc"
+}};
 
 // R2 (Roberts 2018): frac(c * (1/phi2, 1/phi2^2)). A hash lands offsets too close, measured |r| = 0.14 between channels 8 and 23.
 constexpr std::uint32_t kR2AlphaX = 0xC13FA9A9U;
@@ -123,11 +127,15 @@ constexpr std::uint32_t kR2AlphaY = 0x91E10DA6U;
 constexpr int kR2Shift = 32 - std::countr_zero(static_cast<unsigned>(kMaskSize));
 
 // The shift in the sampler's 24-bit output space, exactly representable, which lets sampler_validate invert it at zero tolerance.
-std::uint32_t ditherFixed(int pixelX, int pixelY, int ditherChannel) {
+std::uint32_t ditherFixed(pathtracer::gfx::PixelLattice lattice, int pixelX, int pixelY, int ditherChannel) {
+    const bool hexagonal = lattice == pathtracer::gfx::PixelLattice::Hexagonal;
     const auto channel = static_cast<std::uint32_t>(ditherChannel);
+    // An odd row shift moves even and odd rows half a pitch apart, no lattice translation, so the hexagonal mask shifts by even rows.
+    const std::uint32_t rowShift = ((channel * kR2AlphaY) >> kR2Shift) & (hexagonal ? ~1U : ~0U);
     const auto x = (static_cast<std::uint32_t>(pixelX) + ((channel * kR2AlphaX) >> kR2Shift)) & (kMaskSize - 1U);
-    const auto y = (static_cast<std::uint32_t>(pixelY) + ((channel * kR2AlphaY) >> kR2Shift)) & (kMaskSize - 1U);
-    return (static_cast<std::uint32_t>(kBlueNoiseRanks[(y * kMaskSize) + x]) << 10U) | 512U;
+    const auto y = (static_cast<std::uint32_t>(pixelY) + rowShift) & (kMaskSize - 1U);
+    const std::array<std::uint16_t, kMaskPixels>& ranks = hexagonal ? kHexBlueNoiseRanks : kBlueNoiseRanks;
+    return (static_cast<std::uint32_t>(ranks[(y * kMaskSize) + x]) << 10U) | 512U;
 }
 
 // One dimension set's output: 24 significant bits of the scrambled point, shifted by this pixel's dither for that set.
@@ -142,13 +150,15 @@ std::uint32_t replicateSeed(std::uint32_t scrambleSeed, int replicate) {
     return scrambleSeed ^ static_cast<std::uint32_t>(hashSeed(replicate, 0U));
 }
 
-float blueNoiseDither(int pixelX, int pixelY, int ditherChannel) {
-    return static_cast<float>(ditherFixed(pixelX, pixelY, ditherChannel)) * 0x1.0p-24F;
+float blueNoiseDither(int pixelX, int pixelY, int ditherChannel, pathtracer::gfx::PixelLattice lattice) {
+    return static_cast<float>(ditherFixed(lattice, pixelX, pixelY, ditherChannel)) * 0x1.0p-24F;
 }
 
 // The index mask bounds the sequence to the length drawn: 62 ns/draw unmasked, 14 masked, at 128 samples. sampleCount <= 0 = unbounded.
-Sampler::Sampler(int pixelX, int pixelY, int sampleIndex, int sampleCount, std::uint32_t scrambleSeed)
-    : pixelX_(pixelX),
+Sampler::Sampler(int pixelX, int pixelY, int sampleIndex, int sampleCount, std::uint32_t scrambleSeed,
+                 pathtracer::gfx::PixelLattice lattice)
+    : lattice_(lattice),
+      pixelX_(pixelX),
       pixelY_(pixelY),
       sampleIndex_(static_cast<std::uint32_t>(sampleIndex)),
       indexMask_(sampleCount > 0 ? std::bit_ceil(static_cast<std::uint32_t>(std::max(sampleCount, sampleIndex + 1))) - 1U
@@ -165,7 +175,7 @@ float Sampler::next1D() {
     const auto scramble = static_cast<std::uint32_t>(setHash >> 32U);
     const std::uint32_t shuffled = nestedUniformScramble(sampleIndex_, indexSeed) & indexMask_;
     return toShiftedUnitFloat(nestedUniformScramble(sobolPoint(shuffled, 0), scramble),
-                               ditherFixed(pixelX_, pixelY_, 2 * set));
+                               ditherFixed(lattice_, pixelX_, pixelY_, 2 * set));
 }
 
 glm::vec2 Sampler::next2D() {
@@ -179,9 +189,9 @@ glm::vec2 Sampler::next2D() {
     const auto scrambleY = static_cast<std::uint32_t>(scrambleHash);
     const std::uint32_t shuffled = nestedUniformScramble(sampleIndex_, indexSeed) & indexMask_;
     return {toShiftedUnitFloat(nestedUniformScramble(sobolPoint(shuffled, 0), scrambleX),
-                               ditherFixed(pixelX_, pixelY_, 2 * set)),
+                               ditherFixed(lattice_, pixelX_, pixelY_, 2 * set)),
             toShiftedUnitFloat(nestedUniformScramble(sobolPoint(shuffled, 1), scrambleY),
-                               ditherFixed(pixelX_, pixelY_, (2 * set) + 1))};
+                               ditherFixed(lattice_, pixelX_, pixelY_, (2 * set) + 1))};
 }
 
 CdfSample invertCdf(const float* cdf, int count, float u) {
