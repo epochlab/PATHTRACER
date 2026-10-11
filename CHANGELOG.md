@@ -3,6 +3,29 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## OpenPBR thin film
+
+OpenPBR's thin film: Belcour & Barla 2017's Airy reflectance in the metal's and the dielectric's Fresnel, mixed in by
+`thin_film_weight`, with its spectrum integrated exactly against the CIE 1931 observer under D65. Unfilmed shipped scenes
+match the previous build to float rounding (beauty RMSE at most 1.3e-8). Evidence, with oil on chrome and a soap film on
+glass, is in `results/openpbr/pr6`.
+
+- feat: `thin_film_weight`, `thin_film_thickness` (micrometres) and `thin_film_ior`, listed in `principled.json`; a zero
+  thickness is no film. The film's ambient side is the statistical mix the specification states, ambient and coat by C.
+- feat: the interference terms read the exact cosine and sine transforms of CIE 1931 x D65 into linear Rec.709, tabulated
+  over path difference from `cie.h`'s own tables, in place of the paper's XYZ Gaussian fits and an illuminant-E matrix.
+  The Airy series is summed until its geometric tail is below float resolution, not cut at the second order, which left
+  up to 8e-2 over metals at grazing; it matches an all-order spectral reference to 2e-5.
+- feat: under the film the metal's complex index is Gulbrandsen 2014's map of (`base_color`, `specular_color`), as the
+  specification suggests; a perfect conductor is its exact limit. Transmission carries `1 - F_film`.
+- feat: the film's reflected energy, for albedo scaling, masses and the metal's Kulla-Conty tint, is the reflect kernel's
+  Gauss rule over its Fresnel: `albedo_table` now bakes order-8 rules of E[F] over (roughness, mu) by Lanczos and
+  Golub-Welsch, exact to degree 15, and the rule of 2 mu dmu for the hemispherical average.
+- fix: polarised Fresnel is formed from sums of squares, non-negative at Brewster's angle where the expanded form rounded
+  below zero.
+- test: `thin_film_against_spectral_reference`, `thin_film_identity`, `thin_film_over_perfect_conductor`,
+  `filmed_white_furnace`, `filmed_albedo_matches_lobe`, filmed chi-square rows.
+
 ## OpenPBR fuzz
 
 OpenPBR's fuzz layer: the volumetric SGGX sheen, fitted by linearly transformed cosines (Zeltner, Burley and Chiang 2022),

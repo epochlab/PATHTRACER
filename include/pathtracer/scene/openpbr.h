@@ -65,6 +65,9 @@ struct OpenPbrInputs {
     In<float> fuzzRoughness = 0.5F;
     In<float> emissionLuminance = 0.0F;
     In<glm::vec3> emissionColor = glm::vec3(1.0F);
+    In<float> thinFilmWeight = 0.0F;
+    In<float> thinFilmThickness = 0.5F;
+    In<float> thinFilmIor = 1.4F;
 };
 
 // Visits every input of one or more OpenPbrInputs in specification order, zipped: visit(spec, a.member, b.member, ...).
@@ -103,6 +106,9 @@ void forEachInput(Visit&& visit, Inputs&... inputs) {
     visit(InputSpec{"fuzz_roughness", Unit, kData, false}, inputs.fuzzRoughness...);
     visit(InputSpec{"emission_luminance", NonNegative, kData, true, InputUse::Emission}, inputs.emissionLuminance...);
     visit(InputSpec{"emission_color", NonNegative, kColour, true, InputUse::Emission}, inputs.emissionColor...);
+    visit(InputSpec{"thin_film_weight", Unit, kData, true}, inputs.thinFilmWeight...);
+    visit(InputSpec{"thin_film_thickness", NonNegative, kData, false}, inputs.thinFilmThickness...);
+    visit(InputSpec{"thin_film_ior", Positive, kData, false}, inputs.thinFilmIor...);
 }
 
 // Membership in the range by direct comparisons, which every NaN fails; infinity fails too, past float max.

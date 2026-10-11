@@ -28,5 +28,8 @@
     "fuzz_color": [1.0, 1.0, 1.0],
     "fuzz_roughness": 0.5,
     "emission_luminance": 0.0,
-    "emission_color": [1.0, 1.0, 1.0]
+    "emission_color": [1.0, 1.0, 1.0],
+    "thin_film_weight": 0.0,
+    "thin_film_thickness": 0.5,
+    "thin_film_ior": 1.4
 }

@@ -18,11 +18,13 @@ namespace pathtracer::scene {
 // Heitz 2018 VNDF sampling; wo.z >= 0.
 [[nodiscard]] glm::vec3 sampleGGXVNDF(const glm::vec3& wo, float alpha, glm::vec2 u);
 
-// The metal's F82-tint Fresnel (OpenPBR; Hoffman 2023) at cosTheta in [0,1], k from the slab.
-[[nodiscard]] glm::vec3 fresnelF82(float cosTheta, const glm::vec3& f0, const glm::vec3& k);
-
 // The conductor slab at wo: f0 = base_weight * base_color, specular_color the F82 tint, specular_weight the Fresnel scale.
-[[nodiscard]] ConductorSlab makeConductorSlab(float roughness, const glm::vec3& f0, const glm::vec3& tint, float scale, float muO);
+[[nodiscard]] ConductorSlab makeConductorSlab(float roughness, const glm::vec3& f0, const glm::vec3& tint, float scale, const FilmLayer& film,
+                                              float muO);
+
+// A slab's Fresnel at a facet cosine: the conductor's F82, the interface's dielectric, each mixed with the film's by its weight.
+[[nodiscard]] glm::vec3 conductorFresnel(const ConductorSlab& slab, float cosTheta);
+[[nodiscard]] glm::vec3 interfaceFresnel(const DielectricSlab& slab, float cosTheta);
 
 // One dielectric interface: geometry ratio etaI/etaT bends refraction, the Fresnel ratio sets R and T (OpenPBR's coat moves it alone).
 struct InterfaceInputs {
@@ -34,6 +36,9 @@ struct InterfaceInputs {
     glm::vec3 tint;
     float refractWeight;
     glm::vec3 transmitTint;
+    FilmLayer film;
+    float baseIor;   // n_b, the film's substrate from outside or its incident medium from inside
+    bool fromBase;
 };
 
 // The dielectric interface at wo; refractWeight and the tints as DielectricSlab documents.
@@ -42,14 +47,13 @@ struct InterfaceInputs {
 // An interface's untinted reflection albedo at mu, single plus multiple scattering, from the side etaI faces.
 [[nodiscard]] float reflectionAlbedo(float roughness, float etaI, float etaT, float mu);
 
-// The conductor slab's directional albedo per channel at mu, single plus Kulla-Conty multiple scattering.
-[[nodiscard]] glm::vec3 conductorAlbedo(float roughness, const glm::vec3& f0, const glm::vec3& tint, float scale, float mu);
-
 // The interface's reflection albedo at wo, single plus multiple scattering, untinted: E_spec of OpenPBR's albedo scaling.
-[[nodiscard]] inline float reflectAlbedo(const DielectricSlab& slab) { return slab.reflectSingle + slab.multiReflect; }
+[[nodiscard]] inline glm::vec3 reflectAlbedo(const DielectricSlab& slab) { return slab.reflectSingle + slab.multiReflect; }
 
-// Fresnel-matched: the interface reflects nothing at any angle.
-[[nodiscard]] inline bool isIndexMatched(const DielectricSlab& slab) { return slab.fresnelEtaI == slab.fresnelEtaT; }
+// Fresnel-matched and unfilmed: the interface reflects nothing at any angle.
+[[nodiscard]] inline bool isIndexMatched(const DielectricSlab& slab) {
+    return slab.fresnelEtaI == slab.fresnelEtaT && slab.film.weight == 0.0F;
+}
 
 // A slab's cosine-weighted value at wi and the density of each of its techniques there, unweighted by selection mass.
 struct ConductorEval {
