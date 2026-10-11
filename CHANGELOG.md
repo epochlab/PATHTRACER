@@ -3,6 +3,41 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Film filter importance sampling
+
+The film splatted every sample with the 1.5 px Blackman-Harris filter onto a 3x3 neighbourhood, so each pixel's noise
+was a weighted mix of its neighbours' samples: lag-1 noise correlation +0.15-0.25, power moved out of the top octave
+into the mid bands. OIDN's documentation states splatting "causes the denoising to fail", and measurement agreed
+(`results/oidn_denoise/wip/splat_vs_denoised.png`). The film now importance-samples the filter (Ernst et al. 2006, as in
+pbrt-v4): each pixel traces its own samples at centre + offset, the offset drawn from the filter, every weight 1. The
+expected image is unchanged in the interior (agreement 1.02-1.11, 1 = equal). Pixel noise is independent (correlation
+within +/-0.03) and white in the top octave. Per-pixel RMS at equal samples rises by the splat's averaging gain,
+(∫f)²/∫f² = 1.497 per axis, measured 1.45-1.61. Passes are 2-8% faster. Evidence is in `results/film_fis`.
+
+- fix: filter importance sampling replaces the splat.
+  - The half-filter CDF is built once from the window's closed-form integral at 64 knots, exact at each and linear
+    between, so the pdf is piecewise-constant over 0.024 px bins and the weight f/pdf is exactly 1.
+  - Each axis inverts it at |2u-1| and takes the sign of 2u-1: monotone in u, so the Sobol pair's stratification
+    carries onto the film.
+  - A pixel is the plain mean of its samples, divided rather than scaled by fl(1/n), so all-0 or all-1 lanes are exact.
+  - Removed: the halo re-trace, the 26-lane `thread_local` tile accumulator (0.9 MiB per worker), the weight lane,
+    `filterWeight` and its truncating table.
+- fix: the 1 px frame border now sees the full filter, reaching 1 px past the frame, rather than the splat's
+  clipped and renormalised one. Rectilinear extrapolates, a fisheye reads zero past its circle as before, a lat-long
+  crosses the seam and the poles (crossing a pole turns longitude by pi).
+- refactor: `invertCdf` moves from `environment_map.cpp` to `sampler.h`, shared by the environment map and the film.
+- refactor!: `kMinPathTraceTileSize` (32) is removed. Its only justification was the halo's (4t+4)/t² re-trace cost;
+  with no halo the halving floors at 1 px. On 8 threads 256x128 keeps 48 px and 2048x1152 keeps 96; 205x115 goes 32 -> 24.
+- test:
+  - integrator: `film_offsets_follow_the_filter_cdf`, a half-plane edge's coverage against the filter's closed-form tail
+    mass 0.1186, within the 2/N bound of shifted stratification at N = 1024. Verified to fail with a tent filter.
+  - integrator: the alpha and seam checks rest on that guarantee rather than on a seed: 32 spp puts a sample in any
+    u-interval of 2/32. Alpha is exactly 1 where opaque. The seam check skips the end rows, whose samples may cross a
+    pole. The clear-coat ratio gets the rounding budget its two means already carry.
+  - driver: the fixture's floor ends mid-frame with the sky hidden, so Alpha varies across passes; it had varied only
+    through the splat's rounding.
+  - G-buffer AOVs are bit-identical (18/18).
+
 ## SNR from replicated RQMC
 
 The SNR AOV's standard error assumed independent passes. They are successive points of one Owen-scrambled Sobol

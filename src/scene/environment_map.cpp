@@ -6,6 +6,7 @@
 #include <glm/gtc/constants.hpp>
 
 #include "pathtracer/scene/lat_long.h"
+#include "pathtracer/scene/sampler.h"
 
 namespace pathtracer::scene {
 
@@ -17,11 +18,6 @@ float luminanceOf(const pathtracer::gfx::HdrImage& image, int x, int y) {
     return std::max(0.0F, (0.2126F * texel.r) + (0.7152F * texel.g) + (0.0722F * texel.b));
 }
 
-// Inverts a piecewise-constant CDF slice at u, returning the bin and the fractional offset within its mass. Shared by both inversions.
-struct CdfSample {
-    int index;
-    float fraction;  // [0,1) position within the selected bin
-};
 // The integer texel a direction falls in, plus that row's sin(theta) for the Jacobian, as pdf()'s piecewise-constant cell.
 struct EquirectTexel {
     int x;
@@ -46,16 +42,6 @@ EquirectTexel equirectTexelOf(int width, int height, const glm::vec3& direction,
     return {std::clamp(static_cast<int>(uv.x * static_cast<float>(width)), 0, width - 1),
             std::clamp(static_cast<int>(uv.y * static_cast<float>(height)), 0, height - 1),
             std::max(std::sin(uv.y * glm::pi<float>()), 1e-6F)};
-}
-
-CdfSample invertCdf(const float* cdf, int count, float u) {
-    // upper_bound finds the first entry > u; the bin before it is u's. cdf[0]==0 is never > u, so searching it is harmless.
-    const float* it = std::upper_bound(cdf, cdf + count + 1, u);
-    const int index = std::clamp(static_cast<int>(it - cdf) - 1, 0, count - 1);
-    const float lo = cdf[index];
-    const float hi = cdf[index + 1];
-    const float fraction = hi > lo ? std::clamp((u - lo) / (hi - lo), 0.0F, 1.0F) : 0.5F;
-    return {index, fraction};
 }
 
 }  // namespace

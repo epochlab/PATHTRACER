@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstddef>
 #include <limits>
+#include <numbers>
 #include <optional>
 #include <vector>
 
@@ -51,40 +52,43 @@ float transmissionOffsetEpsilon(const ShadingTriangle& tri) {
     return std::max(kRayEpsilon, std::max({e0, e1, e2}) * curvature);
 }
 
-// Blackman-Harris at Arnold's default 1.5px radius: support wider than one pixel, so each sample reconstructs several pixels.
+// Blackman-Harris (Harris 1978) at Arnold's default 1.5 px radius, importance-sampled (Ernst et al. 2006): pdf proportional to f, weight 1.
 constexpr float kFilterRadius = 1.5F;
-// How far a splat reaches: a sample sits at most 1.0 past its own pixel's far centre, so two pixels away weighs exactly zero.
-constexpr int kFilterExtent = 1;
-constexpr int kFilterTableSize = 64;
-// Per-tile lanes: beauty.rgb, termination bounce, shadow, five transport buckets, AO, Fresnel, alpha. Scalars broadcast at write-out.
+// Knots of the half-filter CDF over |x| in [0, kFilterRadius]: exact at each knot, linear between, so 63 bins of 0.024 px each.
+constexpr int kFilterCdfKnots = 64;
+// Per-pixel lanes: beauty.rgb, termination bounce, shadow, five transport buckets, AO, Fresnel, alpha. Scalars broadcast at write-out.
 constexpr int kSampleLanes = 25;
-constexpr int kTileLanes = kSampleLanes + 1;  // plus the per-pixel filter weight the lanes above are normalised by
 
-// Sampled at |x| = i/(N-1) * kFilterRadius, read by truncating lookup: PBRT's table trick, replacing three cos() per tap.
-std::array<float, kFilterTableSize> buildFilterTable() {
-    constexpr float kA0 = 0.35875F;
-    constexpr float kA1 = 0.48829F;
-    constexpr float kA2 = 0.14128F;
-    constexpr float kA3 = 0.01168F;
-    std::array<float, kFilterTableSize> table{};
-    for (int i = 0; i < kFilterTableSize; ++i) {
-        // Blackman-Harris is defined over [0,1] centred at t = 0.5, so |x| = 0 maps there and the radius to the zero end.
-        const float t = 0.5F + (0.5F * static_cast<float>(i) / static_cast<float>(kFilterTableSize - 1));
-        table[static_cast<std::size_t>(i)] = kA0 - (kA1 * std::cos(2.0F * kPi * t)) +
-                                              (kA2 * std::cos(4.0F * kPi * t)) -
-                                              (kA3 * std::cos(6.0F * kPi * t));
+// CDF of |x| / kFilterRadius from the window's closed-form integral: the window spans t in [0, 1] centred at 0.5, so |x| = 0 maps there.
+std::array<float, kFilterCdfKnots> buildFilterCdf() {
+    constexpr double kA0 = 0.35875;
+    constexpr double kA1 = 0.48829;
+    constexpr double kA2 = 0.14128;
+    constexpr double kA3 = 0.01168;
+    constexpr double kTwoPi = 2.0 * std::numbers::pi;
+    const auto integral = [](double t) {
+        return (kA0 * t) - (kA1 * std::sin(kTwoPi * t) / kTwoPi) + (kA2 * std::sin(2.0 * kTwoPi * t) / (2.0 * kTwoPi)) -
+               (kA3 * std::sin(3.0 * kTwoPi * t) / (3.0 * kTwoPi));
+    };
+    // Differenced against the same centre and normalised by the same span, so the end knots are exactly 0 and 1.
+    const double centre = integral(0.5);
+    const double half = integral(1.0) - centre;
+    std::array<float, kFilterCdfKnots> cdf{};
+    for (int i = 0; i < kFilterCdfKnots; ++i) {
+        const double t = 0.5 + (0.5 * static_cast<double>(i) / static_cast<double>(kFilterCdfKnots - 1));
+        cdf[static_cast<std::size_t>(i)] = static_cast<float>((integral(t) - centre) / half);
     }
-    return table;
+    return cdf;
 }
 
-const std::array<float, kFilterTableSize> kFilterTable = buildFilterTable();
+const std::array<float, kFilterCdfKnots> kFilterCdf = buildFilterCdf();
 
-float filterWeight(float distance) {
-    const float t = std::abs(distance) / kFilterRadius;
-    if (t >= 1.0F) {
-        return 0.0F;
-    }
-    return kFilterTable[static_cast<std::size_t>(t * static_cast<float>(kFilterTableSize - 1))];
+// Film offset from the pixel centre, filter-distributed: the half-CDF inverted at |2u-1|, signed by 2u-1, is monotone so u's strata hold.
+float sampleFilterOffset(float u) {
+    const float signedU = (2.0F * u) - 1.0F;
+    const CdfSample bin = invertCdf(kFilterCdf.data(), kFilterCdfKnots - 1, std::abs(signedU));
+    const float radiusFraction = (static_cast<float>(bin.index) + bin.fraction) / static_cast<float>(kFilterCdfKnots - 1);
+    return std::copysign(kFilterRadius * radiusFraction, signedU);
 }
 
 }  // namespace
@@ -96,8 +100,8 @@ int pathTraceTileSize(int width, int height, unsigned int threadCount) {
     };
     const int wanted = static_cast<int>(threadCount) * kTilesPerThread;
     int size = kPathTraceTileSize;
-    while (size > kMinPathTraceTileSize && tileCount(size) < wanted) {
-        size = std::max(size / 2, kMinPathTraceTileSize);
+    while (size > 1 && tileCount(size) < wanted) {
+        size /= 2;
     }
     return size;
 }
@@ -571,11 +575,10 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
     const float aspect = static_cast<float>(width) / static_cast<float>(height);
     // Constant for the whole pass, so built once: the aspect-taking primaryRay rebuilds it on every one of millions of rays.
     const Camera::ViewBasis basis = camera.viewBasis(aspect);
-    const bool wraps = wrapsHorizontally(basis.lens.projection);
-    out.wrapsHorizontally = wraps;
-    // A sample's stratum, 1/sqrt(N) px (pbrt-v4's differential scale), so prefilter blur vanishes as N grows; unbounded N as Sampler's.
+    out.wrapsHorizontally = wrapsHorizontally(basis.lens.projection);
+    // Sample spacing 1/sqrt(N) px (pbrt-v4's differential scale), so prefilter blur vanishes as N grows; unbounded N as Sampler's.
     const float strataPerAxis = std::sqrt(static_cast<float>(std::max(sampleCount, sampleBase + settings.samplesPerPixel)));
-    // d(ndc) across that stratum: two NDC units span the image, and +Y flips because row 0 is the top.
+    // d(ndc) across that spacing: two NDC units span the image, and +Y flips because row 0 is the top.
     const glm::mat2 ndcPerStratum(2.0F / (static_cast<float>(width) * strataPerAxis), 0.0F, 0.0F,
                                   -2.0F / (static_cast<float>(height) * strataPerAxis));
     // Replicated RQMC: pass p draws from replicate p mod K at its position p div K, so each replicate is a prefix of its own sequence.
@@ -591,7 +594,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
     const PassThroughScene scene{accel, shadingTriangles, instances, mayPassThrough,
                                  std::any_of(mayPassThrough.begin(), mayPassThrough.end(), [](std::uint8_t may) { return may != 0; })};
 
-    // One worker owns every output pixel of one tile and traces every pixel within the filter radius: the halo is traced twice.
+    // One worker owns one tile: filter importance sampling keeps each sample in its own pixel's estimate, so tiles share no work.
     const auto renderTile = [&](int tileIndex) {
         const int tileX0 = (tileIndex % tilesX) * tileSize;
         const int tileY0 = (tileIndex / tilesX) * tileSize;
@@ -601,36 +604,26 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
         // Stack-local, not thread_local: zeroed by construction, so the reset boundary is the tile boundary with no bookkeeping.
         pathtracer::debug::RayCounts tileRays;
 
-        // Reused for the worker's life, so a pass allocates nothing; sized for a full tile so the stride stays tileSize.
-
-        // NOLINTNEXTLINE(misc-use-internal-linkage)
-        thread_local std::vector<float> accumulator;
-        accumulator.assign(static_cast<std::size_t>(tileSize) * tileSize * kTileLanes, 0.0F);
-
-        // Past a wrapping image's left or right edge the halo is the far edge's pixels: on a lat-long both edges are one meridian.
-        const int haloX0 = wraps ? tileX0 - kFilterExtent : std::max(tileX0 - kFilterExtent, 0);
-        const int haloX1 = wraps ? tileX1 + kFilterExtent : std::min(tileX1 + kFilterExtent, width);
-        for (int y = std::max(tileY0 - kFilterExtent, 0);
-             y < std::min(tileY1 + kFilterExtent, height); ++y) {
-            for (int x = haloX0; x < haloX1; ++x) {
-                // The owning pixel: its sample stream and its ray, so a wrapped halo sample is bit-identical to the one its owner traces.
-                const int pixelX = (x + width) % width;
+        const auto samples = static_cast<float>(settings.samplesPerPixel);
+        for (int y = tileY0; y < tileY1; ++y) {
+            for (int x = tileX0; x < tileX1; ++x) {
+                std::array<float, kSampleLanes> sum{};
                 for (int s = 0; s < settings.samplesPerPixel; ++s) {
                     // replicateBase + s is this sample's position in its replicate's sequence: it must advance across passes to stratify.
                     const int sampleIndex = replicateBase + s;
-                    Sampler sampler(pixelX, y, sampleIndex, replicateCount, seed);
-                    const glm::vec2 jitter = sampler.next2D();
-                    // Unwrapped, so the splat below measures filter distance across the seam as across any interior pixel boundary.
-                    const float filmX = static_cast<float>(x) + jitter.x;
-                    const float filmY = static_cast<float>(y) + jitter.y;
-                    const float ndcX = (((static_cast<float>(pixelX) + jitter.x) / static_cast<float>(width)) * 2.0F) - 1.0F;
+                    Sampler sampler(x, y, sampleIndex, replicateCount, seed);
+                    const glm::vec2 filmU = sampler.next2D();
+                    // Reaches 1 px past the frame: rectilinear extrapolates, fisheye is rayless past its circle, lat-long wraps seam, pole.
+                    const float filmX = static_cast<float>(x) + 0.5F + sampleFilterOffset(filmU.x);
+                    const float filmY = static_cast<float>(y) + 0.5F + sampleFilterOffset(filmU.y);
+                    const float ndcX = ((filmX / static_cast<float>(width)) * 2.0F) - 1.0F;
                     // HdrImage row 0 is the top (EXR/glTF convention); NDC +Y is up -- flip.
                     const float ndcY = 1.0F - ((filmY / static_cast<float>(height)) * 2.0F);
                     const std::optional<Camera::RayDifferential> primary = camera.primaryRayDifferential(basis, ndcX, ndcY);
                     // AO and Fresnel draw from their own stream: taking dimensions from `sampler` would shift every later dimension.
-                    Sampler aoSampler(pixelX, y, sampleIndex, replicateCount, seed ^ kAoSeedOffset);
+                    Sampler aoSampler(x, y, sampleIndex, replicateCount, seed ^ kAoSeedOffset);
                     const glm::vec2 aoSample = aoSampler.next2D();
-                    Sampler fresnelSampler(pixelX, y, sampleIndex, replicateCount, seed ^ kFresnelSeedOffset);
+                    Sampler fresnelSampler(x, y, sampleIndex, replicateCount, seed ^ kFresnelSeedOffset);
                     const glm::vec2 fresnelSample = fresnelSampler.next2D();
                     // Nullopt is a fisheye sample outside the image circle: no ray exists, so every lane reads zero for it.
                     const TraceResult trace =
@@ -652,56 +645,22 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                         trace.ao,                  trace.fresnel.x,
                         trace.fresnel.y,           trace.fresnel.z,
                         trace.alpha};
-
-                    // Clipped to this tile: taps outside belong to a neighbouring tile, which traces this same sample itself.
-                    const int splatX0 = std::max(tileX0, static_cast<int>(std::ceil(filmX - 0.5F - kFilterRadius)));
-                    const int splatX1 = std::min(tileX1 - 1, static_cast<int>(std::floor(filmX - 0.5F + kFilterRadius)));
-                    const int splatY0 = std::max(tileY0, static_cast<int>(std::ceil(filmY - 0.5F - kFilterRadius)));
-                    const int splatY1 = std::min(tileY1 - 1, static_cast<int>(std::floor(filmY - 0.5F + kFilterRadius)));
-                    for (int splatY = splatY0; splatY <= splatY1; ++splatY) {
-                        // Separable: the 2D weight is the product of two 1D lookups, so a row's factor hoists out of the inner loop.
-                        const float weightY = filterWeight(filmY - (static_cast<float>(splatY) + 0.5F));
-                        if (weightY <= 0.0F) {
-                            continue;
-                        }
-                        for (int splatX = splatX0; splatX <= splatX1; ++splatX) {
-                            const float weight =
-                                weightY * filterWeight(filmX - (static_cast<float>(splatX) + 0.5F));
-                            if (weight <= 0.0F) {
-                                continue;
-                            }
-                            float* lanes =
-                                accumulator.data() +
-                                ((static_cast<std::size_t>(splatY - tileY0) * tileSize) +
-                                 static_cast<std::size_t>(splatX - tileX0)) * kTileLanes;
-                            for (int lane = 0; lane < kSampleLanes; ++lane) {
-                                lanes[lane] += weight * values[lane];
-                            }
-                            lanes[kSampleLanes] += weight;
-                        }
+                    for (int lane = 0; lane < kSampleLanes; ++lane) {
+                        sum[lane] += values[lane];
                     }
                 }
-            }
-        }
-
-        for (int y = tileY0; y < tileY1; ++y) {
-            for (int x = tileX0; x < tileX1; ++x) {
-                const float* lanes = accumulator.data() +
-                                      ((static_cast<std::size_t>(y - tileY0) * tileSize) +
-                                       static_cast<std::size_t>(x - tileX0)) * kTileLanes;
-                // Always positive: a film sample carries weight even where the lens formed no ray, and lands inside the 1.5px support.
-                const float invWeight = 1.0F / lanes[kSampleLanes];
-                writeTexel(out.beauty, x, y, glm::vec3(lanes[0], lanes[1], lanes[2]) * invWeight);
-                writeTexel(out.bounceHeatmap, x, y, lanes[3] * invWeight);
-                writeTexel(out.shadow, x, y, lanes[4] * invWeight);
-                writeTexel(out.directDiffuse, x, y, glm::vec3(lanes[5], lanes[6], lanes[7]) * invWeight);
-                writeTexel(out.indirectDiffuse, x, y, glm::vec3(lanes[8], lanes[9], lanes[10]) * invWeight);
-                writeTexel(out.directSpecular, x, y, glm::vec3(lanes[11], lanes[12], lanes[13]) * invWeight);
-                writeTexel(out.indirectSpecular, x, y, glm::vec3(lanes[14], lanes[15], lanes[16]) * invWeight);
-                writeTexel(out.refraction, x, y, glm::vec3(lanes[17], lanes[18], lanes[19]) * invWeight);
-                writeTexel(out.ao, x, y, lanes[20] * invWeight);
-                writeTexel(out.fresnel, x, y, glm::vec3(lanes[21], lanes[22], lanes[23]) * invWeight);
-                writeTexel(out.alpha, x, y, lanes[24] * invWeight);
+                // Unit weights make the estimate the plain mean; divided, not scaled by fl(1/n), so all-0 or all-1 samples read exactly.
+                writeTexel(out.beauty, x, y, glm::vec3(sum[0], sum[1], sum[2]) / samples);
+                writeTexel(out.bounceHeatmap, x, y, sum[3] / samples);
+                writeTexel(out.shadow, x, y, sum[4] / samples);
+                writeTexel(out.directDiffuse, x, y, glm::vec3(sum[5], sum[6], sum[7]) / samples);
+                writeTexel(out.indirectDiffuse, x, y, glm::vec3(sum[8], sum[9], sum[10]) / samples);
+                writeTexel(out.directSpecular, x, y, glm::vec3(sum[11], sum[12], sum[13]) / samples);
+                writeTexel(out.indirectSpecular, x, y, glm::vec3(sum[14], sum[15], sum[16]) / samples);
+                writeTexel(out.refraction, x, y, glm::vec3(sum[17], sum[18], sum[19]) / samples);
+                writeTexel(out.ao, x, y, sum[20] / samples);
+                writeTexel(out.fresnel, x, y, glm::vec3(sum[21], sum[22], sum[23]) / samples);
+                writeTexel(out.alpha, x, y, sum[24] / samples);
             }
         }
 

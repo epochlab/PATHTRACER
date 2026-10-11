@@ -30,4 +30,13 @@ private:
 // The shift Sampler adds at (pixelX, pixelY) on one dither channel; sampler_validate undoes it exactly, both being multiples of 2^-24.
 [[nodiscard]] float blueNoiseDither(int pixelX, int pixelY, int ditherChannel);
 
+// A piecewise-constant CDF inverted at u: the bin and u's fractional position within that bin's mass.
+struct CdfSample {
+    int index;
+    float fraction;  // [0,1] position within the selected bin
+};
+
+// cdf is count + 1 non-decreasing knots from 0 to 1; a zero-mass bin returns its midpoint.
+[[nodiscard]] CdfSample invertCdf(const float* cdf, int count, float u);
+
 }  // namespace pathtracer::scene

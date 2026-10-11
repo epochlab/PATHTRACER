@@ -393,7 +393,7 @@ PT_CHECK(omnidirectional_primary_rays_match_the_closed_form, Fast, Exact) {
               "the lat-long's vertical extent must be pi, pole to pole, whatever the gate and focal length");
 }
 
-// The film halo casts past the seam: ndcX and ndcX +/- 2 are one longitude, so they must be one ray to the arguments' rounding.
+// Filter-sampled film positions cross the seam: ndcX and ndcX +/- 2 are one longitude, so one ray to the arguments' rounding.
 PT_CHECK(omnidirectional_rays_are_periodic_in_longitude, Fast, Exact) {
     ctx.plan(1);
     const Camera camera{glm::vec3(0.0F), glm::vec3(-21.0F, 37.0F, 0.0F), kFullFrame, 35.0F, 0.01F, 100.0F, 2.8F, 0.008F, 400.0F,
