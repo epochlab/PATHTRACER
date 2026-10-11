@@ -43,7 +43,7 @@ void writeError(char* err, int errCap, const std::string& message) {
     return false;
 }
 
-// Decode only: an unknown projection has no enum value to coerce to; every range is Camera::validate's, run by HeadlessRenderer::render.
+// Decode only: an unknown projection or lattice has no enum to coerce to; ranges are Camera::validate's, run by HeadlessRenderer::render.
 [[nodiscard]] std::optional<pathtracer::scene::Camera> toCamera(const PtCamera& camera, std::string& error) {
     pathtracer::scene::Lens lens;
     if (camera.lens_projection == PT_LENS_RECTILINEAR) {
@@ -61,6 +61,15 @@ void writeError(char* err, int errCap, const std::string& message) {
         lens.radialCoefficients[i] = camera.fisheye_coefficients[i];
     }
     lens.maxFieldOfViewDegrees = camera.fisheye_field_of_view_degrees;
+    pathtracer::gfx::PixelLattice lattice{};
+    if (camera.pixel_lattice == PT_LATTICE_SQUARE) {
+        lattice = pathtracer::gfx::PixelLattice::Square;
+    } else if (camera.pixel_lattice == PT_LATTICE_HEXAGONAL) {
+        lattice = pathtracer::gfx::PixelLattice::Hexagonal;
+    } else {
+        error = "pixel_lattice must be PT_LATTICE_SQUARE or PT_LATTICE_HEXAGONAL, got " + std::to_string(camera.pixel_lattice);
+        return std::nullopt;
+    }
     return pathtracer::scene::Camera{
         glm::make_vec3(camera.position),
         glm::make_vec3(camera.rotation_degrees),
@@ -71,7 +80,8 @@ void writeError(char* err, int errCap, const std::string& message) {
         camera.aperture,
         camera.shutter_seconds,
         camera.iso,
-        lens};
+        lens,
+        lattice};
 }
 
 // NULL keeps the authored lights, so it decodes to nullopt; otherwise one XYZ triple per scene light, in scene order.
@@ -233,6 +243,10 @@ void pt_renderer_default_camera(const PtRenderer* renderer, PtCamera* out) {
         out->fisheye_coefficients[i] = lens.radialCoefficients[i];
     }
     out->fisheye_field_of_view_degrees = lens.maxFieldOfViewDegrees;
+    static_assert(static_cast<int>(pathtracer::gfx::PixelLattice::Square) == PT_LATTICE_SQUARE &&
+                      static_cast<int>(pathtracer::gfx::PixelLattice::Hexagonal) == PT_LATTICE_HEXAGONAL,
+                  "PT_LATTICE_* must stay index-parallel with PixelLattice");
+    out->pixel_lattice = static_cast<int>(camera.pixelLattice());
 }
 
 int pt_abi_version(void) {

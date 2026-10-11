@@ -102,10 +102,13 @@ def display_encode(
 # Index-parallel with PT_LENS_* in _ffi.py and LensProjection in scene/lens.h: the projection names Camera.lens accepts.
 LENS_PROJECTIONS = ("rectilinear", "fisheye_polynomial", "omnidirectional")
 
+# Index-parallel with PT_LATTICE_* in _ffi.py and PixelLattice in gfx/pixel_lattice.h: the names Camera.pixel_lattice accepts.
+PIXEL_LATTICES = ("square", "hexagonal")
+
 
 @dataclass(frozen=True)
 class Camera:
-    """Pose, lens and exposure.
+    """Pose, lens, exposure and pixel lattice.
 
     ``aperture``, ``shutter_seconds`` and ``iso`` set the photographic exposure value only. No projection
     produces depth of field, and ``aperture`` is not a lens radius.
@@ -123,6 +126,13 @@ class Camera:
     ``x`` is longitude ``pi * (2 * (x + 0.5) / width - 1)`` turning right from the view direction, row ``y`` colatitude
     ``pi * (y + 0.5) / height`` from up, so straight behind is the left and right edges, which are one seam. Focal length, film
     back and the fisheye fields play no part; ``width = 2 * height`` gives square angular pixels.
+
+    ``pixel_lattice`` places the pixels. ``"square"`` centres pixel ``(x, y)`` at ``(x + 0.5, y + 0.5)``. ``"hexagonal"`` is a
+    sensor of regular hexagons in offset rows, every neighbour one pitch away: pixel ``(x, y)`` is centred at
+    ``(x + 0.25 + 0.5 * (y % 2), (y + 0.5) * sqrt(3) / 2)`` column pitches, so odd rows sit half a pitch right of even ones and
+    the frame spans ``width`` by ``height * sqrt(3) / 2`` pitches. The arrays keep shape ``(height, width, channels)``; this field
+    is the layout's only record. A written EXR carries it as ``pathtracer:pixelLattice`` with ``PixelAspectRatio`` ``2 / sqrt(3)``.
+    The hexagonal lattice refuses ``sobel``, ``gabor``, ``dog`` and ``denoised``, which need a square neighbourhood.
 
     Every AOV renders under every lens; G-buffer ``depth`` is the distance along the primary ray, the one depth a fisheye past
     90 degrees or the lat-long still defines.
@@ -150,6 +160,7 @@ class Camera:
     lens: str = "rectilinear"
     fisheye_coefficients: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
     fisheye_field_of_view_degrees: float = 180.0
+    pixel_lattice: str = "square"
 
     @classmethod
     def _from_struct(cls, struct: _ffi.PtCamera) -> Camera:
@@ -166,6 +177,7 @@ class Camera:
             lens=LENS_PROJECTIONS[struct.lens_projection],
             fisheye_coefficients=tuple(struct.fisheye_coefficients),
             fisheye_field_of_view_degrees=struct.fisheye_field_of_view_degrees,
+            pixel_lattice=PIXEL_LATTICES[struct.pixel_lattice],
         )
 
     def _to_struct(self) -> _ffi.PtCamera:
@@ -185,6 +197,9 @@ class Camera:
         struct.lens_projection = LENS_PROJECTIONS.index(self.lens)
         struct.fisheye_coefficients = (ctypes.c_float * 4)(*self.fisheye_coefficients)
         struct.fisheye_field_of_view_degrees = self.fisheye_field_of_view_degrees
+        if self.pixel_lattice not in PIXEL_LATTICES:
+            raise ValueError(f"pixel_lattice must be one of {PIXEL_LATTICES}, got {self.pixel_lattice!r}")
+        struct.pixel_lattice = PIXEL_LATTICES.index(self.pixel_lattice)
         return struct
 
 
@@ -280,7 +295,7 @@ class Renderer:
         ``env_light_enabled`` decides whether the environment is in the light set at all, which does change the
         lighting. ``None`` keeps the scene's authored ``environment.lightEnabled``.
 
-        ``previous_camera`` is the view ``motionVector`` measures from: ``(dx, dy)`` in pixels of this frame, the
+        ``previous_camera`` is the view ``motionVector`` measures from: ``(dx, dy)`` in column pitches of this frame, the
         displacement ``x_now - x_previous`` of the point seen at each pixel centre, zero where the previous view has no
         image of it. ``None`` is ``camera`` itself, so the motion is exactly zero. Only the camera moves it, never a pose.
 

@@ -224,6 +224,37 @@ PT_CHECK(render_accepts_every_lens_projection, Slow, Exact) {
     }
 }
 
+// Both PT_LATTICE_* values decode and render finite Beauty and depth through the ABI, and the authored camera reads back square.
+PT_CHECK(render_accepts_every_pixel_lattice, Slow, Exact) {
+    constexpr std::array<int, 2> kLattices{PT_LATTICE_SQUARE, PT_LATTICE_HEXAGONAL};
+    ctx.plan(static_cast<int>(kLattices.size()) + 1);
+    const OpenRenderer renderer;
+    if (renderer.handle == nullptr) {
+        for (std::size_t i = 0; i <= kLattices.size(); ++i) {
+            PT_EXPECT(ctx, false, "scene load failed: " + renderer.error);
+        }
+        return;
+    }
+    PtCamera authored{};
+    pt_renderer_default_camera(renderer.handle, &authored);
+    PT_EXPECT(ctx, authored.pixel_lattice == PT_LATTICE_SQUARE, "profile.json's camera did not read back square");
+    const std::vector<int> aovs{beautyId(), pt_aov_id("depth")};
+    for (const int lattice : kLattices) {
+        std::vector<GuardedBuffer> outputs = makeOutputs(aovs);
+        const std::vector<float*> pointers = pointersTo(outputs);
+        PtRenderRequest request = makeRequest(renderer.handle, aovs, 1);
+        request.camera.pixel_lattice = lattice;
+        std::vector<char> err(kErrorCapacity, '\0');
+        const bool rendered = pt_render(renderer.handle, &request, pointers.data(), err.data(), kErrorCapacity) == PT_OK;
+        const bool finite = std::all_of(outputs.begin(), outputs.end(), [](const GuardedBuffer& b) {
+            return b.guardsIntact() && std::all_of(b.storage.begin(), b.storage.begin() + static_cast<std::ptrdiff_t>(b.extent),
+                                                   [](float value) { return std::isfinite(value); });
+        });
+        PT_EXPECT(ctx, rendered && finite,
+                  "pixel_lattice " + std::to_string(lattice) + ": " + (rendered ? "non-finite output" : err.data()));
+    }
+}
+
 // A rejected request returns PT_ERROR naming its field and writes no output float, so a caller's buffers stay what it put there.
 PT_CHECK(render_rejects_invalid_requests_without_writing, Slow, Exact) {
     struct Case {
@@ -234,7 +265,9 @@ PT_CHECK(render_rejects_invalid_requests_without_writing, Slow, Exact) {
     // Static, so a captureless mutation can point the request at them; cornell has one light, so one triple is the full array.
     static const std::array<float, 3> kNanRotation{0.0F, std::numeric_limits<float>::quiet_NaN(), 0.0F};
     static const std::array<float, 3> kInfRotation{std::numeric_limits<float>::infinity(), 0.0F, 0.0F};
-    const std::array<Case, 12> cases{{
+    // Sobel at depth's one channel, so the request's buffers fit it: refused for its square stencil before any is written.
+    static const std::array<int, 2> kSobelAovs{pt_aov_id("beauty"), pt_aov_id("sobel")};
+    const std::array<Case, 14> cases{{
         {"aov_count 0", "no AOVs", [](PtRenderRequest& r, std::vector<float*>&) { r.aov_count = 0; }},
         {"null aovs", "no AOVs", [](PtRenderRequest& r, std::vector<float*>&) { r.aovs = nullptr; }},
         {"show_sky 2", "show_sky", [](PtRenderRequest& r, std::vector<float*>&) { r.show_sky = 2; }},
@@ -242,6 +275,12 @@ PT_CHECK(render_rejects_invalid_requests_without_writing, Slow, Exact) {
         {"lens_projection 7", "lens_projection", [](PtRenderRequest& r, std::vector<float*>&) { r.camera.lens_projection = 7; }},
         {"lens_projection one past the last", "lens_projection",
          [](PtRenderRequest& r, std::vector<float*>&) { r.camera.lens_projection = PT_LENS_OMNIDIRECTIONAL + 1; }},
+        {"pixel_lattice 2", "pixel_lattice", [](PtRenderRequest& r, std::vector<float*>&) { r.camera.pixel_lattice = 2; }},
+        {"hexagonal sobel", "square neighbourhood",
+         [](PtRenderRequest& r, std::vector<float*>&) {
+             r.camera.pixel_lattice = PT_LATTICE_HEXAGONAL;
+             r.aovs = kSobelAovs.data();
+         }},
         {"null out[1]", "output buffer 1", [](PtRenderRequest&, std::vector<float*>& p) { p[1] = nullptr; }},
         {"width 0", "resolution", [](PtRenderRequest& r, std::vector<float*>&) { r.width = 0; }},
         {"samples 0", "samples", [](PtRenderRequest& r, std::vector<float*>&) { r.samples = 0; }},

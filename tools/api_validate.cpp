@@ -597,6 +597,43 @@ PT_CHECK(every_aov_renders_finite, Slow, Exact) {
     }
 }
 
+// The hexagonal lattice refuses exactly the square-neighbourhood AOVs, naming them, and renders every other AOV finite.
+PT_CHECK(hexagonal_lattice_refuses_only_square_stencils, Slow, Exact) {
+    ctx.plan(kAovCount + 1);
+    std::string error;
+    const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", error);
+    if (!renderer) {
+        PT_EXPECT(ctx, false, "scene load failed: " + error);
+        return;
+    }
+    const pathtracer::scene::Camera& authored = renderer->defaultCamera();
+    const pathtracer::scene::Camera camera{authored.position(), authored.rotationDegrees(), authored.filmBack(),
+                                           authored.focalLengthMm(), authored.nearClip(), authored.farClip(), authored.aperture(),
+                                           authored.shutterSeconds(), authored.iso(), authored.lens(),
+                                           pathtracer::gfx::PixelLattice::Hexagonal};
+    constexpr int kWidth = 24;
+    constexpr int kHeight = 18;
+    bool squareTakesAll = true;
+    for (int i = 0; i < kAovCount; ++i) {
+        const auto aov = static_cast<AovId>(i);
+        squareTakesAll = squareTakesAll && pathtracer::debug::aovSupportsLattice(aov, pathtracer::gfx::PixelLattice::Square);
+        const bool supported = pathtracer::debug::aovSupportsLattice(aov, pathtracer::gfx::PixelLattice::Hexagonal);
+        const pathtracer::api::HeadlessRenderer::Request request{
+            .camera = camera, .width = kWidth, .height = kHeight, .samples = 2, .scrambleSeed = 1, .aovs = {aov}};
+        std::vector<float> buffer(static_cast<std::size_t>(kWidth) * kHeight * static_cast<std::size_t>(pathtracer::debug::aovChannels(aov)));
+        float* pointer = buffer.data();
+        error.clear();
+        const bool rendered = renderer->render(request, std::span<float* const>(&pointer, 1), error);
+        const bool finite = std::all_of(buffer.begin(), buffer.end(), [aov](float value) {
+            return std::isfinite(value) || (aov == AovId::SNR && value == std::numeric_limits<float>::infinity());
+        });
+        const std::string name = pathtracer::debug::kAovNames[i];
+        PT_EXPECT(ctx, supported ? rendered && finite : !rendered && error.starts_with(name) && error.find("Hexagonal") != std::string::npos,
+                  name + (supported ? " did not render finite on the hexagonal lattice: " : " was not refused by name: ") + error);
+    }
+    PT_EXPECT(ctx, squareTakesAll, "the square lattice refuses an AOV");
+}
+
 // Sharing one accumulation, one G-buffer pass and one Beauty across a multi-AOV request must be bit-identical to requesting them singly.
 PT_CHECK(multi_aov_request_matches_single_aov_requests, Slow, Exact) {
     const std::vector<AovId> combined = {AovId::Beauty, AovId::Depth, AovId::Normal, AovId::Sobel, AovId::AO};

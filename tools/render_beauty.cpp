@@ -65,6 +65,8 @@ struct Options {
     float fisheyeFocalLengthMm = 0.0F;
     // profile.json's camera through the 360-degree lat-long lens, which reads no focal length or gate.
     bool omnidirectional = false;
+    // profile.json's camera on the hexagonal pixel lattice; --width and --height still count columns and rows.
+    pathtracer::gfx::PixelLattice lattice = pathtracer::gfx::PixelLattice::Square;
 };
 
 // All AOVs are reachable now HeadlessRenderer drives the G-buffer and filters; names come from pathtracer/debug/aov.h, not restated here.
@@ -170,6 +172,10 @@ bool appendTimingRecord(const Options& options, int argc, char** argv, int width
         .work = {{"rays", {{"primary", rays.primary}, {"bounce", rays.bounce}, {"ao", rays.ao}, {"shadow", rays.shadow}}},
                  {"crc32", pathtracer::debug::floatCrc32(accumulated.texels)}},
     };
+    // Absent on the square lattice, so square records stay comparable with logs written before the lattice existed.
+    if (options.lattice != pathtracer::gfx::PixelLattice::Square) {
+        record.config["pixel_lattice"] = pathtracer::gfx::kPixelLatticeNames[static_cast<int>(options.lattice)];
+    }
     // A Beauty filter runs once after the passes, so its wall clock is its own column rather than a pass sample.
     if (filterMs > 0.0) {
         record.samples["filter_ms"] = std::vector<double>{filterMs};
@@ -237,6 +243,8 @@ bool parseArgs(int argc, char** argv, Options& options) {
             }
         } else if (std::strcmp(argv[i], "--omnidirectional") == 0) {
             options.omnidirectional = true;
+        } else if (std::strcmp(argv[i], "--hexagonal") == 0) {
+            options.lattice = pathtracer::gfx::PixelLattice::Hexagonal;
         } else if (std::strcmp(argv[i], "--env-light") == 0) {
             if (!needsValue("--env-light")) { return false; }
             options.envLight = std::atoi(argv[++i]) != 0 ? 1 : 0;
@@ -244,7 +252,8 @@ bool parseArgs(int argc, char** argv, Options& options) {
             std::cerr << "render_beauty: unknown argument '" << argv[i]
                       << "'\nusage: render_beauty [--scene scenes/x.json] --out out.png [--out-exr out.exr] [--compare-exr ref.exr] "
                          "[--compare ref.png] [--error-spectrum] [--seed N] [--passes N] [--width W] [--height H] "
-                         "[--exposure EV] [--aov name] [--fisheye FOCAL_MM | --omnidirectional] [--env-light 0|1] [--bench-log log.jsonl] [--assert-deterministic] [--assert-converged]\n";
+                         "[--exposure EV] [--aov name] [--fisheye FOCAL_MM | --omnidirectional] [--hexagonal] [--env-light 0|1] "
+                         "[--bench-log log.jsonl] [--assert-deterministic] [--assert-converged]\n";
             return false;
         }
     }
@@ -273,6 +282,16 @@ bool parseArgs(int argc, char** argv, Options& options) {
         std::cerr << "render_beauty: --error-spectrum needs --compare-exr to have an error to analyse\n";
         return false;
     }
+    // The octave bands are a square-grid FFT's, which has no meaning over offset rows.
+    if (options.errorSpectrum && options.lattice != pathtracer::gfx::PixelLattice::Square) {
+        std::cerr << "render_beauty: --error-spectrum bands a square grid's spectrum, so --hexagonal cannot take it\n";
+        return false;
+    }
+    if (!pathtracer::debug::aovSupportsLattice(options.aov, options.lattice)) {
+        std::cerr << "render_beauty: " << pathtracer::debug::kAovNames[static_cast<int>(options.aov)]
+                  << " reads a square neighbourhood, so --hexagonal cannot render it\n";
+        return false;
+    }
     return true;
 }
 
@@ -295,16 +314,19 @@ int main(int argc, char** argv) {
 
     // Fixed camera from profile.json, no controller: what makes two runs comparable is that neither can have been nudged.
     const bool fisheye = options.fisheyeFocalLengthMm > 0.0F;
-    const pathtracer::scene::Camera camera = fisheye || options.omnidirectional ? [&] {
-        // Rebuilt only for a lens flag; every accessor returns its constructor argument as given, so the pose carries over exactly.
+    const bool hexagonal = options.lattice != pathtracer::gfx::PixelLattice::Square;
+    const pathtracer::scene::Camera camera = fisheye || options.omnidirectional || hexagonal ? [&] {
+        // Rebuilt only for a lens or lattice flag; every accessor returns its constructor argument as given, so the pose carries over.
         const pathtracer::scene::Camera& authored = renderer->defaultCamera();
         pathtracer::scene::Lens lens = authored.lens();
-        lens.projection =
-            fisheye ? pathtracer::scene::LensProjection::FisheyePolynomial : pathtracer::scene::LensProjection::Omnidirectional;
+        if (fisheye || options.omnidirectional) {
+            lens.projection =
+                fisheye ? pathtracer::scene::LensProjection::FisheyePolynomial : pathtracer::scene::LensProjection::Omnidirectional;
+        }
         return pathtracer::scene::Camera{authored.position(), authored.rotationDegrees(), authored.filmBack(),
                                          fisheye ? options.fisheyeFocalLengthMm : authored.focalLengthMm(), authored.nearClip(),
                                          authored.farClip(), authored.aperture(), authored.shutterSeconds(),
-                                         authored.iso(), lens};
+                                         authored.iso(), lens, hexagonal ? options.lattice : authored.pixelLattice()};
     }() : renderer->defaultCamera();
     const int width = options.width;
     const int height = options.height;
@@ -330,7 +352,7 @@ int main(int argc, char** argv) {
             .envLightEnabled = envLightOverride,
         };
         if (!renderer->render(request, error)) {
-            // Unreachable: parseArgs rejects a non-positive pass count and the resolution is positive above, render()'s only failure modes.
+            // Unreachable: parseArgs rejects a non-positive pass count and a lattice's unsupported AOV, and the resolution is positive.
             std::cerr << "render_beauty: " << error << "\n";
             std::exit(EXIT_FAILURE);
         }
@@ -470,7 +492,7 @@ int main(int argc, char** argv) {
     if (!options.outExrPath.empty()) {
         const pathtracer::gfx::ImageRole role =
             pathtracer::debug::aovIsColour(options.aov) ? pathtracer::gfx::ImageRole::Colour : pathtracer::gfx::ImageRole::Data;
-        if (!pathtracer::gfx::writeExr(options.outExrPath, accumulated, role)) {
+        if (!pathtracer::gfx::writeExr(options.outExrPath, accumulated, role, camera.pixelLattice())) {
             return EXIT_FAILURE;
         }
         std::cout << "render_beauty: wrote " << options.outExrPath << " (linear " << aovName << ", "

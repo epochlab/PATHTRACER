@@ -122,7 +122,7 @@ std::optional<glm::vec2> omnidirectionalProjection(const Camera::ViewBasis& basi
 
 Camera::Camera(const glm::vec3& position, const glm::vec3& rotationDegrees, FilmBack filmBack,
                float focalLengthMm, float nearClip, float farClip, float aperture,
-               float shutterSeconds, float iso, Lens lens)
+               float shutterSeconds, float iso, Lens lens, pathtracer::gfx::PixelLattice pixelLattice)
     : position_(position),
       rotationDegrees_(rotationDegrees),
       filmBack_(filmBack),
@@ -132,7 +132,8 @@ Camera::Camera(const glm::vec3& position, const glm::vec3& rotationDegrees, Film
       aperture_(aperture),
       shutterSeconds_(shutterSeconds),
       iso_(iso),
-      lens_(lens) {}
+      lens_(lens),
+      pixelLattice_(pixelLattice) {}
 
 bool Camera::validate(std::string& error) const {
     std::ostringstream reason;
@@ -211,7 +212,7 @@ Camera::ViewBasis Camera::viewBasis(float aspect) const {
     const glm::vec3 fwd = -rotation[2];
     const glm::vec3 right = rotation[0];
     const glm::vec3 up = rotation[1];
-    // Sensor width from the gate height and the render aspect, as the pinhole vfov is: widthMm stays display-only, so pixels stay square.
+    // Sensor width from the gate height and the render aspect, as the pinhole vfov is: widthMm stays display-only.
     const float halfHeightMm = 0.5F * filmBack_.heightMm;
     const float halfWidthMm = halfHeightMm * aspect;
     // tan(vfov/2) by similar triangles, exact; tan(atan(x)) caps or turns negative at small f, where atan rounds to pi/2.

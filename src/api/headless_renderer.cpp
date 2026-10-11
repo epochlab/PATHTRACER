@@ -123,6 +123,14 @@ struct SceneInputs {
     if (!request.camera.validate(error)) {
         return false;
     }
+    const pathtracer::gfx::PixelLattice lattice = request.camera.pixelLattice();
+    const auto unsupported = std::find_if(request.aovs.begin(), request.aovs.end(),
+                                          [lattice](AovId aov) { return !pathtracer::debug::aovSupportsLattice(aov, lattice); });
+    if (unsupported != request.aovs.end()) {
+        error = std::string(pathtracer::debug::kAovNames[static_cast<int>(*unsupported)]) + " reads a square neighbourhood, so the " +
+                pathtracer::gfx::kPixelLatticeNames[static_cast<int>(lattice)] + " lattice cannot render it";
+        return false;
+    }
     if (request.previousCamera.has_value() && !request.previousCamera->validate(error)) {
         error = "previousCamera: " + error;
         return false;

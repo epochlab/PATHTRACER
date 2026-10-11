@@ -5,6 +5,7 @@
 #include <glm/glm.hpp>
 
 #include "pathtracer/gfx/hdr_image.h"
+#include "pathtracer/gfx/pixel_lattice.h"
 
 namespace pathtracer::debug {
 
@@ -23,7 +24,7 @@ enum class AovId : int {
     DoG,
     WorldPos,
     UV,
-    MotionVector,  // geometric screen-space motion in pixels from the request's previous camera (gbuffer.h)
+    MotionVector,  // geometric film-plane motion in column pitches from the request's previous camera (gbuffer.h)
     // Perceptual: observer models over Beauty, as against the Utility block's image-space derivative operators.
     ColourOpponent,
     // Material.
@@ -136,6 +137,9 @@ struct AovDisplay {
 [[nodiscard]] inline bool aovNeedsLightTransport(AovId aov) {
     return aovSource(aov) != AovSource::GBuffer;
 }
+
+// False where the AOV reads a square neighbourhood the lattice does not have: the image-space stencils and OIDN's square-trained network.
+[[nodiscard]] bool aovSupportsLattice(AovId aov, pathtracer::gfx::PixelLattice lattice);
 
 // Exact lookup against kAovNames, so "bounceCount" resolves and "Bounce Count" does not. AovId::Count doubles as "unknown".
 [[nodiscard]] AovId aovIdFromName(std::string_view name);

@@ -23,7 +23,7 @@ constexpr std::array<std::array<int, 2>, 12> kBoxEdges{
     {{0, 1}, {1, 2}, {2, 3}, {3, 0}, {4, 5}, {5, 6}, {6, 7}, {7, 4}, {0, 4}, {1, 5}, {2, 6}, {3, 7}}};
 constexpr std::size_t kBoxCornerCount = 8;
 
-// Fixed on-screen line thickness in pixels, constant regardless of triangle/box size or distance.
+// Fixed on-screen line thickness in pixel sides, constant regardless of triangle/box size or distance.
 constexpr float kLineThicknessPx = 1.0F;
 
 const glm::vec3 kWireframeColor(1.0F, 1.0F, 1.0F);
@@ -88,15 +88,17 @@ ViewBox viewBox(const AabbBounds& box, const glm::vec3& eye, const glm::vec3& co
 // Everything a row needs that is constant across the call, built once rather than per pixel.
 struct GBufferView {
     const Camera& camera;
+    pathtracer::gfx::PixelLattice lattice;
     Camera::ViewBasis basis;
     Projector current;
     Projector previous;
-    glm::vec2 pixelsPerNdc;  // (W/2, -H/2): NDC +Y up to pixels with row 0 at the top
+    glm::vec2 pixelsPerNdc;  // half the film extent, (W/2, -H rowPitch/2): NDC +Y up to column pitches with row 0 at the top
+    float pixelSide;  // the cell's side as an equal-area square: the unit of dirPerPixel, so of footprints and line widths
     std::vector<ViewBox> boxes;
     bool wrapsHorizontally;  // both views wrap, so a motion's x lives on a circle rather than a line
 };
 
-// A pixel-centre ray in the local linear image model d(p + dp) = d + J dp (Igehy 1999), J's columns d(dir)/d(pixel x, y).
+// A pixel-centre ray in the local linear image model d(p + dp) = d + J dp (Igehy 1999), J's columns d(dir) per pixel side in x, y.
 struct PixelRay {
     Ray ray;
     glm::mat2x3 dirPerPixel;
@@ -109,14 +111,15 @@ glm::mat3x2 pixelPerDir(const PixelRay& pixel) {
 }
 
 std::optional<PixelRay> pixelRay(const GBufferView& view, int x, int y) {
-    const float ndcX = ((static_cast<float>(x) + 0.5F) / view.pixelsPerNdc.x) - 1.0F;
-    const float ndcY = 1.0F + ((static_cast<float>(y) + 0.5F) / view.pixelsPerNdc.y);
+    const glm::vec2 centre = pathtracer::gfx::pixelCentre(view.lattice, x, y);
+    const float ndcX = (centre.x / view.pixelsPerNdc.x) - 1.0F;
+    const float ndcY = 1.0F + (centre.y / view.pixelsPerNdc.y);
     const std::optional<Camera::RayDifferential> differential = view.camera.primaryRayDifferential(view.basis, ndcX, ndcY);
     if (!differential) {
         return std::nullopt;
     }
-    const glm::mat2x3 dirPerPixel = differential->dirPerNdc * glm::mat2(1.0F / view.pixelsPerNdc.x, 0.0F, 0.0F,
-                                                                        1.0F / view.pixelsPerNdc.y);
+    const glm::mat2x3 dirPerPixel = differential->dirPerNdc * glm::mat2(view.pixelSide / view.pixelsPerNdc.x, 0.0F, 0.0F,
+                                                                        view.pixelSide / view.pixelsPerNdc.y);
     return PixelRay{differential->ray, dirPerPixel};
 }
 
@@ -352,9 +355,11 @@ void renderGBuffer(const Camera& camera, const Camera& previousCamera, const Emb
     ++result.generation;
     result.wrapsHorizontally = wrapsHorizontally(camera.lens().projection);
 
-    const float aspect = static_cast<float>(width) / static_cast<float>(height);
-    GBufferView view{camera, camera.viewBasis(aspect), projectorFor(camera, aspect), projectorFor(previousCamera, aspect),
-                     glm::vec2(0.5F * static_cast<float>(width), -0.5F * static_cast<float>(height)), {},
+    const pathtracer::gfx::PixelLattice lattice = camera.pixelLattice();
+    const glm::vec2 frame = pathtracer::gfx::frameExtent(lattice, width, height);
+    const float aspect = frame.x / frame.y;
+    GBufferView view{camera, lattice, camera.viewBasis(aspect), projectorFor(camera, aspect), projectorFor(previousCamera, aspect),
+                     glm::vec2(0.5F * frame.x, -0.5F * frame.y), pathtracer::gfx::pixelSide(lattice), {},
                      result.wrapsHorizontally && wrapsHorizontally(previousCamera.lens().projection)};
     // One box per instance in its ObjectID false colour; an instance that contributed no triangles has an empty box and no edges.
     view.boxes.reserve(instanceBounds.size());

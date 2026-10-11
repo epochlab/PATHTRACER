@@ -22,7 +22,7 @@ struct GBuffer {
     pathtracer::gfx::HdrImage lookahead;
     pathtracer::gfx::HdrImage worldPos;
     pathtracer::gfx::HdrImage uv;
-    // x_now - x_previous in current pixels of the point at the pixel centre, the shorter way round a lat-long; 0 where a view has no image.
+    // x_now - x_previous in column pitches of the point at the pixel centre, the short way round a lat-long; 0 where a view has no image.
     pathtracer::gfx::HdrImage motionVector;
     pathtracer::gfx::HdrImage normal;
     pathtracer::gfx::HdrImage geomNormal;
