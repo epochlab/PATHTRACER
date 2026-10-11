@@ -1,6 +1,8 @@
 #pragma once
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
 #include <numbers>
 
 #include <glm/glm.hpp>
@@ -34,6 +36,26 @@ static_assert(sizeof(kPixelLatticeNames) / sizeof(kPixelLatticeNames[0]) == stat
 // The film a width x height lattice spans in column pitches, whose ratio is the primary rays' aspect.
 [[nodiscard]] inline glm::vec2 frameExtent(PixelLattice lattice, int width, int height) {
     return {static_cast<float>(width), static_cast<float>(height) * rowPitch(lattice)};
+}
+
+// The cell nearest film point p, its Voronoi cell, so a display shows each cell crisp; columns wrap or clamp at the frame's edges.
+[[nodiscard]] inline glm::ivec2 nearestPixel(PixelLattice lattice, glm::vec2 film, int width, int height, bool wrapsHorizontally) {
+    // A cell reaches less than a row pitch above or below its centre, so only the two rows bracketing p can hold it.
+    const int below = std::clamp(static_cast<int>(std::floor((film.y / rowPitch(lattice)) - 0.5F)), 0, height - 1);
+    glm::ivec2 nearest(0);
+    float nearestDistance = std::numeric_limits<float>::infinity();
+    for (const int row : {below, std::min(below + 1, height - 1)}) {
+        const int column = static_cast<int>(std::floor(film.x - pixelCentre(lattice, 0, row).x + 0.5F));
+        const int bounded = wrapsHorizontally ? column : std::clamp(column, 0, width - 1);
+        const glm::vec2 offset = pixelCentre(lattice, bounded, row) - film;
+        const float distance = glm::dot(offset, offset);
+        if (distance < nearestDistance) {
+            nearestDistance = distance;
+            nearest = glm::ivec2(bounded, row);
+        }
+    }
+    nearest.x = (nearest.x + width) % width;
+    return nearest;
 }
 
 }  // namespace pathtracer::gfx

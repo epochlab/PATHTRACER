@@ -678,6 +678,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
     // Constant for the whole pass, so built once: the aspect-taking primaryRay rebuilds it on every one of millions of rays.
     const Camera::ViewBasis basis = camera.viewBasis(aspect);
     out.wrapsHorizontally = wrapsHorizontally(basis.lens.projection);
+    out.pixelLattice = lattice;
     const float pixelSide = pathtracer::gfx::pixelSide(lattice);
     // Sample spacing pixelSide/sqrt(N) (pbrt-v4's differential scale), so prefilter blur vanishes as N grows; unbounded N as Sampler's.
     const float strataPerAxis = std::sqrt(static_cast<float>(std::max(sampleCount, sampleBase + settings.samplesPerPixel))) / pixelSide;

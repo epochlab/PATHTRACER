@@ -38,15 +38,39 @@ constexpr const char* kApplyChannelViewGlsl =
 // 1.0 - rgb, applied to the final display-referred colour (after the display curve/Raw passthrough, before dither).
 constexpr const char* kInvertGlsl = "uniform bool uInvert;\n";
 
+// pixel_lattice.h's nearestPixel transcribed: a hexagonal film shows each cell's texel over its Voronoi cell, the probe's own lookup.
+constexpr const char* kLatticeGlsl =
+    "uniform bool uHexagonal;\n"
+    "uniform bool uWrapsHorizontally;\n"
+    "vec3 latticeTexel(vec2 uv) {\n"
+    "    if (!uHexagonal) { return texture(uHdrColor, uv).rgb; }\n"
+    "    ivec2 size = textureSize(uHdrColor, 0);\n"
+    "    float rowPitch = 0.5 * sqrt(3.0);\n"
+    "    vec2 film = uv * vec2(float(size.x), float(size.y) * rowPitch);\n"
+    "    int below = clamp(int(floor(film.y / rowPitch - 0.5)), 0, size.y - 1);\n"
+    "    ivec2 nearest = ivec2(0, below);\n"
+    "    float nearestDistance = -1.0;\n"
+    "    for (int row = below; row <= min(below + 1, size.y - 1); ++row) {\n"
+    "        float offset = 0.25 + 0.5 * float(row & 1);\n"
+    "        int column = int(floor(film.x - offset + 0.5));\n"
+    "        if (!uWrapsHorizontally) { column = clamp(column, 0, size.x - 1); }\n"
+    "        vec2 delta = vec2(float(column) + offset, (float(row) + 0.5) * rowPitch) - film;\n"
+    "        float distance = dot(delta, delta);\n"
+    "        if (nearestDistance < 0.0 || distance < nearestDistance) { nearestDistance = distance; nearest = ivec2(column, row); }\n"
+    "    }\n"
+    "    nearest.x = (nearest.x + size.x) % size.x;\n"
+    "    return texelFetch(uHdrColor, nearest, 0).rgb;\n"
+    "}\n";
+
 // Radial per-channel UV offset, 0 = off: R toward centre, B away, scaling with distance from centre. Beauty only, so no separate pass.
 constexpr const char* kAberrationGlsl =
     "uniform float uAberration;\n"
     "vec3 sampleAberrated(vec2 uv) {\n"
     "    vec2 dir = uv - vec2(0.5);\n"
     "    vec3 color;\n"
-    "    color.r = texture(uHdrColor, uv - dir * uAberration).r;\n"
-    "    color.g = texture(uHdrColor, uv).g;\n"
-    "    color.b = texture(uHdrColor, uv + dir * uAberration).b;\n"
+    "    color.r = latticeTexel(uv - dir * uAberration).r;\n"
+    "    color.g = latticeTexel(uv).g;\n"
+    "    color.b = latticeTexel(uv + dir * uAberration).b;\n"
     "    return color;\n"
     "}\n";
 
@@ -82,7 +106,7 @@ std::string buildFragmentSource(const std::string& ocioShaderText, const std::st
         << "uniform sampler2D uHdrColor;\n"
         << "uniform vec3 uDisplayGain;\n"
         << "uniform vec3 uDisplayOffset;\n"
-        << kChannelViewGlsl << kInvertGlsl << kAberrationGlsl << kBloomGlsl << "\n"
+        << kChannelViewGlsl << kInvertGlsl << kLatticeGlsl << kAberrationGlsl << kBloomGlsl << "\n"
         << kDitherGlsl
         << ocioShaderText << "\n"
         << "void main() {\n"
@@ -106,7 +130,7 @@ std::string buildRawFragmentSource() {
                        "uniform sampler2D uHdrColor;\n"
                        "uniform vec3 uDisplayGain;\n"
                        "uniform vec3 uDisplayOffset;\n") +
-           kChannelViewGlsl + kInvertGlsl + kAberrationGlsl + kBloomGlsl + kDitherGlsl +
+           kChannelViewGlsl + kInvertGlsl + kLatticeGlsl + kAberrationGlsl + kBloomGlsl + kDitherGlsl +
            "\nvoid main() {\n"
            "    vec3 hdrColor = sampleAberrated(vUv);\n" +
            kApplyBloomGlsl +
@@ -212,7 +236,13 @@ OcioDisplayTransform::OcioDisplayTransform(ShaderProgram rawShader, ShaderProgra
       rec709DitherOriginLoc_(rec709Shader_.uniformLocation("uDitherOrigin")),
       rawBloomStrengthLoc_(rawShader_.uniformLocation("uBloomStrength")),
       srgbBloomStrengthLoc_(srgbShader_.uniformLocation("uBloomStrength")),
-      rec709BloomStrengthLoc_(rec709Shader_.uniformLocation("uBloomStrength")) {}
+      rec709BloomStrengthLoc_(rec709Shader_.uniformLocation("uBloomStrength")),
+      rawHexagonalLoc_(rawShader_.uniformLocation("uHexagonal")),
+      srgbHexagonalLoc_(srgbShader_.uniformLocation("uHexagonal")),
+      rec709HexagonalLoc_(rec709Shader_.uniformLocation("uHexagonal")),
+      rawWrapsHorizontallyLoc_(rawShader_.uniformLocation("uWrapsHorizontally")),
+      srgbWrapsHorizontallyLoc_(srgbShader_.uniformLocation("uWrapsHorizontally")),
+      rec709WrapsHorizontallyLoc_(rec709Shader_.uniformLocation("uWrapsHorizontally")) {}
 
 // Not wrapped in GL_CALL: runs every frame.
 void OcioDisplayTransform::bind() const {
@@ -224,6 +254,8 @@ void OcioDisplayTransform::bind() const {
     int displayOffsetLoc = rawDisplayOffsetLoc_;
     int ditherOriginLoc = rawDitherOriginLoc_;
     int bloomStrengthLoc = rawBloomStrengthLoc_;
+    int hexagonalLoc = rawHexagonalLoc_;
+    int wrapsHorizontallyLoc = rawWrapsHorizontallyLoc_;
     if (activeLut_ == Lut::SRGB) {
         displayGainLoc = srgbDisplayGainLoc_;
         channelViewLoc = srgbChannelViewLoc_;
@@ -232,6 +264,8 @@ void OcioDisplayTransform::bind() const {
         displayOffsetLoc = srgbDisplayOffsetLoc_;
         ditherOriginLoc = srgbDitherOriginLoc_;
         bloomStrengthLoc = srgbBloomStrengthLoc_;
+        hexagonalLoc = srgbHexagonalLoc_;
+        wrapsHorizontallyLoc = srgbWrapsHorizontallyLoc_;
     } else if (activeLut_ == Lut::Rec709) {
         displayGainLoc = rec709DisplayGainLoc_;
         channelViewLoc = rec709ChannelViewLoc_;
@@ -240,6 +274,8 @@ void OcioDisplayTransform::bind() const {
         displayOffsetLoc = rec709DisplayOffsetLoc_;
         ditherOriginLoc = rec709DitherOriginLoc_;
         bloomStrengthLoc = rec709BloomStrengthLoc_;
+        hexagonalLoc = rec709HexagonalLoc_;
+        wrapsHorizontallyLoc = rec709WrapsHorizontallyLoc_;
     }
     shader.use();
     glUniform3f(displayGainLoc, gain_.r, gain_.g, gain_.b);
@@ -248,6 +284,8 @@ void OcioDisplayTransform::bind() const {
     glUniform1f(aberrationLoc, aberration_);
     glUniform3f(displayOffsetLoc, displayOffset_.r, displayOffset_.g, displayOffset_.b);
     glUniform1f(bloomStrengthLoc, bloomStrength_);
+    glUniform1i(hexagonalLoc, pixelLattice_ == PixelLattice::Hexagonal ? 1 : 0);
+    glUniform1i(wrapsHorizontallyLoc, wrapsHorizontally_ ? 1 : 0);
     // The image's top-left pixel in window coordinates, whose y axis points up.
     glUniform2i(ditherOriginLoc, imageRect_.x, imageRect_.y + imageRect_.height - 1);
     ditherMask_.bind(kDitherMaskUnit);

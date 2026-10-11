@@ -5,7 +5,7 @@
 
 namespace pathtracer::gfx {
 
-ViewportRect fitAspect(int imageWidth, int imageHeight, int viewportWidth, int viewportHeight) {
+ViewportRect fitAspect(double imageWidth, double imageHeight, int viewportWidth, int viewportHeight) {
     if (imageWidth <= 0 || imageHeight <= 0 || viewportWidth <= 0 || viewportHeight <= 0) {
         return {0, 0, 0, 0};
     }

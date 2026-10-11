@@ -27,6 +27,7 @@ struct CameraConfig {
     float iso;
     // Projection selector plus the polynomial; Camera::validate checks both whichever is active, as the HUD dropdown switches either way.
     pathtracer::scene::Lens lens;
+    pathtracer::gfx::PixelLattice pixelLattice;
 };
 
 struct ControlsConfig {

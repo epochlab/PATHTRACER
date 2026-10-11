@@ -74,6 +74,19 @@ std::optional<pathtracer::scene::Lens> parseLens(const nlohmann::json& lens, con
     return parsed;
 }
 
+// Camera pixelLattice, spelled as the lens projections are; the HUD switches it at runtime as it does the projection.
+std::optional<pathtracer::gfx::PixelLattice> parsePixelLattice(const nlohmann::json& lattice, const std::string& path) {
+    const std::string name = lattice.get<std::string>();
+    if (name == "square") {
+        return pathtracer::gfx::PixelLattice::Square;
+    }
+    if (name == "hexagonal") {
+        return pathtracer::gfx::PixelLattice::Hexagonal;
+    }
+    std::cerr << "loadProfileConfig: " << path << " has camera.pixelLattice " << name << ", expected square or hexagonal\n";
+    return std::nullopt;
+}
+
 // The counts loadProfileConfig otherwise takes on trust. Nothing downstream re-checks them, and each has a concrete failure mode.
 bool validCounts(const RenderConfig& render, const PathTracerConfig& pathTracer, const std::string& path) {
     bool ok = true;
@@ -132,7 +145,7 @@ std::optional<RenderConfig> parseRenderOutput(const nlohmann::json& render, cons
     return RenderConfig{width, height, 0.0F, 0.0F, 0, *defaultLut, false, *displayFormat, toFloat(render.at("bloomStrength"))};
 }
 
-// The camera block in field order, then its lens. Ranges need the film back, so Camera::validate runs where sensor.json supplies it.
+// The camera block in field order, then lens and lattice. Ranges need the film back, so Camera::validate runs once sensor.json supplies it.
 std::optional<CameraConfig> parseCamera(const nlohmann::json& camera, const std::string& path) {
     CameraConfig config{
         camera.at("position").get<glm::vec3>(),
@@ -145,13 +158,29 @@ std::optional<CameraConfig> parseCamera(const nlohmann::json& camera, const std:
         toFloat(camera.at("shutterSeconds")),
         toFloat(camera.at("iso")),
         {},
+        {},
     };
     const std::optional<pathtracer::scene::Lens> lens = parseLens(camera.at("lens"), path);
-    if (!lens.has_value()) {
+    const std::optional<pathtracer::gfx::PixelLattice> lattice = parsePixelLattice(camera.at("pixelLattice"), path);
+    if (!lens.has_value() || !lattice.has_value()) {
         return std::nullopt;
     }
     config.lens = *lens;
+    config.pixelLattice = *lattice;
     return config;
+}
+
+// The viewer would open on an AOV no producer serves: denoised with the denoiser off, or a square stencil on another lattice.
+bool servedDefaultAov(int defaultAov, const DenoiserConfig& denoiser, const CameraConfig& camera, const std::string& path) {
+    if (!denoiser.enabled && defaultAov == static_cast<int>(pathtracer::debug::AovId::Denoised)) {
+        std::cerr << "loadProfileConfig: " << path << ": defaultAOV is denoised, but the denoiser is disabled\n";
+        return false;
+    }
+    if (!pathtracer::debug::aovSupportsLattice(static_cast<pathtracer::debug::AovId>(defaultAov), camera.pixelLattice)) {
+        std::cerr << "loadProfileConfig: " << path << ": defaultAOV reads a square neighbourhood the camera's pixelLattice lacks\n";
+        return false;
+    }
+    return true;
 }
 
 bool validRender(const RenderConfig& render, const std::string& path) {
@@ -243,9 +272,7 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
             !validPathTracer(pathTracerConfig, path) || !validCounts(*renderConfig, pathTracerConfig, path)) {
             return std::nullopt;
         }
-        // The viewer would open on an AOV no producer serves.
-        if (!denoiserConfig->enabled && renderConfig->defaultAov == static_cast<int>(pathtracer::debug::AovId::Denoised)) {
-            std::cerr << "loadProfileConfig: " << path << ": defaultAOV is denoised, but the denoiser is disabled\n";
+        if (!servedDefaultAov(renderConfig->defaultAov, *denoiserConfig, *cameraConfig, path)) {
             return std::nullopt;
         }
         return ProfileConfig{*cameraConfig, controlsConfig, *renderConfig, pathTracerConfig, *denoiserConfig};

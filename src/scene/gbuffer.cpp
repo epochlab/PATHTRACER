@@ -356,6 +356,7 @@ void renderGBuffer(const Camera& camera, const Camera& previousCamera, const Emb
     result.wrapsHorizontally = wrapsHorizontally(camera.lens().projection);
 
     const pathtracer::gfx::PixelLattice lattice = camera.pixelLattice();
+    result.pixelLattice = lattice;
     const glm::vec2 frame = pathtracer::gfx::frameExtent(lattice, width, height);
     const float aspect = frame.x / frame.y;
     GBufferView view{camera, lattice, camera.viewBasis(aspect), projectorFor(camera, aspect), projectorFor(previousCamera, aspect),

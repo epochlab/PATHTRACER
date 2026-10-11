@@ -36,6 +36,7 @@ struct GBuffer {
     // Bumped by every renderGBuffer call: the buffer is reused in place, so a consumer caching by pointer needs this to see a change.
     std::uint64_t generation = 0;
     bool wrapsHorizontally = false;  // the lens it was cast through joins its left and right edges, so neighbour reads wrap in x
+    pathtracer::gfx::PixelLattice pixelLattice = pathtracer::gfx::PixelLattice::Square;  // where its texels sit on the film
 };
 
 // Row-parallel over disjoint rows, through the path tracer's own accel and bounce-0 sampling; previousCamera sets motionVector's origin.

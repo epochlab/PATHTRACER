@@ -369,8 +369,8 @@ PT_CHECK(frame_stats_percentiles_are_correct, Fast, Exact) {
 PT_CHECK(viewport_fit_preserves_aspect_and_centres, Fast, Exact) {
     struct Case {
         const char* name;
-        int imageWidth;
-        int imageHeight;
+        double imageWidth;
+        double imageHeight;
         int viewportWidth;
         int viewportHeight;
         pathtracer::gfx::ViewportRect expected;
@@ -385,6 +385,8 @@ PT_CHECK(viewport_fit_preserves_aspect_and_centres, Fast, Exact) {
         {"minified below the authored size", 1024, 576, 512, 288, {0, 0, 512, 288}},
         {"non-positive viewport yields nothing", 1024, 576, 0, 576, {0, 0, 0, 0}},
         {"non-positive image yields nothing", 0, 576, 1024, 576, {0, 0, 0, 0}},
+        // 256 columns by 128 hexagonal rows span 256 x 110.85 pitches: x8 fills the width, and 886.8 rows round to 887.
+        {"hexagonal film's fractional height", 256, 128.0 * std::sqrt(3.0) / 2.0, 2048, 1024, {0, 68, 2048, 887}},
     };
     ctx.plan(static_cast<int>(cases.size()) * 3);
     for (const Case& testCase : cases) {
@@ -406,7 +408,7 @@ PT_CHECK(viewport_fit_preserves_aspect_and_centres, Fast, Exact) {
         // Half a pixel of rounding on each extent, propagated through w/h: d(w/h) <= (0.5 + 0.5*aspect)/h. Anything above that distorts.
         const bool degenerate = rect.width == 0 || rect.height == 0;
         const double imageAspect = degenerate ? 0.0
-                                              : static_cast<double>(testCase.imageWidth) / testCase.imageHeight;
+                                              : testCase.imageWidth / testCase.imageHeight;
         const double rectAspect = degenerate ? 0.0 : static_cast<double>(rect.width) / rect.height;
         const double allowed = degenerate ? 0.0 : (0.5 + (0.5 * imageAspect)) / rect.height;
         char aspect[224];
