@@ -3,6 +3,35 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## OpenImageIO image I/O: colour-managed reads, tagged EXRs, 16-bit RGBA PNG capture
+
+Images were read and written by hand: OpenEXR assumed linear Rec.709 (chromaticities only warned on), and `render_beauty`
+carried its own zlib PNG codec, 8-bit RGB only. OpenImageIO now does both. Linear OpenEXR stays the pipeline's one image
+format; PNG is a capture output, never read back as scene data. Colour goes through the pinned ACES OCIO config the display
+already uses. Evidence is in `results/oiio`.
+
+- feat!: `loadImage(path, ImageRole)` replaces `loadExr`. It reads a linear EXR's leading R, RG or RGB as float.
+  - `Colour` converts from the file's colour space into the working space (`Linear Rec.709 (sRGB)`) through OCIO. The
+    space is the file's `oiio:ColorSpace` tag; an untagged EXR is BT.709 by OpenEXR's own rule.
+  - A non-EXR file, an untagged EXR whose chromaticities name other primaries, or one tagged data, non-linear or unknown
+    is refused rather than read as Rec.709.
+  - `Data` reads raw, for normals, depths and heights.
+- feat!: `writeExr(path, image, ImageRole)`. `Colour` tags the working space as `oiio:ColorSpace` (written as OpenEXR's
+  `colorInteropID`) and as `chromaticities`, derived from the config's CIE XYZ D65 interchange role rather than a table.
+  `Data` tags the config's data role. `render_beauty --out-exr` picks the role by the new `aovIsColour`.
+- feat!: `render_beauty --out` writes a 16-bit PNG through `writeDisplayPng`, with the sRGB chunk, and RGBA for Beauty
+  with straight alpha unassociated in linear before the display transform. `--compare` reads both PNGs through OIIO and
+  reports deltas in 16-bit codes. The hand-written PNG encoder and decoder are gone.
+- feat!: Alpha is a path-traced lane: primary coverage through Beauty's Blackman-Harris splat, opaque on a hit or on a miss
+  into a shown sky. It was the G-buffer's pixel-centre 0/1, which disagreed with the filtered RGB at every edge. Path-traced
+  lanes are 11, G-buffer lanes 14.
+- refactor: `encodeForDisplay` has a float overload: the affine map and display transform without the 8-bit dither, which
+  the viewer and C ABI path keep byte for byte.
+- test: `io_validate` checks the round trip is lossless under both roles, that Colour EXRs carry BT.709-6's published
+  chromaticities, ACEScg reads against OCIO, PNG and sRGB-encoded EXR refused, untagged chromaticities, and the
+  PNG's codes, straight alpha and sRGB chunk. `integrator_validate alpha_is_filtered_primary_coverage` checks the lane
+  against the filter's 1.5 px support on a half-plane.
+
 ## Bump strength is a world-space height: Mikkelsen's surface gradient
 
 `bumpStrength` multiplied the height difference across two texels along the glTF tangent frame. It was not a slope, so

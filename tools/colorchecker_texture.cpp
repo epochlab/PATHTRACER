@@ -56,7 +56,7 @@ int main(int argc, char** argv) {
     if (!patches) {
         return EXIT_FAILURE;
     }
-    if (!pathtracer::gfx::writeExr(outPath, makeChart(*patches, patchPx))) {
+    if (!pathtracer::gfx::writeExr(outPath, makeChart(*patches, patchPx), pathtracer::gfx::ImageRole::Colour)) {
         std::cerr << "colorchecker_texture: failed to write " << outPath << '\n';
         return EXIT_FAILURE;
     }

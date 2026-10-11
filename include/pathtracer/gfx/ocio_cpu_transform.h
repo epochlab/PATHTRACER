@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <span>
 
 #include <glm/glm.hpp>
@@ -16,5 +17,12 @@ void applyOcioDisplayTransform(std::span<float> rgb, int width, int height,
 // Linear to display-referred 8-bit into out, presentFrame's order: affine map, transform, dither, quantize. rgb and out hold w*h*3.
 void encodeForDisplay(std::span<const float> rgb, int width, int height, const glm::vec3& gain, bool applyDisplayTransform,
                       const glm::vec3& displayOffset, std::span<unsigned char> out);
+
+// encodeForDisplay's affine map and transform without its dither or quantize, unclamped floats for an encoder of any bit depth.
+void encodeForDisplay(std::span<const float> rgb, int width, int height, const glm::vec3& gain, bool applyDisplayTransform,
+                      const glm::vec3& displayOffset, std::span<float> out);
+
+// OpenEXR-order xy (R, G, B, white) of a config colour space via its CIE XYZ D65 interchange: exact for a D65-white space.
+[[nodiscard]] std::array<float, 8> chromaticitiesOf(const char* colorSpace);
 
 }  // namespace pathtracer::gfx

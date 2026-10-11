@@ -219,9 +219,9 @@ struct PoseCounts {
 
 // Every lane bar wireframe at a pixel without a surface: zero, IOR's -1 background, and zero motion between identical views.
 bool isBackground(const GBuffer& g, int x, int y) {
-    const std::array<const pathtracer::gfx::HdrImage*, 13> zeroLanes{
+    const std::array<const pathtracer::gfx::HdrImage*, 12> zeroLanes{
         &g.depth, &g.lookahead, &g.worldPos, &g.uv, &g.motionVector, &g.normal, &g.geomNormal, &g.albedo,
-        &g.metallic, &g.roughness, &g.tangent, &g.objectId, &g.alpha};
+        &g.metallic, &g.roughness, &g.tangent, &g.objectId};
     return std::all_of(zeroLanes.begin(), zeroLanes.end(), [&](const auto* lane) { return texelAt(*lane, x, y) == glm::vec3(0.0F); }) &&
            texelAt(g.iorAov, x, y).x == -1.0F;
 }
@@ -241,7 +241,7 @@ bool matchesOracle(const GBuffer& g, int x, int y, const Hit& hit, const Fixture
            texelAt(g.normal, x, y) == frame[2] && texelAt(g.geomNormal, x, y) == glm::normalize(shading.normal) &&
            texelAt(g.albedo, x, y) == params.baseColor && texelAt(g.metallic, x, y).x == params.metallic &&
            texelAt(g.roughness, x, y).x == params.roughness && texelAt(g.tangent, x, y) == frame[0] &&
-           texelAt(g.objectId, x, y) == falseColorForId(triangle.instanceIndex) && texelAt(g.alpha, x, y).x == 1.0F &&
+           texelAt(g.objectId, x, y) == falseColorForId(triangle.instanceIndex) &&
            texelAt(g.iorAov, x, y).x == settings.ior && glm::vec2(texelAt(g.motionVector, x, y)) == glm::vec2(0.0F);
 }
 
@@ -686,7 +686,7 @@ void expectThinWireframe(tools::check::Context& ctx, const char* name, const Cam
     int wirePixels = 0;
     for (int y = 0; y < kHeight; ++y) {
         for (int x = 0; x < kWidth; ++x) {
-            if (texelAt(g.alpha, x, y).x > 0.5F) {
+            if (texelAt(g.depth, x, y).x > 0.0F) {
                 ++hitPixels;
                 wirePixels += isWireframeColor(texelAt(g.wireframe, x, y)) ? 1 : 0;
             }
@@ -752,7 +752,7 @@ int uncoveredPixels(const GBuffer& g) {
     int uncovered = 0;
     for (int y = 0; y < kHeight; ++y) {
         for (int x = 0; x < kWidth; ++x) {
-            uncovered += texelAt(g.alpha, x, y).x > 0.5F ? 0 : 1;
+            uncovered += texelAt(g.depth, x, y).x > 0.0F ? 0 : 1;
         }
     }
     return uncovered;
@@ -1071,7 +1071,7 @@ OracleMotion oracleMotion(const GBuffer& g, const Camera& camera, const Camera& 
     if (!ray) {
         return {glm::dvec2(0.0), 0.0};
     }
-    const bool hit = texelAt(g.alpha, x, y).x > 0.5F;
+    const bool hit = texelAt(g.depth, x, y).x > 0.0F;
     const glm::dvec4 point = hit ? glm::dvec4(glm::dvec3(texelAt(g.worldPos, x, y)), 1.0) : glm::dvec4(glm::dvec3(ray->dir), 0.0);
     const std::optional<glm::dvec2> now = oracleNdc(camera, point);
     const std::optional<glm::dvec2> before = oracleNdc(previous, point);
@@ -1180,7 +1180,7 @@ PT_CHECK(motion_vector_takes_the_short_way_across_the_seam, Fast, Exact) {
     int departures = 0;
     for (int y = 0; y < kHeight; ++y) {
         for (int x = 0; x < kWidth; ++x) {
-            if (texelAt(g.alpha, x, y).x > 0.5F) {
+            if (texelAt(g.depth, x, y).x > 0.0F) {
                 continue;
             }
             seamMisses += x < expected + 1.0 ? 1 : 0;
@@ -1204,7 +1204,7 @@ PT_CHECK(motion_vector_holds_the_sky_still_under_translation, Fast, Exact) {
         for (int y = 0; y < kHeight; ++y) {
             for (int x = 0; x < kWidth; ++x) {
                 const bool moved = motionAt(g, x, y) != glm::vec2(0.0F);
-                (texelAt(g.alpha, x, y).x > 0.5F ? movedHits : movedMisses) += moved ? 1 : 0;
+                (texelAt(g.depth, x, y).x > 0.0F ? movedHits : movedMisses) += moved ? 1 : 0;
             }
         }
         PT_EXPECT(ctx, movedMisses == 0, std::to_string(movedMisses) + " environment pixels moved under a pure translation");

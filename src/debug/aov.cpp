@@ -14,8 +14,9 @@ namespace pathtracer::debug {
 
 AovSource aovSource(AovId aov) {
     switch (aov) {
-        // Accumulated by renderPathTraced into PathTraceResult's 10 lanes.
+        // Accumulated by renderPathTraced into PathTraceResult's 11 lanes.
         case AovId::Beauty:
+        case AovId::Alpha:
         case AovId::BounceCount:
         case AovId::AO:
         case AovId::Shadow:
@@ -37,9 +38,8 @@ AovSource aovSource(AovId aov) {
         case AovId::SNR:
             return AovSource::BeautyFilter;
 
-        // The 15 primary-hit lanes renderGBuffer ray-casts. No default: -Werror makes an unclassified AovId a compile error.
+        // The 14 primary-hit lanes renderGBuffer ray-casts. No default: -Werror makes an unclassified AovId a compile error.
         case AovId::Wireframe:
-        case AovId::Alpha:
         case AovId::Depth:
         case AovId::Lookahead:
         case AovId::WorldPos:
@@ -140,6 +140,50 @@ bool aovCarriesRadiance(AovId aov) {
         case AovId::ObjectID:
         case AovId::AO:
         case AovId::Fresnel:
+        case AovId::IOR:
+        case AovId::BounceCount:
+        case AovId::SNR:
+        case AovId::Shadow:
+        case AovId::Count:
+            return false;
+    }
+    return false;
+}
+
+bool aovIsColour(AovId aov) {
+    switch (aov) {
+        // Working-space RGB: radiance lanes and per-channel reflectances, whose values change with the primaries they are written in.
+        case AovId::Beauty:
+        case AovId::DirectDiffuse:
+        case AovId::IndirectDiffuse:
+        case AovId::DirectSpecular:
+        case AovId::IndirectSpecular:
+        case AovId::Refraction:
+        case AovId::Albedo:
+        case AovId::Fresnel:
+            return true;
+
+        // Scalars, geometry, derived colour coordinates and false colours: no change of primaries applies to them.
+        case AovId::Luminance:
+        case AovId::Sobel:
+        case AovId::Gabor:
+        case AovId::DoG:
+        case AovId::HSV:
+        case AovId::ColourOpponent:
+        case AovId::MotionVector:
+        case AovId::Wireframe:
+        case AovId::Alpha:
+        case AovId::Depth:
+        case AovId::Lookahead:
+        case AovId::WorldPos:
+        case AovId::UV:
+        case AovId::Normal:
+        case AovId::GeomNormal:
+        case AovId::Metallic:
+        case AovId::Roughness:
+        case AovId::Tangent:
+        case AovId::ObjectID:
+        case AovId::AO:
         case AovId::IOR:
         case AovId::BounceCount:
         case AovId::SNR:
@@ -327,6 +371,7 @@ PathTracedLane pathTracedLane(AovId aov) {
         case AovId::IndirectSpecular: return &Result::indirectSpecular;
         case AovId::Refraction:       return &Result::refraction;
         case AovId::Fresnel:          return &Result::fresnel;
+        case AovId::Alpha:            return &Result::alpha;
         default:                      return nullptr;
     }
 }
@@ -347,7 +392,6 @@ GBufferLane gbufferLane(AovId aov) {
         case AovId::Roughness:  return &GBuffer::roughness;
         case AovId::Tangent:    return &GBuffer::tangent;
         case AovId::ObjectID:   return &GBuffer::objectId;
-        case AovId::Alpha:      return &GBuffer::alpha;
         case AovId::Wireframe:  return &GBuffer::wireframe;
         default:                return nullptr;
     }

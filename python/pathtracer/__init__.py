@@ -57,7 +57,7 @@ def aov_channels(name: str) -> int:
 def aov_needs_samples(name: str) -> bool:
     """Whether ``samples`` affects this AOV.
 
-    False for the 15 primary-hit AOVs one pixel-centre camera ray each resolves; those are essentially free and
+    False for the 14 primary-hit AOVs one pixel-centre camera ray each resolves; those are essentially free and
     converge immediately, so raising ``samples`` for them only wastes time.
     """
     return bool(_LIB.pt_aov_needs_samples(_aov_id(name)))
@@ -267,7 +267,7 @@ class Renderer:
         """Renders the requested AOVs and returns them keyed by the names given.
 
         Each producer runs at most once per call, so asking for several AOVs together costs far less than asking for
-        them separately: the 10 path-traced lanes share one sample set, the 15 G-buffer lanes share one set of
+        them separately: the 11 path-traced lanes share one sample set, the 14 G-buffer lanes share one set of
         pixel-centre rays, and the Beauty filters share the one accumulated Beauty.
 
         ``samples`` is the number of one-sample passes averaged. The sampler's scramble is fixed by ``seed`` and its

@@ -31,7 +31,6 @@ struct GBuffer {
     pathtracer::gfx::HdrImage roughness;
     pathtracer::gfx::HdrImage tangent;
     pathtracer::gfx::HdrImage objectId;
-    pathtracer::gfx::HdrImage alpha;
     // Colour-coded, not a 0/1 mask: white near a mesh triangle edge, the instance's falseColorForId hue near the instance boundary.
     pathtracer::gfx::HdrImage wireframe;
     // Bumped by every renderGBuffer call: the buffer is reused in place, so a consumer caching by pointer needs this to see a change.

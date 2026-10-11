@@ -5,6 +5,8 @@
 #include <cmath>
 #include <exception>
 #include <iostream>
+#include <memory>
+#include <string_view>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -13,9 +15,14 @@
 #include <OpenEXR/ImfChromaticities.h>
 #include <OpenEXR/ImfFrameBuffer.h>
 #include <OpenEXR/ImfInputFile.h>
-#include <OpenEXR/ImfOutputFile.h>
 #include <OpenEXR/ImfStandardAttributes.h>
 #include <OpenEXR/ImfThreading.h>
+#include <OpenImageIO/color.h>
+#include <OpenImageIO/imagebuf.h>
+#include <OpenImageIO/imagebufalgo.h>
+#include <OpenImageIO/imageio.h>
+
+#include "pathtracer/gfx/ocio_cpu_transform.h"
 
 namespace pathtracer::gfx {
 
@@ -127,7 +134,7 @@ template <typename T>
 bool allFinite(const std::vector<T>& texels, const std::string& path) {
     for (const T texel : texels) {
         if (!std::isfinite(static_cast<float>(texel))) {
-            std::cerr << "readExrChannels: non-finite texel in " << path << " read as " << scalarTypeName(kScalarType<T>)
+            std::cerr << path << ": non-finite texel read as " << scalarTypeName(kScalarType<T>)
                       << " (source Inf/NaN";
             if constexpr (std::is_same_v<T, Half>) {
                 std::cerr << ", or a finite value above binary16's max " << kHalfMax;
@@ -180,30 +187,77 @@ std::optional<ExrPixels<T>> readExrChannels(const std::string& path, int channel
     }
 }
 
-}  // namespace
-
-std::optional<HdrImage> loadExr(const std::string& path) {
-    // The leading run of R, G, B the file holds is the channel count writeExr wrote, so a 1- or 2-channel AOV reads back as itself.
-    int channels = 0;
-    try {
-        const Imf::InputFile file(path.c_str());
-        while (channels < kRgbChannels && file.header().channels().findChannel(kRgbPlanes[channels]) != nullptr) {
-            ++channels;
-        }
-    } catch (const std::exception& e) {
-        std::cerr << "loadExr: failed to load " << path << ": " << e.what() << '\n';
-        return std::nullopt;
-    }
-    if (channels == 0) {
-        std::cerr << "loadExr: " << path << " has no R channel\n";
-        return std::nullopt;
-    }
-    std::optional<ExrPixels<float>> pixels = readExrChannels<float>(path, channels);
-    if (!pixels) {
-        return std::nullopt;
-    }
-    return HdrImage{pixels->width, pixels->height, channels, std::move(pixels->texels)};
+// The pinned OCIO config as OIIO sees it, so file tags resolve and colorconvert runs against the config the display uses.
+const OIIO::ColorConfig& colorConfig() {
+    static const OIIO::ColorConfig config(std::string("ocio://") + kOcioConfigName);
+    return config;
 }
+
+// OpenEXR's meaning for a file with no colour tag: absent chromaticities are BT.709 primaries with a D65 white.
+constexpr const char* kOpenExrDefaultColorSpace = "lin_rec709_scene";
+
+// Half a unit in the fourth decimal, the precision ITU-R BT.709 publishes its white point at.
+constexpr float kChromaticityTolerance = 5e-5F;
+
+// The linear config colour space a Colour EXR is in: its oiio:ColorSpace tag, else OpenEXR's default; nullopt, logged, otherwise.
+std::optional<std::string> sourceColorSpace(const OIIO::ImageInput& input, const std::string& path) {
+    const OIIO::ImageSpec& spec = input.spec();
+    std::string tag(spec.get_string_attribute("oiio:ColorSpace"));
+    if (tag.empty()) {
+        tag = kOpenExrDefaultColorSpace;
+        // Untagged chromaticities name primaries no config space is matched to: only the default's own are honoured.
+        if (const OIIO::ParamValue* declared = spec.find_attribute("chromaticities", OIIO::TypeDesc(OIIO::TypeDesc::FLOAT, 8))) {
+            const std::array<float, 8> expected = chromaticitiesOf(std::string(colorConfig().resolve(tag)).c_str());
+            const auto* values = static_cast<const float*>(declared->data());
+            for (std::size_t i = 0; i < expected.size(); ++i) {
+                if (std::abs(values[i] - expected[i]) > kChromaticityTolerance) {
+                    std::cerr << "loadImage: " << path << " declares chromaticities other than its untagged default " << tag << '\n';
+                    return std::nullopt;
+                }
+            }
+        }
+    }
+    std::string resolved(colorConfig().resolve(tag));
+    // Linear only: the pipeline is scene-linear end to end, so an encoded (display or texture-curve) EXR is an authoring error.
+    if (colorConfig().getColorSpaceIndex(resolved) < 0 || colorConfig().isData(resolved) || !colorConfig().isColorSpaceLinear(resolved)) {
+        std::cerr << "loadImage: " << path << " is tagged " << tag << ", not a linear colour space of " << kOcioConfigName << '\n';
+        return std::nullopt;
+    }
+    return resolved;
+}
+
+// Converts a Colour image's texels in place from the file's colour space to the working space; false, logged, on failure.
+bool toWorkingSpace(const OIIO::ImageInput& input, const std::string& path, HdrImage& image) {
+    const std::optional<std::string> source = sourceColorSpace(input, path);
+    if (!source) {
+        return false;
+    }
+    if (colorConfig().equivalent(*source, kOcioSceneColorSpace)) {
+        return true;
+    }
+    if (image.channels != kRgbChannels) {
+        std::cerr << "loadImage: " << path << " needs a colour conversion from " << *source << " but has no RGB\n";
+        return false;
+    }
+    OIIO::ImageBuf buffer(OIIO::ImageSpec(image.width, image.height, image.channels, OIIO::TypeFloat), OIIO::make_span(image.texels));
+    if (!OIIO::ImageBufAlgo::colorconvert(buffer, buffer, *source, kOcioSceneColorSpace, false, "", "", &colorConfig())) {
+        std::cerr << "loadImage: " << path << ": " << buffer.geterror() << '\n';
+        return false;
+    }
+    return true;
+}
+
+// Writes image's texels as `format` under spec; false, logged, on any failure.
+bool writeImage(const std::string& path, const char* format, const OIIO::ImageSpec& spec, const HdrImage& image) {
+    const std::unique_ptr<OIIO::ImageOutput> output = OIIO::ImageOutput::create(format);
+    if (!output || !output->open(path, spec) || !output->write_image(OIIO::TypeFloat, image.texels.data()) || !output->close()) {
+        std::cerr << "writeImage: failed to write " << path << ": " << (output ? output->geterror() : OIIO::geterror()) << '\n';
+        return false;
+    }
+    return true;
+}
+
+}  // namespace
 
 HdrImage makeImage(int width, int height, int channels) {
     return {width, height, channels,
@@ -217,7 +271,7 @@ glm::vec3 HdrImage::rgb(std::size_t pixel) const {
     if (channels == kScalarChannels) {
         return glm::vec3(texel[0]);
     }
-    return {texel[0], texel[1], channels == kRgbChannels ? texel[2] : 0.0F};
+    return {texel[0], texel[1], channels >= kRgbChannels ? texel[2] : 0.0F};
 }
 
 std::optional<ImageTexture> loadImageTexture(const std::string& path, ScalarType type, int channels) {
@@ -245,31 +299,62 @@ glm::vec3 ImageTexture::texel(int x, int y) const {
     });
 }
 
-bool writeExr(const std::string& path, const HdrImage& image) {
-    try {
-        Imf::Header header(image.width, image.height);
-        Imf::FrameBuffer frameBuffer;
-        // const_cast because OpenEXR's OutputFile takes a mutable base pointer though it only reads through it.
-
-        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast) -- required by the OpenEXR API, see above.
-        auto* base = const_cast<float*>(image.texels.data());
-        const auto channels = static_cast<std::size_t>(image.channels);
-        const std::size_t xStride = sizeof(float) * channels;
-        const std::size_t yStride = xStride * static_cast<std::size_t>(image.width);
-        for (std::size_t c = 0; c < channels; ++c) {
-            header.channels().insert(kRgbPlanes[c], Imf::Channel(Imf::FLOAT));
-            frameBuffer.insert(kRgbPlanes[c],
-                                Imf::Slice(Imf::FLOAT, reinterpret_cast<char*>(base + c), xStride, yStride));
-        }
-
-        Imf::OutputFile file(path.c_str(), header);
-        file.setFrameBuffer(frameBuffer);
-        file.writePixels(image.height);
-        return true;
-    } catch (const std::exception& e) {
-        std::cerr << "writeExr: failed to write " << path << ": " << e.what() << '\n';
-        return false;
+std::optional<HdrImage> loadImage(const std::string& path, ImageRole role) {
+    const std::unique_ptr<OIIO::ImageInput> input = OIIO::ImageInput::open(path);
+    if (!input) {
+        std::cerr << "loadImage: " << OIIO::geterror() << '\n';
+        return std::nullopt;
     }
+    // Linear OpenEXR is the pipeline's one image format; PNG is a capture output only, never read back as scene data.
+    if (std::string_view(input->format_name()) != "openexr") {
+        std::cerr << "loadImage: " << path << " is " << input->format_name() << ", not OpenEXR\n";
+        return std::nullopt;
+    }
+    const OIIO::ImageSpec& spec = input->spec();
+    // OIIO orders a file's channels R, G, B first, so the leading run is contiguous and one read takes it.
+    const int first = spec.channelindex("R");
+    if (first < 0) {
+        std::cerr << "loadImage: " << path << " has no R channel\n";
+        return std::nullopt;
+    }
+    int channels = 1;
+    while (channels < kRgbChannels && first + channels < spec.nchannels && spec.channel_name(first + channels) == kRgbPlanes[channels]) {
+        ++channels;
+    }
+    HdrImage image = makeImage(spec.width, spec.height, channels);
+    if (!input->read_image(0, 0, first, first + channels, OIIO::TypeFloat, image.texels.data())) {
+        std::cerr << "loadImage: " << path << ": " << input->geterror() << '\n';
+        return std::nullopt;
+    }
+    if (role == ImageRole::Colour && !toWorkingSpace(*input, path, image)) {
+        return std::nullopt;
+    }
+    if (!allFinite(image.texels, path)) {
+        return std::nullopt;
+    }
+    return image;
+}
+
+bool writeExr(const std::string& path, const HdrImage& image, ImageRole role) {
+    OIIO::ImageSpec spec(image.width, image.height, image.channels, OIIO::TypeFloat);
+    spec.channelnames.assign(kRgbPlanes.begin(), kRgbPlanes.begin() + image.channels);
+    if (role == ImageRole::Colour) {
+        // Both, so a reader that knows only one of OIIO's colour tag or OpenEXR's chromaticities reads the same primaries.
+        spec.attribute("oiio:ColorSpace", kOcioSceneColorSpace);
+        const std::array<float, 8> chromaticities = chromaticitiesOf(kOcioSceneColorSpace);
+        spec.attribute("chromaticities", OIIO::TypeDesc(OIIO::TypeDesc::FLOAT, chromaticities.size()), chromaticities.data());
+    } else {
+        spec.attribute("oiio:ColorSpace", colorConfig().getColorSpaceNameByRole("data"));
+    }
+    return writeImage(path, "openexr", spec, image);
+}
+
+bool writeDisplayPng(const std::string& path, const HdrImage& image) {
+    // 16 bits put the quantization step at 2^-16, below any display's resolution, so no dither is needed to hide banding.
+    OIIO::ImageSpec spec(image.width, image.height, image.channels, OIIO::TypeUInt16);
+    spec.attribute("oiio:UnassociatedAlpha", 1);
+    spec.attribute("oiio:ColorSpace", kOcioSrgbDisplay);
+    return writeImage(path, "png", spec, image);
 }
 
 glm::vec3 sampleBilinear(const ImageTexture& image, glm::vec2 uv, WrapMode wrap) {

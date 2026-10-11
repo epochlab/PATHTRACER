@@ -75,12 +75,13 @@ def test_different_seeds_differ(renderer: Renderer) -> None:
 
 
 def test_depth_is_positive_inside_the_box_and_far_on_the_background(renderer: Renderer) -> None:
-    frame = renderer.render(aovs=("depth", "alpha"), width=64, height=48)
-    depth, alpha = frame["depth"][..., 0], frame["alpha"][..., 0]
+    frame = renderer.render(aovs=("depth",), width=64, height=48)
+    depth = frame["depth"][..., 0]
     assert np.isfinite(depth).all()
-    hit = alpha > 0.0
+    assert (depth >= 0.0).all()
+    # A hit's t is at least the near clip, so depth > 0 is exactly the primary-hit mask.
+    hit = depth > 0.0
     assert hit.any(), "the default camera should see geometry"
-    assert (depth[hit] > 0.0).all()
     # The Cornell box encloses the camera, so every primary ray hits something well inside the far clip.
     assert depth[hit].max() < renderer.default_camera.far_clip
 
@@ -88,20 +89,20 @@ def test_depth_is_positive_inside_the_box_and_far_on_the_background(renderer: Re
 def test_lookahead_is_depth_on_the_profile_horizon(renderer: Renderer) -> None:
     """The lane's whole contract: clamp(1 - Z/lookaheadDistance, 0, 1) against the Depth lane of the same render."""
     horizon = json.loads((REPO_ROOT / "assets" / "config" / "profile.json").read_text())["pathTracer"]["lookaheadDistance"]
-    frame = renderer.render(aovs=("lookahead", "depth", "alpha"), width=64, height=48)
-    lookahead, depth, alpha = frame["lookahead"][..., 0], frame["depth"][..., 0], frame["alpha"][..., 0]
-    hit = alpha > 0.0
+    frame = renderer.render(aovs=("lookahead", "depth"), width=64, height=48)
+    lookahead, depth = frame["lookahead"][..., 0], frame["depth"][..., 0]
+    hit = depth > 0.0
     assert hit.any(), "the default camera should see geometry"
     expected = np.clip(1.0 - depth[hit] / horizon, 0.0, 1.0)
     assert np.allclose(lookahead[hit], expected, rtol=0.0, atol=1e-6)
-    # A primary miss reads 0, the same value geometry beyond the horizon reads -- alpha is what separates the two.
+    # A primary miss reads 0, the same value geometry beyond the horizon reads -- depth is what separates the two.
     assert (lookahead[~hit] == 0.0).all() if (~hit).any() else True
     assert ((lookahead >= 0.0) & (lookahead <= 1.0)).all()
 
 
 def test_normals_are_unit_length_where_geometry_was_hit(renderer: Renderer) -> None:
-    frame = renderer.render(aovs=("normal", "alpha"), width=64, height=48)
-    hit = frame["alpha"][..., 0] > 0.0
+    frame = renderer.render(aovs=("normal", "depth"), width=64, height=48)
+    hit = frame["depth"][..., 0] > 0.0
     lengths = np.linalg.norm(frame["normal"][hit], axis=-1)
     assert np.allclose(lengths, 1.0, atol=1e-5)
 
@@ -184,8 +185,8 @@ def test_fisheye_gbuffer_depth_is_the_ray_distance(renderer: Renderer) -> None:
     """Depth is |worldPos - eye| under every lens: the one depth a fisheye past 90 degrees or the lat-long still defines."""
     for lens in LENS_PROJECTIONS:
         camera = dataclasses.replace(renderer.default_camera, lens=lens, focal_length_mm=10.0)
-        frame = renderer.render(aovs=("depth", "worldPos", "alpha"), camera=camera, width=48, height=32)
-        hit = frame["alpha"][..., 0] > 0.0
+        frame = renderer.render(aovs=("depth", "worldPos"), camera=camera, width=48, height=32)
+        hit = frame["depth"][..., 0] > 0.0
         assert hit.any(), f"{lens}: the camera should see geometry"
         distance = np.linalg.norm(frame["worldPos"][hit] - np.asarray(camera.position, dtype=np.float32), axis=-1)
         assert np.allclose(frame["depth"][..., 0][hit], distance, rtol=1e-5, atol=0.0), lens
@@ -196,8 +197,8 @@ def test_omnidirectional_pixels_are_the_documented_longitude_and_latitude(render
     # Pitched, yawed and rolled at once, so the frame is the documented Rz @ Ry @ Rx and not merely the identity.
     camera = dataclasses.replace(renderer.default_camera, lens="omnidirectional", rotation=(20.0, 30.0, 40.0))
     width, height = 64, 32
-    frame = renderer.render(aovs=("worldPos", "alpha"), camera=camera, width=width, height=height)
-    hit = frame["alpha"][..., 0] > 0.0
+    frame = renderer.render(aovs=("worldPos", "depth"), camera=camera, width=width, height=height)
+    hit = frame["depth"][..., 0] > 0.0
     assert hit.any(), "the lat-long should see the scene"
     rotation = _rotation_xyz(camera.rotation)
     right, up, forward = rotation[:, 0], rotation[:, 1], -rotation[:, 2]

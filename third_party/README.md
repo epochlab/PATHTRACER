@@ -21,7 +21,7 @@ the file and editing the row above; update a submodule with `git submodule updat
 Only six of imgui's sources are compiled (`imgui{,_draw,_tables,_widgets}.cpp` plus the GLFW and OpenGL3
 backends); the rest of the submodule tree is unused.
 
-Build-system dependencies resolved externally, not vendored: Embree 4, OpenEXR, Imath, OpenColorIO, GLFW 3.5,
-GLEW, glm, OpenGL, zlib.
+Build-system dependencies resolved externally, not vendored: Embree 4, OpenEXR, Imath, OpenColorIO, OpenImageIO 3,
+GLFW 3.5, GLEW, glm, OpenGL, zlib.
 
 Licence texts for the four vendored libraries are in `NOTICE`.

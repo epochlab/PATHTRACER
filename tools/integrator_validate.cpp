@@ -1000,7 +1000,8 @@ PT_CHECK(texture_binding_resolution, Fast, Exact) {
     const std::string exr = "engine_integrator_scene_texture.exr";
     const glm::vec3 texel(0.25F, 0.5F, 0.75F);
     const bool written = pathtracer::gfx::writeExr((root / exr).string(),
-                                                   {1, 1, pathtracer::gfx::kRgbChannels, {texel.x, texel.y, texel.z}});
+                                                   {1, 1, pathtracer::gfx::kRgbChannels, {texel.x, texel.y, texel.z}},
+                                                   pathtracer::gfx::ImageRole::Colour);
     // "beta" owns two primitives, as a multi-primitive glTF node does: an override must reach both.
     const auto makeInstances = [] {
         return std::vector<MeshInstance>{MeshInstance{makeMaterial(1.0F, glm::vec3(0.04F)), glm::mat4(1.0F), "alpha"},
@@ -1722,6 +1723,48 @@ PT_CHECK(ambient_occlusion_distance_bound, Slow, Statistical) {
 }
 
 }  // namespace
+
+// Alpha is filtered primary coverage: the half-plane x < 0 images onto columns left of the centre line, the frame's x = 8.
+PT_CHECK(alpha_is_filtered_primary_coverage, Fast, Exact) {
+    // A pixel's support reaches kFilterRadius = 1.5 px from its centre c + 0.5: columns 0-6 see only the plane, 9-15 only the sky.
+    constexpr int kLastOpaque = 6;
+    constexpr int kFirstClear = 9;
+    TestScene scene = makeTwoInstanceScene(1.0F, glm::vec3(0.04F));
+    scene.worldTriangles.resize(2);
+    scene.shadingTriangles.resize(2);
+    scene.instances.resize(1);
+    std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+    const EnvironmentMap env = makeUniformEnvironment();
+    PathTraceSettings settings = makeSettings(1, 1, 0.0F);
+    settings.samplesPerPixel = 16;
+    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    const pathtracer::scene::PathTraceResult hidden = renderPass(scene, env, settings, *accel, pool, /*showSky=*/false);
+    const pathtracer::scene::PathTraceResult shown = renderPass(scene, env, settings, *accel, pool, /*showSky=*/true);
+    // The lane is (sum w) * fl(1 / sum w), two roundings: an all-opaque support reads within 2u = FLT_EPSILON of 1.
+    const auto opaque = [](float alpha) { return std::abs(alpha - 1.0F) <= std::numeric_limits<float>::epsilon(); };
+    bool interior = true;
+    bool edge = true;
+    bool monotone = true;
+    bool premultiplied = true;
+    bool opaqueSky = true;
+    for (int y = 0; y < kImageSize; ++y) {
+        for (int x = 0; x < kImageSize; ++x) {
+            const std::size_t pixel = (static_cast<std::size_t>(y) * kImageSize) + static_cast<std::size_t>(x);
+            const float alpha = hidden.alpha.texels[pixel];
+            interior = interior && (x > kLastOpaque || opaque(alpha)) && (x < kFirstClear || alpha == 0.0F);
+            edge = edge && (x <= kLastOpaque || x >= kFirstClear || (alpha > 0.0F && !opaque(alpha)));
+            monotone = monotone && (x == 0 || alpha <= hidden.alpha.texels[pixel - 1] || opaque(alpha));
+            premultiplied = premultiplied && (alpha > 0.0F || hidden.beauty.rgb(pixel) == glm::vec3(0.0F));
+            opaqueSky = opaqueSky && opaque(shown.alpha.texels[pixel]);
+        }
+    }
+    ctx.plan(5);
+    PT_EXPECT(ctx, interior, "a pixel whose whole filter support sees only plane or only sky is not exactly 1 or 0");
+    PT_EXPECT(ctx, edge, "a pixel whose support straddles the edge is not strictly between 0 and 1");
+    PT_EXPECT(ctx, monotone, "coverage rises moving off the half-plane");
+    PT_EXPECT(ctx, premultiplied, "a transparent pixel carries radiance with the sky hidden");
+    PT_EXPECT(ctx, opaqueSky, "a shown sky is not opaque");
+}
 
 // Radiance only inside one end column, 1/8 px clear of its edges: the column across the seam is lit if, and only if, the filter wraps.
 PT_CHECK(omnidirectional_film_filter_reaches_across_the_seam, Fast, Exact) {

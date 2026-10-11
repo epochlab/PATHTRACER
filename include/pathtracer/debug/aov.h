@@ -72,7 +72,7 @@ inline constexpr const char* kAovLabels[] = {
 static_assert(sizeof(kAovLabels) / sizeof(kAovLabels[0]) == static_cast<int>(AovId::Count),
               "kAovLabels must stay index-parallel with AovId");
 
-// Which of the three producers computes each AOV: 10 accumulated path-traced lanes, 15 G-buffer lanes, 7 filters over Beauty.
+// Which of the three producers computes each AOV: 11 accumulated path-traced lanes, 14 G-buffer lanes, 7 filters over Beauty.
 enum class AovSource { PathTraced, GBuffer, BeautyFilter };
 
 [[nodiscard]] AovSource aovSource(AovId aov);
@@ -82,6 +82,9 @@ enum class AovSource { PathTraced, GBuffer, BeautyFilter };
 
 // True where the AOV's value is proportional to scene radiance, so the display exposure is a gain on it rather than a distortion.
 [[nodiscard]] bool aovCarriesRadiance(AovId aov);
+
+// True where the AOV is RGB in the working space's primaries, so a file carries it as Colour and a change of space converts it.
+[[nodiscard]] bool aovIsColour(AovId aov);
 
 // True where zero is the operator's own centre and both signs are meaningful, so the preview maps zero to mid-grey. Preview only.
 [[nodiscard]] bool aovIsBipolar(AovId aov);
@@ -118,7 +121,7 @@ struct AovDisplay {
     return aovCarriesRadiance(aov) && !aovIsBipolar(aov);
 }
 
-// True for AOVs needing light transport, false for the 15 primary-hit ones. Derived from aovSource, so the two cannot drift apart.
+// True for AOVs needing light transport, false for the 14 primary-hit ones. Derived from aovSource, so the two cannot drift apart.
 [[nodiscard]] inline bool aovNeedsLightTransport(AovId aov) {
     return aovSource(aov) != AovSource::GBuffer;
 }
