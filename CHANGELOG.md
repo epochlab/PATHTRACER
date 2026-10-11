@@ -3,6 +3,31 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Blue-noise display dither
+
+The 8-bit display encode's triangular-PDF dither used to hash two `sin` per texel, on the CPU and in the viewer shader.
+It now reads one precomputed table that both share. The table is a 128x128 void-and-cluster mask (Ulichney 1993),
+mapped through the triangular inverse CDF. That keeps the mask's rank order, so its blue spectrum survives and the
+marginal becomes TPDF on (-1, 1) codes (Gjøl 2016). The amplitude and the moment-independence of TPDF (Lipshitz et al.
+1992) are unchanged: error RMS stays 0.50 codes. What changes is where the error power sits. The share below
+Nyquist/8 falls from 1.17% (white) to 0.03%, and the error left after a 2-pixel Gaussian falls 5.3x. The viewer's dither
+pattern changes accordingly. A 256x128 `display_encode` takes 0.54 ms instead of 0.94 ms; viewer GPU present is within
+noise. Evidence is in `results/display_dither`.
+
+- feat: `displayDitherMask()` builds the table once. `encodeForDisplay` reads it per row, and the display shaders read
+  the same floats from an R32F texture through `texelFetch`.
+  - Both index texel (x, y), counted from the image's top-left, at (x, y) mod 128. A 1:1 viewer frame therefore matches
+    the CPU encode texel for texel; `OcioDisplayTransform::setImageRect` supplies the anchor.
+  - The mask is generated with seed 2, independent of the sampler's seed-1 mask, because dither must be independent of
+    the signal, render noise included.
+- chore: `bluenoise_mask` writes a header that holds for any output, recording its own seed and path. Regenerating
+  `blue_noise_mask.inc` changes only its comment.
+- test: `display_validate` gains four checks:
+  - the table is TPDF, to within the 2/N quadrature bound;
+  - a flat field encodes without bias (Schuchman 1964);
+  - the quantisation error is blue, using `sampler_validate`'s gate;
+  - the mask is uncorrelated with every toroidal shift of the sampler's mask, |r| < 0.1.
+
 ## OIDN denoised AOV
 
 A new **Denoised** AOV runs Intel Open Image Denoise 2.5 (RT filter, HDR, CPU device) on the accumulated Beauty, guided

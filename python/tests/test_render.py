@@ -326,7 +326,7 @@ def test_display_encode_is_monotonic_and_clamps() -> None:
     ramp = np.linspace(-1.0, 3.0, 256, dtype=np.float32).repeat(3).reshape(1, 256, 3)
     encoded = display_encode(ramp)[0, :, 0].astype(np.int16)
     assert encoded[0] == 0 and encoded[-1] == 255
-    # Dither is a pure function of uv, so it perturbs neighbours independently; monotonicity holds to one count.
+    # Dither is a function of pixel position with |d| < 1 code, so neighbouring codes invert by at most one.
     assert np.all(np.diff(encoded) >= -1)
 
 

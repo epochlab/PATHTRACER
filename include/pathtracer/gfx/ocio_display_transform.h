@@ -5,6 +5,8 @@
 #include <glm/glm.hpp>
 
 #include "pathtracer/gfx/shader_program.h"
+#include "pathtracer/gfx/texture.h"
+#include "pathtracer/gfx/viewport.h"
 
 namespace pathtracer::gfx {
 
@@ -39,6 +41,9 @@ public:
     // 0 = off. Radial per-channel UV offset (R toward centre, B away) at the texture fetch, before exposure and the display curve.
     void setAberration(float aberration) { aberration_ = aberration; }
 
+    // The window rect the image is drawn into, which anchors the dither tile at the image's top-left as encodeForDisplay does.
+    void setImageRect(ViewportRect imageRect) { imageRect_ = imageRect; }
+
     [[nodiscard]] const ShaderProgram& activeShader() const {
         switch (activeLut_) {
             case Lut::SRGB:
@@ -51,16 +56,17 @@ public:
         }
     }
 
-    // Uploads the display map to the active shader. Call once per frame, before PostProcessPass::draw consumes activeShader().
+    // Uploads the display map to the active shader and binds the dither mask. Call once per frame, before PostProcessPass::draw.
     void bind() const;
 
 private:
     OcioDisplayTransform(ShaderProgram rawShader, ShaderProgram srgbShader,
-                          ShaderProgram rec709Shader);
+                          ShaderProgram rec709Shader, Texture ditherMask);
 
     ShaderProgram rawShader_;
     ShaderProgram srgbShader_;
     ShaderProgram rec709Shader_;
+    Texture ditherMask_;  // displayDitherMask() on kDitherMaskUnit, shared by all three shaders
     int rawDisplayGainLoc_;
     int srgbDisplayGainLoc_;
     int rec709DisplayGainLoc_;
@@ -76,12 +82,16 @@ private:
     int rawDisplayOffsetLoc_;
     int srgbDisplayOffsetLoc_;
     int rec709DisplayOffsetLoc_;
+    int rawDitherOriginLoc_;
+    int srgbDitherOriginLoc_;
+    int rec709DitherOriginLoc_;
     Lut activeLut_ = Lut::SRGB;
     glm::vec3 gain_{1.0F};
     int channelView_ = 0;
     bool invert_ = false;
     float aberration_ = 0.0F;
     glm::vec3 displayOffset_{0.0F};
+    ViewportRect imageRect_{};
 };
 
 }  // namespace pathtracer::gfx
