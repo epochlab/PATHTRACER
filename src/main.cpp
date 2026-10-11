@@ -589,7 +589,7 @@ const pathtracer::gfx::HdrImage* ensureFilterImage(
     const pathtracer::debug::ScopedCpuTimer filterTimer(app.stages.filterMs);
     cache.image = pathtracer::debug::evaluateFilterAov(
         aov,
-        pathtracer::debug::FilterInput{snapshot->beauty, snapshot->beautyLuminanceM2.data(), snapshot->samples,
+        pathtracer::debug::FilterInput{snapshot->beauty, snapshot->replicateLuminance.data(), snapshot->replicates, snapshot->samples,
                                        snapshot->wrapsHorizontally},
         *app.gbufferThreadPool);
     cache.aov = aov;
@@ -1011,6 +1011,7 @@ nlohmann::json benchConfig(const AppResources& app, const BenchCapture& bench) {
             {"height", bench.passes.back().height},
             {"max_samples", app.maxSamples},
             {"spp_per_pass", app.scene.baseSettings.samplesPerPixel},
+            {"replicates", app.scene.baseSettings.replicates},
             {"max_bounces", app.scene.baseSettings.maxBounces},
             {"rr_start_bounce", app.scene.baseSettings.russianRouletteStartBounce},
             {"ao_max_distance", app.scene.baseSettings.aoMaxDistance},

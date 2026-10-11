@@ -89,6 +89,7 @@ void pushQuad(TestScene& scene, const std::array<glm::vec3, 4>& corners, glm::ve
 PathTraceSettings makeSettings() {
     PathTraceSettings settings{};
     settings.samplesPerPixel = 1;  // one sample per pass: the progressive configuration the driver exists for
+    settings.replicates = 4;  // interleaved, so every check below crosses replicate boundaries rather than one sequence
     settings.maxBounces = 1;
     settings.russianRouletteStartBounce = 8;
     return settings;
@@ -174,7 +175,7 @@ std::shared_ptr<const PathTraceResult> waitForPublished(const PathTraceDriver& d
     return published ? result : nullptr;
 }
 
-// Every image the driver averages, index-aligned with accumulateMean's lists; beautyLuminanceM2 is not one, see below.
+// Every image the driver averages, index-aligned with accumulateMean's lists; replicateLuminance is not one, see below.
 struct Lane {
     pathtracer::gfx::HdrImage PathTraceResult::*image;
     const char* name;
@@ -198,7 +199,7 @@ struct OracleMean {
     std::array<bool, kLanes.size()> varies{};
     // HeadlessRenderer's calling pattern: the shared kernels folded in place over whole images, the first pass kept as drawn.
     std::array<std::vector<float>, kLanes.size()> folded;
-    std::vector<float> foldedM2;
+    std::vector<float> foldedReplicates;
 };
 
 // Renders the driver's passes synchronously: the exact batch mean m_k in double, beside the float32 running mean's error bound E_k.
@@ -206,7 +207,8 @@ OracleMean oracleBatchMean(DriverFixture& fixture, const Camera& camera, int pas
     constexpr double kUnitRoundoff = std::numeric_limits<float>::epsilon() / 2.0;
     constexpr double kGamma4 = (4.0 * kUnitRoundoff) / (1.0 - (4.0 * kUnitRoundoff));
     const pathtracer::scene::LightSet lights(&fixture.environment, glm::vec3(0.0F), 1.0F, fixture.scene.quadLights);
-    PathTraceResult pass = pathtracer::scene::makePathTraceResult(kImageSize, kImageSize);
+    const PathTraceSettings settings = makeSettings();
+    PathTraceResult pass = pathtracer::scene::makePathTraceResult(kImageSize, kImageSize, settings.replicates);
     std::array<std::vector<double>, kLanes.size()> sum;
     OracleMean oracle;
     for (std::size_t lane = 0; lane < kLanes.size(); ++lane) {
@@ -214,24 +216,23 @@ OracleMean oracleBatchMean(DriverFixture& fixture, const Camera& camera, int pas
         sum[lane].assign(floats, 0.0);
         oracle.tolerance[lane].assign(floats, 0.0);
     }
-    oracle.foldedM2.assign(pass.beautyLuminanceM2.size(), 0.0F);
+    oracle.foldedReplicates.assign(pass.replicateLuminance.size(), 0.0F);
     const std::atomic<std::uint64_t> generation{scrambleSeed};
     pathtracer::debug::PassStats stats;
     for (int p = 0; p < passes; ++p) {
         stats.reset();
         pathtracer::scene::renderPathTraced(camera, *fixture.accel, fixture.scene.shadingTriangles,
                                          fixture.scene.instances, fixture.scene.instanceLightIndex, lights,
-                                         kImageSize, kImageSize, /*showSky=*/true, makeSettings(), scrambleSeed, /*sampleBase=*/p,
+                                         kImageSize, kImageSize, /*showSky=*/true, settings, scrambleSeed, /*sampleBase=*/p,
                                          /*sampleCount=*/passes, generation, scrambleSeed, fixture.pool, stats,
                                          pass);
         const double k = p + 1;
         const float invN = 1.0F / static_cast<float>(p + 1);
-        if (p > 0) {
-            // kLanes[0] is beauty, read before its own fold below overwrites the previous mean.
-            pathtracer::scene::foldLuminanceM2(oracle.folded[0].data(), pass.beauty.texels.data(),
-                                               static_cast<std::size_t>(pass.beauty.channels), oracle.foldedM2.data(),
-                                               oracle.foldedM2.data(), oracle.foldedM2.size(), invN);
-        }
+        const int count = (p / settings.replicates) + 1;
+        pathtracer::scene::foldReplicateLuminance(oracle.foldedReplicates.data(), pass.beauty.texels.data(),
+                                                  static_cast<std::size_t>(pass.beauty.channels), oracle.foldedReplicates.data(),
+                                                  static_cast<std::size_t>(kImageSize) * kImageSize, settings.replicates,
+                                                  p % settings.replicates, 1.0F / static_cast<float>(count));
         for (std::size_t lane = 0; lane < kLanes.size(); ++lane) {
             const std::vector<float>& drawn = (pass.*kLanes[lane].image).texels;
             if (p == 0) {
@@ -400,16 +401,16 @@ PT_CHECK(in_place_fold_is_bit_identical_to_driver, Slow, Exact) {
     char detail[192];
     std::snprintf(detail, sizeof(detail), "%zu of %zu lane floats differ from the in-place fold", differing, floats);
     PT_EXPECT(ctx, differing == 0, detail);
-    std::size_t differingM2 = 0;
-    for (std::size_t pixel = 0; pixel < published->beautyLuminanceM2.size(); ++pixel) {
-        differingM2 += std::bit_cast<std::uint32_t>(published->beautyLuminanceM2[pixel]) !=
-                               std::bit_cast<std::uint32_t>(expected.foldedM2[pixel])
-                           ? 1
-                           : 0;
+    std::size_t differingReplicates = 0;
+    for (std::size_t i = 0; i < published->replicateLuminance.size(); ++i) {
+        differingReplicates += std::bit_cast<std::uint32_t>(published->replicateLuminance[i]) !=
+                                       std::bit_cast<std::uint32_t>(expected.foldedReplicates[i])
+                                   ? 1
+                                   : 0;
     }
-    std::snprintf(detail, sizeof(detail), "%zu of %zu M2 floats differ from the in-place fold", differingM2,
-                  published->beautyLuminanceM2.size());
-    PT_EXPECT(ctx, differingM2 == 0, detail);
+    std::snprintf(detail, sizeof(detail), "%zu of %zu replicate mean floats differ from the in-place fold", differingReplicates,
+                  published->replicateLuminance.size());
+    PT_EXPECT(ctx, differingReplicates == 0 && published->replicateLuminance.size() == expected.foldedReplicates.size(), detail);
 }
 
 // A driver holding sampleBase at 0 publishes the mean of N identical passes (sampler.h); pinned at maxSamples = 1, bit-identical.
@@ -772,7 +773,7 @@ PT_CHECK(render_is_invariant_to_tile_size, Slow, Exact) {
     pathtracer::debug::PassStats stats;
     const auto renderWith = [&](unsigned int threads) {
         pathtracer::scene::ThreadPool pool(threads);
-        PathTraceResult out = pathtracer::scene::makePathTraceResult(kTiledImageSize, kTiledImageSize);
+        PathTraceResult out = pathtracer::scene::makePathTraceResult(kTiledImageSize, kTiledImageSize, makeSettings().replicates);
         stats.reset();
         pathtracer::scene::renderPathTraced(camera, *fixture->accel, fixture->scene.shadingTriangles,
                                          fixture->scene.instances, fixture->scene.instanceLightIndex, lights,
@@ -808,7 +809,7 @@ PT_CHECK(render_is_invariant_to_thread_count, Slow, Exact) {
 
     const auto renderWith = [&](unsigned int threads) {
         pathtracer::scene::ThreadPool pool(threads);
-        PathTraceResult out = pathtracer::scene::makePathTraceResult(kImageSize, kImageSize);
+        PathTraceResult out = pathtracer::scene::makePathTraceResult(kImageSize, kImageSize, makeSettings().replicates);
         stats.reset();
         pathtracer::scene::renderPathTraced(camera, *fixture->accel, fixture->scene.shadingTriangles,
                                          fixture->scene.instances, fixture->scene.instanceLightIndex, lights,
@@ -831,8 +832,8 @@ PT_CHECK(render_is_invariant_to_thread_count, Slow, Exact) {
 
 }  // namespace
 
-// The second moment is not an averaged image, so it is absent from kLanes and from the two checks above; this is what covers it.
-PT_CHECK(running_m2_matches_batch_variance, Slow, Exact) {
+// The replicate means are not an averaged image, so they are absent from kLanes and from the two checks above; this is what covers them.
+PT_CHECK(replicate_means_match_batch_means, Slow, Exact) {
     constexpr int kPasses = 8;
     ctx.plan(3);
     std::unique_ptr<DriverFixture> fixture = makeFixture();
@@ -856,23 +857,21 @@ PT_CHECK(running_m2_matches_batch_variance, Slow, Exact) {
     constexpr double kUnitRoundoff = std::numeric_limits<float>::epsilon() / 2.0;
     constexpr double kGamma3 = (3.0 * kUnitRoundoff) / (1.0 - (3.0 * kUnitRoundoff));
     constexpr double kGamma4 = (4.0 * kUnitRoundoff) / (1.0 - (4.0 * kUnitRoundoff));
+    const int replicates = makeSettings().replicates;
+    const auto stride = static_cast<std::size_t>(replicates);
     const auto pixels = static_cast<std::size_t>(kImageSize) * kImageSize;
-    const std::size_t floats = pixels * pathtracer::gfx::kRgbChannels;
     const glm::dvec3 weights(pathtracer::debug::kRec709LuminanceWeights);
 
-    // The same passes the driver ran, synchronously, with every per-texel luminance kept in double for an exact two-pass variance.
+    // The same passes the driver ran, synchronously: per replicate slot the exact luminance sum and the float recurrence's error bound.
     const pathtracer::scene::LightSet lights(&fixture->environment, glm::vec3(0.0F), 1.0F, fixture->scene.quadLights);
-    PathTraceResult pass = pathtracer::scene::makePathTraceResult(kImageSize, kImageSize);
+    PathTraceResult pass = pathtracer::scene::makePathTraceResult(kImageSize, kImageSize, replicates);
     const auto scrambleSeed = static_cast<std::uint32_t>(generation);
     const std::atomic<std::uint64_t> oracleGeneration{scrambleSeed};
     pathtracer::debug::PassStats stats;
-    std::vector<std::vector<double>> luminance(kPasses, std::vector<double>(pixels, 0.0));
-    std::vector<double> sum(floats, 0.0);
-    // The driver reads its previous mean out of the float RGB lane, so the luminance it differences carries that lane's own error.
-    std::vector<double> meanError(floats, 0.0);
-    std::vector<double> previousLuminanceError(pixels, 0.0);
-    std::vector<double> bound(pixels, 0.0);
-
+    std::vector<double> sum(pixels * stride, 0.0);
+    // Rounding of the recurrence itself (E) and the mean of the float luminance dot's own errors it averages in (D).
+    std::vector<double> recurrenceError(pixels * stride, 0.0);
+    std::vector<double> inputError(pixels * stride, 0.0);
     for (int p = 0; p < kPasses; ++p) {
         stats.reset();
         pathtracer::scene::renderPathTraced(camera, *fixture->accel, fixture->scene.shadingTriangles,
@@ -880,82 +879,59 @@ PT_CHECK(running_m2_matches_batch_variance, Slow, Exact) {
                                          kImageSize, kImageSize, /*showSky=*/true, makeSettings(), scrambleSeed, /*sampleBase=*/p,
                                          /*sampleCount=*/kPasses, oracleGeneration, scrambleSeed, fixture->pool,
                                          stats, pass);
-        const double k = p + 1;
-        const std::vector<float>& drawn = pass.beauty.texels;
+        const auto slot = static_cast<std::size_t>(p % replicates);
+        const double k = (p / replicates) + 1;
         for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
-            const std::size_t texel = pixel * pathtracer::gfx::kRgbChannels;
-            glm::dvec3 before(0.0);
-            glm::dvec3 sample(0.0);
-            double beforeError = 0.0;
-            for (int c = 0; c < 3; ++c) {
-                before[c] = p == 0 ? 0.0 : sum[texel + static_cast<std::size_t>(c)] / (k - 1.0);
-                sample[c] = drawn[texel + static_cast<std::size_t>(c)];
-                beforeError += weights[c] * meanError[texel + static_cast<std::size_t>(c)];
+            const glm::dvec3 sample(pass.beauty.rgb(pixel));
+            const double luminance = glm::dot(sample, weights);
+            // The fold's three-term float dot: |fl(w.x) - w.x| <= gamma_3 sum |w_c x_c| (Higham 2002, eq. 3.5).
+            const double dotError = kGamma3 * glm::dot(glm::abs(sample), weights);
+            const std::size_t i = (pixel * stride) + slot;
+            const double before = k == 1.0 ? 0.0 : sum[i] / (k - 1.0);
+            sum[i] += luminance;
+            // The first visit is 0 + (x - 0) * 1, exactly the float luminance; later ones are foldRunningMean's recurrence.
+            if (k > 1.0) {
+                const double e = recurrenceError[i];
+                recurrenceError[i] = ((1.0 - (1.0 / k)) * (1.0 + kUnitRoundoff) * e) +
+                                     (kGamma4 * (std::fabs(luminance - before) + dotError + inputError[i] + e) / k) +
+                                     (kUnitRoundoff * std::fabs(sum[i] / k));
             }
-            const double sampleLuminance = glm::dot(sample, weights);
-            luminance[static_cast<std::size_t>(p)][pixel] = sampleLuminance;
-            if (p > 0) {
-                // Welford's own step in exact arithmetic, against which the float recurrence's departure is bounded below.
-                const double beforeLuminance = glm::dot(before, weights);
-                const double afterLuminance = beforeLuminance + ((sampleLuminance - beforeLuminance) / k);
-                const double term = (sampleLuminance - beforeLuminance) * (sampleLuminance - afterLuminance);
-                // The three-term dot rounds too, so the float mean's luminance is off by the lane errors plus that.
-                beforeError += kGamma3 * std::fabs(beforeLuminance);
-                const double afterError = previousLuminanceError[pixel] + ((beforeError + previousLuminanceError[pixel]) / k);
-                bound[pixel] = (bound[pixel] * (1.0 + kUnitRoundoff)) +
-                               (std::fabs(sampleLuminance - afterLuminance) * beforeError) +
-                               (std::fabs(sampleLuminance - beforeLuminance) * afterError) +
-                               (beforeError * afterError) + (kGamma4 * std::fabs(term));
-                previousLuminanceError[pixel] = beforeError;
-            }
-            for (int c = 0; c < 3; ++c) {
-                const std::size_t i = texel + static_cast<std::size_t>(c);
-                sum[i] += sample[c];
-                if (p > 0) {
-                    const double e = meanError[i];
-                    meanError[i] = ((1.0 - (1.0 / k)) * (1.0 + kUnitRoundoff) * e) +
-                                   (kGamma4 * (std::fabs(sample[c] - before[c]) + e) / k) +
-                                   (kUnitRoundoff * std::fabs(sum[i] / k));
-                }
-            }
+            inputError[i] += (dotError - inputError[i]) / k;
         }
     }
 
     std::size_t violations = 0;
     double worstRatio = 0.0;
-    double largest = 0.0;
+    double largestSpread = 0.0;
     for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
-        // Two-pass sum of squared deviations, the definition, in double: the reference the incremental form must reproduce.
-        double mean = 0.0;
-        for (int p = 0; p < kPasses; ++p) {
-            mean += luminance[static_cast<std::size_t>(p)][pixel];
+        double lowest = std::numeric_limits<double>::infinity();
+        double highest = -lowest;
+        for (std::size_t slot = 0; slot < stride; ++slot) {
+            const std::size_t i = (pixel * stride) + slot;
+            const double count = static_cast<double>((kPasses - static_cast<int>(slot) + replicates - 1) / replicates);
+            const double expected = sum[i] / count;
+            lowest = std::min(lowest, expected);
+            highest = std::max(highest, expected);
+            const double error = std::fabs(static_cast<double>(published->replicateLuminance[i]) - expected);
+            // Plus the oracle's own single rounding of the exact mean to float, as the lanes' bound carries.
+            const double tolerance = recurrenceError[i] + inputError[i] + (kUnitRoundoff * std::fabs(expected));
+            violations += !(error <= tolerance) ? 1 : 0;
+            const double ratio = tolerance > 0.0 ? error / tolerance
+                                                 : (error == 0.0 ? 0.0 : std::numeric_limits<double>::infinity());
+            worstRatio = std::max(worstRatio, ratio);
         }
-        mean /= static_cast<double>(kPasses);
-        double expected = 0.0;
-        for (int p = 0; p < kPasses; ++p) {
-            const double deviation = luminance[static_cast<std::size_t>(p)][pixel] - mean;
-            expected += deviation * deviation;
-        }
-        largest = std::max(largest, expected);
-        const double error = std::fabs(static_cast<double>(published->beautyLuminanceM2[pixel]) - expected);
-        // Plus the oracle's own single rounding of the exact moment to float, as the mean's bound carries.
-        const double tolerance = bound[pixel] + (kUnitRoundoff * expected);
-        violations += !(error <= tolerance) ? 1 : 0;
-        const double ratio = tolerance > 0.0 ? error / tolerance
-                                             : (error == 0.0 ? 0.0 : std::numeric_limits<double>::infinity());
-        worstRatio = std::max(worstRatio, ratio);
+        largestSpread = std::max(largestSpread, highest - lowest);
     }
     char detail[192];
     std::snprintf(detail, sizeof(detail),
-                  "%zu of %zu texels over their forward-error bound; worst |running - batch|/bound = %.3e", violations,
-                  pixels, worstRatio);
+                  "%zu of %zu replicate means over their forward-error bound; worst |running - batch|/bound = %.3e", violations,
+                  pixels * stride, worstRatio);
     PT_EXPECT(ctx, violations == 0, detail);
-    // A frame the passes agree on everywhere would satisfy the bound with an all-zero lane, proving nothing about the recurrence.
-    std::snprintf(detail, sizeof(detail), "largest batch second moment across the frame is %.6g", largest);
-    PT_EXPECT(ctx, largest > 0.0, detail);
-    const bool nonNegative = std::all_of(published->beautyLuminanceM2.begin(), published->beautyLuminanceM2.end(),
-                                          [](float value) { return value >= 0.0F; });
-    PT_EXPECT(ctx, nonNegative, "a sum of squared deviations came back negative");
+    PT_EXPECT(ctx, published->replicates == replicates && published->replicateLuminance.size() == pixels * stride,
+              "the published result does not carry one luminance mean per replicate per texel");
+    // Replicates that agree everywhere would satisfy the bound with copies of one lane, proving nothing about the interleaving.
+    std::snprintf(detail, sizeof(detail), "largest spread between replicate means across the frame is %.6g", largestSpread);
+    PT_EXPECT(ctx, largestSpread > 0.0, detail);
 }
 
 PT_CHECK_MAIN("driver")

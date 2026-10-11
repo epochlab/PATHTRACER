@@ -76,6 +76,14 @@ bool validCounts(const RenderConfig& render, const PathTracerConfig& pathTracer,
     atLeast("russianRouletteStartBounce", pathTracer.russianRouletteStartBounce, 0);
     // Zero is the documented unbounded case; negative would cap accumulation below the first pass.
     atLeast("maxSamples", pathTracer.maxSamples, 0);
+    // One replicate is one sequence, a valid render whose SNR is undefined; zero would divide the pass index.
+    atLeast("replicates", pathTracer.replicates, 1);
+    // A capped accumulation must end on a complete round, or its replicates settle at unequal counts.
+    if (pathTracer.replicates >= 1 && pathTracer.maxSamples % pathTracer.replicates != 0) {
+        std::cerr << "loadProfileConfig: " << path << ": maxSamples " << pathTracer.maxSamples << " is not a multiple of replicates "
+                  << pathTracer.replicates << "\n";
+        ok = false;
+    }
     // The traced image the render scale multiplies, and the denominator of the primary ray's aspect ratio.
     atLeast("render.width", render.width, 1);
     atLeast("render.height", render.height, 1);
@@ -204,6 +212,7 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
             pathTracer.at("maxSamples").get<int>(),
             toFloat(pathTracer.at("aoMaxDistance")),
             toFloat(pathTracer.at("lookaheadDistance")),
+            pathTracer.at("replicates").get<int>(),
         };
 
         if (!validRender(*renderConfig, path) ||

@@ -584,8 +584,10 @@ PT_CHECK(every_aov_renders_finite, Slow, Exact) {
             PT_EXPECT(ctx, false, std::string(pathtracer::debug::kAovNames[i % kAovCount]) + ": " + error);
             continue;
         }
-        const bool finite = std::all_of(buffer.begin(), buffer.end(),
-                                         [](float value) { return std::isfinite(value); });
+        // SNR's +inf is a positive signal every replicate agreed on exactly, its true value; any other non-finite texel is a defect.
+        const bool finite = std::all_of(buffer.begin(), buffer.end(), [aov](float value) {
+            return std::isfinite(value) || (aov == AovId::SNR && value == std::numeric_limits<float>::infinity());
+        });
         PT_EXPECT(ctx, finite, std::string(pathtracer::debug::kAovNames[i % kAovCount]) + " contains a non-finite value");
         // Its producer's lane is stored at exactly the channels it declares: the memory the declared count promises, and no padding lane.
         const HdrImage& lane = renderer->lastImage(aov);

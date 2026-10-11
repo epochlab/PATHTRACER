@@ -75,7 +75,7 @@ private:
     void publishPassRecord(std::uint64_t generation, int passIndex, int width, int height,
                             double traceMs, double accumulateMs, double overRangeMs,
                             double publishMs, double passMs, bool cancelled);
-    std::shared_ptr<PathTraceResult> acquireFreeBuffer(int width, int height);
+    std::shared_ptr<PathTraceResult> acquireFreeBuffer(int width, int height, int replicates);
     double tracePass(const Request& request, int sampleBase, std::uint64_t generation, PathTraceResult& pass);
     void finishPass(const std::shared_ptr<PathTraceResult>& pass, std::shared_ptr<PathTraceResult>& currentMean, int passIndex,
                     std::uint64_t generation, double traceMs, std::chrono::steady_clock::time_point passStart);
@@ -132,8 +132,8 @@ private:
 // Running mean m_n = m_{n-1} + (x_n - m_{n-1}) * invN over count floats; `mean` may alias either input. HeadlessRenderer shares it.
 void foldRunningMean(const float* previousMean, const float* drawn, float* mean, std::size_t count, float invN);
 
-// Welford (1962) M2 of Rec.709 luminance over `pixels` Beauty texels, West's (1979) form; call before foldRunningMean overwrites them.
-void foldLuminanceM2(const float* previousMean, const float* drawn, std::size_t channels, const float* previousM2, float* m2,
-                     std::size_t pixels, float invN);
+// Folds drawn Beauty's Rec.709 luminance into one replicate's running mean, carrying the rest; means may alias previousMeans.
+void foldReplicateLuminance(const float* previousMeans, const float* drawn, std::size_t channels, float* means, std::size_t pixels,
+                            int replicates, int replicate, float invCount);
 
 }  // namespace pathtracer::scene

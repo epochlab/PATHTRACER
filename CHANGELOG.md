@@ -3,6 +3,49 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## SNR from replicated RQMC
+
+The SNR AOV's standard error assumed independent passes. They are successive points of one Owen-scrambled Sobol
+sequence, so the passes are stratified against each other and `sqrt(M2/(n(n-1)))` misstates the error of the mean.
+Measured at 256x128 and 16 passes, it overstated SE² by 1.24-2.61x, so SNR read low by up to 1.6x. Owen 1997 shows the
+iid formula is not even a bound for scrambled nets. The fix is replicated RQMC (Owen 1997; L'Ecuyer & Lemieux 2002):
+K independent scrambles interleaved by pass, with the SE taken from the spread of their means. That estimate is
+calibrated to within six-seed noise (0.87-1.08). It costs Beauty some stratification: at fixed samples, the K = 4
+default raises Beauty RMSE by 5-7% on cornell and stump and 29% on macbeth. K = 1 is bit-identical to before. Evidence
+is in `results/snr_replicates`.
+
+- feat: `profile.json` `pathTracer.replicates`, the number of independent scrambles.
+  - Pass p draws from replicate p mod K at sequence position p div K, under `replicateSeed(seed, r)`. That is the
+    scramble seed XOR SplitMix64(r), and the identity at r = 0.
+  - The AO and Fresnel streams follow the same replicate.
+  - Each replicate is a prefix of its own sequence, so its net stratification holds.
+  - Validated at load: at least 1, and a divisor of `maxSamples`, so a capped accumulation ends on a complete round.
+- feat!: `PathTraceResult::beautyLuminanceM2` becomes `replicateLuminance`, K running Rec.709 luminance means per texel.
+  - `foldLuminanceM2` becomes `foldReplicateLuminance`, which updates one slot and carries the rest.
+  - Headless folds in place into its per-pass buffer, so it drops its separate lane.
+- feat!: `snrAov` is mbar / SE, with SE² = sum (m_r - mbar)² / (K(K-1)) over the min(n, K) populated replicates,
+  computed in double.
+  - It is unbiased for Var(mbar) at unequal replicate counts, so it is exact mid-round too.
+  - It reads 0 where undefined: fewer than two replicates, or no signal.
+  - It reads **+inf** where a positive signal is known exactly (every replicate agreed). Before, that read 0, displayed
+    black like "unresolved". The display already maps +inf to white.
+  - The all-AOV finiteness gates (api_validate, Python) admit +inf for SNR alone.
+- fix: the viewer driver passed `sampleBase` in passes, while the tracer adds the in-pass sample index. At
+  `samplesPerPixel` > 1, consecutive passes therefore reused sequence indices. It now passes `accumulated * spp` and a
+  sample count of `maxSamples * spp`. The shipped spp of 1 was unaffected.
+- feat: the `render_beauty` and viewer bench configs record `replicates`, so `bench_compare` never pairs different K.
+- test:
+  - filter: the closed form over alternating replicate means at K = 2 to 64; an incomplete round reads only the
+    populated replicates (the unread ones are NaN-poisoned); the undefined cases are 0 and the exact case is +inf.
+  - driver: runs at K = 4. The published replicate means are bit-identical to the in-place fold. They also match each
+    replicate's double batch mean under a forward-error bound, with the float luminance dot's gamma_3 carried in. The
+    replicate means must differ somewhere.
+  - sampler: replicate 0 is the identity, and 64 replicate seeds are pairwise 2^16 or more apart in XOR, so nearby
+    seeds (generations, the convergence gate's families) never alias.
+  - io: `replicates` 1 is accepted; 0 and a missing key are rejected, as is one that does not divide `maxSamples`.
+- perf: trace time is unchanged (`pass_ms` B/A 0.95-1.00). Viewer accumulate goes 0.19 -> 0.23 ms at 256x128, and the
+  lane costs 4(K-1) B per texel per pool buffer, +72 MiB at 2048x1024 with K = 4.
+
 ## Microfacet-based normal mapping
 
 Normal and bump maps now shade through Schussler, Heitz, Hanika & Dachsbacher 2017's microsurface rather than a

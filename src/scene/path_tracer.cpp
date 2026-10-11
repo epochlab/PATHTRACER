@@ -544,7 +544,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
 
 }  // namespace
 
-PathTraceResult makePathTraceResult(int width, int height) {
+PathTraceResult makePathTraceResult(int width, int height, int replicates) {
     PathTraceResult result;
     for (int i = 0; i < static_cast<int>(pathtracer::debug::AovId::Count); ++i) {
         const auto aov = static_cast<pathtracer::debug::AovId>(i);
@@ -552,7 +552,10 @@ PathTraceResult makePathTraceResult(int width, int height) {
             result.*lane = pathtracer::gfx::makeImage(width, height, pathtracer::debug::aovChannels(aov));
         }
     }
-    result.beautyLuminanceM2.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height), 0.0F);
+    result.replicateLuminance.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) *
+                                         static_cast<std::size_t>(replicates),
+                                     0.0F);
+    result.replicates = replicates;
     return result;
 }
 
@@ -575,6 +578,11 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
     // d(ndc) across that stratum: two NDC units span the image, and +Y flips because row 0 is the top.
     const glm::mat2 ndcPerStratum(2.0F / (static_cast<float>(width) * strataPerAxis), 0.0F, 0.0F,
                                   -2.0F / (static_cast<float>(height) * strataPerAxis));
+    // Replicated RQMC: pass p draws from replicate p mod K at its position p div K, so each replicate is a prefix of its own sequence.
+    const int pass = sampleBase / settings.samplesPerPixel;
+    const std::uint32_t seed = replicateSeed(scrambleSeed, pass % settings.replicates);
+    const int replicateBase = (pass / settings.replicates) * settings.samplesPerPixel;
+    const int replicateCount = sampleCount > 0 ? (sampleCount + settings.replicates - 1) / settings.replicates : sampleCount;
     // Derived from the target, not fixed: the interactive scale renders a fraction of the frame, where a 96 px grid is only a few tiles.
     const int tileSize = pathTraceTileSize(width, height, threadPool.threadCount());
     const int tilesX = (width + tileSize - 1) / tileSize;
@@ -608,9 +616,9 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                 // The owning pixel: its sample stream and its ray, so a wrapped halo sample is bit-identical to the one its owner traces.
                 const int pixelX = (x + width) % width;
                 for (int s = 0; s < settings.samplesPerPixel; ++s) {
-                    // sampleBase + s is this sample's position in the accumulated sequence: it must advance across passes to stratify.
-                    const int sampleIndex = sampleBase + s;
-                    Sampler sampler(pixelX, y, sampleIndex, sampleCount, scrambleSeed);
+                    // replicateBase + s is this sample's position in its replicate's sequence: it must advance across passes to stratify.
+                    const int sampleIndex = replicateBase + s;
+                    Sampler sampler(pixelX, y, sampleIndex, replicateCount, seed);
                     const glm::vec2 jitter = sampler.next2D();
                     // Unwrapped, so the splat below measures filter distance across the seam as across any interior pixel boundary.
                     const float filmX = static_cast<float>(x) + jitter.x;
@@ -620,9 +628,9 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                     const float ndcY = 1.0F - ((filmY / static_cast<float>(height)) * 2.0F);
                     const std::optional<Camera::RayDifferential> primary = camera.primaryRayDifferential(basis, ndcX, ndcY);
                     // AO and Fresnel draw from their own stream: taking dimensions from `sampler` would shift every later dimension.
-                    Sampler aoSampler(pixelX, y, sampleIndex, sampleCount, scrambleSeed ^ kAoSeedOffset);
+                    Sampler aoSampler(pixelX, y, sampleIndex, replicateCount, seed ^ kAoSeedOffset);
                     const glm::vec2 aoSample = aoSampler.next2D();
-                    Sampler fresnelSampler(pixelX, y, sampleIndex, sampleCount, scrambleSeed ^ kFresnelSeedOffset);
+                    Sampler fresnelSampler(pixelX, y, sampleIndex, replicateCount, seed ^ kFresnelSeedOffset);
                     const glm::vec2 fresnelSample = fresnelSampler.next2D();
                     // Nullopt is a fisheye sample outside the image circle: no ray exists, so every lane reads zero for it.
                     const TraceResult trace =

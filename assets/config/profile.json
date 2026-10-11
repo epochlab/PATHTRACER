@@ -35,6 +35,7 @@
         "russianRouletteStartBounce": 3,
         "maxSamples": 64,
         "aoMaxDistance": 1.0,
-        "lookaheadDistance": 10.0
+        "lookaheadDistance": 10.0,
+        "replicates": 4
     }
 }

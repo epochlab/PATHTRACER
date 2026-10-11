@@ -306,6 +306,7 @@ PathTraceSettings baseSettingsOf(const pathtracer::config::ProfileConfig& profil
         .russianRouletteStartBounce = profile.pathTracer.russianRouletteStartBounce,
         .aoMaxDistance = profile.pathTracer.aoMaxDistance,
         .lookaheadDistance = profile.pathTracer.lookaheadDistance,
+        .replicates = profile.pathTracer.replicates,
     };
 }
 

@@ -158,6 +158,7 @@ bool appendTimingRecord(const Options& options, int argc, char** argv, int width
                    {"aov", aovName},
                    {"env_light", envLightEnabled},
                    {"spp_per_pass", settings.samplesPerPixel},
+                   {"replicates", settings.replicates},
                    {"max_bounces", settings.maxBounces},
                    {"rr_start_bounce", settings.russianRouletteStartBounce},
                    {"ao_max_distance", settings.aoMaxDistance},

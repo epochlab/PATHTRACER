@@ -279,7 +279,7 @@ pathtracer::scene::PathTraceResult renderPass(const TestScene& scene, const Envi
                                               std::uint32_t scrambleSeed = 7U, const Camera& camera = makeCamera()) {
     const std::atomic<std::uint64_t> generation{1};
     pathtracer::scene::PathTraceResult result =
-        pathtracer::scene::makePathTraceResult(kImageSize, kImageSize);
+        pathtracer::scene::makePathTraceResult(kImageSize, kImageSize, settings.replicates);
     // No test scene here authors an emitter -- every instance is ordinary geometry.
     const std::vector<int> instanceLightIndex(scene.instances.size(), -1);
     const std::vector<pathtracer::scene::QuadLight> noQuads;
@@ -1195,7 +1195,7 @@ pathtracer::scene::PathTraceResult renderPassWithLights(const TestScene& scene,
                                                      EmbreeAccel& accel, pathtracer::scene::ThreadPool& pool,
                                                      bool showSky) {
     const std::atomic<std::uint64_t> generation{1};
-    pathtracer::scene::PathTraceResult result = pathtracer::scene::makePathTraceResult(kImageSize, kImageSize);
+    pathtracer::scene::PathTraceResult result = pathtracer::scene::makePathTraceResult(kImageSize, kImageSize, settings.replicates);
     const pathtracer::scene::LightSet lights(env, /*envRotationDegrees=*/glm::vec3(0.0F), /*envExposure=*/1.0F, quads);
     pathtracer::debug::PassStats stats;  // required by renderPathTraced; this tool checks radiance, not throughput
     pathtracer::scene::renderPathTraced(makeCamera(), accel, scene.shadingTriangles, scene.instances,
@@ -2051,7 +2051,7 @@ PT_CHECK(omnidirectional_film_filter_reaches_across_the_seam, Fast, Exact) {
         }
         const EnvironmentMap env = tools::fixtures::makeEnvironment(kEnvWidth, kEnvHeight, rgb);
         const std::atomic<std::uint64_t> generation{1};
-        pathtracer::scene::PathTraceResult result = pathtracer::scene::makePathTraceResult(kWidth, kHeight);
+        pathtracer::scene::PathTraceResult result = pathtracer::scene::makePathTraceResult(kWidth, kHeight, settings.replicates);
         const std::vector<pathtracer::scene::QuadLight> noQuads;
         const pathtracer::scene::LightSet lights(&env, /*envRotationDegrees=*/glm::vec3(0.0F), /*envExposure=*/1.0F, noQuads);
         pathtracer::debug::PassStats stats;

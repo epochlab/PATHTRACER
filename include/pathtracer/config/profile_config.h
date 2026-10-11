@@ -56,6 +56,7 @@ struct PathTracerConfig {
     int maxSamples;  // accumulated-pass cap for PathTraceDriver; 0 = unbounded
     float aoMaxDistance;  // ray-traced AO occlusion range, scene units; occluders beyond it don't darken
     float lookaheadDistance;  // horizon of the Lookahead AOV's ramp, scene units; geometry at or beyond it reads 0
+    int replicates;  // independent scrambles interleaved by pass, whose spread is the SNR's standard error; divides maxSamples
 };
 
 // Session-wide defaults: the controller's initial and reset pose, lens, exposure and tuning constants -- what is not specific to one scene.

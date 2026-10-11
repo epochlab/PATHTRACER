@@ -43,6 +43,8 @@ struct PathTraceSettings {
     float rrMinProb = 0.05F;  // floor: stops a near-zero-throughput path being killed with near-certainty
     // Exactly 1.0: a path at full throughput must never be terminated; a lower cap costs more in variance than the deep paths it saves.
     float rrMaxProb = 1.0F;
+    // Independent scrambles K, interleaved by pass (replicated RQMC, Owen 1997): their spread is the SNR's error; 1 is one sequence.
+    int replicates = 1;
 };
 
 // Stops either side of unity the readout is exact over: the next binade above the +/-13.95 EV the exposure controls reach.
@@ -96,8 +98,9 @@ struct PathTraceResult {
     // Filtered primary opacity: a sample is opaque on any hit, or on a miss when showSky shows the environment behind it.
     pathtracer::gfx::HdrImage alpha;
 
-    // Welford second moment of each texel's per-pass Rec.709 luminance, one float and not an image: an SNR needs no chromaticity.
-    std::vector<float> beautyLuminanceM2;
+    // Running mean of each replicate's per-pass Rec.709 luminance, `replicates` floats per texel, pixel-major: the SNR's error estimate.
+    std::vector<float> replicateLuminance;
+    int replicates = 1;
 
     // Reduced from `beauty` immediately before publish, so it describes exactly the pixels published with it, unlike PassRecord.
     OverRangeStats overRange;
@@ -106,8 +109,8 @@ struct PathTraceResult {
     int samples = 0;  // passes averaged in, stamped with generation so image and count publish as one snapshot
 };
 
-// All 11 images at their aovChannels counts and the second-moment lane, zeroed at width x height: renderPathTraced's `out`.
-[[nodiscard]] PathTraceResult makePathTraceResult(int width, int height);
+// All 11 images at their aovChannels counts and the replicate luminance lane, zeroed at width x height: renderPathTraced's `out`.
+[[nodiscard]] PathTraceResult makePathTraceResult(int width, int height, int replicates);
 
 // Whether a primary ray that misses returns environment radiance when nothing overrides it; viewer, driver and headless share it.
 inline constexpr bool kDefaultShowSky = false;

@@ -772,7 +772,7 @@ PT_CHECK(profile_config_integer_counts, Fast, Exact) {
     std::vector<Case> cases;
     // Lowest legal value accepted, then each way of going under it. maxBounces/maxSamples 0 are meaningful: direct-only and unbounded.
     const std::vector<std::pair<const char*, int>> floors = {
-        {"samplesPerPixel", 1}, {"maxBounces", 0}, {"russianRouletteStartBounce", 0}, {"maxSamples", 0}};
+        {"samplesPerPixel", 1}, {"maxBounces", 0}, {"russianRouletteStartBounce", 0}, {"maxSamples", 0}, {"replicates", 1}};
     for (const auto& [key, floor] : floors) {
         cases.push_back({std::string(key) + " " + std::to_string(floor), "pathTracer", key, floor, true});
         cases.push_back({std::string(key) + " " + std::to_string(floor - 1), "pathTracer", key, floor - 1, false});
@@ -791,6 +791,9 @@ PT_CHECK(profile_config_integer_counts, Fast, Exact) {
         pathtracer::config::loadProfileConfig(shippedPath.string());
     std::ifstream shippedFile(shippedPath);
     const nlohmann::json shipped = nlohmann::json::parse(shippedFile);
+    // A capped accumulation must end on a complete round: replicates of maxSamples + 1 cannot divide a positive maxSamples.
+    const int shippedMaxSamples = shipped["pathTracer"]["maxSamples"].get<int>();
+    cases.push_back({"replicates not dividing maxSamples", "pathTracer", "replicates", shippedMaxSamples + 1, shippedMaxSamples == 0});
     ctx.plan(static_cast<int>(cases.size()) + 1);
     PT_EXPECT(ctx, shippedConfig.has_value(), "the shipped profile does not load, so no row below means anything");
     if (!shippedConfig) {

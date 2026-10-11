@@ -24,13 +24,18 @@ void accumulateMean(PathTraceResult& sample, const PathTraceResult& previousMean
     const std::span<const pathtracer::debug::PathTracedLane> lanes = pathtracer::debug::pathTracedLanes();
     const auto width = static_cast<std::size_t>(sample.beauty.width);
     const auto beautyChannels = static_cast<std::size_t>(sample.beauty.channels);
+    const int replicates = sample.replicates;
+    // Pass n-1 (0-based) is replicate (n-1) mod K's ((n-1) div K + 1)th, the mapping renderPathTraced draws its sequence by.
+    const int replicate = (n - 1) % replicates;
+    const int count = ((n - 1) / replicates) + 1;
+    const float invCount = 1.0F / static_cast<float>(count);
+    const auto stride = static_cast<std::size_t>(replicates);
     threadPool.parallelFor(sample.beauty.height, [&](int y) {
         const std::size_t rowPixel = static_cast<std::size_t>(y) * width;
-        // Before the lane folds overwrite it: `beauty` still holds this pass's own radiance and its source the mean of the rest.
-        foldLuminanceM2(previousMean.beauty.texels.data() + (rowPixel * beautyChannels),
-                        sample.beauty.texels.data() + (rowPixel * beautyChannels), beautyChannels,
-                        previousMean.beautyLuminanceM2.data() + rowPixel, sample.beautyLuminanceM2.data() + rowPixel, width,
-                        invN);
+        // Before the lane folds overwrite it: `beauty` still holds this pass's own radiance.
+        foldReplicateLuminance(previousMean.replicateLuminance.data() + (rowPixel * stride),
+                               sample.beauty.texels.data() + (rowPixel * beautyChannels), beautyChannels,
+                               sample.replicateLuminance.data() + (rowPixel * stride), width, replicates, replicate, invCount);
         for (const pathtracer::debug::PathTracedLane lane : lanes) {
             const auto channels = static_cast<std::size_t>((sample.*lane).channels);
             float* destination = (sample.*lane).texels.data() + (rowPixel * channels);
@@ -94,16 +99,21 @@ void foldRunningMean(const float* previousMean, const float* drawn, float* mean,
     }
 }
 
-void foldLuminanceM2(const float* previousMean, const float* drawn, std::size_t channels, const float* previousM2, float* m2,
-                     std::size_t pixels, float invN) {
+void foldReplicateLuminance(const float* previousMeans, const float* drawn, std::size_t channels, float* means, std::size_t pixels,
+                            int replicates, int replicate, float invCount) {
     const glm::vec3 weights = pathtracer::debug::kRec709LuminanceWeights;
+    const auto stride = static_cast<std::size_t>(replicates);
+    const auto slot = static_cast<std::size_t>(replicate);
     for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
+        const float* previous = previousMeans + (pixel * stride);
+        float* folded = means + (pixel * stride);
+        // In place (headless) the other replicates are already there; into a fresh pool buffer (driver) they are carried.
+        if (folded != previous) {
+            std::copy(previous, previous + stride, folded);
+        }
         const std::size_t i = pixel * channels;
         const float x = (drawn[i] * weights.r) + (drawn[i + 1] * weights.g) + (drawn[i + 2] * weights.b);
-        const float before = (previousMean[i] * weights.r) + (previousMean[i + 1] * weights.g) + (previousMean[i + 2] * weights.b);
-        // The luminance mean m_n by foldRunningMean's recurrence and invN; (x - m_{n-1})(x - m_n) is West's M2 increment.
-        const float after = before + ((x - before) * invN);
-        m2[pixel] = previousM2[pixel] + ((x - before) * (x - after));
+        folded[slot] = previous[slot] + ((x - previous[slot]) * invCount);
     }
 }
 
@@ -156,13 +166,13 @@ std::shared_ptr<const PathTraceResult> PathTraceDriver::latestResult() const {
 }
 
 // Driver-thread-only. Hands back the first pool slot nothing else holds, reallocating only on a size change.
-std::shared_ptr<PathTraceResult> PathTraceDriver::acquireFreeBuffer(int width, int height) {
+std::shared_ptr<PathTraceResult> PathTraceDriver::acquireFreeBuffer(int width, int height, int replicates) {
     for (std::shared_ptr<PathTraceResult>& slot : bufferPool_) {
         if (slot != nullptr && slot.use_count() > 1) {
             continue;
         }
-        if (slot == nullptr || slot->beauty.width != width || slot->beauty.height != height) {
-            slot = std::make_shared<PathTraceResult>(makePathTraceResult(width, height));
+        if (slot == nullptr || slot->beauty.width != width || slot->beauty.height != height || slot->replicates != replicates) {
+            slot = std::make_shared<PathTraceResult>(makePathTraceResult(width, height, replicates));
         }
         return slot;
     }
@@ -215,7 +225,7 @@ double PathTraceDriver::tracePass(const Request& request, int sampleBase, std::u
                      instanceLightIndex_, lights, request.width, request.height,
                      request.showSky, request.settings,
                      // The generation is the scramble seed: fixed per accumulation, changing exactly when the image restarts.
-                     static_cast<std::uint32_t>(generation), sampleBase, request.maxSamples,
+                     static_cast<std::uint32_t>(generation), sampleBase, request.maxSamples * request.settings.samplesPerPixel,
                      generation_, generation,
                      threadPool_, passStats_, pass);
     return millisecondsSince(traceStart);
@@ -230,8 +240,12 @@ void PathTraceDriver::finishPass(const std::shared_ptr<PathTraceResult>& pass, s
     if (passIndex > 1) {
         accumulateMean(*pass, *currentMean, passIndex, threadPool_);
     } else {
-        // One sample has no dispersion, so the second moment starts at exactly zero rather than at whatever the reused slot held.
-        std::fill(pass->beautyLuminanceM2.begin(), pass->beautyLuminanceM2.end(), 0.0F);
+        // Replicate 0's first pass is its mean; the rest start at exactly zero, not at whatever the reused slot held, and are not read yet.
+        std::fill(pass->replicateLuminance.begin(), pass->replicateLuminance.end(), 0.0F);
+        foldReplicateLuminance(pass->replicateLuminance.data(), pass->beauty.texels.data(),
+                               static_cast<std::size_t>(pass->beauty.channels), pass->replicateLuminance.data(),
+                               pass->beauty.texels.size() / static_cast<std::size_t>(pass->beauty.channels), pass->replicates,
+                               /*replicate=*/0, /*invCount=*/1.0F);
     }
     const double accumulateMs = millisecondsSince(accumulateStart);
 
@@ -294,17 +308,16 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
             continue;
         }
 
-        const std::shared_ptr<PathTraceResult> pass = acquireFreeBuffer(request.width, request.height);
+        const std::shared_ptr<PathTraceResult> pass = acquireFreeBuffer(request.width, request.height, request.settings.replicates);
         if (pass == nullptr) {
             std::this_thread::sleep_for(kBufferRetryInterval);
             continue;  // every buffer still referenced by the render thread -- retry rather than allocate
         }
 
-        // Two roles (sampler.h): sampleBase continues the Sobol sequence, passIndex is that count 1-based, so this pass weighs 1/passIndex.
-        const int sampleBase = accumulated;
-        const int passIndex = sampleBase + 1;
+        // accumulated passes have drawn accumulated * spp samples, so this pass continues the sequence there and weighs 1/passIndex.
+        const int passIndex = accumulated + 1;
         const auto passStart = std::chrono::steady_clock::now();
-        const double traceMs = tracePass(request, sampleBase, activeGeneration, *pass);
+        const double traceMs = tracePass(request, accumulated * request.settings.samplesPerPixel, activeGeneration, *pass);
 
         if (generation_.load(std::memory_order_relaxed) != activeGeneration) {
             // Published before the discard, not skipped: a camera drag cancels passes continuously, and their rays were still paid for.
