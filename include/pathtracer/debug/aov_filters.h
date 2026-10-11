@@ -80,16 +80,16 @@ void demodulate(std::span<const float> plane, const MorletPlaneWave& wave, int w
 [[nodiscard]] pathtracer::gfx::HdrImage colourOpponentAov(const pathtracer::gfx::HdrImage& beauty,
                                                           pathtracer::scene::ThreadPool& threadPool);
 
-// Signal-to-noise ratio of each texel's published radiance: its Rec.709 luminance over the standard error of that mean.
-[[nodiscard]] pathtracer::gfx::HdrImage snrAov(const pathtracer::gfx::HdrImage& beauty,
-                                            const float* beautyLuminanceM2, int samples,
+// Rec.709 luminance SNR from replicated RQMC: the replicates' mean over its standard error, from their spread (L'Ecuyer & Lemieux 2002).
+[[nodiscard]] pathtracer::gfx::HdrImage snrAov(int width, int height, const float* replicateLuminance, int replicates, int samples,
                                             pathtracer::scene::ThreadPool& threadPool);
 
 // Everything a BeautyFilter AOV reads, as explicit fields rather than a PathTraceResult, so a validator can build one with no renderer.
 struct FilterInput {
     const pathtracer::gfx::HdrImage& beauty;  // published mean radiance, linear Rec.709, scene-referred and unbounded
-    // Welford second moment of the per-pass luminance and the passes averaged in; a variance is undefined below two of them.
-    const float* beautyLuminanceM2 = nullptr;
+    // Per-replicate running luminance means, `replicates` per texel, and the passes averaged in: min(samples, replicates) are populated.
+    const float* replicateLuminance = nullptr;
+    int replicates = 1;
     int samples = 0;
     bool wrapsHorizontally = false;  // the lens joins the image's left and right edges, so neighbourhood filters wrap in x
 };

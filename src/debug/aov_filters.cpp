@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstddef>
 #include <numbers>
+#include <numeric>
 #include <vector>
 
 #include "pathtracer/debug/scale_space.h"
@@ -265,26 +266,30 @@ HdrImage colourOpponentAov(const HdrImage& beauty, ThreadPool& threadPool) {
     return out;
 }
 
-HdrImage snrAov(const HdrImage& beauty, const float* beautyLuminanceM2, int samples, ThreadPool& threadPool) {
-    HdrImage out = makeAovImage(AovId::SNR, beauty.width, beauty.height);
-    // A single sample carries no dispersion, so the ratio is undefined rather than infinite, and a black frame says so.
-    if (beautyLuminanceM2 == nullptr || samples < 2) {
+HdrImage snrAov(int width, int height, const float* replicateLuminance, int replicates, int samples, ThreadPool& threadPool) {
+    HdrImage out = makeAovImage(AovId::SNR, width, height);
+    // Replicates not yet drawn hold no estimate; fewer than two populated carry no spread, so the ratio is undefined and reads zero.
+    const int populated = std::min(samples, replicates);
+    if (replicateLuminance == nullptr || populated < 2) {
         return out;
     }
-    // Standard error of the MEAN, not of one sample: `beauty` is a mean, and the question is how well its value is known.
-    const float passes = static_cast<float>(samples);
-    // Widened before the product, not after: n(n-1) leaves int at 46341 passes, which an uncapped accumulation reaches.
-    const float inverseDegrees = 1.0F / (passes * (passes - 1.0F));
-    threadPool.parallelFor(beauty.height, [&](int y) {
-        const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(beauty.width);
-        for (int x = 0; x < beauty.width; ++x) {
-            const std::size_t pixel = row + static_cast<std::size_t>(x);
-            const glm::vec3 rgb = beauty.rgb(pixel);
-            const float luminance = (rgb.r * kRec709LuminanceWeights.r) + (rgb.g * kRec709LuminanceWeights.g) +
-                                    (rgb.b * kRec709LuminanceWeights.b);
-            const float standardError = std::sqrt(beautyLuminanceM2[pixel] * inverseDegrees);
-            // Zero dispersion is a converged texel, not an infinite ratio; a background pixel every pass agrees on is the usual case.
-            writeTexel(out, x, y, standardError > 0.0F ? luminance / standardError : 0.0F);
+    // Independent replicate means m_r of one expectation: sum (m_r - mbar)^2 / (K(K-1)) is unbiased for Var(mbar) at any counts.
+    const double inverseDegrees = 1.0 / (static_cast<double>(populated) * static_cast<double>(populated - 1));
+    const auto stride = static_cast<std::size_t>(replicates);
+    threadPool.parallelFor(height, [&](int y) {
+        for (int x = 0; x < width; ++x) {
+            const std::size_t pixel = (static_cast<std::size_t>(y) * static_cast<std::size_t>(width)) + static_cast<std::size_t>(x);
+            const float* means = replicateLuminance + (pixel * stride);
+            // Double: the deviations of a converged texel's replicates are rounding-scale differences of float means.
+            const double mean = std::accumulate(means, means + populated, 0.0) / static_cast<double>(populated);
+            double squares = 0.0;
+            for (int r = 0; r < populated; ++r) {
+                squares += (means[r] - mean) * (means[r] - mean);
+            }
+            const double standardError = std::sqrt(squares * inverseDegrees);
+            // No signal reads zero; a positive signal every replicate agreed on exactly is known exactly, so its SNR is +inf, not zero.
+            const double ratio = mean > 0.0 ? mean / standardError : 0.0;
+            writeTexel(out, x, y, static_cast<float>(ratio));
         }
     });
     return out;
@@ -298,7 +303,8 @@ HdrImage evaluateFilterAov(AovId aov, const FilterInput& input, ThreadPool& thre
         case AovId::Gabor:     return gaborAov(input.beauty, threadPool, input.wrapsHorizontally);
         case AovId::DoG:       return dogAov(input.beauty, threadPool, input.wrapsHorizontally);
         case AovId::ColourOpponent:  return colourOpponentAov(input.beauty, threadPool);
-        case AovId::SNR:       return snrAov(input.beauty, input.beautyLuminanceM2, input.samples, threadPool);
+        case AovId::SNR:
+            return snrAov(input.beauty.width, input.beauty.height, input.replicateLuminance, input.replicates, input.samples, threadPool);
 
         // The lanes their own producers write. No default arm: -Werror then makes an unrouted new filter a compile error.
         case AovId::Beauty:

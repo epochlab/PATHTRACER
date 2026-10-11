@@ -122,7 +122,7 @@ private:
     void resizeBuffers(int width, int height);
     // Traces request.samples one-sample passes and folds each into accumulators_, the running means PathTraceDriver publishes.
     void accumulatePathTraced(const Request& request);
-    // Folds one pass into the means and the Beauty luminance M2 in place, through the driver's foldRunningMean/foldLuminanceM2.
+    // Folds one pass into the means and the Beauty replicate means in place, through the driver's foldRunningMean/foldReplicateLuminance.
     void accumulatePass(const Request& request, int pass, const std::vector<const std::vector<float>*>& laneSources,
                         int beautyIndex);
     // Ray-casts the G-buffer lanes, motion measured from request.previousCamera (camera itself when absent).
@@ -142,14 +142,12 @@ private:
     pathtracer::scene::Camera defaultCamera_;
     pathtracer::scene::ThreadPool threadPool_;
 
-    // Reused across render() calls, reallocated only when the resolution changes.
+    // Reused across render() calls, reallocated only when the resolution changes; its replicateLuminance is the running replicate means.
     pathtracer::scene::PathTraceResult pathTraced_;
     pathtracer::scene::GBuffer gbuffer_;
     // One running mean per path-traced lane this request needs, parallel to accumulatedAovs_.
     std::vector<pathtracer::debug::AovId> accumulatedAovs_;
     std::vector<pathtracer::gfx::HdrImage> accumulators_;
-    // Welford second moment of the per-pass Beauty luminance, bit-identical to the driver's PathTraceResult::beautyLuminanceM2.
-    std::vector<float> beautyLuminanceM2_;
     // One evaluated filter per distinct BeautyFilter AOV, so lastImage() can return one and two AOVs sharing a filter evaluate it once.
     std::vector<pathtracer::debug::AovId> filteredAovs_;
     std::vector<pathtracer::gfx::HdrImage> filtered_;

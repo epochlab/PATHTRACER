@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <cstddef>
 #include <numbers>
 #include <random>
@@ -372,84 +373,95 @@ PT_CHECK(colour_opponent_separates_the_rec709_primaries, Fast, Exact) {
     PT_EXPECT(ctx, blue > 0.0F, "Rec.709 blue reads B-Y " + std::to_string(blue));
 }
 
-// x_i = mu +/- delta over an even count gives M2 = n delta^2 exactly, so the reported ratio has a closed form and no tolerance.
-PT_CHECK(snr_matches_the_closed_form_of_an_alternating_sequence, Fast, Exact) {
-    // 65536 is past the 46341 at which the degrees-of-freedom product leaves int, so this sweep covers that widening too.
-    const std::array<int, 5> counts{2, 8, 64, 1024, 65536};
+// Replicate means mu +/- delta over an even K sum K delta^2 of squared deviations, so the ratio mu sqrt(K-1) / delta is exact.
+PT_CHECK(snr_matches_the_closed_form_of_alternating_replicates, Fast, Exact) {
+    const std::array<int, 5> counts{2, 4, 8, 16, 64};
     ctx.plan(static_cast<int>(counts.size()));
     ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
     constexpr int kWidth = 64;
     constexpr int kHeight = 48;
     constexpr std::size_t kPixels = static_cast<std::size_t>(kWidth) * kHeight;
-    // Powers of two, so mu, delta and every product below are exact and the comparison is against an exactly representable value.
-    constexpr float kValue = 0.25F;
+    // Powers of two, so every replicate mean and their exact average are representable and the reference has a closed form.
+    constexpr float kMean = 0.25F;
     constexpr float kDelta = 0.03125F;
-    const float mean = greyLuminanceGain() * kValue;
-    const HdrImage beauty = greyImage(kWidth, kHeight, std::vector<float>(kPixels, kValue));
-
-    for (const int samples : counts) {
-        const std::vector<float> secondMoment(kPixels, static_cast<float>(samples) * kDelta * kDelta);
-        const HdrImage snr = pathtracer::debug::snrAov(beauty, secondMoment.data(), samples, pool);
-        // SEM = delta / sqrt(n-1), so the ratio is mu sqrt(n-1) / delta.
-        const double expected = (static_cast<double>(mean) * std::sqrt(static_cast<double>(samples) - 1.0)) / kDelta;
+    for (const int replicates : counts) {
+        std::vector<float> means(kPixels * static_cast<std::size_t>(replicates));
+        for (std::size_t i = 0; i < means.size(); ++i) {
+            means[i] = (i % 2 == 0) ? kMean + kDelta : kMean - kDelta;
+        }
+        const HdrImage snr = pathtracer::debug::snrAov(kWidth, kHeight, means.data(), replicates, replicates, pool);
+        const double expected = (static_cast<double>(kMean) * std::sqrt(static_cast<double>(replicates) - 1.0)) / kDelta;
         double worst = 0.0;
         for (int y = 0; y < kHeight; ++y) {
             for (int x = 0; x < kWidth; ++x) {
                 worst = std::max(worst, std::fabs(static_cast<double>(texelAt(snr, x, y, 0)) - expected) / expected);
             }
         }
-        // One rounding each in the luminance dot, the product under the root, the root itself and the divide.
-        PT_EXPECT(ctx, worst <= 4.0 * static_cast<double>(kFloatEpsilon),
-                      "n=" + std::to_string(samples) + " reports a relative " + std::to_string(worst) + " off " +
-                          std::to_string(expected));
+        // Computed in double, so the one float rounding of the stored ratio dominates.
+        PT_EXPECT(ctx, worst <= static_cast<double>(kFloatEpsilon),
+                  "K=" + std::to_string(replicates) + " reports a relative " + std::to_string(worst) + " off " +
+                      std::to_string(expected));
     }
 }
 
-// Independent draws of variance sigma^2 have E[M2] = (n-1) sigma^2, so the standard error of the mean must fall as sigma/sqrt(n).
-PT_CHECK(snr_falls_with_the_root_of_the_pass_count, Fast, Exact) {
-    const std::array<int, 5> counts{4, 16, 64, 256, 1024};
-    ctx.plan(static_cast<int>(counts.size()));
+// Mid-round only min(n, K) replicates are drawn: the rest hold no estimate and must not be read, so NaN there must not reach the ratio.
+PT_CHECK(snr_reads_only_the_populated_replicates, Fast, Exact) {
+    ctx.plan(1);
     ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    constexpr int kWidth = 32;
-    constexpr int kHeight = 32;
+    constexpr int kWidth = 16;
+    constexpr int kHeight = 8;
+    constexpr int kReplicates = 8;
+    constexpr int kSamples = 5;
     constexpr std::size_t kPixels = static_cast<std::size_t>(kWidth) * kHeight;
-    constexpr float kValue = 0.5F;
-    constexpr float kSigma = 0.125F;
-    const float mean = greyLuminanceGain() * kValue;
-    const HdrImage beauty = greyImage(kWidth, kHeight, std::vector<float>(kPixels, kValue));
-
-    for (const int samples : counts) {
-        const std::vector<float> secondMoment(kPixels, static_cast<float>(samples - 1) * kSigma * kSigma);
-        const HdrImage snr = pathtracer::debug::snrAov(beauty, secondMoment.data(), samples, pool);
-        const double expected = (static_cast<double>(mean) * std::sqrt(static_cast<double>(samples))) / kSigma;
-        const double worst = std::fabs(static_cast<double>(texelAt(snr, 0, 0, 0)) - expected) / expected;
-        PT_EXPECT(ctx, worst <= 4.0 * static_cast<double>(kFloatEpsilon),
-                      "n=" + std::to_string(samples) + " reports a relative " + std::to_string(worst) + " off " +
-                          std::to_string(expected));
+    constexpr float kMean = 0.5F;
+    constexpr float kDelta = 0.0625F;
+    // Five drawn: mu+d, mu-d, mu+d, mu-d, mu average to mu with squared deviations 4 d^2, so SE^2 = 4 d^2 / (5 * 4).
+    const std::array<float, kReplicates> pixel{kMean + kDelta, kMean - kDelta, kMean + kDelta, kMean - kDelta, kMean,
+                                               std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::quiet_NaN(),
+                                               std::numeric_limits<float>::quiet_NaN()};
+    std::vector<float> means;
+    means.reserve(kPixels * kReplicates);
+    for (std::size_t i = 0; i < kPixels; ++i) {
+        means.insert(means.end(), pixel.begin(), pixel.end());
     }
+    const HdrImage snr = pathtracer::debug::snrAov(kWidth, kHeight, means.data(), kReplicates, kSamples, pool);
+    const double expected = (static_cast<double>(kMean) * std::sqrt(static_cast<double>(kSamples))) / kDelta;
+    const bool exact = std::all_of(snr.texels.begin(), snr.texels.end(), [&](float value) {
+        return std::fabs(static_cast<double>(value) - expected) <= static_cast<double>(kFloatEpsilon) * expected;
+    });
+    PT_EXPECT(ctx, exact, "an incomplete round read an undrawn replicate or mis-weighted the drawn ones");
 }
 
-// A variance needs two draws, and a texel every pass agreed on has none: both report zero rather than an infinity or a stale number.
-PT_CHECK(snr_is_zero_where_the_ratio_is_undefined, Fast, Exact) {
-    ctx.plan(4);
+// Undefined is zero (no estimate, one replicate, no signal); a positive signal every replicate agreed on exactly is known, so +inf.
+PT_CHECK(snr_is_zero_where_undefined_and_infinite_where_exact, Fast, Exact) {
+    ctx.plan(6);
     ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
     constexpr int kWidth = 32;
     constexpr int kHeight = 24;
+    constexpr int kReplicates = 4;
     constexpr std::size_t kPixels = static_cast<std::size_t>(kWidth) * kHeight;
-    const HdrImage beauty = greyImage(kWidth, kHeight, std::vector<float>(kPixels, 0.75F));
-    const std::vector<float> secondMoment(kPixels, 0.125F);
-    const std::vector<float> converged(kPixels, 0.0F);
-    const auto allZero = [](const HdrImage& image) {
-        return std::all_of(image.texels.begin(), image.texels.end(), [](float value) { return value == 0.0F; });
+    std::vector<float> spread(kPixels * kReplicates);
+    for (std::size_t i = 0; i < spread.size(); ++i) {
+        spread[i] = (i % 2 == 0) ? 0.75F : 0.5F;
+    }
+    const std::vector<float> dark(kPixels * kReplicates, 0.0F);
+    const std::vector<float> agreed(kPixels * kReplicates, 0.75F);
+    const auto all = [](const HdrImage& image, float expected) {
+        return std::all_of(image.texels.begin(), image.texels.end(), [expected](float value) { return value == expected; });
     };
-    PT_EXPECT(ctx, allZero(pathtracer::debug::snrAov(beauty, nullptr, 64, pool)),
-                  "an absent second moment did not read zero");
-    PT_EXPECT(ctx, allZero(pathtracer::debug::snrAov(beauty, secondMoment.data(), 0, pool)),
-                  "zero passes did not read zero");
-    PT_EXPECT(ctx, allZero(pathtracer::debug::snrAov(beauty, secondMoment.data(), 1, pool)),
-                  "a single pass did not read zero");
-    PT_EXPECT(ctx, allZero(pathtracer::debug::snrAov(beauty, converged.data(), 64, pool)),
-                  "a texel with no dispersion did not read zero");
+    constexpr float kInfinity = std::numeric_limits<float>::infinity();
+    PT_EXPECT(ctx, all(pathtracer::debug::snrAov(kWidth, kHeight, nullptr, kReplicates, 64, pool), 0.0F),
+              "absent replicate means did not read zero");
+    PT_EXPECT(ctx, all(pathtracer::debug::snrAov(kWidth, kHeight, spread.data(), kReplicates, 0, pool), 0.0F),
+              "zero passes did not read zero");
+    PT_EXPECT(ctx, all(pathtracer::debug::snrAov(kWidth, kHeight, spread.data(), kReplicates, 1, pool), 0.0F),
+              "a single populated replicate did not read zero");
+    PT_EXPECT(ctx, all(pathtracer::debug::snrAov(kWidth, kHeight, spread.data(), 1, 64, pool), 0.0F),
+              "one replicate, a single sequence with no independent spread, did not read zero");
+    PT_EXPECT(ctx, all(pathtracer::debug::snrAov(kWidth, kHeight, dark.data(), kReplicates, 64, pool), 0.0F),
+              "no signal did not read zero");
+    PT_EXPECT(ctx, all(pathtracer::debug::snrAov(kWidth, kHeight, agreed.data(), kReplicates, 64, pool), kInfinity),
+              "a positive signal every replicate agreed on did not read +inf");
 }
 
 // The Morlet bank's admissibility term is a 2-D blur written as two 1-D ones, which is only sound if the mirror separates too.

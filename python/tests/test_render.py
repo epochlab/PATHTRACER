@@ -136,7 +136,9 @@ def test_every_aov_renders(renderer: Renderer) -> None:
     for name in AOVS:
         array = renderer.render(aovs=(name,), width=32, height=32, samples=2)[name]
         assert array.shape == (32, 32, aov_channels(name))
-        assert np.isfinite(array).all(), f"{name} produced a non-finite value"
+        # SNR's +inf is a positive signal every replicate agreed on exactly, its true value; any other non-finite texel is a defect.
+        admitted = np.isposinf(array) if name == "snr" else np.zeros_like(array, dtype=bool)
+        assert (np.isfinite(array) | admitted).all(), f"{name} produced a non-finite value"
 
 
 def test_multi_aov_request_matches_single_requests(renderer: Renderer) -> None:

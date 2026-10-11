@@ -137,6 +137,11 @@ float toShiftedUnitFloat(std::uint32_t x, std::uint32_t dither) {
 
 }  // namespace
 
+std::uint32_t replicateSeed(std::uint32_t scrambleSeed, int replicate) {
+    // SplitMix64 of r alone is 0 at r = 0 and avalanched otherwise; XOR is the kAoSeedOffset idiom for an independent stream.
+    return scrambleSeed ^ static_cast<std::uint32_t>(hashSeed(replicate, 0U));
+}
+
 float blueNoiseDither(int pixelX, int pixelY, int ditherChannel) {
     return static_cast<float>(ditherFixed(pixelX, pixelY, ditherChannel)) * 0x1.0p-24F;
 }

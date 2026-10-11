@@ -1,5 +1,6 @@
 // Correctness gate for sampler.cpp, asserting EXACT combinatorial net properties rather than Monte Carlo tolerances.
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -345,6 +346,23 @@ PT_CHECK(mask_is_blue_noise, Fast, Statistical) {
                   100.0 * measured, 100.0 * expected, expected / measured);
     ctx.plan(1);
     PT_EXPECT(ctx, measured < 0.5 * expected, detail);
+}
+
+// Replicate 0 is the plain sequence and replicate seeds differ by >= 2^16, so seeds nearer than that never alias two replicates' streams.
+PT_CHECK(replicate_seeds_are_identity_then_far_apart, Fast, Exact) {
+    constexpr int kReplicates = 64;
+    constexpr std::uint32_t kNearSeeds = 1U << 16U;
+    ctx.plan(2);
+    PT_EXPECT(ctx, pathtracer::scene::replicateSeed(kSeed, 0) == kSeed, "replicate 0 changed the scramble seed");
+    std::uint32_t closest = 0xFFFFFFFFU;
+    for (int a = 0; a < kReplicates; ++a) {
+        for (int b = a + 1; b < kReplicates; ++b) {
+            closest = std::min(closest, pathtracer::scene::replicateSeed(0U, a) ^ pathtracer::scene::replicateSeed(0U, b));
+        }
+    }
+    char detail[128];
+    std::snprintf(detail, sizeof(detail), "two of %d replicate seeds differ by XOR 0x%08X, under 2^16", kReplicates, closest);
+    PT_EXPECT(ctx, closest >= kNearSeeds, detail);
 }
 
 }  // namespace

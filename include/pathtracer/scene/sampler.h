@@ -24,6 +24,9 @@ private:
     int dimensionSet_ = 0;
 };
 
+// Replicate r's scramble seed (Owen 1997 replicated RQMC): independent scrambles per r, and the identity at r = 0 so K = 1 is one sequence.
+[[nodiscard]] std::uint32_t replicateSeed(std::uint32_t scrambleSeed, int replicate);
+
 // The shift Sampler adds at (pixelX, pixelY) on one dither channel; sampler_validate undoes it exactly, both being multiples of 2^-24.
 [[nodiscard]] float blueNoiseDither(int pixelX, int pixelY, int ditherChannel);
 

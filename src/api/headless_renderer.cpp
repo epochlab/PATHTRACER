@@ -265,7 +265,7 @@ void HeadlessRenderer::resizeBuffers(int width, int height) {
     if (bufferWidth_ == width && bufferHeight_ == height) {
         return;
     }
-    pathTraced_ = pathtracer::scene::makePathTraceResult(width, height);
+    pathTraced_ = pathtracer::scene::makePathTraceResult(width, height, baseSettings_.replicates);
     // renderGBuffer reallocates on a size change and clears per row otherwise; resetting the stamp says this buffer holds nothing.
     gbuffer_ = pathtracer::scene::GBuffer{};
     accumulators_.clear();
@@ -356,12 +356,13 @@ void HeadlessRenderer::accumulatePathTraced(const Request& request) {
     for (const AovId aov : accumulatedAovs_) {
         laneSources.push_back(&(pathTraced_.*pathtracer::debug::pathTracedLane(aov)).texels);
     }
-    // Only Beauty carries a second moment, and only where it is accumulated at all; -1 leaves the lane zero and SNR black.
+    // Only Beauty carries replicate means, and only where it is accumulated at all; -1 leaves the lane zero and SNR black.
     const auto beautyLane = std::find(accumulatedAovs_.begin(), accumulatedAovs_.end(), AovId::Beauty);
     const auto beautyIndex = beautyLane == accumulatedAovs_.end()
                                  ? -1
                                  : static_cast<int>(beautyLane - accumulatedAovs_.begin());
-    beautyLuminanceM2_.assign(static_cast<std::size_t>(request.width) * static_cast<std::size_t>(request.height), 0.0F);
+    // renderPathTraced writes images only, so pathTraced_ holds the replicate means across passes, folded in place from zero.
+    std::fill(pathTraced_.replicateLuminance.begin(), pathTraced_.replicateLuminance.end(), 0.0F);
     for (int pass = 0; pass < request.samples; ++pass) {
         // Only the trace is timed: the accumulation below it is O(pixels) and identical across revisions.
         const auto passStart = std::chrono::steady_clock::now();
@@ -384,9 +385,21 @@ void HeadlessRenderer::accumulatePass(const Request& request, int pass,
     const auto width = static_cast<std::size_t>(request.width);
     // The driver's own arithmetic, folded in place: same kernels, same invN, same per-element order, so the two means are bit-identical.
     const float invN = 1.0F / static_cast<float>(pass + 1);
+    const int replicates = baseSettings_.replicates;
+    // The driver's mapping: pass p is replicate p mod K's (p div K + 1)th, folded in place from zeroed slots.
+    const int replicate = pass % replicates;
+    const int count = (pass / replicates) + 1;
+    const float invCount = 1.0F / static_cast<float>(count);
+    const auto stride = static_cast<std::size_t>(replicates);
     threadPool_.parallelFor(request.height, [&](int y) {
         const std::size_t rowPixel = static_cast<std::size_t>(y) * width;
-        // The first pass is kept as drawn, as the driver keeps it: folding into a zero mean would turn -0 into +0 and M2 into NaN at inf.
+        if (beautyIndex >= 0) {
+            const auto channels = static_cast<std::size_t>(pathTraced_.beauty.channels);
+            const float* drawn = laneSources[static_cast<std::size_t>(beautyIndex)]->data() + (rowPixel * channels);
+            float* means = pathTraced_.replicateLuminance.data() + (rowPixel * stride);
+            pathtracer::scene::foldReplicateLuminance(means, drawn, channels, means, width, replicates, replicate, invCount);
+        }
+        // The first pass is kept as drawn, as the driver keeps it: folding into a zero mean would turn -0 into +0.
         if (pass == 0) {
             for (std::size_t lane = 0; lane < laneSources.size(); ++lane) {
                 const auto channels = static_cast<std::size_t>(accumulators_[lane].channels);
@@ -394,14 +407,6 @@ void HeadlessRenderer::accumulatePass(const Request& request, int pass,
                 std::copy(drawn, drawn + (width * channels), accumulators_[lane].texels.data() + (rowPixel * channels));
             }
             return;
-        }
-        if (beautyIndex >= 0) {
-            const auto channels = static_cast<std::size_t>(pathTraced_.beauty.channels);
-            const auto beauty = static_cast<std::size_t>(beautyIndex);
-            const float* mean = accumulators_[beauty].texels.data() + (rowPixel * channels);
-            const float* drawn = laneSources[beauty]->data() + (rowPixel * channels);
-            float* m2 = beautyLuminanceM2_.data() + rowPixel;
-            pathtracer::scene::foldLuminanceM2(mean, drawn, channels, m2, m2, width, invN);
         }
         for (std::size_t lane = 0; lane < laneSources.size(); ++lane) {
             const auto channels = static_cast<std::size_t>(accumulators_[lane].channels);
@@ -426,7 +431,8 @@ void HeadlessRenderer::renderGBufferLanes(const Request& request) {
 void HeadlessRenderer::evaluateFilters(const Request& request) {
     const auto filterStart = std::chrono::steady_clock::now();
     const pathtracer::gfx::HdrImage& beauty = lastImage(AovId::Beauty);
-    const pathtracer::debug::FilterInput filterInput{beauty, beautyLuminanceM2_.data(), request.samples,
+    const pathtracer::debug::FilterInput filterInput{beauty, pathTraced_.replicateLuminance.data(), pathTraced_.replicates,
+                                                     request.samples,
                                                      pathtracer::scene::wrapsHorizontally(request.camera.lens().projection)};
     for (const AovId aov : request.aovs) {
         if (pathtracer::debug::aovSource(aov) != AovSource::BeautyFilter ||
