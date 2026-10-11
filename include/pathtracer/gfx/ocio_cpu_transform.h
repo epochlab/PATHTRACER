@@ -14,6 +14,13 @@ namespace pathtracer::gfx {
 void applyOcioDisplayTransform(std::span<float> rgb, int width, int height,
                                OcioDisplayTransform::Lut lut = OcioDisplayTransform::Lut::SRGB);
 
+// Edge of the display dither tile; the encode and the viewer both read texel (x, y), counted from the top-left, at (x, y) mod 128.
+inline constexpr int kDitherMaskSize = 128;
+inline constexpr int kDitherMaskTexels = kDitherMaskSize * kDitherMaskSize;
+
+// Row-major dither offsets in display-referred units: a blue-noise mask remapped to triangular PDF on (-1, 1) codes of 255, built once.
+[[nodiscard]] const std::array<float, kDitherMaskTexels>& displayDitherMask();
+
 // Linear to display-referred 8-bit into out, presentFrame's order: affine map, transform, dither, quantize. rgb and out hold w*h*3.
 void encodeForDisplay(std::span<const float> rgb, int width, int height, const glm::vec3& gain, bool applyDisplayTransform,
                       const glm::vec3& displayOffset, std::span<unsigned char> out);

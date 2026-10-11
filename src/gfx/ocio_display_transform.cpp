@@ -1,5 +1,6 @@
 #include "pathtracer/gfx/ocio_display_transform.h"
 
+#include <bit>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -12,6 +13,7 @@
 #include <OpenColorIO/OpenColorIO.h>
 
 #include "pathtracer/gfx/gl_debug.h"
+#include "pathtracer/gfx/ocio_cpu_transform.h"
 
 namespace OCIO = OCIO_NAMESPACE;
 
@@ -49,11 +51,19 @@ constexpr const char* kAberrationGlsl =
     "    return color;\n"
     "}\n";
 
-// Triangular-PDF dither before the 8-bit quantization: without it, smooth dark gradients band once noise no longer masks them.
+// Texture unit of displayDitherMask(); unit 0 is uHdrColor, bound by PostProcessPass::draw.
+constexpr unsigned int kDitherMaskUnit = 1;
+
+// The shader wraps by AND, since integer modulo is emulated on GPUs; the CPU's % by a constant power of two compiles to the same.
+static_assert(std::has_single_bit(static_cast<unsigned>(kDitherMaskSize)));
+
+// TPDF dither before the 8-bit quantization, else gradients band: encodeForDisplay's table and tiling, so a 1:1 frame matches it.
 constexpr const char* kDitherGlsl =
-    "float ditherRand(vec2 co) { return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453); }\n"
-    "vec3 ditherOffset(vec2 uv) {\n"
-    "    return vec3((ditherRand(uv) - ditherRand(uv + vec2(0.618, 0.618))) / 255.0);\n"
+    "uniform sampler2D uDitherMask;\n"
+    "uniform ivec2 uDitherOrigin;\n"
+    "vec3 ditherOffset() {\n"
+    "    ivec2 texel = ivec2(int(gl_FragCoord.x) - uDitherOrigin.x, uDitherOrigin.y - int(gl_FragCoord.y));\n"
+    "    return vec3(texelFetch(uDitherMask, texel & (textureSize(uDitherMask, 0) - 1), 0).r);\n"
     "}\n";
 
 std::optional<std::string> readFile(const std::string& path) {
@@ -86,7 +96,7 @@ std::string buildFragmentSource(const std::string& ocioShaderText, const std::st
         << "    vec4 exposed = vec4(hdrColor, 1.0);\n"
         << "    vec3 displayColor = " << functionName << "(exposed).rgb;\n"
         << "    if (uInvert) { displayColor = 1.0 - displayColor; }\n"
-        << "    fragColor = vec4(displayColor + ditherOffset(vUv), 1.0);\n"
+        << "    fragColor = vec4(displayColor + ditherOffset(), 1.0);\n"
         << "}\n";
     return src.str();
 }
@@ -106,7 +116,7 @@ std::string buildRawFragmentSource() {
            kApplyChannelViewGlsl +
            "    vec3 displayColor = hdrColor;\n"
            "    if (uInvert) { displayColor = 1.0 - displayColor; }\n"
-           "    fragColor = vec4(displayColor + ditherOffset(vUv), 1.0);\n"
+           "    fragColor = vec4(displayColor + ditherOffset(), 1.0);\n"
            "}\n";
 }
 
@@ -164,22 +174,25 @@ std::optional<OcioDisplayTransform> OcioDisplayTransform::create() {
     }
 
     // One-time texture-unit assignment, matching main.cpp's existing explicit-uniform convention for uBaseColor/uHdrColor.
-    rawShader->use();
-    GL_CALL(glUniform1i(rawShader->uniformLocation("uHdrColor"), 0));
-    srgbShader->use();
-    GL_CALL(glUniform1i(srgbShader->uniformLocation("uHdrColor"), 0));
-    rec709Shader->use();
-    GL_CALL(glUniform1i(rec709Shader->uniformLocation("uHdrColor"), 0));
+    for (const ShaderProgram* shader : {&*rawShader, &*srgbShader, &*rec709Shader}) {
+        shader->use();
+        GL_CALL(glUniform1i(shader->uniformLocation("uHdrColor"), 0));
+        GL_CALL(glUniform1i(shader->uniformLocation("uDitherMask"), static_cast<GLint>(kDitherMaskUnit)));
+    }
 
+    // Float32, so the shader adds exactly the offsets the CPU encode adds.
+    Texture ditherMask = Texture::createFromFloatPixels(kDitherMaskSize, kDitherMaskSize, 1, displayDitherMask().data(),
+                                                        ScalarType::Float32);
     return OcioDisplayTransform(std::move(*rawShader), std::move(*srgbShader),
-                                 std::move(*rec709Shader));
+                                 std::move(*rec709Shader), std::move(ditherMask));
 }
 
 OcioDisplayTransform::OcioDisplayTransform(ShaderProgram rawShader, ShaderProgram srgbShader,
-                                            ShaderProgram rec709Shader)
+                                            ShaderProgram rec709Shader, Texture ditherMask)
     : rawShader_(std::move(rawShader)),
       srgbShader_(std::move(srgbShader)),
       rec709Shader_(std::move(rec709Shader)),
+      ditherMask_(std::move(ditherMask)),
       rawDisplayGainLoc_(rawShader_.uniformLocation("uDisplayGain")),
       srgbDisplayGainLoc_(srgbShader_.uniformLocation("uDisplayGain")),
       rec709DisplayGainLoc_(rec709Shader_.uniformLocation("uDisplayGain")),
@@ -194,7 +207,10 @@ OcioDisplayTransform::OcioDisplayTransform(ShaderProgram rawShader, ShaderProgra
       rec709AberrationLoc_(rec709Shader_.uniformLocation("uAberration")),
       rawDisplayOffsetLoc_(rawShader_.uniformLocation("uDisplayOffset")),
       srgbDisplayOffsetLoc_(srgbShader_.uniformLocation("uDisplayOffset")),
-      rec709DisplayOffsetLoc_(rec709Shader_.uniformLocation("uDisplayOffset")) {}
+      rec709DisplayOffsetLoc_(rec709Shader_.uniformLocation("uDisplayOffset")),
+      rawDitherOriginLoc_(rawShader_.uniformLocation("uDitherOrigin")),
+      srgbDitherOriginLoc_(srgbShader_.uniformLocation("uDitherOrigin")),
+      rec709DitherOriginLoc_(rec709Shader_.uniformLocation("uDitherOrigin")) {}
 
 // Not wrapped in GL_CALL: runs every frame.
 void OcioDisplayTransform::bind() const {
@@ -204,18 +220,21 @@ void OcioDisplayTransform::bind() const {
     int invertLoc = rawInvertLoc_;
     int aberrationLoc = rawAberrationLoc_;
     int displayOffsetLoc = rawDisplayOffsetLoc_;
+    int ditherOriginLoc = rawDitherOriginLoc_;
     if (activeLut_ == Lut::SRGB) {
         displayGainLoc = srgbDisplayGainLoc_;
         channelViewLoc = srgbChannelViewLoc_;
         invertLoc = srgbInvertLoc_;
         aberrationLoc = srgbAberrationLoc_;
         displayOffsetLoc = srgbDisplayOffsetLoc_;
+        ditherOriginLoc = srgbDitherOriginLoc_;
     } else if (activeLut_ == Lut::Rec709) {
         displayGainLoc = rec709DisplayGainLoc_;
         channelViewLoc = rec709ChannelViewLoc_;
         invertLoc = rec709InvertLoc_;
         aberrationLoc = rec709AberrationLoc_;
         displayOffsetLoc = rec709DisplayOffsetLoc_;
+        ditherOriginLoc = rec709DitherOriginLoc_;
     }
     shader.use();
     glUniform3f(displayGainLoc, gain_.r, gain_.g, gain_.b);
@@ -223,6 +242,9 @@ void OcioDisplayTransform::bind() const {
     glUniform1i(invertLoc, invert_ ? 1 : 0);
     glUniform1f(aberrationLoc, aberration_);
     glUniform3f(displayOffsetLoc, displayOffset_.r, displayOffset_.g, displayOffset_.b);
+    // The image's top-left pixel in window coordinates, whose y axis points up.
+    glUniform2i(ditherOriginLoc, imageRect_.x, imageRect_.y + imageRect_.height - 1);
+    ditherMask_.bind(kDitherMaskUnit);
 }
 
 }  // namespace pathtracer::gfx

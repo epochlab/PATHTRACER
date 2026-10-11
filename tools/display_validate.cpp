@@ -1,17 +1,22 @@
 // Correctness gate for the CPU-evaluable display and statistics path: the OCIO display transform and the frame-time ring buffer.
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
+#include <numeric>
 #include <random>
 #include <string>
 #include <vector>
 
 #include "check.h"
 #include "pathtracer/debug/frame_stats.h"
+#include "pathtracer/debug/power_spectrum.h"
 #include "pathtracer/gfx/ocio_cpu_transform.h"
 #include "pathtracer/gfx/viewport.h"
+#include "pathtracer/scene/sampler.h"
 
 namespace {
 
@@ -160,6 +165,136 @@ PT_CHECK(encode_matches_whole_image_transform, Fast, Exact) {
     std::vector<float> raw = mapped;
     pathtracer::gfx::applyOcioDisplayTransform(raw, kWidth, kHeight, pathtracer::gfx::OcioDisplayTransform::Lut::Raw);
     PT_EXPECT(ctx, raw == mapped, "the Raw LUT must leave every value untouched");
+}
+
+// --- Dither: one 128x128 tile of the mask, so every quantile of the TPDF appears exactly once in each test field.
+
+constexpr int kTile = pathtracer::gfx::kDitherMaskSize;
+constexpr int kTileTexels = pathtracer::gfx::kDitherMaskTexels;
+
+// Codes of a flat field at display-referred v over one tile, untransformed at unit gain so only the dither and quantize act.
+std::vector<unsigned char> encodeFlatTile(float v) {
+    const std::vector<float> rgb(static_cast<std::size_t>(kTileTexels) * 3, v);
+    std::vector<unsigned char> codes(rgb.size());
+    pathtracer::gfx::encodeForDisplay(rgb, kTile, kTile, glm::vec3(1.0F), false, glm::vec3(0.0F), codes);
+    return codes;
+}
+
+// Flat-field levels whose code +-1.5 stays inside [0, 255], so the clamp never acts and the dither alone decides each code.
+std::vector<float> unclampedLevels(std::uint64_t seed) {
+    constexpr int kLevels = 16;
+    std::mt19937_64 rng(seed);
+    std::uniform_real_distribution<float> level(1.5F / 255.0F, 253.5F / 255.0F);
+    std::vector<float> levels(kLevels);
+    std::generate(levels.begin(), levels.end(), [&] { return level(rng); });
+    return levels;
+}
+
+// TPDF on (-1, 1) codes: mean 0, variance 1/6. Midpoint quantiles of a function monotone on each half err by at most 2/N.
+PT_CHECK(dither_mask_is_tpdf, Fast, Exact) {
+    const std::array<float, kTileTexels>& mask = pathtracer::gfx::displayDitherMask();
+    double sum = 0.0;
+    double squares = 0.0;
+    double peak = 0.0;
+    for (const float d : mask) {
+        const double code = 255.0 * d;
+        sum += code;
+        squares += code * code;
+        peak = std::max(peak, std::fabs(code));
+    }
+    const double mean = sum / kTileTexels;
+    const double variance = (squares / kTileTexels) - (mean * mean);
+    constexpr double kQuadratureBound = 2.0 / kTileTexels;
+    char detail[160];
+    std::snprintf(detail, sizeof(detail), "mean %.3g, variance %.9f vs 1/6, peak %.9f codes", mean, variance, peak);
+    ctx.plan(3);
+    PT_EXPECT(ctx, std::fabs(mean) <= kQuadratureBound, detail);
+    PT_EXPECT(ctx, std::fabs(variance - (1.0 / 6.0)) <= kQuadratureBound, detail);
+    PT_EXPECT(ctx, peak < 1.0, detail);
+}
+
+// TPDF meets Schuchman's condition (1964), so E[Q(x + d)] = x; over the tile's midpoint quantiles, a <= 2-code step errs <= 2/N.
+PT_CHECK(encode_of_flat_field_is_unbiased, Fast, Exact) {
+    constexpr double kQuadratureBound = 2.0 / kTileTexels;
+    double worst = 0.0;
+    float worstLevel = 0.0F;
+    for (const float v : unclampedLevels(ctx.seed())) {
+        const std::vector<unsigned char> codes = encodeFlatTile(v);
+        const double mean = std::accumulate(codes.begin(), codes.end(), 0.0) / static_cast<double>(codes.size());
+        const double bias = std::fabs(mean - (255.0 * static_cast<double>(v)));
+        if (bias > worst) {
+            worst = bias;
+            worstLevel = v;
+        }
+    }
+    char detail[160];
+    std::snprintf(detail, sizeof(detail), "worst mean-code bias %.3g at v = %.6f, bound %.3g", worst,
+                  static_cast<double>(worstLevel), kQuadratureBound);
+    ctx.plan(1);
+    PT_EXPECT(ctx, worst <= kQuadratureBound, detail);
+}
+
+// A flat field's quantization error must be blue, every threshold of a void-and-cluster mask being so; sampler_validate's gate.
+PT_CHECK(encode_error_is_blue_noise, Fast, Statistical) {
+    constexpr int kLowBand = 3;  // everything below an eighth of Nyquist, as sampler_validate's mask_is_blue_noise
+    const std::array<double, pathtracer::debug::kSpectrumBands> null = pathtracer::debug::whiteNoiseBandShare(kTile, kTile);
+    const double expected = std::accumulate(null.begin() + kLowBand, null.end(), 0.0);
+    double worst = 0.0;
+    for (const float v : unclampedLevels(ctx.seed())) {
+        const std::vector<unsigned char> codes = encodeFlatTile(v);
+        std::vector<double> error(static_cast<std::size_t>(kTileTexels));
+        for (std::size_t i = 0; i < error.size(); ++i) {
+            error[i] = static_cast<double>(codes[i * 3]) - (255.0 * static_cast<double>(v));
+        }
+        const std::array<double, pathtracer::debug::kSpectrumBands> bands =
+            pathtracer::debug::octaveBandPower(error, kTile, kTile);
+        const double measured = std::accumulate(bands.begin() + kLowBand, bands.end(), 0.0) /
+                                std::accumulate(bands.begin(), bands.end(), 0.0);
+        worst = std::max(worst, measured);
+    }
+    char detail[160];
+    std::snprintf(detail, sizeof(detail), "worst low band %.5f%% of power vs %.3f%% white-noise null", 100.0 * worst,
+                  100.0 * expected);
+    ctx.plan(1);
+    PT_EXPECT(ctx, worst < 0.5 * expected, detail);
+}
+
+// Every sampler dither channel is a toroidal shift of its mask, so all 128^2 shifts cover every channel. sampler_validate's |r| gate.
+PT_CHECK(dither_mask_independent_of_sampler, Fast, Statistical) {
+    const std::array<float, kTileTexels>& mask = pathtracer::gfx::displayDitherMask();
+    std::vector<double> display(mask.begin(), mask.end());
+    std::vector<double> sampler(static_cast<std::size_t>(kTileTexels));
+    for (int y = 0; y < kTile; ++y) {
+        for (int x = 0; x < kTile; ++x) {
+            sampler[(static_cast<std::size_t>(y) * kTile) + static_cast<std::size_t>(x)] =
+                pathtracer::scene::blueNoiseDither(x, y, 0) - 0.5;  // mean-centred: the mask is uniform on [0,1)
+        }
+    }
+    const double displayNorm = std::inner_product(display.begin(), display.end(), display.begin(), 0.0);
+    const double samplerNorm = std::inner_product(sampler.begin(), sampler.end(), sampler.begin(), 0.0);
+    const double norm = std::sqrt(displayNorm * samplerNorm);
+    double worst = 0.0;
+    for (int dy = 0; dy < kTile; ++dy) {
+        for (int dx = 0; dx < kTile; ++dx) {
+            double dot = 0.0;
+            for (int y = 0; y < kTile; ++y) {
+                const double* a = &display[static_cast<std::size_t>(y) * kTile];
+                const double* b = &sampler[static_cast<std::size_t>((y + dy) % kTile) * kTile];
+                // The row's shift split at the wrap, so the inner loops carry no modulo.
+                for (int x = 0; x < kTile - dx; ++x) {
+                    dot += a[x] * b[x + dx];
+                }
+                for (int x = kTile - dx; x < kTile; ++x) {
+                    dot += a[x] * b[x + dx - kTile];
+                }
+            }
+            worst = std::max(worst, std::fabs(dot) / norm);
+        }
+    }
+    char detail[96];
+    std::snprintf(detail, sizeof(detail), "worst |r| = %.4f over all %d shifts", worst, kTileTexels);
+    ctx.plan(1);
+    PT_EXPECT(ctx, worst < 0.1, detail);
 }
 
 // --- FrameStats: testable exactly only because tick() takes an injectable clock, steady_clock having made every assertion a race.

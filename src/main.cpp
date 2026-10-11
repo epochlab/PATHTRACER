@@ -738,6 +738,7 @@ void presentFrame(AppResources& app,
     app.ocioTransform.setInvert(app.invert);
     // The picture only -- an artistic lens effect over the rendered image, not meaningful on a raw data AOV like Normal/Depth/Albedo.
     app.ocioTransform.setAberration(isPicture ? app.aberrationStrength : 0.0F);
+    app.ocioTransform.setImageRect(imageRect);
     app.ocioTransform.bind();
     app.postProcess.draw(app.pathTraceDisplayTexture->id(), app.ocioTransform.activeShader(), imageRect);
 }
