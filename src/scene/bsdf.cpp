@@ -22,14 +22,6 @@ float& massOf(BsdfClosure& closure, Technique technique) { return closure.mass[s
 
 float massOf(const BsdfClosure& closure, Technique technique) { return closure.mass[static_cast<std::size_t>(technique)]; }
 
-// Rows (t, b, n) of an orthonormal basis about unit n, branchless (Duff et al. 2017); the identity at n = +z.
-glm::mat3 toFrameAbout(const glm::vec3& n) {
-    const float s = std::copysign(1.0F, n.z);
-    const float a = -1.0F / (s + n.z);
-    const float b = n.x * n.y * a;
-    return glm::transpose(glm::mat3(glm::vec3(1.0F + (s * n.x * n.x * a), s * b, -s * n.x), glm::vec3(b, s + (n.y * n.y * a), -n.y), n));
-}
-
 // Rows (t, b, n) about unit n with t projected into its plane: an anisotropic lobe's alpha_t runs along t. Identity at (+z, +x).
 glm::mat3 toFrameAlong(const glm::vec3& n, const glm::vec3& t) {
     const glm::vec3 tangent = glm::normalize(t - (glm::dot(t, n) * n));

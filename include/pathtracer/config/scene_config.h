@@ -50,6 +50,23 @@ struct QuadLightConfig {
     bool twoSided = false;
 };
 
+// A volume material file, MaterialX anisotropic_vdf's inputs: coefficients per unit of the grid's own space at density 1.
+struct VolumeMaterialConfig {
+    glm::vec3 absorption;
+    glm::vec3 scattering;
+    float anisotropy;  // Henyey-Greenstein g in (-1, 1), positive forward
+};
+
+// A VDB density grid as a heterogeneous medium in world space, not under the model root: sigma(x) = density(x) * coefficient.
+struct VolumeConfig {
+    std::string vdbPath;  // relative to ASSET_ROOT_DIR
+    std::string grid;  // the FloatGrid's name in the file
+    glm::vec3 position;
+    glm::vec3 rotation;  // degrees; Rz*Ry*Rx as ModelConfig::rotation, so X applies first
+    float scale = 1.0F;  // uniform, applied first; coefficients are in grid units, so scaling keeps the optical depth
+    std::string materialPath;  // a VolumeMaterialConfig file, relative to ASSET_ROOT_DIR
+};
+
 // A material file: OpenPBR Surface v1.1.1 constants under their specification names, every omitted input at its default.
 using MaterialConfig = pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant>;
 
@@ -72,5 +89,8 @@ struct SceneConfig {
 
 // Reads and parses a standalone material file (e.g. assets/materials/clay.json). Same failure contract as loadSceneConfig.
 [[nodiscard]] std::optional<MaterialConfig> loadMaterialConfig(const std::string& path);
+
+// Reads and validates a volume material file (e.g. assets/materials/volume.json). Same failure contract as loadSceneConfig.
+[[nodiscard]] std::optional<VolumeMaterialConfig> loadVolumeMaterialConfig(const std::string& path);
 
 }  // namespace pathtracer::config
