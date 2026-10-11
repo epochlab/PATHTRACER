@@ -106,6 +106,10 @@ int pt_render(PtRenderer* renderer, const PtRenderRequest* request, float* const
 int pt_display_encode(const float* rgb, int width, int height, float exposure_ev, int display_transform,
                       unsigned char* out, char* err, int err_cap);
 
+/* Draws a w*h*channels image's cells over camera's frame onto out_w*out_h*channels, each texel its nearest pixel, as the viewer does. */
+int pt_lattice_preview(const float* image, int width, int height, int channels, const PtCamera* camera, int out_width,
+                       int out_height, float* out, char* err, int err_cap);
+
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif

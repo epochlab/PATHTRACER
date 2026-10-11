@@ -17,7 +17,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pathtracer import AOVS, LENS_PROJECTIONS, PIXEL_LATTICES, Renderer, aov_channels, aov_needs_samples, display_encode
+from pathtracer import (AOVS, LENS_PROJECTIONS, PIXEL_LATTICES, Renderer, aov_channels, aov_needs_samples, display_encode,
+                        lattice_preview)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCENE = "scenes/cornell.json"
@@ -250,6 +251,38 @@ def test_pixel_lattice_round_trips_and_rejects_unknown_names(renderer: Renderer)
     with pytest.raises(ValueError, match="triangular"):
         renderer.render(aovs=("beauty",), camera=dataclasses.replace(renderer.default_camera, pixel_lattice="triangular"),
                         width=8, height=8, samples=1)
+
+
+@pytest.mark.parametrize("lattice", PIXEL_LATTICES)
+@pytest.mark.parametrize("lens", ["fisheye_polynomial", "omnidirectional"])
+def test_lattice_preview_draws_each_texel_from_its_nearest_centre(renderer: Renderer, lattice: str, lens: str) -> None:
+    """Every texel holds the pixel whose documented centre is nearest, by brute force over all of them, the lat-long's wrapping."""
+    camera = dataclasses.replace(renderer.default_camera, lens=lens, pixel_lattice=lattice)
+    width, height, scale = 12, 8, 6
+    image = np.arange(width * height, dtype=np.float32).reshape(height, width, 1)
+    preview = lattice_preview(image, camera, scale=scale)
+    row_pitch = math.sqrt(3.0) / 2.0 if lattice == "hexagonal" else 1.0
+    assert preview.shape == (round(height * row_pitch * scale), width * scale, 1)
+    rows, columns = np.divmod(np.arange(width * height), width)
+    centre_x = columns + (0.25 + 0.5 * (rows % 2) if lattice == "hexagonal" else 0.5)
+    centre_y = (rows + 0.5) * row_pitch
+    texel_y, texel_x = np.mgrid[0:preview.shape[0], 0:preview.shape[1]]
+    dx = ((texel_x + 0.5) * width / preview.shape[1])[..., None] - centre_x
+    if lens == "omnidirectional":
+        dx -= width * np.round(dx / width)
+    distance = np.hypot(dx, ((texel_y + 0.5) * height * row_pitch / preview.shape[0])[..., None] - centre_y)
+    chosen = np.take_along_axis(distance, preview.astype(np.int64), axis=-1)[..., 0]
+    assert (chosen <= distance.min(axis=-1) + 1e-5).all()
+
+
+def test_lattice_preview_rejects_bad_input(renderer: Renderer) -> None:
+    image = np.zeros((4, 4, 3), dtype=np.float32)
+    with pytest.raises(ValueError, match="channels"):
+        lattice_preview(image[..., 0], renderer.default_camera)
+    with pytest.raises(ValueError, match="scale"):
+        lattice_preview(image, renderer.default_camera, scale=0)
+    with pytest.raises(ValueError, match="triangular"):
+        lattice_preview(image, dataclasses.replace(renderer.default_camera, pixel_lattice="triangular"))
 
 
 def test_unknown_lens_is_rejected_before_the_abi(renderer: Renderer) -> None:

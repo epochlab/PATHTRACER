@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <numeric>
 #include <bit>
 #include <cmath>
 #include <cstddef>
@@ -427,6 +428,35 @@ PT_CHECK(display_encode_boundary, Fast, Exact) {
                           encode(rgb.data(), kW, -1, untouched.data()) == PT_ERROR;
     PT_EXPECT(ctx, rejected && allBytes(untouched.begin(), untouched.end(), kGuardByte),
               "null buffers and non-positive extents must fail without writing");
+}
+
+// One texel per square pixel copies through exactly and no further; null buffers, empty extents and unknown lattices write nothing.
+PT_CHECK(lattice_preview_boundary, Fast, Exact) {
+    ctx.plan(3);
+    constexpr int kW = 5;
+    constexpr int kH = 3;
+    constexpr int kC = 2;
+    constexpr auto kFloats = static_cast<std::size_t>(kW * kH * kC);
+    std::vector<float> image(kFloats);
+    std::iota(image.begin(), image.end(), 0.0F);
+    const PtCamera camera{};
+    PtCamera triangular{};
+    triangular.pixel_lattice = 2;
+    std::vector<char> err(kErrorCapacity, '\0');
+    const auto preview = [&](const float* in, int width, const PtCamera* view, float* to) {
+        return pt_lattice_preview(in, width, kH, kC, view, kW, kH, to, err.data(), kErrorCapacity);
+    };
+    GuardedBuffer out(kFloats);
+    const bool copied = preview(image.data(), kW, &camera, out.storage.data()) == PT_OK &&
+                        std::equal(image.begin(), image.end(), out.storage.begin());
+    PT_EXPECT(ctx, copied, std::string("a square preview at one texel per pixel must be the image: ") + err.data());
+    PT_EXPECT(ctx, out.guardsIntact(), "wrote past out_width * out_height * channels floats");
+    GuardedBuffer untouched(kFloats);
+    float* to = untouched.storage.data();
+    const bool rejected = preview(nullptr, kW, &camera, to) == PT_ERROR && preview(image.data(), kW, nullptr, to) == PT_ERROR &&
+                          preview(image.data(), kW, &camera, nullptr) == PT_ERROR && preview(image.data(), 0, &camera, to) == PT_ERROR &&
+                          preview(image.data(), kW, &triangular, to) == PT_ERROR;
+    PT_EXPECT(ctx, rejected && untouched.allUntouched(), "null buffers, empty extents and unknown lattices must fail without writing");
 }
 
 // Every handle-taking query is defined on NULL, so a caller's failed open never turns a cleanup path into a crash.

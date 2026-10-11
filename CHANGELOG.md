@@ -21,6 +21,8 @@ The camera can now render a hexagonal sensor: `camera.pixelLattice` in profile.j
   only, since an odd row shift is not a lattice translation. The square mask would leak 110x its low-band power there.
 - **Output:** EXRs carry `pathtracer:pixelLattice` and `PixelAspectRatio` 2/sqrt(3). Motion vectors are in column
   pitches. The viewer draws each cell's texel over its Voronoi cell, and the probe reads the same cell.
+  `pt_lattice_preview` and Python's `lattice_preview(image, camera, scale=8)` draw the same cells into a square-pixel
+  array for `imshow` or `display_encode`, sharing the viewer's nearest-cell lookup.
 - **Refused:** Sobel, Gabor, DoG and Denoised, by name at every boundary, and bloom is off; their hexagonal forms are
   on the roadmap.
 - **Measured:** square output is bit-identical (33/33 EXRs), and the square viewer is pixel-identical. Hexagonal pixels

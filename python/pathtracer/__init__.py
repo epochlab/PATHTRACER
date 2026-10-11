@@ -8,7 +8,7 @@
 
 Values are scene-referred linear, unclamped, with no display transform applied: what a model should train on, not
 what a monitor should show. Pass one through ``display_encode`` for a picture that matches the viewer, or use
-``render_beauty --out`` to write one from the CLI.
+``render_beauty --out`` to write one from the CLI. ``lattice_preview`` draws a hexagonal render's cells as the viewer does.
 
 Arrays are C-contiguous float32, so ``torch.from_numpy(frame["beauty"])`` shares memory with no copy, leaving one
 explicit ``.to(device)``.
@@ -17,6 +17,7 @@ explicit ``.to(device)``.
 from __future__ import annotations
 
 import ctypes
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
@@ -24,7 +25,7 @@ import numpy as np
 
 from . import _ffi
 
-__all__ = ["AOVS", "Camera", "Renderer", "aov_channels", "aov_needs_samples", "display_encode"]
+__all__ = ["AOVS", "Camera", "Renderer", "aov_channels", "aov_needs_samples", "display_encode", "lattice_preview"]
 
 _LIB = _ffi.load_library()
 
@@ -92,6 +93,43 @@ def display_encode(
         exposure_ev,
         1 if display_transform else 0,
         out.ctypes.data_as(ctypes.POINTER(ctypes.c_ubyte)),
+        error,
+        len(error),
+    ) != 0:
+        raise RuntimeError(error.value.decode())
+    return out
+
+
+def lattice_preview(image: np.ndarray, camera: Camera, *, scale: int = 8) -> np.ndarray:
+    """A render drawn as its pixels' cells over ``camera``'s frame: hexagons on the hexagonal lattice, squares on the square.
+
+    ``image`` is ``(height, width, channels)`` from ``render`` with ``camera``. Each output texel takes the pixel whose centre is
+    nearest, columns wrapping where the lens does, exactly as the viewer draws: ``scale`` texels span one column pitch, so the
+    result is ``(round(height * row_pitch * scale), width * scale, channels)`` float32, ``row_pitch`` being ``sqrt(3) / 2`` when
+    hexagonal and 1 when square. ``imshow`` the result, or ``display_encode`` it, rather than the raw array, whose offset rows
+    ``imshow`` cannot know about.
+    """
+    if image.ndim != 3:
+        raise ValueError(f"lattice_preview takes (height, width, channels), got {image.shape}")
+    if scale < 1:
+        raise ValueError(f"scale must be at least 1, got {scale}")
+    struct = camera._to_struct()
+    height, width, channels = image.shape
+    row_pitch = math.sqrt(3.0) / 2.0 if camera.pixel_lattice == "hexagonal" else 1.0
+    out_height, out_width = round(height * row_pitch * scale), width * scale
+    source = np.ascontiguousarray(image, dtype=np.float32)
+    out = np.empty((out_height, out_width, channels), dtype=np.float32)
+
+    error = _ffi.make_error_buffer()
+    if _LIB.pt_lattice_preview(
+        source.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+        width,
+        height,
+        channels,
+        ctypes.byref(struct),
+        out_width,
+        out_height,
+        out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
         error,
         len(error),
     ) != 0:
