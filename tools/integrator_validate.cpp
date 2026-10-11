@@ -738,8 +738,11 @@ PT_CHECK(emission_returns_luminance_times_colour, Fast, Exact) {
     const float cornerMu = kFocalLengthMm / std::sqrt((kFocalLengthMm * kFocalLengthMm) + (18.0F * 18.0F) + (12.0F * 12.0F));
     const float coatIor = pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant>{}.coatIor;  // the clear coat keeps the default
     const glm::vec3 clearRatio = throughClear / open;
-    PT_EXPECT(ctx, std::abs(clearRatio.x - clearRatio.z) <= 1e-6F && clearRatio.x <= 1.0F - pathtracer::scene::fresnelDielectric(1.0F, 1.0F, coatIor) &&
-                       clearRatio.x >= 1.0F - pathtracer::scene::fresnelDielectric(cornerMu, 1.0F, coatIor),
+    // Each mean carries the tolerance's (kTexelSamples + 16) roundings, the quotient two of them plus its own.
+    const float ratioSlack = static_cast<float>((2 * (kTexelSamples + 16)) + 1) * std::numeric_limits<float>::epsilon();
+    PT_EXPECT(ctx, std::abs(clearRatio.x - clearRatio.z) <= 1e-6F &&
+                       clearRatio.x <= 1.0F - pathtracer::scene::fresnelDielectric(1.0F, 1.0F, coatIor) + ratioSlack &&
+                       clearRatio.x >= 1.0F - pathtracer::scene::fresnelDielectric(cornerMu, 1.0F, coatIor) - ratioSlack,
               "a clear coat must dim emission by its own untinted reflection alone, 1 - F(mu_o)");
     PT_EXPECT(ctx, glm::all(glm::lessThan(throughTint, open)) && glm::all(glm::greaterThan(throughTint, 0.5F * open)),
               "a half-weight tinted coat must dim emission, by at most its weight: (1-C) + C*T with 0 < T < 1");
@@ -1899,7 +1902,7 @@ PT_CHECK(ambient_occlusion_distance_bound, Slow, Statistical) {
 
 // Alpha is filtered primary coverage: the half-plane x < 0 images onto columns left of the centre line, the frame's x = 8.
 PT_CHECK(alpha_is_filtered_primary_coverage, Fast, Exact) {
-    // A pixel's support reaches kFilterRadius = 1.5 px from its centre c + 0.5: columns 0-6 see only the plane, 9-15 only the sky.
+    // A pixel's samples reach kFilterRadius = 1.5 px from its centre c + 0.5: columns 0-6 see only the plane, 9-15 only the sky.
     constexpr int kLastOpaque = 6;
     constexpr int kFirstClear = 9;
     TestScene scene = makeTwoInstanceScene(1.0F);
@@ -1909,12 +1912,13 @@ PT_CHECK(alpha_is_filtered_primary_coverage, Fast, Exact) {
     std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
     const EnvironmentMap env = makeUniformEnvironment();
     PathTraceSettings settings = makeSettings(1, 1);
-    settings.samplesPerPixel = 16;
+    // N shifted strata put a sample in any u-interval of length 2/N: 32 covers the 11.9% filter tail past an edge pixel's 0.5 px.
+    settings.samplesPerPixel = 32;
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     const pathtracer::scene::PathTraceResult hidden = renderPass(scene, env, settings, *accel, pool, /*showSky=*/false);
     const pathtracer::scene::PathTraceResult shown = renderPass(scene, env, settings, *accel, pool, /*showSky=*/true);
-    // The lane is (sum w) * fl(1 / sum w), two roundings: an all-opaque support reads within 2u = FLT_EPSILON of 1.
-    const auto opaque = [](float alpha) { return std::abs(alpha - 1.0F) <= std::numeric_limits<float>::epsilon(); };
+    // The lane is the mean of 0/1 samples, n/n exactly: an all-opaque pixel reads 1 with no rounding.
+    const auto opaque = [](float alpha) { return alpha == 1.0F; };
     bool interior = true;
     bool edge = true;
     bool monotone = true;
@@ -1937,6 +1941,42 @@ PT_CHECK(alpha_is_filtered_primary_coverage, Fast, Exact) {
     PT_EXPECT(ctx, monotone, "coverage rises moving off the half-plane");
     PT_EXPECT(ctx, premultiplied, "a transparent pixel carries radiance with the sky hidden");
     PT_EXPECT(ctx, opaqueSky, "a shown sky is not opaque");
+}
+
+// Film offsets are filter-distributed: the coverage of a pixel 0.5 px from a half-plane's edge is the filter's mass past that edge.
+PT_CHECK(film_offsets_follow_the_filter_cdf, Fast, Exact) {
+    // Blackman-Harris (Harris 1978) over t in [0, 1] spanning +/-1.5 px: offset < -0.5 px is t < 1/3, from the closed-form integral.
+    constexpr double kTwoPi = 2.0 * std::numbers::pi;
+    const auto integral = [](double t) {
+        return (0.35875 * t) - (0.48829 * std::sin(kTwoPi * t) / kTwoPi) + (0.14128 * std::sin(2.0 * kTwoPi * t) / (2.0 * kTwoPi)) -
+               (0.01168 * std::sin(3.0 * kTwoPi * t) / (3.0 * kTwoPi));
+    };
+    const double tail = integral(1.0 / 3.0) / integral(1.0);
+    // Shifted strata hold one sample per 1/N cell, so an interval's count is within 2 of N times its length; 1024 separates a tent.
+    constexpr int kSamples = 1024;
+    constexpr double kBound = 2.0 / kSamples;
+    constexpr int kOpaqueEdge = (kImageSize / 2) - 1;
+    TestScene scene = makeTwoInstanceScene(1.0F);
+    scene.worldTriangles.resize(2);
+    scene.shadingTriangles.resize(2);
+    scene.instances.resize(1);
+    std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+    const EnvironmentMap env = makeUniformEnvironment();
+    PathTraceSettings settings = makeSettings(0, 1);
+    settings.samplesPerPixel = kSamples;
+    const pathtracer::scene::PathTraceResult traced =
+        renderPass(scene, env, settings, *accel, sharedPool(ctx.threads()), /*showSky=*/false);
+    double worst = 0.0;
+    for (int y = 0; y < kImageSize; ++y) {
+        const std::size_t row = static_cast<std::size_t>(y) * kImageSize;
+        worst = std::max({worst, std::abs(traced.alpha.texels[row + kOpaqueEdge] - (1.0 - tail)),
+                          std::abs(traced.alpha.texels[row + kOpaqueEdge + 1] - tail)});
+    }
+    ctx.plan(1);
+    char detail[160];
+    std::snprintf(detail, sizeof(detail), "edge coverage is %.4g from the filter's tail mass %.4g, over the stratified bound %.4g", worst,
+                  tail, kBound);
+    PT_EXPECT(ctx, worst <= kBound, detail);
 }
 
 // A checker minified 64:1 reads its mean wherever bounce 0 filters: Beauty by each sample's stratum, the G-buffer's Albedo by its pixel.
@@ -1971,7 +2011,7 @@ PT_CHECK(primary_hits_filter_minified_textures, Fast, Exact) {
     scene.worldTriangles = {Triangle{v0.position, v1.position, v2.position}, Triangle{v0.position, v2.position, v3.position}};
     scene.shadingTriangles = {ShadingTriangle{v0, v1, v2, 0}, ShadingTriangle{v0, v2, v3, 0}};
     const TextureHandle checkerTexture = tools::fixtures::makeTexture(kChecker, kChecker, pathtracer::gfx::kRgbChannels, checker);
-    // Emission alone, so Beauty is the filtered emission_color lookup itself, splatted; the G-buffer's Albedo reads base_color.
+    // Emission alone, so Beauty is the filtered emission_color lookup itself, averaged; the G-buffer's Albedo reads base_color.
     Material material = makeMaterial(1.0F);
     material.baseWeight = 0.0F;
     material.specularWeight = 0.0F;
@@ -1998,7 +2038,7 @@ PT_CHECK(primary_hits_filter_minified_textures, Fast, Exact) {
     pathtracer::scene::renderGBuffer(camera, camera, *accel, albedoScene.shadingTriangles, albedoScene.instances, settings.lookaheadDistance,
                                      pathtracer::scene::computeInstanceBounds(scene.shadingTriangles, 1), kImageSize, kImageSize, pool,
                                      gbuffer);
-    // 16 texels per stratum select levels 3-4, every one exactly 0.5; the blend and the splat's (sum w) fl(1/sum w) round a few ulp.
+    // 16 texels per stratum select levels 3-4, every one exactly 0.5; the blend rounds a few ulp, the 16-sample mean adds one.
     const float bound = 8.0F * std::numeric_limits<float>::epsilon() * 0.5F;
     float worstBeauty = 0.0F;
     float worstAlbedo = 0.0F;
@@ -2036,7 +2076,8 @@ PT_CHECK(omnidirectional_film_filter_reaches_across_the_seam, Fast, Exact) {
     std::optional<EmbreeAccel> accel = EmbreeAccel::build({});
     pathtracer::scene::ThreadPool pool;
     PathTraceSettings settings;
-    settings.samplesPerPixel = 16;
+    // N shifted strata put a sample in any u-interval of length 2/N: 32 covers the 6.8% of filter mass that reaches the band.
+    settings.samplesPerPixel = 32;
     // Yaw 180 faces +Z with -X on the right, the map's own frame, so the image's u is the map's u.
     const Camera camera(glm::vec3(0.0F), glm::vec3(0.0F, 180.0F, 0.0F), Camera::FilmBack{36.0F, 24.0F}, kFocalLengthMm, 0.01F, 1000.0F,
                         2.8F, 1.0F / 125.0F, 100.0F, pathtracer::scene::Lens{pathtracer::scene::LensProjection::Omnidirectional});
@@ -2064,8 +2105,11 @@ PT_CHECK(omnidirectional_film_filter_reaches_across_the_seam, Fast, Exact) {
         bool lit = true;
         bool dark = true;
         for (int y = 0; y < kHeight; ++y) {
-            lit = lit && result.beauty.rgb((static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(seamSide)).x > 0.0F;
-            dark = dark && result.beauty.rgb((static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(inward)).x == 0.0F;
+            // An end row's samples may pass the pole, which turns longitude by pi: only rows a 1.5 px reach keeps in frame must be lit.
+            const bool inFrame = y > 0 && y < kHeight - 1;
+            const std::size_t row = static_cast<std::size_t>(y) * kWidth;
+            lit = lit && (!inFrame || result.beauty.rgb(row + static_cast<std::size_t>(seamSide)).x > 0.0F);
+            dark = dark && result.beauty.rgb(row + static_cast<std::size_t>(inward)).x == 0.0F;
         }
         PT_EXPECT(ctx, lit, "column " + std::to_string(seamSide) + " got nothing across the seam from " + std::to_string(litColumn));
         PT_EXPECT(ctx, dark, "column " + std::to_string(inward) + ", past the filter's reach of the band, was lit");

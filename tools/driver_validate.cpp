@@ -109,10 +109,10 @@ struct DriverFixture {
 std::unique_ptr<DriverFixture> makeFixture() {
     auto fixture = std::make_unique<DriverFixture>();
     TestScene& scene = fixture->scene;
-    // Every accumulated image must vary across passes, or a missing accumulate entry for it is invisible to the running-mean check.
+    // Every image must vary across passes or the running-mean check is blind to it: the floor ends mid-frame, so Alpha varies there.
     pushQuad(scene,
              {glm::vec3(-kQuadExtent, -kQuadExtent, kFloorZ), glm::vec3(kQuadExtent, -kQuadExtent, kFloorZ),
-              glm::vec3(kQuadExtent, kQuadExtent, kFloorZ), glm::vec3(-kQuadExtent, kQuadExtent, kFloorZ)},
+              glm::vec3(kQuadExtent, 0.0F, kFloorZ), glm::vec3(-kQuadExtent, 0.0F, kFloorZ)},
              glm::vec3(0.0F, 0.0F, 1.0F), 0);
     pushQuad(scene,
              {glm::vec3(kWallX, -kQuadExtent, kFloorZ), glm::vec3(kWallX, -kQuadExtent, kWallTopZ),
@@ -143,7 +143,7 @@ PathTraceDriver::Request makeRequest(int maxSamples, const Camera& camera) {
     request.width = kImageSize;
     request.height = kImageSize;
     request.envRotationDegrees = glm::vec3(0.0F);
-    request.showSky = true;
+    request.showSky = false;
     request.envLightEnabled = true;
     request.envExposure = 1.0F;
     request.settings = makeSettings();
@@ -223,7 +223,7 @@ OracleMean oracleBatchMean(DriverFixture& fixture, const Camera& camera, int pas
         stats.reset();
         pathtracer::scene::renderPathTraced(camera, *fixture.accel, fixture.scene.shadingTriangles,
                                          fixture.scene.instances, fixture.scene.instanceLightIndex, lights,
-                                         kImageSize, kImageSize, /*showSky=*/true, settings, scrambleSeed, /*sampleBase=*/p,
+                                         kImageSize, kImageSize, /*showSky=*/false, settings, scrambleSeed, /*sampleBase=*/p,
                                          /*sampleCount=*/passes, generation, scrambleSeed, fixture.pool, stats,
                                          pass);
         const double k = p + 1;
@@ -713,7 +713,6 @@ PT_CHECK(over_range_stats_match_serial_scan, Slow, Exact) {
 
 // The tiling is a work split, so it must cover the target exactly and never hand the pool fewer tiles than it can use.
 PT_CHECK(tile_size_covers_the_target_and_fills_the_pool, Fast, Exact) {
-    using pathtracer::scene::kMinPathTraceTileSize;
     using pathtracer::scene::kPathTraceTileSize;
     using pathtracer::scene::kTilesPerThread;
     using pathtracer::scene::pathTraceTileSize;
@@ -725,9 +724,9 @@ PT_CHECK(tile_size_covers_the_target_and_fills_the_pool, Fast, Exact) {
             for (const unsigned int threads : kThreads) {
                 const int size = pathTraceTileSize(width, height, threads);
                 char detail[192];
-                std::snprintf(detail, sizeof(detail), "%dx%d on %u threads gave tile %d, outside [%d, %d]",
-                              width, height, threads, size, kMinPathTraceTileSize, kPathTraceTileSize);
-                PT_EXPECT(ctx, size >= kMinPathTraceTileSize && size <= kPathTraceTileSize, detail);
+                std::snprintf(detail, sizeof(detail), "%dx%d on %u threads gave tile %d, outside [1, %d]", width, height, threads,
+                              size, kPathTraceTileSize);
+                PT_EXPECT(ctx, size >= 1 && size <= kPathTraceTileSize, detail);
 
                 // Ceiling division must reach every pixel: a grid short of the target would silently drop a strip.
                 const int tilesX = (width + size - 1) / size;
@@ -739,7 +738,7 @@ PT_CHECK(tile_size_covers_the_target_and_fills_the_pool, Fast, Exact) {
                 // Largest such tile: shrinking is only justified where the next size up could not fill the pool.
                 const bool wantedMet = static_cast<long long>(tilesX) * tilesY >=
                                         static_cast<long long>(threads) * kTilesPerThread;
-                const bool atFloor = size == kMinPathTraceTileSize;
+                const bool atFloor = size == 1;
                 const bool atCeiling = size == kPathTraceTileSize;
                 std::snprintf(detail, sizeof(detail), "%dx%d on %u threads shrank to %d without needing to", width,
                               height, threads, size);
@@ -876,7 +875,7 @@ PT_CHECK(replicate_means_match_batch_means, Slow, Exact) {
         stats.reset();
         pathtracer::scene::renderPathTraced(camera, *fixture->accel, fixture->scene.shadingTriangles,
                                          fixture->scene.instances, fixture->scene.instanceLightIndex, lights,
-                                         kImageSize, kImageSize, /*showSky=*/true, makeSettings(), scrambleSeed, /*sampleBase=*/p,
+                                         kImageSize, kImageSize, /*showSky=*/false, makeSettings(), scrambleSeed, /*sampleBase=*/p,
                                          /*sampleCount=*/kPasses, oracleGeneration, scrambleSeed, fixture->pool,
                                          stats, pass);
         const auto slot = static_cast<std::size_t>(p % replicates);

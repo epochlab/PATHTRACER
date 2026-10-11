@@ -21,11 +21,9 @@
 
 namespace pathtracer::scene {
 
-// Square destination tiles, one owner each; splatting crosses pixel bounds. Halo re-traces 4.2% here vs 6.3% at 64, and 128 ties with 96.
+// Square tiles, one owner each; pixels are independent under filter importance sampling, so the size sets only scheduling granularity.
 inline constexpr int kPathTraceTileSize = 96;
-// Floor for the resolution-derived size: the halo re-trace is (4t+4)/t^2, 4.3% at 96 but 12.9% at 32, so balance stops paying below it.
-inline constexpr int kMinPathTraceTileSize = 32;
-// Tiles per worker the split aims for: two leaves no worker idle and bounds the straggler tail at half a worker's share, without more halo.
+// Tiles per worker the split aims for: two leaves no worker idle and bounds the straggler tail at half a worker's share.
 inline constexpr int kTilesPerThread = 2;
 
 // Tile edge renderPathTraced splits `width` x `height` into for `threadCount` workers: kPathTraceTileSize unless that leaves the pool idle.
