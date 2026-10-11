@@ -28,9 +28,6 @@ using pathtracer::scene::fresnelDielectric;
 
 constexpr double kPi = 3.14159265358979323846;
 
-// Must match bsdf.cpp's roughness floor: each row stores the albedo of the lobe that ships at r, alpha = max(r*r, kMinAlpha).
-constexpr float kMinAlpha = 0.02F * 0.02F;
-
 // Reflect side, three resolutions each sized by what checkAlbedoTableInterpolation measures on that axis; the bilinear read dominates.
 constexpr int kAlbedoRoughnessRes = 256;
 constexpr int kAlbedoMuRes = 256;
@@ -64,6 +61,12 @@ struct Split {
     double b;
     double c;
 };
+
+// The deficit 1 - E in double, where it is resolved: formed in float from a table's E it cancels to nothing as alpha -> 0.
+double deficitOf(const Split& split) {
+    // A passive microsurface reflects no more than it receives; the quadrature's own residual above E = 1 is no energy.
+    return std::max(1.0 - (split.a + split.b), 0.0);
+}
 
 // Gauss-Legendre nodes/weights on [0,1] by Newton on P_n through Bonnet's recurrence (Numerical Recipes 3rd ed. 4.6.1); weights sum to 1.
 struct GaussLegendre {
@@ -100,6 +103,11 @@ GaussLegendre gaussLegendre(int n) {
 }
 
 Split reflectAlbedo(double mu, double alpha, const GaussLegendre& phiRule, const GaussLegendre& psiRule) {
+    // alpha = 0 is the smooth mirror, every facet the macro normal: E(F) = F(mu) exactly, where the measure below degenerates.
+    if (alpha == 0.0) {
+        const double fc = std::pow(1.0 - mu, 5.0);
+        return {1.0 - fc, fc, mu * fc * (1.0 - mu)};
+    }
     const double sinTv = std::sqrt(std::max(0.0, 1.0 - (mu * mu)));
     double a = 0.0;
     double b = 0.0;
@@ -146,9 +154,18 @@ struct EscapeSums {
 
 // Escaping fraction of a dielectric interface, reflected and transmitted shares: exact Fresnel, 1.0 inside TIR where Schlick reads ~0.1.
 EscapeSums escapeAlbedo(double mu, double alpha, const GaussLegendre& rule) {
+    EscapeSums sums{};
+    // alpha = 0 is the smooth interface: it reflects F(mu) and transmits the rest, F being 1 past the critical angle.
+    if (alpha == 0.0) {
+        for (int ei = 0; ei < kEtaRes; ++ei) {
+            const double fresnel = fresnelDielectric(static_cast<float>(mu), static_cast<float>(etaAtIndex(ei)), 1.0F);
+            sums.reflect[static_cast<std::size_t>(ei)] = fresnel;
+            sums.transmit[static_cast<std::size_t>(ei)] = 1.0 - fresnel;
+        }
+        return sums;
+    }
     const double sinTv = std::sqrt(std::max(0.0, 1.0 - (mu * mu)));
     const glm::dvec3 wo(sinTv, 0.0, mu);
-    EscapeSums sums{};
     for (int ei = 0; ei < kEtaRes; ++ei) {
         const auto e = static_cast<std::size_t>(ei);
         const auto eta = static_cast<float>(etaAtIndex(ei));
@@ -240,9 +257,11 @@ struct AlbedoTable {
     std::vector<float> a;  // [roughnessIndex][muIndex], kAlbedoRoughnessRes * kAlbedoMuRes
     std::vector<float> b;
     std::vector<float> c;
+    std::vector<float> d;  // 1 - E in double
     std::vector<float> aavg;  // cosine-weighted means, 2*integral(.(mu)*mu dmu)
     std::vector<float> bavg;
     std::vector<float> cavg;
+    std::vector<float> davg;
     std::vector<float> r;  // [roughnessIndex][muIndex][etaIndex], kTransmitRoughnessRes * kTransmitMuRes * kEtaRes
     std::vector<float> t;
     std::vector<float> ravg;
@@ -265,9 +284,10 @@ double escapeMu(int index) {
     return t * t;
 }
 
+// alpha = r^2 exactly, as bsdf.cpp's alphaForRoughness: row 0 is the smooth surface itself.
 double gridAlpha(int index, int resolution) {
     const double roughness = static_cast<double>(index) / static_cast<double>(resolution - 1);
-    return std::max(roughness * roughness, static_cast<double>(kMinAlpha));
+    return roughness * roughness;
 }
 
 // Directional tables at the stored grid plus cosine-weighted means, each mean a Gauss-Legendre integral in mu, not a trapezoid.
@@ -278,9 +298,11 @@ void buildReflect(AlbedoTable& table, int phiNodes, int psiNodes, int muNodes) {
     table.a.assign(static_cast<std::size_t>(kAlbedoRoughnessRes) * kAlbedoMuRes, 0.0F);
     table.b.assign(static_cast<std::size_t>(kAlbedoRoughnessRes) * kAlbedoMuRes, 0.0F);
     table.c.assign(static_cast<std::size_t>(kAlbedoRoughnessRes) * kAlbedoMuRes, 0.0F);
+    table.d.assign(static_cast<std::size_t>(kAlbedoRoughnessRes) * kAlbedoMuRes, 0.0F);
     table.aavg.assign(kAlbedoRoughnessRes, 0.0F);
     table.bavg.assign(kAlbedoRoughnessRes, 0.0F);
     table.cavg.assign(kAlbedoRoughnessRes, 0.0F);
+    table.davg.assign(kAlbedoRoughnessRes, 0.0F);
     // One roughness row per worker, sharing no accumulator, so the result is identical to serial order: the artifact stays deterministic.
     parallelRows(kAlbedoRoughnessRes, [&](int ri) {
         const double alpha = gridAlpha(ri, kAlbedoRoughnessRes);
@@ -289,6 +311,7 @@ void buildReflect(AlbedoTable& table, int phiNodes, int psiNodes, int muNodes) {
             table.a[static_cast<std::size_t>((ri * kAlbedoMuRes) + mi)] = static_cast<float>(split.a);
             table.b[static_cast<std::size_t>((ri * kAlbedoMuRes) + mi)] = static_cast<float>(split.b);
             table.c[static_cast<std::size_t>((ri * kAlbedoMuRes) + mi)] = static_cast<float>(split.c);
+            table.d[static_cast<std::size_t>((ri * kAlbedoMuRes) + mi)] = static_cast<float>(deficitOf(split));
         }
         // E(0, alpha) = 1 for every alpha, analytic at the axis' endpoint; a bake-time abort, since a miss means the quadrature is wrong.
         const double grazing = static_cast<double>(table.a[static_cast<std::size_t>(ri * kAlbedoMuRes)]) +
@@ -311,6 +334,7 @@ void buildReflect(AlbedoTable& table, int phiNodes, int psiNodes, int muNodes) {
         table.aavg[static_cast<std::size_t>(ri)] = static_cast<float>(aMean);
         table.bavg[static_cast<std::size_t>(ri)] = static_cast<float>(bMean);
         table.cavg[static_cast<std::size_t>(ri)] = static_cast<float>(cMean);
+        table.davg[static_cast<std::size_t>(ri)] = static_cast<float>(deficitOf({aMean, bMean, cMean}));
     });
 }
 
@@ -353,48 +377,50 @@ void buildTransmit(AlbedoTable& table, int nodes) {
     });
 }
 
-// Reflect-side E at a uniform-mu density node, read through the sqrt(mu) axis as directionalAlbedo does, float arithmetic included.
-float reflectAtUniformMu(const AlbedoTable& table, int ri, int mi) {
+// Reflect-side 1 - E at a uniform-mu density node, read through the sqrt(mu) axis as directionalAlbedo does, float arithmetic included.
+float deficitAtUniformMu(const AlbedoTable& table, int ri, int mi) {
     const float mf = std::sqrt(static_cast<float>(mi) / static_cast<float>(kMsReflectMuRes - 1)) * (kAlbedoMuRes - 1);
     const int m0 = std::min(static_cast<int>(mf), kAlbedoMuRes - 2);
     const float mt = mf - static_cast<float>(m0);
-    const auto at = [&](int m) {
-        const auto index = static_cast<std::size_t>((ri * kAlbedoMuRes) + m);
-        return table.a[index] + table.b[index];
-    };
+    const auto at = [&](int m) { return table.d[static_cast<std::size_t>((ri * kAlbedoMuRes) + m)]; };
     return at(m0) + (mt * (at(m0 + 1) - at(m0)));
 }
 
-// --- Sampling shape for the reflected multiple-scattering lobe, the exact (1-E)cos sampler.
+// Sampling shape for the reflected multiple-scattering lobe, the exact (1-E)cos sampler; a smooth row takes its alpha -> 0 limit.
 void buildMultipleScatteringShape(AlbedoTable& table) {
     const double step = 1.0 / (kMsReflectMuRes - 1);
     table.msDensity.assign(static_cast<std::size_t>(kAlbedoRoughnessRes) * kMsReflectMuRes, 0.0F);
     table.msCdf.assign(static_cast<std::size_t>(kAlbedoRoughnessRes) * kMsReflectMuRes, 0.0F);
-    for (int ri = 0; ri < kAlbedoRoughnessRes; ++ri) {
+    // Top down, so a row with no deficit (the mirror, whose lobe carries no energy) inherits the shape of the nearest row that has one.
+    int shapeRow = -1;
+    for (int ri = kAlbedoRoughnessRes - 1; ri >= 0; --ri) {
         std::vector<double> raw(kMsReflectMuRes);
-        for (int mi = 0; mi < kMsReflectMuRes; ++mi) {
-            const double deficit = 1.0 - static_cast<double>(reflectAtUniformMu(table, ri, mi));
-            raw[static_cast<std::size_t>(mi)] = deficit * mi * step;
-        }
         double norm = 0.0;
-        for (int mi = 0; mi + 1 < kMsReflectMuRes; ++mi) {
-            norm += 0.5 * (raw[static_cast<std::size_t>(mi)] + raw[static_cast<std::size_t>(mi) + 1]) * step;
+        for (int mi = 0; mi < kMsReflectMuRes; ++mi) {
+            raw[static_cast<std::size_t>(mi)] = static_cast<double>(deficitAtUniformMu(table, ri, mi)) * mi * step;
+            norm += mi > 0 ? 0.5 * (raw[static_cast<std::size_t>(mi) - 1] + raw[static_cast<std::size_t>(mi)]) * step : 0.0;
         }
-        // 1-E is positive at every roughness the table reaches (measured minimum 1.4e-7 at roughness 0), so this is a bake-time abort.
+        const auto row = [&](int r, int mi) { return static_cast<std::size_t>((r * kMsReflectMuRes) + mi); };
         if (!(norm > 0.0)) {
-            std::cerr << "albedo_table: roughness row " << ri << " has non-positive energy deficit " << norm
-                      << " -- the reflect table is wrong, not this shape\n";
-            std::exit(EXIT_FAILURE);
+            if (shapeRow < 0) {
+                std::cerr << "albedo_table: roughness row " << ri << " and every row above have no energy deficit -- the reflect table is wrong\n";
+                std::exit(EXIT_FAILURE);
+            }
+            for (int mi = 0; mi < kMsReflectMuRes; ++mi) {
+                table.msDensity[row(ri, mi)] = table.msDensity[row(shapeRow, mi)];
+                table.msCdf[row(ri, mi)] = table.msCdf[row(shapeRow, mi)];
+            }
+            continue;
         }
+        shapeRow = ri;
         double cdf = 0.0;
         for (int mi = 0; mi < kMsReflectMuRes; ++mi) {
-            const auto index = static_cast<std::size_t>((ri * kMsReflectMuRes) + mi);
             const double density = raw[static_cast<std::size_t>(mi)] / norm;
             if (mi > 0) {
-                cdf += 0.5 * (table.msDensity[index - 1] + density) * step;
+                cdf += 0.5 * (table.msDensity[row(ri, mi) - 1] + density) * step;
             }
-            table.msDensity[index] = static_cast<float>(density);
-            table.msCdf[index] = static_cast<float>(mi == kMsReflectMuRes - 1 ? 1.0 : cdf);
+            table.msDensity[row(ri, mi)] = static_cast<float>(density);
+            table.msCdf[row(ri, mi)] = static_cast<float>(mi == kMsReflectMuRes - 1 ? 1.0 : cdf);
         }
     }
 }
@@ -448,13 +474,15 @@ Residual verifyReflect(const AlbedoTable& table, int phiNodes, int psiNodes, int
     AlbedoTable reference;
     buildReflect(reference, phiNodes * 2, psiNodes * 2, muNodes * 2);
     Residual worst{0.0, "a", 0, 0};
-    const std::array<std::tuple<const char*, const std::vector<float>*, const std::vector<float>*>, 6>
+    const std::array<std::tuple<const char*, const std::vector<float>*, const std::vector<float>*>, 8>
         channels = {{{"a", &table.a, &reference.a},
                      {"b", &table.b, &reference.b},
                      {"c", &table.c, &reference.c},
+                     {"d", &table.d, &reference.d},
                      {"aavg", &table.aavg, &reference.aavg},
                      {"bavg", &table.bavg, &reference.bavg},
-                     {"cavg", &table.cavg, &reference.cavg}}};
+                     {"cavg", &table.cavg, &reference.cavg},
+                     {"davg", &table.davg, &reference.davg}}};
     for (const auto& [name, shipped, exact] : channels) {
         Residual channelWorst{0.0, name, 0, 0};
         for (std::size_t i = 0; i < shipped->size(); ++i) {
@@ -545,6 +573,8 @@ bool writeInc(const std::string& path, const AlbedoTable& table, double residual
            "// has one step width.\n"
            "// The reflect side splits E = F0*a + b - k*c for the F82-tint Fresnel F0 + (1-F0)(1-x)^5 - k*x(1-x)^6\n"
            "// (OpenPBR's metal, Hoffman 2023): linear in (F0, k), so the three Fresnel-free integrals are exact.\n"
+           "// kAlbedoDeficit is 1 - E formed in double, so the Kulla-Conty lobe never cancels it in float as alpha -> 0.\n"
+           "// Roughness 0 is alpha = 0, the smooth surface, tabulated analytically: E = F(mu), R = F, T = 1 - F.\n"
            "// Reflect side (a, b, c and their means) is exact-domain Gauss-Legendre, residual "
         << residual << " against a doubled rule.\n"
            "// Transmit side (r, t, ravg, tavg) is Gauss-Legendre in the NDF measure at "
@@ -567,9 +597,11 @@ bool writeInc(const std::string& path, const AlbedoTable& table, double residual
     writeArray(out, "kAlbedoA", table.a);
     writeArray(out, "kAlbedoB", table.b);
     writeArray(out, "kAlbedoC", table.c);
+    writeArray(out, "kAlbedoDeficit", table.d);
     writeArray(out, "kAlbedoAvgA", table.aavg);
     writeArray(out, "kAlbedoAvgB", table.bavg);
     writeArray(out, "kAlbedoAvgC", table.cavg);
+    writeArray(out, "kAlbedoAvgDeficit", table.davg);
     writeArray(out, "kEscapeReflect", table.r);
     writeArray(out, "kEscapeTransmit", table.t);
     writeArray(out, "kEscapeAvgReflect", table.ravg);

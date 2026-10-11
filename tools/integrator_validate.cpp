@@ -386,8 +386,8 @@ PT_CHECK(transmissive_slab_energy, Slow, Statistical) {
     constexpr int kSlabBounces = 12;
     constexpr float kThickness = 0.5F;
     constexpr int kWalkPaths = 1 << 16;
-    // 0.02 is below bsdf.cpp's smooth-roughness threshold, so it exercises the delta transmission path; the rest take the Walter lobe.
-    const std::array<float, 5> roughnesses = {0.02F, 0.05F, 0.4F, 0.7F, 1.0F};
+    // 0 is the smooth interface, the delta transmission path; the rest take the Walter lobe.
+    const std::array<float, 5> roughnesses = {0.0F, 0.05F, 0.4F, 0.7F, 1.0F};
 
     ctx.plan(static_cast<int>(2 * roughnesses.size()));
     const EnvironmentMap env = makeUniformEnvironment();
@@ -436,8 +436,8 @@ PT_CHECK(transmissive_sphere_energy, Slow, Statistical) {
     // Measured convergence point, not a guess: 32 and 96 bounces are bit-identical to this, and 12 is not.
     constexpr int kSphereBounces = 16;
     constexpr float kTolerance = 0.03F;
-    // 0.02 is below bsdf.cpp's smooth-roughness threshold and takes the delta path; the rest take the Walter lobe with far-side NEE.
-    const std::array<float, 4> roughnesses = {0.02F, 0.2F, 0.4F, 0.7F};
+    // 0 is the smooth interface and takes the delta path; the rest take the Walter lobe with far-side NEE.
+    const std::array<float, 4> roughnesses = {0.0F, 0.2F, 0.4F, 0.7F};
 
     const EnvironmentMap env = makeUniformEnvironment();
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
@@ -476,7 +476,7 @@ PT_CHECK(transmissive_sphere_energy, Slow, Statistical) {
     }};
     std::cout << "  dispersive (per channel, the one-sample hero-channel estimator)\n";
     for (const DispersiveGlass& glass : dispersive) {
-        const TestScene scene = withSurface(makeSphereScene(0.02F), [&](Material& material) {
+        const TestScene scene = withSurface(makeSphereScene(0.0F), [&](Material& material) {
             transmissive(material);
             material.specularIor = glass.ior;
             material.transmissionDispersionAbbeNumber = glass.abbe;
@@ -534,7 +534,7 @@ PT_CHECK(beer_lambert_absorption, Slow, Statistical) {
 
     std::cout << "integrator_validate: Beer-Lambert absorption through an index-matched medium\n";
     for (const AbsorptionCase& testCase : cases) {
-        const TestScene scene = withSurface(testCase.sphere ? makeSphereScene(0.02F) : makeSlabScene(0.02F, kSlabThickness),
+        const TestScene scene = withSurface(testCase.sphere ? makeSphereScene(0.0F) : makeSlabScene(0.0F, kSlabThickness),
                                             [&](Material& material) {
                                                 transmissive(material);
                                                 indexMatched(material);
@@ -595,7 +595,7 @@ PT_CHECK(on_surface_transmission_tint, Slow, Statistical) {
 
     std::cout << "integrator_validate: on-surface transmission tint at transmissionDepth 0\n";
     for (const TintCase& testCase : cases) {
-        const TestScene scene = withSurface(testCase.sphere ? makeSphereScene(0.02F) : makeSlabScene(0.02F, kSlabThickness),
+        const TestScene scene = withSurface(testCase.sphere ? makeSphereScene(0.0F) : makeSlabScene(0.0F, kSlabThickness),
                                             [&](Material& material) {
                                                 transmissive(material);
                                                 indexMatched(material);
@@ -1031,7 +1031,7 @@ PT_CHECK(transport_aov_partition, Slow, Exact) {
         {"quad glossy dielectric (rough 0.35)", Geometry::Quad, 0.35F, 0.0F, 0.0F, 1, 0.0F},
         {"quad rough metal (rough 0.5)", Geometry::Quad, 0.5F, 1.0F, 0.0F, 2, 0.0F},
         {"corner diffuse (rough 1.0)", Geometry::Corner, 1.0F, 0.0F, 0.0F, 4, 0.0F},
-        {"slab smooth glass (rough 0.02)", Geometry::Slab, 0.02F, 0.0F, 1.0F, 8, 0.0F},
+        {"slab smooth glass (rough 0)", Geometry::Slab, 0.0F, 0.0F, 1.0F, 8, 0.0F},
         {"slab rough glass (rough 0.4)", Geometry::Slab, 0.4F, 0.0F, 1.0F, 8, 0.0F},
         {"slab dispersive glass (rough 0.4)", Geometry::Slab, 0.4F, 0.0F, 1.0F, 8, 64.17F},
     }};

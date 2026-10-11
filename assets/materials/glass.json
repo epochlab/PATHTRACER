@@ -1,5 +1,5 @@
 {
-    "specular_roughness": 0.02,
+    "specular_roughness": 0.0,
     "specular_ior": 1.5168,
     "transmission_weight": 1.0,
     "transmission_color": [0.96, 0.98, 1.0],
