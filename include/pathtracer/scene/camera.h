@@ -5,12 +5,13 @@
 
 #include <glm/glm.hpp>
 
+#include "pathtracer/gfx/pixel_lattice.h"
 #include "pathtracer/scene/lens.h"
 #include "pathtracer/scene/ray_types.h"
 
 namespace pathtracer::scene {
 
-// Pose, lens and exposure, immutable once constructed. Right-handed, +Y up, -Z forward at rest, turned by rotationXyz like the scene.
+// Pose, lens, exposure and lattice, immutable once built. Right-handed, +Y up, -Z forward at rest, turned by rotationXyz like the scene.
 class Camera {
 public:
     // Sensor gate size in mm ({36.0F, 24.0F} for 35mm full-frame), paired with focal length to derive vertical FOV.
@@ -28,7 +29,8 @@ public:
     // rotationDegrees is XYZ degrees as scene.json's rotation keys: X then Y then Z about world axes, so z = 0 is yaw y over pitch x.
     Camera(const glm::vec3& position, const glm::vec3& rotationDegrees, FilmBack filmBack,
            float focalLengthMm, float nearClip, float farClip, float aperture,
-           float shutterSeconds, float iso, Lens lens = Lens{});
+           float shutterSeconds, float iso, Lens lens = Lens{},
+           pathtracer::gfx::PixelLattice pixelLattice = pathtracer::gfx::PixelLattice::Square);
 
     // Every invariant the projections and exposure divide by or take trig of; false names the first violation. Run at each boundary.
     [[nodiscard]] bool validate(std::string& error) const;
@@ -51,6 +53,7 @@ public:
     [[nodiscard]] float shutterSeconds() const { return shutterSeconds_; }
     [[nodiscard]] float iso() const { return iso_; }
     [[nodiscard]] Lens lens() const { return lens_; }
+    [[nodiscard]] pathtracer::gfx::PixelLattice pixelLattice() const { return pixelLattice_; }
 
     // Paraxial vertical FOV from focal length and film-back height, which viewBasis's half-extents are; other lenses' is below.
     [[nodiscard]] float verticalFovRadians() const;
@@ -127,6 +130,7 @@ private:
     float shutterSeconds_;
     float iso_;
     Lens lens_;
+    pathtracer::gfx::PixelLattice pixelLattice_;
 };
 
 }  // namespace pathtracer::scene

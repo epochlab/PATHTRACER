@@ -258,7 +258,7 @@ std::optional<HdrImage> loadImage(const std::string& path, ImageRole role, const
     return image;
 }
 
-bool writeExr(const std::string& path, const HdrImage& image, ImageRole role) {
+bool writeExr(const std::string& path, const HdrImage& image, ImageRole role, PixelLattice lattice) {
     OIIO::ImageSpec spec(image.width, image.height, image.channels, OIIO::TypeFloat);
     spec.channelnames.assign(kRgbPlanes.begin(), kRgbPlanes.begin() + image.channels);
     if (role == ImageRole::Colour) {
@@ -268,6 +268,10 @@ bool writeExr(const std::string& path, const HdrImage& image, ImageRole role) {
         spec.attribute("chromaticities", OIIO::TypeDesc(OIIO::TypeDesc::FLOAT, chromaticities.size()), chromaticities.data());
     } else {
         spec.attribute("oiio:ColorSpace", colorConfig().getColorSpaceNameByRole("data"));
+    }
+    if (lattice == PixelLattice::Hexagonal) {
+        spec.attribute("pathtracer:pixelLattice", kPixelLatticeNames[static_cast<int>(lattice)]);
+        spec.attribute("PixelAspectRatio", 1.0F / rowPitch(lattice));
     }
     return writeImage(path, "openexr", spec, image);
 }

@@ -1980,6 +1980,100 @@ PT_CHECK(film_offsets_follow_the_filter_cdf, Fast, Exact) {
     PT_EXPECT(ctx, worst <= kBound, detail);
 }
 
+namespace {
+
+// Blackman-Harris (Harris 1978) at radius r of the renderer's 1.5 px window, w(t) at t = 1/2 + r/3: transcribed, not shared.
+double radialWindow(double r) {
+    constexpr double kTwoPi = 2.0 * std::numbers::pi;
+    const double t = 0.5 + (r / 3.0);
+    return 0.35875 - (0.48829 * std::cos(kTwoPi * t)) + (0.14128 * std::cos(2.0 * kTwoPi * t)) - (0.01168 * std::cos(3.0 * kTwoPi * t));
+}
+
+// The radial window's mass past a line d from its centre: composite Simpson, r = d + (R - d) s^2 removing acos(d/r)'s square-root edge.
+double radialTailMass(double d) {
+    constexpr double kRadius = 1.5;
+    constexpr int kIntervals = 4096;
+    const auto simpson = [](const auto& g) {
+        double sum = g(0.0) + g(1.0);
+        for (int i = 1; i < kIntervals; ++i) {
+            sum += (i % 2 == 1 ? 4.0 : 2.0) * g(static_cast<double>(i) / kIntervals);
+        }
+        return sum / (3.0 * kIntervals);
+    };
+    const double past = simpson([d](double s) {
+        const double r = d + ((kRadius - d) * s * s);
+        return radialWindow(r) * r * 2.0 * std::acos(d / r) * 2.0 * (kRadius - d) * s;
+    });
+    const double total = 2.0 * std::numbers::pi * kRadius * simpson([](double u) { return radialWindow(kRadius * u) * kRadius * u; });
+    return past / total;
+}
+
+// Mean over the pixels a half-plane edge cuts of each one's tail estimate minus the oracle's, per independent scramble.
+tools::stats::Welford hexagonalTailResiduals(const TestScene& scene, EmbreeAccel& accel, const EnvironmentMap& env,
+                                             const PathTraceSettings& settings, pathtracer::scene::ThreadPool& pool, const Camera& camera,
+                                             bool horizontalEdge, int seeds) {
+    const pathtracer::gfx::PixelLattice lattice = camera.pixelLattice();
+    const glm::vec2 edge = 0.5F * pathtracer::gfx::frameExtent(lattice, kImageSize, kImageSize);
+    tools::stats::Welford residuals;
+    for (int seed = 0; seed < seeds; ++seed) {
+        const pathtracer::scene::PathTraceResult traced =
+            renderPass(scene, env, settings, accel, pool, /*showSky=*/false, 100U + static_cast<std::uint32_t>(seed), camera);
+        double sum = 0.0;
+        int cut = 0;
+        for (int y = 0; y < kImageSize; ++y) {
+            for (int x = 0; x < kImageSize; ++x) {
+                const glm::vec2 centre = pathtracer::gfx::pixelCentre(lattice, x, y);
+                // The plane is x < 0: left of the vertical edge, and above the horizontal one under the 90-degree roll.
+                const double signedDistance = horizontalEdge ? edge.y - centre.y : edge.x - centre.x;
+                if (std::abs(signedDistance) >= 1.5) {
+                    continue;
+                }
+                const double alpha = traced.alpha.texels[(static_cast<std::size_t>(y) * kImageSize) + static_cast<std::size_t>(x)];
+                const double tail = signedDistance > 0.0 ? 1.0 - alpha : alpha;
+                sum += tail - radialTailMass(std::abs(signedDistance));
+                ++cut;
+            }
+        }
+        residuals.add(sum / cut);
+    }
+    return residuals;
+}
+
+}  // namespace
+
+// Hexagonal film offsets follow the radial window: an edge's coverage is its tail mass at both row parities and on both axes.
+PT_CHECK(hexagonal_film_offsets_follow_the_radial_filter, Fast, Statistical) {
+    constexpr int kSeeds = 16;
+    TestScene scene = makeTwoInstanceScene(1.0F);
+    scene.worldTriangles.resize(2);
+    scene.shadingTriangles.resize(2);
+    scene.instances.resize(1);
+    std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+    const EnvironmentMap env = makeUniformEnvironment();
+    PathTraceSettings settings = makeSettings(0, 1);
+    settings.samplesPerPixel = 64;
+    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    const Camera base = makeCamera();
+    const auto hexagonal = [&base](glm::vec3 rotationDegrees) {
+        return Camera(base.position(), rotationDegrees, base.filmBack(), base.focalLengthMm(), base.nearClip(), base.farClip(),
+                      base.aperture(), base.shutterSeconds(), base.iso(), pathtracer::scene::Lens{},
+                      pathtracer::gfx::PixelLattice::Hexagonal);
+    };
+    // Rolled 90 degrees, the camera's up is world -x, so the same plane's edge crosses the rows at d = sqrt(3)/4 instead of the columns.
+    const std::array<std::pair<const char*, tools::stats::Welford>, 2> axes{{
+        {"vertical edge", hexagonalTailResiduals(scene, *accel, env, settings, pool, hexagonal(glm::vec3(0.0F)), false, kSeeds)},
+        {"horizontal edge", hexagonalTailResiduals(scene, *accel, env, settings, pool, hexagonal(glm::vec3(0.0F, 0.0F, 90.0F)), true, kSeeds)},
+    }};
+    const double threshold = tools::stats::studentTTwoSided(tools::stats::sidak(tools::check::kFamilyAlpha, 2), kSeeds - 1);
+    ctx.plan(2);
+    for (const auto& [name, residuals] : axes) {
+        char detail[192];
+        std::snprintf(detail, sizeof(detail), "%s: mean tail residual %.3g over %d scrambles, %.3g standard errors against %.3g", name,
+                      residuals.mean(), kSeeds, residuals.mean() / residuals.standardError(), threshold);
+        PT_EXPECT(ctx, std::abs(residuals.mean()) <= threshold * residuals.standardError(), detail);
+    }
+}
+
 // A checker minified 64:1 reads its mean wherever bounce 0 filters: Beauty by each sample's stratum, the G-buffer's Albedo by its pixel.
 PT_CHECK(primary_hits_filter_minified_textures, Fast, Exact) {
     constexpr int kChecker = 64;

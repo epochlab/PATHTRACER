@@ -13,11 +13,14 @@ typedef struct PtRenderer PtRenderer;
 #define PT_OK 0
 #define PT_ERROR 1
 /* PtCamera is passed by value, so a caller built against a different layout must be caught rather than reading the fields as garbage. */
-#define PT_ABI_VERSION 6
+#define PT_ABI_VERSION 7
 /* Lens projections, PtCamera.lens_projection: the pinhole, Kannala & Brandt's polynomial fisheye, and the 360-degree lat-long. */
 #define PT_LENS_RECTILINEAR 0
 #define PT_LENS_FISHEYE_POLYNOMIAL 1
 #define PT_LENS_OMNIDIRECTIONAL 2
+/* PtCamera.pixel_lattice: pixel (x, y) at (x+0.5, y+0.5), or hexagonal (x+0.25+0.5*(y&1), (y+0.5)*sqrt(3)/2) column pitches. */
+#define PT_LATTICE_SQUARE 0
+#define PT_LATTICE_HEXAGONAL 1
 /* Tri-state sentinel for the optional request fields: defer to the default rather than forcing on or off. Any other value is rejected. */
 #define PT_DEFAULT (-1)
 
@@ -38,7 +41,7 @@ int pt_aov_needs_samples(int aov);
 /* PT_ABI_VERSION this library was built with: a caller compares it to its own header's and refuses to call on a mismatch. */
 int pt_abi_version(void);
 
-/* Pose, lens and exposure; aperture/shutter_seconds/iso set EV only (no depth of field). pt_render names any field out of range. */
+/* Pose, lens, exposure, lattice; aperture/shutter_seconds/iso set EV only (no depth of field). pt_render names any field out of range. */
 typedef struct {
     float position[3]; /* finite */
     float rotation_degrees[3]; /* finite; XYZ degrees as Rz*Ry*Rx, scene.json's convention, so -Z forward at rest */
@@ -56,6 +59,8 @@ typedef struct {
     float fisheye_coefficients[4];
     /* Full angle across the image circle; half it is the polynomial's domain. Must lie in (0, 360] whichever projection is selected. */
     float fisheye_field_of_view_degrees;
+    /* PT_LATTICE_*. Hexagonal refuses sobel, gabor, dog and denoised, whose stencils need a square neighbourhood. */
+    int pixel_lattice;
 } PtCamera;
 
 /* profile.json's authored camera and window size -- the defaults a caller overrides one field at a time. */

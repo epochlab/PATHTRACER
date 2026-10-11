@@ -54,6 +54,11 @@ float transmissionOffsetEpsilon(const ShadingTriangle& tri) {
 
 // Blackman-Harris (Harris 1978) at Arnold's default 1.5 px radius, importance-sampled (Ernst et al. 2006): pdf proportional to f, weight 1.
 constexpr float kFilterRadius = 1.5F;
+// The window's cosine-series coefficients: w(t) = a0 - a1 cos(2 pi t) + a2 cos(4 pi t) - a3 cos(6 pi t) over t in [0, 1].
+constexpr double kBlackmanHarrisA0 = 0.35875;
+constexpr double kBlackmanHarrisA1 = 0.48829;
+constexpr double kBlackmanHarrisA2 = 0.14128;
+constexpr double kBlackmanHarrisA3 = 0.01168;
 // Knots of the half-filter CDF over |x| in [0, kFilterRadius]: exact at each knot, linear between, so 63 bins of 0.024 px each.
 constexpr int kFilterCdfKnots = 64;
 // Per-pixel lanes: beauty.rgb, termination bounce, shadow, five transport buckets, AO, Fresnel, alpha, denoise albedo and normal.
@@ -61,14 +66,11 @@ constexpr int kSampleLanes = 31;
 
 // CDF of |x| / kFilterRadius from the window's closed-form integral: the window spans t in [0, 1] centred at 0.5, so |x| = 0 maps there.
 std::array<float, kFilterCdfKnots> buildFilterCdf() {
-    constexpr double kA0 = 0.35875;
-    constexpr double kA1 = 0.48829;
-    constexpr double kA2 = 0.14128;
-    constexpr double kA3 = 0.01168;
     constexpr double kTwoPi = 2.0 * std::numbers::pi;
     const auto integral = [](double t) {
-        return (kA0 * t) - (kA1 * std::sin(kTwoPi * t) / kTwoPi) + (kA2 * std::sin(2.0 * kTwoPi * t) / (2.0 * kTwoPi)) -
-               (kA3 * std::sin(3.0 * kTwoPi * t) / (3.0 * kTwoPi));
+        return (kBlackmanHarrisA0 * t) - (kBlackmanHarrisA1 * std::sin(kTwoPi * t) / kTwoPi) +
+               (kBlackmanHarrisA2 * std::sin(2.0 * kTwoPi * t) / (2.0 * kTwoPi)) -
+               (kBlackmanHarrisA3 * std::sin(3.0 * kTwoPi * t) / (3.0 * kTwoPi));
     };
     // Differenced against the same centre and normalised by the same span, so the end knots are exactly 0 and 1.
     const double centre = integral(0.5);
@@ -81,7 +83,31 @@ std::array<float, kFilterCdfKnots> buildFilterCdf() {
     return cdf;
 }
 
+// CDF of r / kFilterRadius for the radially symmetric window on the disc, int_0^u f(s) s ds: the area element weights f by s.
+std::array<float, kFilterCdfKnots> buildRadialFilterCdf() {
+    // f(u) = w(1/2 + u/2) = a0 + sum a_k cos(k pi u), each odd term's sign flipped by the half-period shift.
+    const std::array<double, 3> coefficients{kBlackmanHarrisA1, kBlackmanHarrisA2, kBlackmanHarrisA3};
+    // int_0^u s cos(w s) ds = u sin(w u) / w + (cos(w u) - 1) / w^2, by parts.
+    const auto integral = [&coefficients](double u) {
+        double sum = 0.5 * kBlackmanHarrisA0 * u * u;
+        for (std::size_t k = 0; k < coefficients.size(); ++k) {
+            const double w = static_cast<double>(k + 1) * std::numbers::pi;
+            sum += coefficients[k] * ((u * std::sin(w * u) / w) + ((std::cos(w * u) - 1.0) / (w * w)));
+        }
+        return sum;
+    };
+    // Normalised by the same closed form, so the end knots are exactly 0 and 1.
+    const double total = integral(1.0);
+    std::array<float, kFilterCdfKnots> cdf{};
+    for (int i = 0; i < kFilterCdfKnots; ++i) {
+        const double u = static_cast<double>(i) / static_cast<double>(kFilterCdfKnots - 1);
+        cdf[static_cast<std::size_t>(i)] = static_cast<float>(integral(u) / total);
+    }
+    return cdf;
+}
+
 const std::array<float, kFilterCdfKnots> kFilterCdf = buildFilterCdf();
+const std::array<float, kFilterCdfKnots> kRadialFilterCdf = buildRadialFilterCdf();
 
 // Film offset from the pixel centre, filter-distributed: the half-CDF inverted at |2u-1|, signed by 2u-1, is monotone so u's strata hold.
 float sampleFilterOffset(float u) {
@@ -89,6 +115,30 @@ float sampleFilterOffset(float u) {
     const CdfSample bin = invertCdf(kFilterCdf.data(), kFilterCdfKnots - 1, std::abs(signedU));
     const float radiusFraction = (static_cast<float>(bin.index) + bin.fraction) / static_cast<float>(kFilterCdfKnots - 1);
     return std::copysign(kFilterRadius * radiusFraction, signedU);
+}
+
+// Radial offset: Shirley-Chiu's concentric map (1997) keeps u's strata and leaves |rho|^2 uniform, which inverts the radial CDF.
+glm::vec2 sampleRadialFilterOffset(glm::vec2 u) {
+    const glm::vec2 s = (2.0F * u) - 1.0F;
+    // The map's centre, where its angle is undefined, is the zero offset.
+    if (s.x == 0.0F && s.y == 0.0F) {
+        return glm::vec2(0.0F);
+    }
+    const bool xMajor = std::abs(s.x) > std::abs(s.y);
+    const float rho = xMajor ? s.x : s.y;
+    const float phi = xMajor ? 0.25F * std::numbers::pi_v<float> * (s.y / s.x)
+                             : (0.5F * std::numbers::pi_v<float>) - (0.25F * std::numbers::pi_v<float> * (s.x / s.y));
+    const CdfSample bin = invertCdf(kRadialFilterCdf.data(), kFilterCdfKnots - 1, rho * rho);
+    const float radius = kFilterRadius * (static_cast<float>(bin.index) + bin.fraction) / static_cast<float>(kFilterCdfKnots - 1);
+    return std::copysign(radius, rho) * glm::vec2(std::cos(phi), std::sin(phi));
+}
+
+// The square lattice's separable filter keeps its per-axis strata; the hexagonal lattice's six equidistant neighbours need it radial.
+glm::vec2 sampleFilmOffset(pathtracer::gfx::PixelLattice lattice, glm::vec2 u) {
+    if (lattice == pathtracer::gfx::PixelLattice::Hexagonal) {
+        return sampleRadialFilterOffset(u);
+    }
+    return {sampleFilterOffset(u.x), sampleFilterOffset(u.y)};
 }
 
 }  // namespace
@@ -621,17 +671,20 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                        const std::atomic<std::uint64_t>& generation,
                        std::uint64_t requestedGeneration, ThreadPool& threadPool,
                        pathtracer::debug::PassStats& stats, PathTraceResult& out) {
-    const float aspect = static_cast<float>(width) / static_cast<float>(height);
+    const pathtracer::gfx::PixelLattice lattice = camera.pixelLattice();
+    // The film in column pitches: its ratio, not width / height, is the aspect once rows sit closer than columns.
+    const glm::vec2 frame = pathtracer::gfx::frameExtent(lattice, width, height);
+    const float aspect = frame.x / frame.y;
     // Constant for the whole pass, so built once: the aspect-taking primaryRay rebuilds it on every one of millions of rays.
     const Camera::ViewBasis basis = camera.viewBasis(aspect);
     out.wrapsHorizontally = wrapsHorizontally(basis.lens.projection);
-    // Sample spacing 1/sqrt(N) px (pbrt-v4's differential scale), so prefilter blur vanishes as N grows; unbounded N as Sampler's.
-    const float strataPerAxis = std::sqrt(static_cast<float>(std::max(sampleCount, sampleBase + settings.samplesPerPixel)));
-    // d(ndc) across that spacing: two NDC units span the image, and +Y flips because row 0 is the top.
-    const glm::mat2 ndcPerStratum(2.0F / (static_cast<float>(width) * strataPerAxis), 0.0F, 0.0F,
-                                  -2.0F / (static_cast<float>(height) * strataPerAxis));
-    // d(ndc) across one whole pixel: its image on the unit sphere is the solid angle a lobe must undercut to image as a mirror.
-    const glm::mat2 ndcPerPixel(2.0F / static_cast<float>(width), 0.0F, 0.0F, -2.0F / static_cast<float>(height));
+    const float pixelSide = pathtracer::gfx::pixelSide(lattice);
+    // Sample spacing pixelSide/sqrt(N) (pbrt-v4's differential scale), so prefilter blur vanishes as N grows; unbounded N as Sampler's.
+    const float strataPerAxis = std::sqrt(static_cast<float>(std::max(sampleCount, sampleBase + settings.samplesPerPixel))) / pixelSide;
+    // d(ndc) across that spacing: two NDC units span the film, and +Y flips because row 0 is the top.
+    const glm::mat2 ndcPerStratum(2.0F / (frame.x * strataPerAxis), 0.0F, 0.0F, -2.0F / (frame.y * strataPerAxis));
+    // d(ndc) across a pixel side, a square of the cell's area: its image on the unit sphere is the solid angle a mirror lobe must undercut.
+    const glm::mat2 ndcPerPixel((2.0F * pixelSide) / frame.x, 0.0F, 0.0F, (-2.0F * pixelSide) / frame.y);
     // Replicated RQMC: pass p draws from replicate p mod K at its position p div K, so each replicate is a prefix of its own sequence.
     const int pass = sampleBase / settings.samplesPerPixel;
     const std::uint32_t seed = replicateSeed(scrambleSeed, pass % settings.replicates);
@@ -658,18 +711,17 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
         const auto samples = static_cast<float>(settings.samplesPerPixel);
         for (int y = tileY0; y < tileY1; ++y) {
             for (int x = tileX0; x < tileX1; ++x) {
+                const glm::vec2 centre = pathtracer::gfx::pixelCentre(lattice, x, y);
                 std::array<float, kSampleLanes> sum{};
                 for (int s = 0; s < settings.samplesPerPixel; ++s) {
                     // replicateBase + s is this sample's position in its replicate's sequence: it must advance across passes to stratify.
                     const int sampleIndex = replicateBase + s;
                     Sampler sampler(x, y, sampleIndex, replicateCount, seed);
-                    const glm::vec2 filmU = sampler.next2D();
-                    // Reaches 1 px past the frame: rectilinear extrapolates, fisheye is rayless past its circle, lat-long wraps seam, pole.
-                    const float filmX = static_cast<float>(x) + 0.5F + sampleFilterOffset(filmU.x);
-                    const float filmY = static_cast<float>(y) + 0.5F + sampleFilterOffset(filmU.y);
-                    const float ndcX = ((filmX / static_cast<float>(width)) * 2.0F) - 1.0F;
+                    // Reaches past the frame: rectilinear extrapolates, fisheye is rayless past its circle, lat-long wraps seam, pole.
+                    const glm::vec2 film = centre + sampleFilmOffset(lattice, sampler.next2D());
+                    const float ndcX = ((film.x / frame.x) * 2.0F) - 1.0F;
                     // HdrImage row 0 is the top (EXR/glTF convention); NDC +Y is up -- flip.
-                    const float ndcY = 1.0F - ((filmY / static_cast<float>(height)) * 2.0F);
+                    const float ndcY = 1.0F - ((film.y / frame.y) * 2.0F);
                     const std::optional<Camera::RayDifferential> primary = camera.primaryRayDifferential(basis, ndcX, ndcY);
                     // AO and Fresnel draw from their own stream: taking dimensions from `sampler` would shift every later dimension.
                     Sampler aoSampler(x, y, sampleIndex, replicateCount, seed ^ kAoSeedOffset);

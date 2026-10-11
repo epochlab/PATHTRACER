@@ -18,12 +18,16 @@ _ERROR_CAPACITY = 512
 PT_DEFAULT = -1
 
 # PT_ABI_VERSION in pathtracer_c.h. PtCamera and PtRenderRequest cross the boundary by value, so a layout drift must fail loudly.
-PT_ABI_VERSION = 6
+PT_ABI_VERSION = 7
 
 # PtCamera.lens_projection, PT_LENS_* in pathtracer_c.h. Index-parallel with LENS_PROJECTIONS in __init__.py.
 PT_LENS_RECTILINEAR = 0
 PT_LENS_FISHEYE_POLYNOMIAL = 1
 PT_LENS_OMNIDIRECTIONAL = 2
+
+# PtCamera.pixel_lattice, PT_LATTICE_* in pathtracer_c.h. Index-parallel with PIXEL_LATTICES in __init__.py.
+PT_LATTICE_SQUARE = 0
+PT_LATTICE_HEXAGONAL = 1
 
 
 class PtCamera(ctypes.Structure):
@@ -42,6 +46,7 @@ class PtCamera(ctypes.Structure):
         ("lens_projection", ctypes.c_int),
         ("fisheye_coefficients", ctypes.c_float * 4),
         ("fisheye_field_of_view_degrees", ctypes.c_float),
+        ("pixel_lattice", ctypes.c_int),
     ]
 
 

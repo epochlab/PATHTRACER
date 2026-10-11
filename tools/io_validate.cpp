@@ -139,6 +139,32 @@ PT_CHECK(exr_write_keeps_the_declared_channels, Fast, Exact) {
     }
 }
 
+// A hexagonal EXR names its lattice and carries its 1 x sqrt(3)/2 cell as PixelAspectRatio; a square one adds neither, so it is unchanged.
+PT_CHECK(exr_write_declares_its_pixel_lattice, Fast, Exact) {
+    ctx.plan(3);
+    const pathtracer::gfx::HdrImage image{2, 2, pathtracer::gfx::kRgbChannels, std::vector<float>(12, 0.5F)};
+    const std::filesystem::path path = scratchPath("engine_io_validate_lattice.exr");
+    std::optional<OIIO::ImageSpec> square;
+    std::optional<OIIO::ImageSpec> hexagonal;
+    if (pathtracer::gfx::writeExr(path.string(), image, pathtracer::gfx::ImageRole::Colour)) {
+        square = headerOf(path);
+    }
+    if (pathtracer::gfx::writeExr(path.string(), image, pathtracer::gfx::ImageRole::Colour, pathtracer::gfx::PixelLattice::Hexagonal)) {
+        hexagonal = headerOf(path);
+    }
+    std::filesystem::remove(path);
+    PT_EXPECT(ctx,
+              square && square->find_attribute("pathtracer:pixelLattice") == nullptr &&
+                  square->get_float_attribute("PixelAspectRatio", 1.0F) == 1.0F,
+              "a square EXR gained a lattice tag or a non-unit pixel aspect");
+    PT_EXPECT(ctx, hexagonal && hexagonal->get_string_attribute("pathtracer:pixelLattice") == "Hexagonal",
+              "a hexagonal EXR does not name its lattice");
+    // EXR's pixel aspect is a displayed cell's width over its height: one column pitch over the sqrt(3)/2 row pitch.
+    const float aspect = hexagonal ? hexagonal->get_float_attribute("PixelAspectRatio", 0.0F) : 0.0F;
+    PT_EXPECT(ctx, std::abs(static_cast<double>(aspect) - (2.0 / std::sqrt(3.0))) <= std::numeric_limits<float>::epsilon(),
+              "a hexagonal EXR's PixelAspectRatio " + std::to_string(aspect) + " is not 2/sqrt(3)");
+}
+
 // Colour EXRs carry the working space twice, as OIIO's tag and OpenEXR's chromaticities; the oracle is BT.709's own published xy.
 PT_CHECK(exr_write_declares_its_colour_space, Fast, Exact) {
     // ITU-R BT.709-6 Table 1, items 1.3 and 1.4: R, G, B primaries and the D65 white, the working space's definition.

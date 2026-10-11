@@ -9,6 +9,8 @@
 
 #include <glm/glm.hpp>
 
+#include "pathtracer/gfx/pixel_lattice.h"
+
 namespace pathtracer::gfx {
 
 // Linear float image of 1-4 interleaved channels, row-major, row 0 top: every AOV lane at its aovChannels count, and image I/O.
@@ -52,8 +54,9 @@ enum class ImageRole { Colour, Data };
 [[nodiscard]] std::optional<HdrImage> loadImage(const std::string& path, ImageRole role,
                                                 const std::optional<std::string>& colorSpace = std::nullopt);
 
-// Full-float EXR of the image's first `channels` of R,G,B, lossless through loadImage; Colour tags working space and chromaticities.
-[[nodiscard]] bool writeExr(const std::string& path, const HdrImage& image, ImageRole role);
+// Full-float EXR of R,G,B lossless through loadImage; Colour tags the working space, a hexagonal lattice its name and PixelAspectRatio.
+[[nodiscard]] bool writeExr(const std::string& path, const HdrImage& image, ImageRole role,
+                            PixelLattice lattice = PixelLattice::Square);
 
 // Display-referred RGB or RGBA (straight alpha), clamped to [0, 1], as a 16-bit PNG tagged with the display colour space it encodes.
 [[nodiscard]] bool writeDisplayPng(const std::string& path, const HdrImage& image);

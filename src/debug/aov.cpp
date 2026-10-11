@@ -436,6 +436,54 @@ std::span<const GBufferLane> gbufferLanes() {
     return lanes;
 }
 
+bool aovSupportsLattice(AovId aov, pathtracer::gfx::PixelLattice lattice) {
+    if (lattice == pathtracer::gfx::PixelLattice::Square) {
+        return true;
+    }
+    switch (aov) {
+        // Square-grid stencils and a network trained on square images: neither is defined over six equidistant neighbours.
+        case AovId::Sobel:
+        case AovId::Gabor:
+        case AovId::DoG:
+        case AovId::Denoised:
+            return false;
+
+        // One texel each, or a primary ray at the pixel's own centre: the lattice only places that centre.
+        case AovId::Beauty:
+        case AovId::Wireframe:
+        case AovId::Alpha:
+        case AovId::Depth:
+        case AovId::Lookahead:
+        case AovId::HSV:
+        case AovId::Luminance:
+        case AovId::WorldPos:
+        case AovId::UV:
+        case AovId::MotionVector:
+        case AovId::ColourOpponent:
+        case AovId::Normal:
+        case AovId::GeomNormal:
+        case AovId::Albedo:
+        case AovId::Metallic:
+        case AovId::Roughness:
+        case AovId::Tangent:
+        case AovId::ObjectID:
+        case AovId::AO:
+        case AovId::Fresnel:
+        case AovId::IOR:
+        case AovId::BounceCount:
+        case AovId::SNR:
+        case AovId::DirectDiffuse:
+        case AovId::IndirectDiffuse:
+        case AovId::DirectSpecular:
+        case AovId::IndirectSpecular:
+        case AovId::Refraction:
+        case AovId::Shadow:
+        case AovId::Count:
+            break;
+    }
+    return true;
+}
+
 AovId aovIdFromName(std::string_view name) {
     for (int i = 0; i < static_cast<int>(AovId::Count); ++i) {
         if (name == kAovNames[i]) {

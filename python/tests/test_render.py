@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pathtracer import AOVS, LENS_PROJECTIONS, Renderer, aov_channels, aov_needs_samples, display_encode
+from pathtracer import AOVS, LENS_PROJECTIONS, PIXEL_LATTICES, Renderer, aov_channels, aov_needs_samples, display_encode
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCENE = "scenes/cornell.json"
@@ -213,6 +213,43 @@ def test_omnidirectional_pixels_are_the_documented_longitude_and_latitude(render
     angular = 16.0 * np.finfo(np.float32).eps * (math.pi + magnitude / np.linalg.norm(view, axis=-1))
     assert (np.abs(longitude - math.pi * (2.0 * (columns + 0.5) / width - 1.0)) <= angular / np.sin(colatitude)).all()
     assert (np.abs(colatitude - math.pi * (rows + 0.5) / height) <= angular).all()
+
+
+def test_hexagonal_pixels_are_the_documented_centres(renderer: Renderer) -> None:
+    """Through the lat-long, each hit's longitude and colatitude are Camera's hexagonal centre formula over the film it documents."""
+    camera = dataclasses.replace(renderer.default_camera, lens="omnidirectional", rotation=(20.0, 30.0, 40.0), pixel_lattice="hexagonal")
+    width, height = 64, 32
+    frame = renderer.render(aovs=("worldPos", "depth"), camera=camera, width=width, height=height)
+    hit = frame["depth"][..., 0] > 0.0
+    assert hit.any(), "the lat-long should see the scene"
+    rotation = _rotation_xyz(camera.rotation)
+    right, up, forward = rotation[:, 0], rotation[:, 1], -rotation[:, 2]
+    view = frame["worldPos"][hit].astype(np.float64) - np.asarray(camera.position)
+    longitude = np.arctan2(view @ right, view @ forward)
+    colatitude = np.arctan2(np.hypot(view @ right, view @ forward), view @ up)
+    rows, columns = np.nonzero(hit)
+    row_pitch = math.sqrt(3.0) / 2.0
+    centre_x = columns + 0.25 + 0.5 * (rows % 2)
+    centre_y = (rows + 0.5) * row_pitch
+    magnitude = np.abs(frame["worldPos"][hit]).max(axis=-1) + max(map(abs, camera.position))
+    angular = 16.0 * np.finfo(np.float32).eps * (math.pi + magnitude / np.linalg.norm(view, axis=-1))
+    assert (np.abs(longitude - math.pi * (2.0 * centre_x / width - 1.0)) <= angular / np.sin(colatitude)).all()
+    assert (np.abs(colatitude - math.pi * centre_y / (height * row_pitch)) <= angular).all()
+
+
+@pytest.mark.parametrize("aov", ["sobel", "gabor", "dog", "denoised"])
+def test_hexagonal_lattice_refuses_square_stencils_by_name(renderer: Renderer, aov: str) -> None:
+    camera = dataclasses.replace(renderer.default_camera, pixel_lattice="hexagonal")
+    with pytest.raises(RuntimeError, match=f"{aov} reads a square neighbourhood"):
+        renderer.render(aovs=(aov,), camera=camera, width=8, height=8, samples=1)
+
+
+def test_pixel_lattice_round_trips_and_rejects_unknown_names(renderer: Renderer) -> None:
+    assert renderer.default_camera.pixel_lattice == "square"
+    assert PIXEL_LATTICES == ("square", "hexagonal")
+    with pytest.raises(ValueError, match="triangular"):
+        renderer.render(aovs=("beauty",), camera=dataclasses.replace(renderer.default_camera, pixel_lattice="triangular"),
+                        width=8, height=8, samples=1)
 
 
 def test_unknown_lens_is_rejected_before_the_abi(renderer: Renderer) -> None:

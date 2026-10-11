@@ -1,4 +1,4 @@
-// Correctness gate for the camera's projections: the rectilinear pinhole, the Kannala-Brandt polynomial fisheye and the lat-long.
+// Correctness gate for the camera's projections (pinhole, Kannala-Brandt fisheye, lat-long) and the film's pixel lattices.
 
 #include <algorithm>
 #include <array>
@@ -17,6 +17,7 @@
 
 #include "check.h"
 #include "stats.h"
+#include "pathtracer/gfx/pixel_lattice.h"
 #include "pathtracer/scene/camera.h"
 #include "pathtracer/scene/debug_camera_controller.h"
 #include "pathtracer/scene/lens.h"
@@ -975,6 +976,73 @@ PT_CHECK(pinhole_half_height_is_exact_at_extreme_focal_lengths, Fast, Exact) {
                   "focal " + std::to_string(focal) + " mm: half-height " + std::to_string(basis.halfHeight) +
                       ", or the top edge does not look up " + error);
     }
+}
+
+// The square lattice's centres are x + 1/2, y + 1/2 bit for bit: the film position every square render was made with before the lattice.
+PT_CHECK(square_lattice_centres_are_the_half_integers, Fast, Exact) {
+    using pathtracer::gfx::PixelLattice;
+    int mismatches = 0;
+    for (int y = 0; y < 512; ++y) {
+        for (int x = 0; x < 512; ++x) {
+            const glm::vec2 centre = pathtracer::gfx::pixelCentre(PixelLattice::Square, x, y);
+            mismatches += centre == glm::vec2(static_cast<float>(x) + 0.5F, static_cast<float>(y) + 0.5F) ? 0 : 1;
+        }
+    }
+    const glm::vec2 frame = pathtracer::gfx::frameExtent(PixelLattice::Square, 256, 128);
+    ctx.plan(3);
+    PT_EXPECT(ctx, mismatches == 0, std::to_string(mismatches) + " square centres are not the half-integers");
+    PT_EXPECT(ctx, frame == glm::vec2(256.0F, 128.0F), "the square frame is not width x height");
+    PT_EXPECT(ctx, pathtracer::gfx::pixelSide(PixelLattice::Square) == 1.0F, "the square pixel side is not exactly 1");
+}
+
+// Every interior hexagonal pixel has six neighbours at distance 1 and the lattice is symmetric about the frame centre (Mersereau 1979).
+PT_CHECK(hexagonal_lattice_is_regular_and_centred, Fast, Exact) {
+    using pathtracer::gfx::PixelLattice;
+    constexpr int kWidth = 64;
+    constexpr int kHeight = 48;
+    // Two centres near 64 differ by ulps of 64, so their distance carries a few of them relative to its unit length.
+    const double budget = kClosedFormUlps * kEps * kWidth;
+    double worstDistance = 0.0;
+    int wrongCount = 0;
+    for (int y = 1; y < kHeight - 1; ++y) {
+        for (int x = 1; x < kWidth - 1; ++x) {
+            const glm::dvec2 centre(pathtracer::gfx::pixelCentre(PixelLattice::Hexagonal, x, y));
+            int nearest = 0;
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    if (dx == 0 && dy == 0) {
+                        continue;
+                    }
+                    const glm::dvec2 neighbour(pathtracer::gfx::pixelCentre(PixelLattice::Hexagonal, x + dx, y + dy));
+                    const double distance = glm::length(neighbour - centre);
+                    if (std::abs(distance - 1.0) <= budget) {
+                        ++nearest;
+                        worstDistance = std::max(worstDistance, std::abs(distance - 1.0));
+                    } else if (distance < 1.0) {
+                        ++wrongCount;
+                    }
+                }
+            }
+            wrongCount += nearest == 6 ? 0 : 1;
+        }
+    }
+    // Pixel (x, y) and its point reflection (W-1-x, H-1-y) straddle the frame centre when H is even, so the lattice is centred.
+    const glm::vec2 frame = pathtracer::gfx::frameExtent(PixelLattice::Hexagonal, kWidth, kHeight);
+    double worstSymmetry = 0.0;
+    for (int y = 0; y < kHeight; ++y) {
+        for (int x = 0; x < kWidth; ++x) {
+            const glm::dvec2 sum = glm::dvec2(pathtracer::gfx::pixelCentre(PixelLattice::Hexagonal, x, y)) +
+                                   glm::dvec2(pathtracer::gfx::pixelCentre(PixelLattice::Hexagonal, kWidth - 1 - x, kHeight - 1 - y));
+            worstSymmetry = std::max(worstSymmetry, glm::length(sum - glm::dvec2(frame)));
+        }
+    }
+    const double side = pathtracer::gfx::pixelSide(PixelLattice::Hexagonal);
+    ctx.plan(3);
+    PT_EXPECT(ctx, wrongCount == 0, std::to_string(wrongCount) + " interior pixels lack exactly six unit-distance neighbours, worst " +
+                                         std::to_string(worstDistance));
+    PT_EXPECT(ctx, worstSymmetry <= budget, "the lattice is off the frame centre by " + std::to_string(worstSymmetry));
+    PT_EXPECT(ctx, std::abs((side * side) - (std::sqrt(3.0) / 2.0)) <= 4.0 * kEps,
+              "the pixel side's square " + std::to_string(side * side) + " is not the hexagon's area sqrt(3)/2");
 }
 
 PT_CHECK_MAIN("camera_validate")
