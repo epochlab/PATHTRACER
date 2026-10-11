@@ -1,6 +1,7 @@
 #include "microfacet.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 
@@ -13,26 +14,27 @@ namespace {
 
 constexpr float kPi = 3.14159265F;
 
-// GGX D, cancellation-free (Filament 4.4.2); no denominator floor, isSmooth keeping pi*d^2 >= pi*alpha^4 a normal float.
-float distributionGGX(const glm::vec3& nh, float alpha) {
-    const float alpha2 = alpha * alpha;
-    const float d = (alpha2 * nh.z * nh.z) + (nh.x * nh.x) + (nh.y * nh.y);
-    return alpha2 / (kPi * d * d);
+// GGX D, cancellation-free (Filament 4.4.2) and anisotropic (Burley 2012): ax ay/(pi d^2), d = ax ay hz^2 + (ay/ax) hx^2 + (ax/ay) hy^2.
+float distributionGGX(const glm::vec3& h, const glm::vec2& alpha) {
+    const float d = (alpha.x * alpha.y * h.z * h.z) + ((alpha.y / alpha.x) * h.x * h.x) + ((alpha.x / alpha.y) * h.y * h.y);
+    return (alpha.x * alpha.y) / (kPi * d * d);
 }
 
-// cos*sqrt(1 + alpha^2*tan^2), the Smith Lambda radical scaled by cosine: 1 + Lambda(c) = (c + radical)/(2c), finite at c = 0.
-float smithRadical(float cosTheta, float alpha) {
-    const float alpha2 = alpha * alpha;
-    return std::sqrt(alpha2 + ((1.0F - alpha2) * cosTheta * cosTheta));
+// |(ax wx, ay wy, wz)|, the Smith Lambda radical scaled by cosine (Heitz 2014): 1 + Lambda(w) = (|wz| + radical)/(2|wz|), finite at wz = 0.
+float smithRadical(const glm::vec3& w, const glm::vec2& alpha) {
+    return std::sqrt((alpha.x * alpha.x * w.x * w.x) + (alpha.y * alpha.y * w.y * w.y) + (w.z * w.z));
 }
 
-// G2/(4*cosO*cosI), height-correlated Smith (Heitz 2014): cosines multiply rather than divide, so it is exact to the silhouette.
-float smithVisibility(float cosO, float cosI, float alpha) {
-    return 0.5F / ((cosI * smithRadical(cosO, alpha)) + (cosO * smithRadical(cosI, alpha)));
+// G2/(4|cosO cosI|), height-correlated Smith (Heitz 2014): cosines multiply rather than divide, so it is exact to the silhouette.
+float smithVisibility(const glm::vec3& wo, const glm::vec3& wi, const glm::vec2& alpha) {
+    return 0.5F / ((std::abs(wi.z) * smithRadical(wo, alpha)) + (wo.z * smithRadical(wi, alpha)));
 }
 
-// G1(c)/c, the VNDF pdf's projected-area factor, in the same division-free form: 2/alpha at grazing rather than 0/0.
-float smithG1OverCos(float cosTheta, float alpha) { return 2.0F / (cosTheta + smithRadical(cosTheta, alpha)); }
+// G1(wo)/cosO, the VNDF pdf's projected-area factor, in the same division-free form: 2/alpha_o at grazing rather than 0/0.
+float smithG1OverCos(const glm::vec3& wo, const glm::vec2& alpha) { return 2.0F / (wo.z + smithRadical(wo, alpha)); }
+
+// The least alpha whose GGX peak denominator pi*alpha^4 is a normal float: below it D overflows and that axis is a delta.
+const float kLeastAlpha = std::sqrt(std::sqrt(std::numeric_limits<float>::min()));
 
 // --- F82-tint constants: Schlick less k*mu*(1-mu)^6, fit at mu-bar = 1/7 (~82 deg).
 constexpr float kOneMinusMuBar = 6.0F / 7.0F;
@@ -301,6 +303,126 @@ glm::vec3 averageExpectation(Fresnel fresnel) {
     return average;
 }
 
+// The anisotropy axis coordinate 1 - sqrt(alpha_b/alpha_t), the generator's: nodes crowd toward a = 1, where E curves as alpha_b -> 0.
+float anisoAxis(float anisotropy) { return 1.0F - std::sqrt(1.0F - std::clamp(anisotropy, 0.0F, 1.0F)); }
+
+// The table's (alpha_t, alpha_b) at a (roughness, anisotropy) node, unfloored as the generator bakes it.
+glm::vec2 anisoNodeAlpha(int roughnessIndex, int anisotropyIndex) {
+    const float r = static_cast<float>(roughnessIndex) / static_cast<float>(kAnisoRoughnessRes - 1);
+    const float v = 1.0F - (static_cast<float>(anisotropyIndex) / static_cast<float>(kAnisoAnisotropyRes - 1));
+    const float tangent = r * r * std::sqrt(2.0F / (1.0F + (v * v * v * v)));
+    return {tangent, v * v * tangent};
+}
+
+// The azimuth axis: sqrt(alpha_o) from the row's tangent end to its bitangent end, alpha_o = |(alpha_t cos phi, alpha_b sin phi)|.
+float projectedAxis(const glm::vec2& alpha, float cos2) {
+    const float span = std::sqrt(alpha.x) - std::sqrt(alpha.y);
+    // An isotropic row's E has no azimuth, so any coordinate reads it; the generator spaces it uniformly in phi, which 0 matches.
+    if (!(span > 0.0F)) {
+        return 0.0F;
+    }
+    const float projected = std::sqrt(std::sqrt((alpha.x * alpha.x * cos2) + (alpha.y * alpha.y * (1.0F - cos2))));
+    return (std::sqrt(alpha.x) - projected) / span;
+}
+
+// The anisotropic tables' quadrilinear cell over (roughness, anisoAxis, sqrt(mu), projectedAxis at each corner row's own alphas).
+struct AnisoCell {
+    static constexpr int kCorners = 16;
+    std::array<int, kCorners> index;
+    std::array<float, kCorners> weight;
+    template <typename Table>
+    [[nodiscard]] float read(const Table& table) const {
+        float sum = 0.0F;
+        for (int c = 0; c < kCorners; ++c) {
+            sum += weight[c] * table[index[c]];
+        }
+        return sum;
+    }
+};
+
+// The axis position of x on a uniform grid of res nodes over [0, 1].
+struct Axis {
+    int i0;
+    float t;
+};
+
+Axis axisAt(float x, int res) {
+    const float f = std::clamp(x, 0.0F, 1.0F) * static_cast<float>(res - 1);
+    const int i0 = std::min(static_cast<int>(f), res - 2);
+    return {i0, f - static_cast<float>(i0)};
+}
+
+float lerpWeight(const Axis& axis, int upper) { return upper != 0 ? axis.t : 1.0F - axis.t; }
+
+// The tables' rows about (roughness, anisotropy): per slab, so each direction's lookup computes only its mu and azimuth axes.
+AnisoRows anisoRows(float roughness, float anisotropy) {
+    const Axis r = axisAt(roughness, kAnisoRoughnessRes);
+    const Axis a = axisAt(anisoAxis(anisotropy), kAnisoAnisotropyRes);
+    AnisoRows rows{};
+    for (std::size_t c = 0; c < rows.row.size(); ++c) {
+        const int dr = static_cast<int>(c / 2);
+        const int da = static_cast<int>(c % 2);
+        rows.row[c] = ((r.i0 + dr) * kAnisoAnisotropyRes) + a.i0 + da;
+        rows.weight[c] = lerpWeight(r, dr) * lerpWeight(a, da);
+        rows.alpha[c] = anisoNodeAlpha(r.i0 + dr, a.i0 + da);
+    }
+    return rows;
+}
+
+// Anisotropic GGX is even in wx and in wy, so only cos^2 of w's azimuth enters; normal incidence has none and reads the tangent end.
+AnisoCell anisoCell(const AnisoRows& rows, const glm::vec3& w) {
+    const Axis m = axisAt(std::sqrt(std::max(w.z, 0.0F)), kAnisoMuRes);
+    const float planar = (w.x * w.x) + (w.y * w.y);
+    const float cos2 = planar > 0.0F ? (w.x * w.x) / planar : 1.0F;
+    AnisoCell cell{};
+    int c = 0;
+    for (std::size_t r = 0; r < rows.row.size(); ++r) {
+        const Axis p = axisAt(projectedAxis(rows.alpha[r], cos2), kAnisoPhiRes);
+        for (int dm = 0; dm < 2; ++dm) {
+            for (int dp = 0; dp < 2; ++dp) {
+                cell.index[c] = (((rows.row[r] * kAnisoMuRes) + m.i0 + dm) * kAnisoPhiRes) + p.i0 + dp;
+                cell.weight[c] = rows.weight[r] * lerpWeight(m, dm) * lerpWeight(p, dp);
+                ++c;
+            }
+        }
+    }
+    return cell;
+}
+
+// E[F] under the anisotropic kernel, each corner's rule applied then blended: near a = 1 adjacent rules differ too much to pair nodes.
+template <typename Fresnel>
+glm::vec3 anisoKernelExpectation(const AnisoCell& cell, Fresnel fresnel) {
+    glm::vec3 expectation(0.0F);
+    for (int c = 0; c < AnisoCell::kCorners; ++c) {
+        if (cell.weight[c] == 0.0F) {
+            continue;
+        }
+        const int base = cell.index[c] * kKernelOrder;
+        glm::vec3 corner(0.0F);
+        for (int k = 0; k < kKernelOrder; ++k) {
+            corner += kAnisoWeight[base + k] * fresnel(kAnisoNode[base + k]);
+        }
+        expectation += cell.weight[c] * corner;
+    }
+    return expectation;
+}
+
+// E[F] under the reflect kernel at wo: the isotropic (roughness, mu) rules, or the anisotropic ones at wo's azimuth from the tangent.
+template <typename Fresnel>
+glm::vec3 reflectExpectation(float roughness, float anisotropy, const glm::vec3& wo, Fresnel fresnel) {
+    return anisotropy > 0.0F ? anisoKernelExpectation(anisoCell(anisoRows(roughness, anisotropy), wo), fresnel)
+                             : kernelExpectation(roughness, wo.z, fresnel);
+}
+
+// The anisotropic microsurface's cosine-weighted mean deficit 1 - Eavg, bilinear over its rows.
+float anisoDeficitAvg(const AnisoRows& rows) {
+    float mean = 0.0F;
+    for (std::size_t r = 0; r < rows.row.size(); ++r) {
+        mean += rows.weight[r] * kAnisoDeficitAvg[rows.row[r]];
+    }
+    return mean;
+}
+
 // The film's reflectance over its ambient side, a statistical mix (OpenPBR): ambient (index 1) with 1 - C, the coat's n_c with C.
 template <typename At>
 glm::vec3 overAmbient(const FilmLayer& film, At at) {
@@ -328,6 +450,12 @@ glm::vec3 interfaceFilm(const DielectricSlab& slab, float cosTheta) {
     });
 }
 
+// The conductor's deficit 1 - E at w for unit Fresnel: the isotropic table by mu, the anisotropic one by mu and azimuth.
+float conductorDeficit(const ConductorSlab& slab, const glm::vec3& w) {
+    return slab.anisotropy > 0.0F ? anisoCell(slab.rows, w).read(kAnisoDeficit)
+                                  : directionalDeficit(w.z, slab.roughness);
+}
+
 }  // namespace
 
 glm::vec3 conductorFresnel(const ConductorSlab& slab, float cosTheta) {
@@ -340,12 +468,16 @@ glm::vec3 interfaceFresnel(const DielectricSlab& slab, float cosTheta) {
     return slab.film.weight > 0.0F ? glm::mix(bare, interfaceFilm(slab, cosTheta), slab.film.weight) : bare;
 }
 
-float alphaForRoughness(float roughness) { return roughness * roughness; }
+glm::vec2 alphaForRoughness(float roughness, float anisotropy) {
+    const float tangent = roughness * roughness * std::sqrt(2.0F / (1.0F + ((1.0F - anisotropy) * (1.0F - anisotropy))));
+    // alpha_b = 0 at full anisotropy is a delta across the grain, which no float D represents: it is held at the least alpha that is.
+    return {tangent, std::max((1.0F - anisotropy) * tangent, kLeastAlpha)};
+}
 
-bool isSmooth(float alpha) { return alpha * alpha * alpha * alpha < std::numeric_limits<float>::min(); }
+bool isSmooth(float alpha) { return alpha < kLeastAlpha; }
 
-glm::vec3 sampleGGXVNDF(const glm::vec3& wo, float alpha, glm::vec2 u) {
-    const glm::vec3 vh = glm::normalize(glm::vec3(alpha * wo.x, alpha * wo.y, wo.z));
+glm::vec3 sampleGGXVNDF(const glm::vec3& wo, const glm::vec2& alpha, glm::vec2 u) {
+    const glm::vec3 vh = glm::normalize(glm::vec3(alpha.x * wo.x, alpha.y * wo.y, wo.z));
     const float lensq = (vh.x * vh.x) + (vh.y * vh.y);
     const glm::vec3 t1 = lensq > 0.0F ? glm::vec3(-vh.y, vh.x, 0.0F) * (1.0F / std::sqrt(lensq)) : glm::vec3(1.0F, 0.0F, 0.0F);
     const glm::vec3 t2 = glm::cross(vh, t1);
@@ -356,7 +488,7 @@ glm::vec3 sampleGGXVNDF(const glm::vec3& wo, float alpha, glm::vec2 u) {
     const float s = 0.5F * (1.0F + vh.z);
     t2p = ((1.0F - s) * std::sqrt(std::max(0.0F, 1.0F - (t1p * t1p)))) + (s * t2p);
     const glm::vec3 nh = (t1p * t1) + (t2p * t2) + (std::sqrt(std::max(0.0F, 1.0F - (t1p * t1p) - (t2p * t2p))) * vh);
-    return glm::normalize(glm::vec3(alpha * nh.x, alpha * nh.y, std::max(0.0F, nh.z)));
+    return glm::normalize(glm::vec3(alpha.x * nh.x, alpha.y * nh.y, std::max(0.0F, nh.z)));
 }
 
 // 2*int mu*F82 dmu in closed form: Schlick's mean F0 + (1-F0)/21 less k * 2*B(3, 7) = k/126 for the correction.
@@ -386,14 +518,15 @@ float albedoGridMu(float index) {
     return t * t;
 }
 
-ConductorSlab makeConductorSlab(float roughness, const glm::vec3& f0, const glm::vec3& tint, float scale, const FilmLayer& film,
-                                float muO) {
+ConductorSlab makeConductorSlab(float roughness, float anisotropy, const glm::vec3& f0, const glm::vec3& tint, float scale,
+                                const FilmLayer& film, const glm::vec3& wo) {
     // Written field by field, not zeroed: the multiple-scattering terms start at their zero, the film's index only where a film is.
     ConductorSlab slab;
     slab.msScaleWo = 0.0F;
     slab.multiEnergy = 0.0F;
     slab.roughness = roughness;
-    slab.alpha = alphaForRoughness(roughness);
+    slab.anisotropy = anisotropy;
+    slab.alpha = alphaForRoughness(roughness, anisotropy);
     slab.f0 = f0;
     slab.k = f82Weight(f0, tint);
     slab.scale = scale;
@@ -405,19 +538,33 @@ ConductorSlab makeConductorSlab(float roughness, const glm::vec3& f0, const glm:
         slab.filmKappa = ior.kappa;
     }
     // A smooth metal is its mirror: the albedo is its Fresnel at mu_o exactly, and no multiple scattering exists.
-    if (isSmooth(slab.alpha)) {
-        slab.albedo = conductorFresnel(slab, muO);
+    if (isSmooth(slab.alpha.x)) {
+        slab.albedo = conductorFresnel(slab, wo.z);
         slab.singleEnergy = channelMean(slab.albedo);
         return slab;
     }
-    const AlbedoSplit split = directionalAlbedo(muO, roughness);
-    const float deficitAvg = averageAlbedo(roughness).deficit;
-    glm::vec3 single = scale * split.at(f0, slab.k);
+    glm::vec3 single;
+    float deficit;
+    float deficitAvg;
+    // F82's split E = F0 a + b - k c is exact at every anisotropy: the 4D tables carry b, c and the deficit, a = 1 - deficit - b.
+    if (anisotropy > 0.0F) {
+        slab.rows = anisoRows(roughness, anisotropy);
+        const AnisoCell cell = anisoCell(slab.rows, wo);
+        deficit = cell.read(kAnisoDeficit);
+        const float b = cell.read(kAnisoB);
+        single = scale * ((f0 * (1.0F - deficit - b)) + b - (slab.k * cell.read(kAnisoC)));
+        deficitAvg = anisoDeficitAvg(slab.rows);
+    } else {
+        const AlbedoSplit split = directionalAlbedo(wo.z, roughness);
+        single = scale * split.at(f0, slab.k);
+        deficit = split.deficit;
+        deficitAvg = averageAlbedo(roughness).deficit;
+    }
     glm::vec3 average = scale * metalFresnelAvg(f0, tint);
     // The film's Fresnel has no split: its albedo is the reflect kernel's Gauss rule over it, its average the 2 mu dmu rule's.
     if (film.weight > 0.0F) {
         const auto filmed = [&](float x) { return scale * conductorFilm(slab, x); };
-        single = glm::mix(single, kernelExpectation(roughness, muO, filmed), film.weight);
+        single = glm::mix(single, reflectExpectation(roughness, anisotropy, wo, filmed), film.weight);
         average = glm::mix(average, averageExpectation(filmed), film.weight);
     }
     slab.singleEnergy = channelMean(single);
@@ -425,9 +572,9 @@ ConductorSlab makeConductorSlab(float roughness, const glm::vec3& f0, const glm:
     // A zero mean deficit has every deficit zero: the lobe vanishes, its exact limit, with no 0/0 to form.
     if (deficitAvg > 0.0F) {
         slab.msTint = multiScatterTint(average, deficitAvg);
-        slab.msScaleWo = split.deficit / (kPi * deficitAvg);
-        slab.multiEnergy = channelMean(slab.msTint) * split.deficit;
-        slab.albedo += slab.msTint * split.deficit;
+        slab.msScaleWo = deficit / (kPi * deficitAvg);
+        slab.multiEnergy = channelMean(slab.msTint) * deficit;
+        slab.albedo += slab.msTint * deficit;
     }
     return slab;
 }
@@ -446,13 +593,13 @@ InterfaceReflection interfaceReflection(const EscapeRow& row, float roughness, f
     return {escapeAt(kEscapeReflect, row, mu), mean.deficit > 0.0F ? deficit * mean.reflectShare : 0.0F, deficit, mean};
 }
 
-DielectricSlab makeDielectricSlab(const InterfaceInputs& interface, float muO) {
+DielectricSlab makeDielectricSlab(const InterfaceInputs& interface, const glm::vec3& wo) {
     // Written field by field, not zeroed: the escape rows are read only behind the multiple-scattering energies, which start at zero.
     DielectricSlab slab;
     slab.reflectSingle = glm::vec3(0.0F);
     slab.multiReflect = 0.0F;
     slab.multiTransmit = 0.0F;
-    slab.alpha = alphaForRoughness(interface.roughness);
+    slab.alpha = alphaForRoughness(interface.roughness, interface.anisotropy);
     slab.etaI = interface.etaI;
     slab.etaT = interface.etaT;
     slab.fresnelEtaI = interface.fresnelEtaI;
@@ -466,38 +613,41 @@ DielectricSlab makeDielectricSlab(const InterfaceInputs& interface, float muO) {
     slab.baseIor = interface.baseIor;
     slab.fromBase = interface.fromBase;
     // Index-matched media refract undeviated at every roughness: no facet can bend the ray, so refraction is a delta.
-    slab.deltaRefraction = isSmooth(slab.alpha) || interface.etaI == interface.etaT;
+    slab.deltaRefraction = isSmooth(slab.alpha.x) || interface.etaI == interface.etaT;
     // A Fresnel-matched, unfilmed interface reflects exactly nothing: no table's interpolation residual may read as reflection.
     if (isIndexMatched(slab)) {
         slab.transmitSingle = glm::vec3(1.0F);
         return slab;
     }
-    if (isSmooth(slab.alpha)) {
+    if (isSmooth(slab.alpha.x)) {
         // A mirror past the geometric critical angle reflects all: no refracted direction exists to carry 1 - F.
-        const bool tir = cos2Transmitted(muO, interface.etaI / interface.etaT) < 0.0F;
-        slab.reflectSingle = tir ? glm::vec3(1.0F) : interfaceFresnel(slab, muO);
+        const bool tir = cos2Transmitted(wo.z, interface.etaI / interface.etaT) < 0.0F;
+        slab.reflectSingle = tir ? glm::vec3(1.0F) : interfaceFresnel(slab, wo.z);
         slab.transmitSingle = 1.0F - slab.reflectSingle;
         return slab;
     }
+    const auto kernel = [&](auto fresnel) { return reflectExpectation(interface.roughness, interface.anisotropy, wo, fresnel); };
     const auto filmed = [&](float x) { return interfaceFilm(slab, x); };
     // Fresnel-matched under a film: the bare interface reflects nothing and has no multiple scattering; the film alone reflects.
     if (interface.fresnelEtaI == interface.fresnelEtaT) {
-        slab.reflectSingle = slab.film.weight * kernelExpectation(interface.roughness, muO, filmed);
+        slab.reflectSingle = slab.film.weight * kernel(filmed);
         slab.transmitSingle = glm::vec3(1.0F);
         return slab;
     }
     const float eta = interface.fresnelEtaI / interface.fresnelEtaT;
+    // The escape tables have no anisotropy axis: OpenPBR's map keeps alpha_t^2 + alpha_b^2 = 2 r^4, so r is the RMS-equivalent node.
     slab.row = escapeRow(interface.roughness, eta);
     slab.reflectShape = msTransmitRow(interface.roughness, eta);
     slab.transmitShape = msTransmitRow(interface.roughness, 1.0F / eta);
     // The interface's own multiple scattering, a property of the interface alone: OpenPBR mixes whole BSDFs, so each stays linear.
-    const InterfaceReflection reflection = interfaceReflection(slab.row, interface.roughness, eta, muO);
-    // A film reshapes the reflected single scattering through the kernel rule; its multiple scattering stays the bare interface's.
-    slab.reflectSingle = glm::vec3(reflection.single);
+    const InterfaceReflection reflection = interfaceReflection(slab.row, interface.roughness, eta, wo.z);
+    // Anisotropic single scattering is the 4D kernel's rule over the bare Fresnel, exact in azimuth; a film reshapes it the same way.
+    const auto bare = [&](float x) { return glm::vec3(fresnelDielectric(x, interface.fresnelEtaI, interface.fresnelEtaT)); };
+    slab.reflectSingle = interface.anisotropy > 0.0F ? kernel(bare) : glm::vec3(reflection.single);
     if (slab.film.weight > 0.0F) {
-        slab.reflectSingle = glm::mix(slab.reflectSingle, kernelExpectation(interface.roughness, muO, filmed), slab.film.weight);
+        slab.reflectSingle = glm::mix(slab.reflectSingle, kernel(filmed), slab.film.weight);
     }
-    slab.transmitSingle = glm::vec3(escapeAt(kEscapeTransmit, slab.row, muO));
+    slab.transmitSingle = glm::vec3(escapeAt(kEscapeTransmit, slab.row, wo.z));
     // A zero mean deficit or a shape with no density has no energy to carry: the lobe vanishes, its exact limit, with no 0/0 to form.
     if (reflection.multi > 0.0F && slab.reflectShape.scale > 0.0F) {
         slab.multiReflect = reflection.multi;
@@ -510,16 +660,18 @@ DielectricSlab makeDielectricSlab(const InterfaceInputs& interface, float muO) {
     return slab;
 }
 
-float reflectionAlbedo(float roughness, float etaI, float etaT, float mu) {
+float reflectionAlbedo(float roughness, float anisotropy, float etaI, float etaT, const glm::vec3& w) {
     if (etaI == etaT) {
         return 0.0F;
     }
-    if (isSmooth(alphaForRoughness(roughness))) {
-        return fresnelDielectric(mu, etaI, etaT);
+    if (isSmooth(alphaForRoughness(roughness, anisotropy).x)) {
+        return fresnelDielectric(w.z, etaI, etaT);
     }
     const float eta = etaI / etaT;
-    const InterfaceReflection reflection = interfaceReflection(escapeRow(roughness, eta), roughness, eta, mu);
-    return reflection.single + (msTransmitRow(roughness, eta).scale > 0.0F ? reflection.multi : 0.0F);
+    const InterfaceReflection reflection = interfaceReflection(escapeRow(roughness, eta), roughness, eta, w.z);
+    const auto bare = [&](float x) { return glm::vec3(fresnelDielectric(x, etaI, etaT)); };
+    const float single = anisotropy > 0.0F ? anisoKernelExpectation(anisoCell(anisoRows(roughness, anisotropy), w), bare).x : reflection.single;
+    return single + (msTransmitRow(roughness, eta).scale > 0.0F ? reflection.multi : 0.0F);
 }
 
 namespace {
@@ -547,16 +699,16 @@ float fresnelAverage(float eta) {
 
 ConductorEval evaluateConductor(const ConductorSlab& slab, const glm::vec3& wo, const glm::vec3& wi) {
     ConductorEval eval{};
-    if (!isSmooth(slab.alpha)) {
+    if (!isSmooth(slab.alpha.x)) {
         // wo and wi share +z, so dot(wo, h) = |wo + wi|/2 > 0: every half-vector here is a visible facet.
         const glm::vec3 h = glm::normalize(wo + wi);
         const float d = distributionGGX(h, slab.alpha);
-        eval.value = (d * smithVisibility(wo.z, wi.z, slab.alpha) * wi.z) * conductorFresnel(slab, glm::dot(wo, h));
-        eval.pdfSingle = 0.25F * d * smithG1OverCos(wo.z, slab.alpha);
+        eval.value = (d * smithVisibility(wo, wi, slab.alpha) * wi.z) * conductorFresnel(slab, glm::dot(wo, h));
+        eval.pdfSingle = 0.25F * d * smithG1OverCos(wo, slab.alpha);
     }
-    // Kulla & Conty 2017: (1-E(mu_o))(1-E(mu_i))/(pi(1-Eavg)), symmetric in wo and wi, so the lobe stays reciprocal.
+    // Kulla & Conty 2017: (1-E(wo))(1-E(wi))/(pi(1-Eavg)), symmetric in wo and wi, so the lobe stays reciprocal at any anisotropy.
     if (slab.msScaleWo > 0.0F) {
-        eval.value += slab.msTint * (slab.msScaleWo * directionalDeficit(wi.z, slab.roughness) * wi.z);
+        eval.value += slab.msTint * (slab.msScaleWo * conductorDeficit(slab, wi) * wi.z);
         eval.pdfMulti = msReflectPdf(wi.z, slab.roughness);
     }
     return eval;
@@ -565,7 +717,7 @@ ConductorEval evaluateConductor(const ConductorSlab& slab, const glm::vec3& wo, 
 DielectricEval evaluateDielectric(const DielectricSlab& slab, const glm::vec3& wo, const glm::vec3& wi) {
     DielectricEval eval{};
     // A smooth interface scatters by deltas alone; a Fresnel-matched one reflects nothing and refracts by a delta.
-    if (isSmooth(slab.alpha)) {
+    if (isSmooth(slab.alpha.x)) {
         return eval;
     }
     if (wi.z > 0.0F) {
@@ -576,8 +728,8 @@ DielectricEval evaluateDielectric(const DielectricSlab& slab, const glm::vec3& w
         const float woDotH = glm::dot(wo, h);
         const float d = distributionGGX(h, slab.alpha);
         const glm::vec3 fresnel = interfaceFresnel(slab, woDotH);
-        eval.reflect = slab.tint * fresnel * (d * smithVisibility(wo.z, wi.z, slab.alpha) * wi.z);
-        eval.pdfSingle = 0.25F * d * smithG1OverCos(wo.z, slab.alpha) * facetReflectProbability(slab, fresnel);
+        eval.reflect = slab.tint * fresnel * (d * smithVisibility(wo, wi, slab.alpha) * wi.z);
+        eval.pdfSingle = 0.25F * d * smithG1OverCos(wo, slab.alpha) * facetReflectProbability(slab, fresnel);
         // Kulla-Conty's form over the escape deficit, share_R (1-E(mu_o))(1-E(mu_i))/(pi(1-Eavg)): symmetric, so reflection is reciprocal.
         if (slab.multiReflect > 0.0F) {
             eval.reflect += slab.tint * (slab.multiReflectScaleWo * escapeAt(kEscapeDeficit, slab.row, wi.z) * wi.z);
@@ -612,8 +764,8 @@ DielectricEval evaluateDielectric(const DielectricSlab& slab, const glm::vec3& w
     const float d = distributionGGX(ht, slab.alpha);
     const glm::vec3 fresnel = interfaceFresnel(slab, woDotH);
     // D*G2*|wi.h|*(wo.h)/(wo.z*denom^2), with G2/(wo.z*|wi.z|) taken as 4*smithVisibility and |wi.z| the cosine weight.
-    const float value = (4.0F * d * smithVisibility(wo.z, -wi.z, slab.alpha) * -wiDotH * woDotH * -wi.z) / denom2;
-    const float vndfPdf = d * woDotH * smithG1OverCos(wo.z, slab.alpha);
+    const float value = (4.0F * d * smithVisibility(wo, wi, slab.alpha) * -wiDotH * woDotH * -wi.z) / denom2;
+    const float vndfPdf = d * woDotH * smithG1OverCos(wo, slab.alpha);
     eval.transmit += slab.transmitTint * (1.0F - fresnel) * (slab.refractWeight * value);
     eval.pdfSingle = (1.0F - facetReflectProbability(slab, fresnel)) * vndfPdf * etaR * etaR * -wiDotH / denom2;
     return eval;

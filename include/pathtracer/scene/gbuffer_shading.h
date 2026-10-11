@@ -33,7 +33,7 @@ struct LineProximity {
 [[nodiscard]] glm::vec3 emittedRadiance(const Material& material, const ShadingTriangle& triangle, const ShadingVertex& shading,
                                         const glm::vec3& wo, const pathtracer::gfx::TextureFootprint& footprint);
 
-// Gram-Schmidt re-orthogonalized tangent frame, normal- and bump-mapped by one normal input; triangle's edges carry dP/duv.
+// Gram-Schmidt re-orthogonalized tangent frame: normal map, bump, then tangent map from one input; triangle's edges carry dP/duv.
 [[nodiscard]] ShadingFrame buildShadingFrame(const ShadingTriangle& triangle, const ShadingVertex& shading, const NormalInput& geometryNormal);
 
 [[nodiscard]] glm::vec3 geometricNormalOf(const ShadingTriangle& tri);

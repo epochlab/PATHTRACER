@@ -3,6 +3,27 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## OpenPBR anisotropy
+
+OpenPBR's `specular_roughness_anisotropy` and `coat_roughness_anisotropy`: two-axis GGX along a shading tangent, with
+energy compensation from tables carrying the anisotropy and the view's azimuth. Isotropic scenes match the previous build
+to float rounding. Evidence, with brushed chrome and an anisotropic coat on cornell's spheres, is in `results/openpbr/pr7`.
+
+- feat: `specular_roughness_anisotropy` and `coat_roughness_anisotropy`, listed in `principled.json`, point-sampled.
+  `alpha_t = r^2 sqrt(2/(1 + (1-a)^2))`, `alpha_b = (1-a) alpha_t`, so `alpha_t^2 + alpha_b^2 = 2 r^4` at every `a`.
+- feat: `geometry_tangent` and `geometry_coat_tangent` tangent maps, `2x - 1` in the mesh's (T, B) plane after the normal
+  map and bump; a grey texel names no direction and keeps the mesh tangent. The coat's frame now follows its own tangent.
+- feat: GGX D, height-correlated Smith and Heitz 2018 VNDF sampling are anisotropic throughout; `a = 1` is the groove limit,
+  `alpha_b` held at the least alpha a float D represents.
+- feat: `albedo_table` bakes 4D order-8 Gauss rules of E[F], the deficit 1 - E and its mean over roughness, anisotropy,
+  sqrt(mu) and azimuth. Anisotropy is indexed by `1 - sqrt(alpha_b/alpha_t)` and azimuth by the perceptual projected
+  roughness `sqrt(alpha_o)` per row, the variables E curves in; residuals are measured against a rebake at doubled rules
+  and E <= 1 is asserted within them. Lookups blend each corner's expectation, never the rules' nodes.
+- feat: the metal's Kulla-Conty lobe reads the anisotropic deficit at both wo and wi, so it stays reciprocal and integrates
+  to its mass. The dielectric's escape tables are read at `r`, the RMS-equivalent roughness of OpenPBR's map.
+- test: `anisotropic_white_furnace` (metal, glossy-diffuse and coat to `a = 1`), `anisotropic_reciprocity`,
+  `anisotropic_albedo_matches_lobe`, anisotropic chi-square rows, tangent-map frame and binding checks.
+
 ## OpenPBR thin film
 
 OpenPBR's thin film: Belcour & Barla 2017's Airy reflectance in the metal's and the dielectric's Fresnel, mixed in by

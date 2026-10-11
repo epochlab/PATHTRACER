@@ -136,6 +136,13 @@ ShadingFrame buildShadingFrame(const ShadingTriangle& triangle, const ShadingVer
         bumpedNormal = glm::normalize(mappedNormal - surfaceGradient);
     }
 
+    // The tangent map orients the anisotropy in the mesh's (T, B), the normal map's own basis; a zero vector names none, so T stands.
+    if (geometryNormal.tangent) {
+        const glm::vec2 direction = (glm::vec2(pathtracer::gfx::sampleTexture(*geometryNormal.tangent, shading.uv)) * 2.0F) - 1.0F;
+        if (glm::dot(direction, direction) > 0.0F) {
+            tangent = (direction.x * tangent) + (direction.y * bitangent);
+        }
+    }
     const glm::vec3 finalTangent =
         glm::normalize(tangent - (glm::dot(tangent, bumpedNormal) * bumpedNormal));
     const glm::vec3 finalBitangent = glm::cross(bumpedNormal, finalTangent) * shading.tangent.w;

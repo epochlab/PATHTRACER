@@ -267,12 +267,10 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
         const glm::vec3 geoNormal = geometricNormalOf(triangle);
 
         const glm::vec3 woLocal = woWorld * frame;
-        // geometry_coat_normal in the base frame; unbound, the coat follows the interpolated normal, not the base's map or bump.
-        const glm::vec3 coatNormalLocal = inputs.coatWeight > 0.0F
-                                              ? buildShadingFrame(triangle, shading, material.geometryCoatNormal)[2] * frame
-                                              : glm::vec3(0.0F, 0.0F, 1.0F);
+        // The coat's frame in the base frame; unbound, the coat follows the interpolated normal and tangent, not the base's maps.
+        const ShadingFrame coatFrame = inputs.coatWeight > 0.0F ? buildShadingFrame(triangle, shading, material.geometryCoatNormal) : frame;
         // Built once for both estimators below: the continuation draw and NEE's evaluation share every wo-side lookup it holds.
-        const BsdfClosure closure = makeBsdfClosure(inputs, woLocal, heroChannel, coatNormalLocal);
+        const BsdfClosure closure = makeBsdfClosure(inputs, woLocal, heroChannel, coatFrame[2] * frame, coatFrame[0] * frame);
 
         if (bounce == 0) {
             gShadow = 1.0F;  // assume shadowed once we know there's a real surface; the NEE check below may clear this

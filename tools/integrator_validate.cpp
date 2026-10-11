@@ -957,7 +957,7 @@ PT_CHECK(texture_binding_resolution, Fast, Exact) {
     // A packed glTF metallic-roughness map binds a scalar input to G: the channel offset reaches the lookup as R.
     const glm::vec3 green(texel.g, 0.0F, 0.0F);
 
-    ctx.plan(22);
+    ctx.plan(24);
     PT_EXPECT(ctx, written, "could not write the override EXR");
     std::vector<MeshInstance> instances = makeInstances();
     const TextureConfig packed{exr, std::nullopt, 1, std::nullopt};
@@ -992,6 +992,13 @@ PT_CHECK(texture_binding_resolution, Fast, Exact) {
     PT_EXPECT(ctx, coatBumped[0].material.geometryCoatNormal.height && coatBumped[0].material.geometryCoatNormal.heightMetres == 0.01F &&
                        !coatBumped[0].material.geometryNormal.height,
               "geometry_coat_normal's bump did not reach the coat's normal input alone");
+    // A frame's normal and tangent inputs bind field by field: neither replaces the other, and the coat's tangent stays the coat's.
+    std::vector<MeshInstance> oriented = makeInstances();
+    PT_EXPECT(ctx, apply(oriented, {{"alpha", {{"geometry_tangent", file}, {"geometry_normal", file}, {"geometry_coat_tangent", file}}}}),
+              "tangent maps beside a normal map were rejected");
+    PT_EXPECT(ctx, oriented[0].material.geometryNormal.tangent && oriented[0].material.geometryNormal.map &&
+                       oriented[0].material.geometryCoatNormal.tangent && !oriented[0].material.geometryCoatNormal.map,
+              "a tangent map displaced its frame's normal map, or the coat's tangent reached the base");
 
     std::cout << "  the stderr diagnostics below are expected: they are the function under test refusing a bad scene\n";
     std::vector<MeshInstance> untouched = makeInstances();

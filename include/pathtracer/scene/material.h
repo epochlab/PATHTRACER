@@ -17,11 +17,12 @@ using TextureHandle = std::shared_ptr<const pathtracer::gfx::ImageTexture>;
 template <typename T>
 using MaterialInput = std::variant<T, TextureHandle>;
 
-// geometry_normal's sources: a tangent-space normal map, a height map at heightMetres world metres per unit, or both, bump last.
+// A shading frame's sources: a tangent-space normal map, a height map at heightMetres metres per unit, bump last, and a tangent map.
 struct NormalInput {
     TextureHandle map;
     TextureHandle height;
     float heightMetres = 0.0F;
+    TextureHandle tangent;  // geometry_tangent: 2x - 1 in the mesh's (T, B) plane orients the anisotropy; unbound, the mesh's own T
 };
 
 // One instance's OpenPBR surface: every input a constant or a texture, plus the base's and the coat's shading-normal sources.
