@@ -111,6 +111,9 @@ def lattice_preview(image: np.ndarray, camera: Camera, *, scale: int = 8) -> np.
     """
     if image.ndim != 3:
         raise ValueError(f"lattice_preview takes (height, width, channels), got {image.shape}")
+    # display_encode's uint8 codes would come back as float32 0-255, which imshow clips to white: encode the preview instead.
+    if not np.issubdtype(image.dtype, np.floating):
+        raise TypeError(f"lattice_preview takes the float render, got {image.dtype}; display_encode its result instead")
     if scale < 1:
         raise ValueError(f"scale must be at least 1, got {scale}")
     struct = camera._to_struct()

@@ -281,6 +281,8 @@ def test_lattice_preview_rejects_bad_input(renderer: Renderer) -> None:
         lattice_preview(image[..., 0], renderer.default_camera)
     with pytest.raises(ValueError, match="scale"):
         lattice_preview(image, renderer.default_camera, scale=0)
+    with pytest.raises(TypeError, match="display_encode its result"):
+        lattice_preview(display_encode(image), renderer.default_camera)
     with pytest.raises(ValueError, match="triangular"):
         lattice_preview(image, dataclasses.replace(renderer.default_camera, pixel_lattice="triangular"))
 
