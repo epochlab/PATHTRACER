@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <numbers>
 #include <numeric>
 #include <string>
 #include <vector>
@@ -15,6 +16,7 @@
 #include "check.h"
 #include "stats.h"
 #include "pathtracer/debug/power_spectrum.h"
+#include "pathtracer/gfx/pixel_lattice.h"
 #include "pathtracer/scene/sampler.h"
 
 using pathtracer::scene::Sampler;
@@ -256,48 +258,50 @@ PT_CHECK(shift_is_rigid, Fast, Exact) {
     PT_EXPECT(ctx, mismatches == 0, detail);
 }
 
-// Distinct dither channels must be uncorrelated: one shared shift put the error at 199x white noise. Gate |r| < 0.1, about 13 SD.
+// Distinct dither channels must be uncorrelated on either lattice: one shared shift put the error at 199x white noise. |r| < 0.1, ~13 SD.
 PT_CHECK(channels_are_decorrelated, Fast, Statistical) {
     const int channelCount = (2 * kSetCount) + 2;
-    std::vector<std::vector<double>> fields(static_cast<std::size_t>(channelCount));
-    for (int c = 0; c < channelCount; ++c) {
-        std::vector<double>& field = fields[static_cast<std::size_t>(c)];
-        field.resize(kMaskPixels);
-        for (int y = 0; y < kMaskSize; ++y) {
-            for (int x = 0; x < kMaskSize; ++x) {
-                field[(static_cast<std::size_t>(y) * kMaskSize) + static_cast<std::size_t>(x)] =
-                    pathtracer::scene::blueNoiseDither(x, y, c) - 0.5;  // mean-centred: the mask is uniform on [0,1)
+    ctx.plan(2);
+    for (const pathtracer::gfx::PixelLattice lattice : {pathtracer::gfx::PixelLattice::Square, pathtracer::gfx::PixelLattice::Hexagonal}) {
+        std::vector<std::vector<double>> fields(static_cast<std::size_t>(channelCount));
+        for (int c = 0; c < channelCount; ++c) {
+            std::vector<double>& field = fields[static_cast<std::size_t>(c)];
+            field.resize(kMaskPixels);
+            for (int y = 0; y < kMaskSize; ++y) {
+                for (int x = 0; x < kMaskSize; ++x) {
+                    field[(static_cast<std::size_t>(y) * kMaskSize) + static_cast<std::size_t>(x)] =
+                        pathtracer::scene::blueNoiseDither(x, y, c, lattice) - 0.5;  // mean-centred: the mask is uniform on [0,1)
+                }
             }
         }
-    }
-    double worst = 0.0;
-    int worstA = -1;
-    int worstB = -1;
-    for (int a = 0; a < channelCount; ++a) {
-        for (int b = a + 1; b < channelCount; ++b) {
-            double dot = 0.0;
-            double normA = 0.0;
-            double normB = 0.0;
-            for (std::size_t i = 0; i < static_cast<std::size_t>(kMaskPixels); ++i) {
-                const double va = fields[static_cast<std::size_t>(a)][i];
-                const double vb = fields[static_cast<std::size_t>(b)][i];
-                dot += va * vb;
-                normA += va * va;
-                normB += vb * vb;
-            }
-            const double r = std::abs(dot / std::sqrt(normA * normB));
-            if (r > worst) {
-                worst = r;
-                worstA = a;
-                worstB = b;
+        double worst = 0.0;
+        int worstA = -1;
+        int worstB = -1;
+        for (int a = 0; a < channelCount; ++a) {
+            for (int b = a + 1; b < channelCount; ++b) {
+                double dot = 0.0;
+                double normA = 0.0;
+                double normB = 0.0;
+                for (std::size_t i = 0; i < static_cast<std::size_t>(kMaskPixels); ++i) {
+                    const double va = fields[static_cast<std::size_t>(a)][i];
+                    const double vb = fields[static_cast<std::size_t>(b)][i];
+                    dot += va * vb;
+                    normA += va * va;
+                    normB += vb * vb;
+                }
+                const double r = std::abs(dot / std::sqrt(normA * normB));
+                if (r > worst) {
+                    worst = r;
+                    worstA = a;
+                    worstB = b;
+                }
             }
         }
+        char detail[192];
+        std::snprintf(detail, sizeof(detail), "%s: worst |r| = %.4f between channels %d and %d, over %d channels",
+                      pathtracer::gfx::kPixelLatticeNames[static_cast<int>(lattice)], worst, worstA, worstB, channelCount);
+        PT_EXPECT(ctx, worst < 0.1, detail);
     }
-    char detail[160];
-    std::snprintf(detail, sizeof(detail), "worst |r| = %.4f between channels %d and %d, over %d channels", worst,
-                  worstA, worstB, channelCount);
-    ctx.plan(1);
-    PT_EXPECT(ctx, worst < 0.1, detail);
 }
 
 // The mask must be a permutation of [0, kMaskPixels): every shift used exactly once, recovered exactly rather than rounded.
@@ -346,6 +350,111 @@ PT_CHECK(mask_is_blue_noise, Fast, Statistical) {
                   100.0 * measured, 100.0 * expected, expected / measured);
     ctx.plan(1);
     PT_EXPECT(ctx, measured < 0.5 * expected, detail);
+}
+
+// The hexagonal mask is a permutation too, so it shifts by exactly representable, never-repeated ranks.
+PT_CHECK(hexagonal_mask_is_permutation, Fast, Exact) {
+    std::vector<int> seen(kMaskPixels, 0);
+    int bad = 0;
+    for (int y = 0; y < kMaskSize; ++y) {
+        for (int x = 0; x < kMaskSize; ++x) {
+            const float value = pathtracer::scene::blueNoiseDither(x, y, 0, pathtracer::gfx::PixelLattice::Hexagonal);
+            const int rank = static_cast<int>((value * static_cast<float>(kMaskPixels)) - 0.5F);
+            if (rank < 0 || rank >= kMaskPixels || seen[static_cast<std::size_t>(rank)] != 0) {
+                ++bad;
+                continue;
+            }
+            seen[static_cast<std::size_t>(rank)] = 1;
+        }
+    }
+    char detail[128];
+    std::snprintf(detail, sizeof(detail), "%d/%d ranks out of range or repeated", bad, kMaskPixels);
+    ctx.plan(1);
+    PT_EXPECT(ctx, bad == 0, detail);
+}
+
+// Mean power over the torus's frequencies below 1/16 cycle per pitch, over white noise's N var: a DFT at the cells' film positions.
+double lowFrequencyPowerRatio(pathtracer::gfx::PixelLattice lattice) {
+    std::vector<glm::dvec2> positions;
+    std::vector<double> values;
+    double mean = 0.0;
+    for (int y = 0; y < kMaskSize; ++y) {
+        for (int x = 0; x < kMaskSize; ++x) {
+            positions.emplace_back(pathtracer::gfx::pixelCentre(lattice, x, y));
+            values.push_back(pathtracer::scene::blueNoiseDither(x, y, 0, lattice));
+            mean += values.back() / kMaskPixels;
+        }
+    }
+    double variance = 0.0;
+    for (double& value : values) {
+        value -= mean;
+        variance += value * value / kMaskPixels;
+    }
+    // The torus's periods are kMaskSize pitches across and kMaskSize rows down, so its frequencies are m / 128 and n / (128 rowPitch).
+    constexpr double kLowCutoff = 1.0 / 16.0;
+    const glm::dvec2 period(kMaskSize, kMaskSize * static_cast<double>(pathtracer::gfx::rowPitch(lattice)));
+    double power = 0.0;
+    int frequencies = 0;
+    for (int n = -kMaskSize / 8; n <= kMaskSize / 8; ++n) {
+        for (int m = -kMaskSize / 8; m <= kMaskSize / 8; ++m) {
+            const glm::dvec2 frequency(m / period.x, n / period.y);
+            if ((m == 0 && n == 0) || glm::length(frequency) >= kLowCutoff) {
+                continue;
+            }
+            double re = 0.0;
+            double im = 0.0;
+            for (std::size_t i = 0; i < values.size(); ++i) {
+                const double phase = 2.0 * std::numbers::pi * glm::dot(frequency, positions[i]);
+                re += values[i] * std::cos(phase);
+                im -= values[i] * std::sin(phase);
+            }
+            power += (re * re) + (im * im);
+            ++frequencies;
+        }
+    }
+    // White noise has E|F(k)|^2 = N var at every nonzero frequency of the torus, the analytic null.
+    return power / (frequencies * kMaskPixels * variance);
+}
+
+// The hexagonal mask is blue on its own film: low-frequency power under half white noise's, as the square mask's band gate demands.
+PT_CHECK(hexagonal_mask_is_blue_noise, Fast, Statistical) {
+    const double hexagonal = lowFrequencyPowerRatio(pathtracer::gfx::PixelLattice::Hexagonal);
+    char detail[96];
+    std::snprintf(detail, sizeof(detail), "low-frequency power %.4f of white noise on the hexagonal film", hexagonal);
+    ctx.plan(1);
+    PT_EXPECT(ctx, hexagonal < 0.5, detail);
+}
+
+// Every hexagonal dither channel is the base mask translated by a lattice vector: an even row shift, so offset rows keep their parity.
+PT_CHECK(hexagonal_shift_is_a_lattice_translation, Fast, Exact) {
+    constexpr pathtracer::gfx::PixelLattice kHexagonal = pathtracer::gfx::PixelLattice::Hexagonal;
+    // Rank -> cell of the unshifted mask, so each channel's translation is read off its (0, 0) cell exactly.
+    std::vector<glm::ivec2> cellOfRank(kMaskPixels);
+    for (int y = 0; y < kMaskSize; ++y) {
+        for (int x = 0; x < kMaskSize; ++x) {
+            const auto rank = static_cast<std::size_t>(pathtracer::scene::blueNoiseDither(x, y, 0, kHexagonal) * kMaskPixels);
+            cellOfRank[rank] = glm::ivec2(x, y);
+        }
+    }
+    int oddShifts = 0;
+    int mismatches = 0;
+    for (int channel = 1; channel < 2 * kSetCount; ++channel) {
+        const auto rank = static_cast<std::size_t>(pathtracer::scene::blueNoiseDither(0, 0, channel, kHexagonal) * kMaskPixels);
+        const glm::ivec2 shift = cellOfRank[rank];
+        oddShifts += shift.y % 2;
+        for (int y = 0; y < kMaskSize; ++y) {
+            for (int x = 0; x < kMaskSize; ++x) {
+                const glm::ivec2 base = (glm::ivec2(x, y) + shift) % kMaskSize;
+                mismatches += pathtracer::scene::blueNoiseDither(x, y, channel, kHexagonal) !=
+                                      pathtracer::scene::blueNoiseDither(base.x, base.y, 0, kHexagonal)
+                                  ? 1
+                                  : 0;
+            }
+        }
+    }
+    ctx.plan(2);
+    PT_EXPECT(ctx, oddShifts == 0, std::to_string(oddShifts) + " channels shift the hexagonal mask by an odd row");
+    PT_EXPECT(ctx, mismatches == 0, std::to_string(mismatches) + " cells are not their channel's translated base cell");
 }
 
 // Replicate 0 is the plain sequence and replicate seeds differ by >= 2^16, so seeds nearer than that never alias two replicates' streams.

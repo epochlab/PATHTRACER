@@ -716,7 +716,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                 for (int s = 0; s < settings.samplesPerPixel; ++s) {
                     // replicateBase + s is this sample's position in its replicate's sequence: it must advance across passes to stratify.
                     const int sampleIndex = replicateBase + s;
-                    Sampler sampler(x, y, sampleIndex, replicateCount, seed);
+                    Sampler sampler(x, y, sampleIndex, replicateCount, seed, lattice);
                     // Reaches past the frame: rectilinear extrapolates, fisheye is rayless past its circle, lat-long wraps seam, pole.
                     const glm::vec2 film = centre + sampleFilmOffset(lattice, sampler.next2D());
                     const float ndcX = ((film.x / frame.x) * 2.0F) - 1.0F;
@@ -724,9 +724,9 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                     const float ndcY = 1.0F - ((film.y / frame.y) * 2.0F);
                     const std::optional<Camera::RayDifferential> primary = camera.primaryRayDifferential(basis, ndcX, ndcY);
                     // AO and Fresnel draw from their own stream: taking dimensions from `sampler` would shift every later dimension.
-                    Sampler aoSampler(x, y, sampleIndex, replicateCount, seed ^ kAoSeedOffset);
+                    Sampler aoSampler(x, y, sampleIndex, replicateCount, seed ^ kAoSeedOffset, lattice);
                     const glm::vec2 aoSample = aoSampler.next2D();
-                    Sampler fresnelSampler(x, y, sampleIndex, replicateCount, seed ^ kFresnelSeedOffset);
+                    Sampler fresnelSampler(x, y, sampleIndex, replicateCount, seed ^ kFresnelSeedOffset, lattice);
                     const glm::vec2 fresnelSample = fresnelSampler.next2D();
                     // The pixel's footprint on the unit sphere, read only by the feature chain and only where a ray exists.
                     const auto pixelSolidAngle = [&] {
