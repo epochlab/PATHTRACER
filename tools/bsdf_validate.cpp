@@ -20,6 +20,7 @@
 #include "check.h"
 #include "conductor_reference.h"
 #include "fixtures.h"
+#include "microfacet_quadrature.h"
 #include "pathtracer/scene/bsdf.h"
 #include "pathtracer/scene/cie.h"
 #include "pathtracer/scene/fresnel_dielectric.h"
@@ -499,48 +500,35 @@ AlbedoEstimate measureDiffuseAlbedo(const Surface& params, int sampleCount, std:
     return {mean, glm::sqrt(variance / n)};
 }
 
-// The observed albedo must equal the authored one, EON Appendix A's purpose: closed form against closed form, then the shipped lobe.
-PT_CHECK(eon_albedo_inversion, Slow, Statistical) {
+// OpenPBR's albedo scaling takes rho = base_color itself (spec 2.3): the shipped lobe's normal-incidence albedo is E_EON(rho = C).
+PT_CHECK(eon_albedo_is_rho, Slow, Statistical) {
     constexpr int kSampleCount = 400000;
     // Two named bounded residuals: kSigmaBand is a confidence level on the measured standard error, kFitTolerance the model residual.
     constexpr float kSigmaBand = 5.0F;
     constexpr float kFitTolerance = 0.001F;
-    constexpr float kAnalyticTolerance = 1e-5F;
     const std::array<float, 5> diffuseRoughnesses = {0.0F, 0.25F, 0.5F, 0.75F, 1.0F};
     const std::array<glm::vec3, 3> albedos = {glm::vec3(1.0F), glm::vec3(0.5F),
                                                glm::vec3(0.8F, 0.3F, 0.1F)};
 
     bool ok = true;
     std::mt19937 rng(31337);
-    std::cout << "bsdf_validate: EON albedo inversion, observed vs authored albedo at normal incidence\n";
-    std::cout << "  diffuseRoughness  authored              rho                   observed              worst err\n";
+    std::cout << "bsdf_validate: EON at rho = C, observed albedo vs E_EON(C) at normal incidence\n";
+    std::cout << "  diffuseRoughness  authored              E_EON(C)              observed              worst err\n";
     for (const glm::vec3& authored : albedos) {
         for (float diffuseRoughness : diffuseRoughnesses) {
             const Surface params = makeDiffuseParams(authored, diffuseRoughness);
-            const glm::vec3 rho = pathtracer::scene::eonAlbedoInversion(authored, diffuseRoughness);
-            const glm::vec3 analytic = referenceEonAlbedo(rho, diffuseRoughness);
+            const glm::vec3 analytic = referenceEonAlbedo(authored, diffuseRoughness);
             const AlbedoEstimate measured = measureDiffuseAlbedo(params, kSampleCount, rng);
-
-            const glm::vec3 analyticErr = glm::abs(analytic - authored);
-            const glm::vec3 band =
-                (kSigmaBand * measured.stdError) + (kFitTolerance * glm::max(authored, 0.01F));
-            const glm::vec3 measuredErr = glm::abs(measured.mean - authored);
+            const glm::vec3 band = (kSigmaBand * measured.stdError) + (kFitTolerance * glm::max(analytic, 0.01F));
+            const glm::vec3 measuredErr = glm::abs(measured.mean - analytic);
 
             std::cout << "  " << diffuseRoughness << "               [" << authored.x << ", "
-                       << authored.y << ", " << authored.z << "]   [" << rho.x << ", " << rho.y << ", " << rho.z << "]   ["
+                       << authored.y << ", " << authored.z << "]   [" << analytic.x << ", " << analytic.y << ", " << analytic.z << "]   ["
                        << measured.mean.x << ", " << measured.mean.y << ", " << measured.mean.z
                        << "]   " << maxChannel(measuredErr) << '\n';
 
-            if (maxChannel(analyticErr) > kAnalyticTolerance) {
-                std::cerr << "bsdf_validate: FAILED EON albedo inversion (analytic) at diffuseRoughness="
-                           << diffuseRoughness << " authored=[" << authored.x << ", " << authored.y
-                           << ", " << authored.z << "] E_EON=[" << analytic.x << ", " << analytic.y
-                           << ", " << analytic.z << "] err=" << maxChannel(analyticErr)
-                           << " (expected <= " << kAnalyticTolerance << ")\n";
-                ok = false;
-            }
             if (!glm::all(glm::lessThanEqual(measuredErr, band))) {
-                std::cerr << "bsdf_validate: FAILED EON albedo inversion (measured) at diffuseRoughness="
+                std::cerr << "bsdf_validate: FAILED EON albedo at rho = C at diffuseRoughness="
                            << diffuseRoughness << " authored=[" << authored.x << ", " << authored.y
                            << ", " << authored.z << "] observed=[" << measured.mean.x << ", "
                            << measured.mean.y << ", " << measured.mean.z
@@ -550,7 +538,7 @@ PT_CHECK(eon_albedo_inversion, Slow, Statistical) {
             }
         }
     }
-    finish(ctx, ok, "eon_albedo_inversion failed; see the rows above");
+    finish(ctx, ok, "eon_albedo_is_rho failed; see the rows above");
     return;
 }
 
@@ -620,9 +608,7 @@ PT_CHECK(index_matched_glossy_layer, Fast, Exact) {
                         pathtracer::scene::evaluateBsdfSplit(
                             makeDiffuseParams(albedo, diffuseRoughness, roughnesses[0]), wo, wi)
                             .diffuse;
-                    const glm::vec3 analytic = referenceEon(
-                        pathtracer::scene::eonAlbedoInversion(albedo, diffuseRoughness),
-                        diffuseRoughness, wi, wo) * muI;
+                    const glm::vec3 analytic = referenceEon(albedo, diffuseRoughness, wi, wo) * muI;
                     const float scale = std::max(maxChannel(analytic), 1e-6F);
                     const float valueErr = maxChannel(glm::abs(reference - analytic)) / scale;
                     worstValueErr = std::max(worstValueErr, valueErr);
@@ -933,7 +919,7 @@ PT_CHECK(average_fresnel, Fast, Exact) {
         double worst = 0.0;
         double worstTint = 0.0;
         for (double tint : tints) {
-            const double truth = cosineAverageFresnel([&](double mu) { return referenceF82(reflectivity, tint, mu); });
+            const double truth = cosineAverageFresnel([&](double mu) { return std::max(referenceF82(reflectivity, tint, mu), 0.0); });
             const glm::vec3 rule = pathtracer::scene::metalFresnelAvg(glm::vec3(static_cast<float>(reflectivity)),
                                                                       glm::vec3(static_cast<float>(tint)));
             const double error = std::abs(static_cast<double>(rule.x) - truth);
@@ -968,63 +954,26 @@ PT_CHECK(average_fresnel, Fast, Exact) {
     return;
 }
 
-// --- Independent reference for the reflect-side albedo table, on the generator's domain and measure; Gauss-Legendre, Simpson being slower.
-double referenceSmithG2OverCosO(double cosO, double cosI, double alpha) {
-    const double alpha2 = alpha * alpha;
-    const auto radical = [&](double c) { return std::sqrt(alpha2 + ((1.0 - alpha2) * c * c)); };
-    return 2.0 * cosI / ((cosI * radical(cosO)) + (cosO * radical(cosI)));
-}
+// --- Independent reference for the reflect-side albedo table: the generator's measure under a different rule, Simpson in phi.
+constexpr double kPiDouble = tools::quadrature::kPi;
 
-constexpr double kPiDouble = 3.14159265358979324;
-
-// Gauss-Legendre nodes/weights on [0,1] by Newton on P_n via Bonnet's recurrence (Numerical Recipes 3rd ed.), built once per node count.
-struct GaussLegendreRule {
-    std::vector<double> node;
-    std::vector<double> weight;
-};
-
+// The shared Gauss-Legendre rule of N nodes, built once per node count.
 template <int N>
-const GaussLegendreRule& gaussLegendreRule() {
-    static const GaussLegendreRule rule = [] {
-        GaussLegendreRule built{std::vector<double>(N), std::vector<double>(N)};
-        for (int i = 0; i < N; ++i) {
-            double x = std::cos(kPiDouble * (i + 0.75) / (N + 0.5));
-            double derivative = 0.0;
-            for (int iteration = 0; iteration < 100; ++iteration) {
-                double p0 = 1.0;
-                double p1 = 0.0;
-                for (int k = 0; k < N; ++k) {
-                    const double p2 = p1;
-                    p1 = p0;
-                    p0 = ((((2.0 * k) + 1.0) * x * p1) - (k * p2)) / (k + 1.0);
-                }
-                derivative = N * ((x * p0) - p1) / ((x * x) - 1.0);
-                const double step = p0 / derivative;
-                x -= step;
-                if (std::abs(step) <= 1e-16) {
-                    break;
-                }
-            }
-            built.node[static_cast<std::size_t>(i)] = 0.5 * (1.0 - x);
-            built.weight[static_cast<std::size_t>(i)] = 1.0 / ((1.0 - (x * x)) * derivative * derivative);
-        }
-        return built;
-    }();
+const tools::quadrature::GaussLegendre& gaussLegendreRule() {
+    static const tools::quadrature::GaussLegendre rule = tools::quadrature::gaussLegendre(N);
     return rule;
 }
 
 // Gauss-Legendre over [lower, upper], on any value type with + and scalar *, matching simpson's shape.
 template <int N, typename F>
 auto gaussLegendre(double lower, double upper, F f) -> decltype(f(lower)) {
-    const GaussLegendreRule& rule = gaussLegendreRule<N>();
+    const tools::quadrature::GaussLegendre& rule = gaussLegendreRule<N>();
     decltype(f(lower)) sum = f(lower) * 0.0;
     for (std::size_t i = 0; i < rule.node.size(); ++i) {
         sum = sum + (rule.weight[i] * f(lower + ((upper - lower) * rule.node[i])));
     }
     return (upper - lower) * sum;
 }
-
-// Composite Simpson over [lower, upper] with an even panel count, on any value type with + and scalar *.
 
 // OpenPBR's alpha = r^2, mirrored so every reference evaluates the alpha the lobe ships at.
 double alphaAt(double roughness) { return roughness * roughness; }
@@ -1044,7 +993,7 @@ glm::dvec3 referenceDirectionalAlbedo(double mu, double alpha) {
             const double woDotH = radius * std::cos(thetaH - delta);
             const double wiZ = radius * std::cos((2.0 * thetaH) - delta);
             const double weight = (woDotH / std::cos(thetaH)) *
-                                   referenceSmithG2OverCosO(mu, wiZ, alpha) * std::sin(psi) * std::cos(psi);
+                                   tools::quadrature::HeightCorrelated::reflect(mu, wiZ, alpha) * std::sin(psi) * std::cos(psi);
             const double fc = std::pow(std::clamp(1.0 - woDotH, 0.0, 1.0), 5.0);
             return glm::dvec3(weight * (1.0 - fc), weight * fc, weight * woDotH * std::pow(std::clamp(1.0 - woDotH, 0.0, 1.0), 6.0));
         });
@@ -1181,10 +1130,9 @@ PT_CHECK(albedo_table_interpolation, Slow, Exact) {
     std::vector<InterpolationError> averageRows(static_cast<std::size_t>(res.x - 1));
     parallelRows(res.x - 1, ctx.threads(), [&](int ri) {
         const double roughness = pathtracer::scene::albedoGridRoughness(static_cast<float>(ri) + 0.5F);
-        const glm::dvec4 shipped(pathtracer::scene::averageAlbedoSplit(static_cast<float>(roughness)));
+        const double shipped = pathtracer::scene::averageAlbedoDeficit(static_cast<float>(roughness));
         const glm::dvec3 exact = referenceAverageAlbedo(alphaAt(roughness));
-        const glm::dvec3 error = glm::abs(glm::dvec3(shipped) - exact);
-        const double delta = std::max({error.x, error.y, error.z, std::abs(shipped.w - std::max(1.0 - (exact.x + exact.y), 0.0))});
+        const double delta = std::abs(shipped - std::max(1.0 - (exact.x + exact.y), 0.0));
         averageRows[static_cast<std::size_t>(ri)] = {delta, roughness, -1.0};
     });
 
@@ -1236,7 +1184,7 @@ double referenceDielectricReflectAlbedo(double mu, double alpha, double ior) {
             const double thetaH = std::atan(alpha * std::tan(psi));
             const double woDotH = radius * std::cos(thetaH - delta);
             const double wiZ = radius * std::cos((2.0 * thetaH) - delta);
-            return (woDotH / std::cos(thetaH)) * referenceSmithG2OverCosO(mu, wiZ, alpha) * std::sin(psi) * std::cos(psi) *
+            return (woDotH / std::cos(thetaH)) * tools::quadrature::HeightCorrelated::reflect(mu, wiZ, alpha) * std::sin(psi) * std::cos(psi) *
                    referenceDielectricFresnel(woDotH, ior);
         });
     };
@@ -1256,7 +1204,6 @@ PT_CHECK(glossy_diffuse_albedo_scaling, Slow, Exact) {
     const std::array<double, 3> cosines = {0.4, 0.7, 1.0};
     const glm::vec3 albedo(0.8F, 0.3F, 0.1F);
     constexpr float kDiffuseRoughness = 0.5F;
-    const glm::vec3 rho = pathtracer::scene::eonAlbedoInversion(albedo, kDiffuseRoughness);
 
     struct Worst {
         double table = 0.0;
@@ -1290,7 +1237,7 @@ PT_CHECK(glossy_diffuse_albedo_scaling, Slow, Exact) {
                     const float sinI = std::sqrt(std::max(0.0F, 1.0F - static_cast<float>(muI * muI)));
                     const glm::vec3 wi(sinI * std::cos(1.1F), sinI * std::sin(1.1F), static_cast<float>(muI));
                     const double measured = pathtracer::scene::evaluateBsdfSplit(closure, wi).diffuse.x /
-                                            (static_cast<double>(referenceEon(rho, kDiffuseRoughness, wi, wo).x) * muI);
+                                            (static_cast<double>(referenceEon(albedo, kDiffuseRoughness, wi, wo).x) * muI);
                     const double expected = 1.0 - (slab.reflectSingle.x + slab.multiReflect);
                     worst.invariance = std::max(worst.invariance, std::abs(measured - expected) / expected);
                 }
@@ -1328,9 +1275,10 @@ PT_CHECK(cauchy_dispersion, Fast, Exact) {
         {"water, 20C", 1.333F, 55.4F},
         {"diamond", 2.417F, 55.3F},
     }};
-    constexpr float kLambdaDNm = 587.56F;
-    constexpr float kLambdaFNm = 486.13F;
-    constexpr float kLambdaCNm = 656.27F;
+    // OpenPBR's Fraunhofer lines d, F and C, the wavelengths V_d is defined at.
+    constexpr float kLambdaDNm = 587.6F;
+    constexpr float kLambdaFNm = 486.1F;
+    constexpr float kLambdaCNm = 656.3F;
 
     bool ok = true;
     std::cout << "bsdf_validate: Cauchy dispersion inverted from (ior, abbe)\n";
@@ -2468,7 +2416,10 @@ PT_CHECK(index_matched_coat_is_absorption, Fast, Exact) {
 PT_CHECK(coated_white_furnace, Slow, Statistical) {
     constexpr int kSampleCount = 200000;
     constexpr float kTolerance = 0.02F;
-    const std::array<Surface, 3> bases = {makeParams(0.2F, 1.0F, 0.0F), makeParams(0.6F, 1.0F, 0.0F), makeParams(0.5F, 0.0F, 0.0F)};
+    // Glass at specular_ior 1 bends nothing, a delta refraction that must carry the multiple scattering the coat's Fresnel shift leaves.
+    Surface unbent = makeParams(1.0F, 0.0F, 1.0F);
+    unbent.specularIor = 1.0F;
+    const std::array<Surface, 4> bases = {makeParams(0.2F, 1.0F, 0.0F), makeParams(0.6F, 1.0F, 0.0F), makeParams(0.5F, 0.0F, 0.0F), unbent};
     const std::array<float, 3> coatRoughnesses = {0.0F, 0.3F, 0.7F};
     const std::array<float, 3> ndotVs = {1.0F, 0.6F, 0.25F};
     bool ok = true;
@@ -2482,7 +2433,7 @@ PT_CHECK(coated_white_furnace, Slow, Statistical) {
                     const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
                     const glm::vec3 lo = furnaceLo(coat, wo, kSampleCount, ++seed);
                     if (!withinBand(lo, 1.0F, kTolerance)) {
-                        std::cerr << "bsdf_validate: FAILED coated furnace at metal=" << base.baseMetalness << " C=" << weight
+                        std::cerr << "bsdf_validate: FAILED coated furnace at metal=" << base.baseMetalness << " ior=" << base.specularIor << " C=" << weight
                                   << " coat_roughness=" << coatRoughness << " ndotV=" << ndotV << " Lo=" << minChannel(lo) << '\n';
                         ok = false;
                     }
@@ -3064,6 +3015,75 @@ PT_CHECK(anisotropic_albedo_matches_lobe, Slow, Exact) {
     }
     std::cout << "bsdf_validate: anisotropic albedo vs integrated lobe, worst " << worst << '\n';
     finish(ctx, worst <= kTolerance, "an anisotropic slab's albedo does not match the energy its lobe reflects");
+}
+
+// The layer branches the sweeps above leave untouched, each an audit regression: every draw finite, non-negative and self-consistent.
+PT_CHECK(layer_branch_invariants, Fast, Exact) {
+    struct Case {
+        const char* name;
+        Surface surface;
+        float mu;  // wo's cosine, negative inside a transmissive base
+        std::optional<int> hero;
+        glm::vec3 coatNormal;
+    };
+    constexpr int kDraws = 4000;
+    const glm::vec3 up(0.0F, 0.0F, 1.0F);
+    const glm::vec3 tilt = glm::normalize(glm::vec3(0.0F, std::sin(0.4F), std::cos(0.4F)));
+    const Surface glass = makeParams(0.3F, 0.0F, 1.0F);
+    const Surface whiteMirror = makeParams(0.0F, 1.0F, 0.0F);
+    Surface dispersive = coated(makeParams(0.2F, 0.0F, 1.0F), 1.0F, glm::vec3(1.0F), 0.1F, 1.6F, 1.0F);
+    dispersive.transmissionDispersionScale = 1.0F;
+    // specular_ior 1 bends nothing, so refraction is a delta, while the coat's n_b/n_c still reflects and leaves an escape deficit.
+    Surface unbent = coated(makeParams(0.4F, 0.0F, 1.0F), 1.0F, glm::vec3(1.0F), 0.1F, 1.5F, 1.0F);
+    unbent.specularIor = 1.0F;
+    const std::array<Case, 11> cases{{
+        {"coat exiting a transmissive base", coated(glass, 1.0F, glm::vec3(0.8F), 0.2F, 1.5F, 1.0F), -0.6F, std::nullopt, up},
+        {"fuzz exiting a transmissive base", fuzzed(glass, 1.0F, glm::vec3(0.9F), 0.5F), -0.6F, std::nullopt, up},
+        {"film under a coat", filmed(coated(makeParams(0.3F, 0.0F, 0.0F), 1.0F, glm::vec3(1.0F), 0.1F, 1.6F, 1.0F), 1.0F, 0.4F, 1.3F), 0.7F,
+         std::nullopt, up},
+        {"film met from inside the base", filmed(glass, 1.0F, 0.4F, 1.3F), -0.7F, std::nullopt, up},
+        {"smooth tilted coat", coated(makeColoredMetalParams(0.3F), 1.0F, glm::vec3(1.0F), 0.0F, 1.5F, 1.0F), 0.8F, std::nullopt, tilt},
+        {"tilted coat under fuzz", fuzzed(coated(makeParams(0.4F, 0.0F, 0.0F), 1.0F, glm::vec3(0.9F), 0.2F, 1.5F, 1.0F), 1.0F, glm::vec3(0.8F), 0.4F),
+         0.6F, std::nullopt, tilt},
+        {"dispersion under a coat, red hero", dispersive, 0.7F, 0, up},
+        {"dispersion under a coat, blue hero", dispersive, 0.7F, 2, up},
+        {"index-matched bend under the coat's Fresnel shift", unbent, 0.6F, std::nullopt, up},
+        {"darkening's 0/0: white mirror under coat_ior < 1 past its critical angle", coated(whiteMirror, 1.0F, glm::vec3(1.0F), 0.0F, 0.8F, 1.0F),
+         0.3F, std::nullopt, up},
+        {"Airy series as r12 r23 -> 1: film on a perfect conductor at grazing", filmed(makeParams(0.3F, 1.0F, 0.0F), 1.0F, 0.4F, 2.0F), 1e-3F,
+         std::nullopt, up},
+    }};
+    const auto finiteNonNegative = [](const glm::vec3& v) {
+        return glm::all(glm::greaterThanEqual(v, glm::vec3(0.0F))) && glm::all(glm::lessThan(v, glm::vec3(std::numeric_limits<float>::infinity())));
+    };
+    bool ok = true;
+    long long draws = 0;
+    for (const Case& c : cases) {
+        const glm::vec3 wo(std::sqrt(1.0F - (c.mu * c.mu)), 0.0F, c.mu);
+        const pathtracer::scene::BsdfClosure closure = pathtracer::scene::makeBsdfClosure(c.surface, wo, c.hero, c.coatNormal);
+        bool caseOk = true;
+        int caseDraws = 0;
+        for (int i = 0; i < kDraws; ++i) {
+            pathtracer::scene::Sampler sampler(0, 0, i, kDraws, 9100U);
+            const std::optional<pathtracer::scene::BsdfSample> sample = pathtracer::scene::sampleBsdf(closure, sampler);
+            if (!sample) {
+                continue;
+            }
+            ++caseDraws;
+            caseOk = caseOk && finiteNonNegative(sample->throughputWeight) && finiteNonNegative(sample->transmitWeight);
+            if (!sample->delta) {
+                const pathtracer::scene::BsdfEval eval = pathtracer::scene::evaluateBsdfSplit(closure, sample->wiLocal);
+                caseOk = caseOk && eval.pdf == sample->pdf && eval.total() / eval.pdf == sample->throughputWeight;
+            }
+        }
+        draws += caseDraws;
+        if (!caseOk || caseDraws == 0) {
+            std::cerr << "bsdf_validate: FAILED layer branch invariants for " << c.name << " over " << caseDraws << " draws\n";
+            ok = false;
+        }
+    }
+    std::cout << "bsdf_validate: layer branch invariants over " << cases.size() << " configurations, " << draws << " draws\n";
+    finish(ctx, ok, "a layer branch drew a non-finite, negative or self-inconsistent sample, or none; see the rows above");
 }
 
 PT_CHECK_MAIN("bsdf")

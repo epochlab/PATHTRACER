@@ -6,3 +6,7 @@
 	path = third_party/mikktspace
 	url = https://github.com/mmikk/MikkTSpace.git
 	shallow = true
+[submodule "third_party/openpbr-bsdf"]
+	path = third_party/openpbr-bsdf
+	url = https://github.com/adobe/openpbr-bsdf.git
+	shallow = true

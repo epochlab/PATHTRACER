@@ -7,16 +7,16 @@
 #include "fuzz.h"
 #include "microfacet.h"
 #include "pathtracer/scene/fresnel_dielectric.h"
+#include "shading_math.h"
 
 namespace pathtracer::scene {
 
 namespace {
 
-constexpr float kPi = 3.14159265F;
-
-float channelMean(const glm::vec3& v) { return (v.x + v.y + v.z) / 3.0F; }
-
-float lerp1(float a, float b, float t) { return a + ((b - a) * t); }
+// Fraunhofer d, F and C lines as OpenPBR states them (656.3, 587.6, 486.1 nm), where V_d = (n_d - 1)/(n_F - n_C) is defined.
+constexpr float kLambdaDNm = 587.6F;
+constexpr float kLambdaFNm = 486.1F;
+constexpr float kLambdaCNm = 656.3F;
 
 float& massOf(BsdfClosure& closure, Technique technique) { return closure.mass[static_cast<std::size_t>(technique)]; }
 
@@ -46,8 +46,19 @@ float modulatedRatio(float eta, float specularWeight) {
 
 // specular_ior at the path's hero wavelength: dispersion enters here alone, so every index at the vertex is spectrally consistent.
 float dispersedIor(const OpenPbrInputs<Constant>& inputs, std::optional<int> heroChannel) {
-    const float abbe = inputs.transmissionDispersionAbbeNumber / inputs.transmissionDispersionScale;
-    return heroChannel.has_value() ? cauchyIor(inputs.specularIor, abbe, kRgbWavelengthsNm[*heroChannel]) : inputs.specularIor;
+    // A zero transmission_dispersion_scale is V_d infinite, no dispersion, whatever the Abbe number.
+    if (!heroChannel.has_value() || inputs.transmissionDispersionScale == 0.0F) {
+        return inputs.specularIor;
+    }
+    // V_d's least value keeping the longest hero band's index on its side of the surround (the spec allows V_d = 0, unbounded dispersion).
+    const float longest = std::max({kRgbWavelengthsNm.x, kRgbWavelengthsNm.y, kRgbWavelengthsNm.z});
+    const float leastAbbe = ((1.0F / (kLambdaDNm * kLambdaDNm)) - (1.0F / (longest * longest))) /
+                            ((1.0F / (kLambdaFNm * kLambdaFNm)) - (1.0F / (kLambdaCNm * kLambdaCNm)));
+    const float abbe = std::max(inputs.transmissionDispersionAbbeNumber / inputs.transmissionDispersionScale, leastAbbe);
+    // A medium rarer than its surround disperses as its reciprocal, the denser side, so short wavelengths still bend the most.
+    const float n = inputs.specularIor;
+    const float dense = cauchyIor(std::max(n, 1.0F / n), abbe, kRgbWavelengthsNm[*heroChannel]);
+    return n >= 1.0F ? dense : 1.0F / dense;
 }
 
 // What passes beneath the fuzz toward wi, untinted (OpenPBR): 1 - F E_fuzz(wo) from outside, from inside only leaving transmission.
@@ -137,10 +148,9 @@ void addDielectric(BsdfClosure& closure, const OpenPbrInputs<Constant>& inputs, 
     }
     // Albedo scaling, f = f_spec + (1 - E_spec(wo)) f_diffuse: energy-exact for any substrate, non-reciprocal by the spec's definition.
     closure.diffuseWeight = (weight * (1.0F - inputs.transmissionWeight)) * (1.0F - (slab.tint * reflectAlbedo(slab)));
-    const glm::vec3 rho = eonAlbedoInversion(baseAlbedo, inputs.baseDiffuseRoughness);
-    massOf(closure, Technique::Diffuse) = channelMean(closure.diffuseWeight * rho);
+    massOf(closure, Technique::Diffuse) = channelMean(closure.diffuseWeight * baseAlbedo);
     if (massOf(closure, Technique::Diffuse) > 0.0F) {
-        closure.diffuse = makeDiffuseSlab(rho, inputs.baseDiffuseRoughness, closure.wo);
+        closure.diffuse = makeDiffuseSlab(baseAlbedo, inputs.baseDiffuseRoughness, closure.wo);
     }
 }
 
@@ -175,7 +185,7 @@ void addFuzz(BsdfClosure& closure, const OpenPbrInputs<Constant>& inputs) {
 
 // OpenPBR's coat: its slab at wo in its own frame, then the base's absorption, (1 - E_coat) and darkening weights under it.
 void addCoat(BsdfClosure& closure, const OpenPbrInputs<Constant>& inputs, const glm::vec3& baseAlbedo, float roughness, float ior,
-             float fresnelIor) {
+             float fresnelIor, float specularRatio) {
     const float weight = closure.coatWeight;
     glm::vec3 coatWo = closure.toCoat * closure.wo;
     coatWo.z = std::max(coatWo.z, 0.0F);
@@ -200,21 +210,34 @@ void addCoat(BsdfClosure& closure, const OpenPbrInputs<Constant>& inputs, const 
     }
     // Darkening (OpenPBR): Delta = (1-K)/(1-E_b K), K the internal reflectance between the smooth (F) and Lambertian (K_r) base limits.
     glm::vec3 darkening(1.0F);
+    glm::vec3 transmitGain(1.0F);
     if (inputs.coatDarkening > 0.0F) {
         const float nc2 = closure.coatIor * closure.coatIor;
         const float smoothK = fresnelDielectric(muO, 1.0F, closure.coatIor);
         const float roughK = 1.0F - ((1.0F - fresnelAverage(closure.coatIor)) / nc2);
-        const float specularF0 = ((inputs.specularIor - 1.0F) / (inputs.specularIor + 1.0F)) * ((inputs.specularIor - 1.0F) / (inputs.specularIor + 1.0F));
+        // r_d = lerp(1, r, xi_s F_s), F_s at the coat-aware eta_s before modulation, xi_s F_s clamped to [0, 1] (spec 997-1000).
+        const float specularF0 = ((specularRatio - 1.0F) / (specularRatio + 1.0F)) * ((specularRatio - 1.0F) / (specularRatio + 1.0F));
         const float dielectricRoughness = lerp1(1.0F, inputs.specularRoughness, std::min(inputs.specularWeight * specularF0, 1.0F));
         const float baseRoughness = lerp1(dielectricRoughness, inputs.specularRoughness, inputs.baseMetalness);
         const float k = lerp1(smoothK, roughK, baseRoughness);
-        const glm::vec3 delta = (1.0F - k) / (1.0F - (baseAlbedoAtNormal(inputs, baseAlbedo, roughness, ior, fresnelIor) * k));
+        const glm::vec3 below = 1.0F - (baseAlbedoAtNormal(inputs, baseAlbedo, roughness, ior, fresnelIor) * k);
+        // E_b K <= 1 with equality only at E_b = K = 1, where nothing is absorbed or transmitted: both factors' limit there is exactly 1.
+        glm::vec3 delta(1.0F);
+        glm::vec3 series(1.0F);
+        for (int c = 0; c < 3; ++c) {
+            if (below[c] > 0.0F) {
+                delta[c] = (1.0F - k) / below[c];
+                series[c] = 1.0F / below[c];
+            }
+        }
         darkening = glm::vec3(1.0F) + ((weight * inputs.coatDarkening) * (delta - 1.0F));
+        // Light the base transmits never re-crosses the coat: the same series sums to T/(1 - E_b K), with no (1 - K) exit (Elias 2001).
+        transmitGain = glm::vec3(1.0F) + ((weight * inputs.coatDarkening) * (series - 1.0F));
     }
     const glm::vec3 throughCoat = (weight * (1.0F - reflectAlbedo(coat))) * coatTransmittance(closure.coatColor, closure.coatIor, muO);
     closure.baseBare = (1.0F - weight) * darkening;
     closure.baseUnder = throughCoat * darkening;
-    closure.transmitUnder = ((1.0F - weight) + throughCoat) * darkening;
+    closure.transmitUnder = ((1.0F - weight) + throughCoat) * transmitGain;
 }
 
 // Every slab's continuous value and the mixture density at wi, wo's hemisphere being +z; the base's values carry its weight under the coat.
@@ -262,12 +285,13 @@ std::optional<BsdfSample> weighSample(const BsdfClosure& closure, const glm::vec
     if (!(eval.pdf > 0.0F)) {
         return std::nullopt;
     }
-    return BsdfSample{glm::vec3(wi.x, wi.y, wi.z * closure.sign), eval.total() / eval.pdf, type, eval.pdf, false};
+    return BsdfSample{glm::vec3(wi.x, wi.y, wi.z * closure.sign), eval.total() / eval.pdf, eval.transmission / eval.pdf, type, eval.pdf, false};
 }
 
 // A delta technique's sample: its value over its own mass, pdf 0, so NEE has no density to double-count against.
 BsdfSample deltaSample(const BsdfClosure& closure, const glm::vec3& wi, const glm::vec3& value, Technique technique, LobeType type) {
-    return BsdfSample{glm::vec3(wi.x, wi.y, wi.z * closure.sign), value / massOf(closure, technique), type, 0.0F, true};
+    const glm::vec3 weight = value / massOf(closure, technique);
+    return BsdfSample{glm::vec3(wi.x, wi.y, wi.z * closure.sign), weight, type == LobeType::Transmission ? weight : glm::vec3(0.0F), type, 0.0F, true};
 }
 
 // Smooth refraction by Snell; its mass is the (1-F) energy, exactly 0 past the critical angle, so this draw never meets TIR.
@@ -354,11 +378,6 @@ glm::vec3 sampleCosineHemisphere(glm::vec2 u) {
     return {r * std::cos(phi), r * std::sin(phi), std::sqrt(std::max(0.0F, 1.0F - u.x))};
 }
 
-// Fraunhofer d, F and C lines, where V_d = (n_d-1)/(n_F-n_C) is defined: physical constants of the definition, not tuning.
-constexpr float kLambdaDNm = 587.56F;
-constexpr float kLambdaFNm = 486.13F;
-constexpr float kLambdaCNm = 656.27F;
-
 // Cauchy n(lambda) = A + B/lambda^2, (A,B) from (n_d, V_d); V_d infinite, dispersion scale 0, gives B = 0 and the index itself.
 float cauchyIor(float iorD, float abbe, float lambdaNm) {
     const float b = (iorD - 1.0F) / (abbe * ((1.0F / (kLambdaFNm * kLambdaFNm)) - (1.0F / (kLambdaCNm * kLambdaCNm))));
@@ -388,6 +407,8 @@ BsdfClosure makeBsdfClosure(const OpenPbrInputs<Constant>& inputs, const glm::ve
     const float ior = modulatedIor(inputs, heroChannel);
     float roughness = inputs.specularRoughness;
     float fresnelIor = ior;
+    // eta_s, the base's coat-aware index ratio before specular_weight modulates it: darkening's F_s reads it.
+    float specularRatio = dispersedIor(inputs, heroChannel);
     closure.coatWeight = inputs.coatWeight;
     if (closure.coatWeight > 0.0F) {
         closure.coatColor = inputs.coatColor;
@@ -402,9 +423,10 @@ BsdfClosure makeBsdfClosure(const OpenPbrInputs<Constant>& inputs, const glm::ve
         const float rc2 = inputs.coatRoughness * inputs.coatRoughness;
         roughness = lerp1(roughness, std::sqrt(std::sqrt(std::min(1.0F, (r2 * r2) + (2.0F * rc2 * rc2)))), closure.coatWeight);
         // Under the coat the base meets n_c, its Fresnel ratio n_b/n_c, inverted where n_c > n_b so no TIR appears; the bend is unchanged.
-        const float base = dispersedIor(inputs, heroChannel);
+        const float base = specularRatio;
         const float coated = inputs.coatIor > base ? inputs.coatIor / base : base / inputs.coatIor;
-        fresnelIor = modulatedRatio(lerp1(base, coated, closure.coatWeight), inputs.specularWeight);
+        specularRatio = lerp1(base, coated, closure.coatWeight);
+        fresnelIor = modulatedRatio(specularRatio, inputs.specularWeight);
     }
     if (closure.metalWeight > 0.0F) {
         addMetal(closure, inputs, baseAlbedo, roughness);
@@ -420,7 +442,7 @@ BsdfClosure makeBsdfClosure(const OpenPbrInputs<Constant>& inputs, const glm::ve
         closure.fuzzRoughness = inputs.fuzzRoughness;
     }
     if (closure.coatWeight > 0.0F && !closure.exiting) {
-        addCoat(closure, inputs, baseAlbedo, roughness, ior, fresnelIor);
+        addCoat(closure, inputs, baseAlbedo, roughness, ior, fresnelIor, specularRatio);
         // The base's selection masses at its weight toward wo: selection only, so one scalar serves reflection and refraction alike.
         const float baseScale = channelMean(underCoat(closure, glm::vec3(-closure.wo.x, -closure.wo.y, closure.wo.z)));
         for (std::size_t t = static_cast<std::size_t>(Technique::MetalSingle); t < kTechniqueCount; ++t) {

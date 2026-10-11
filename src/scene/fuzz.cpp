@@ -4,12 +4,11 @@
 #include <cmath>
 
 #include "eon.h"
+#include "shading_math.h"
 
 namespace pathtracer::scene {
 
 namespace {
-
-constexpr float kPi = 3.14159265F;
 
 // The two names the published table is written against, so third_party/ltc-sheen compiles exactly as its authors ship it.
 struct Vector3f {
@@ -26,8 +25,6 @@ struct SheenLTC {
 #include "ltc_table_sheen_volume.cpp"  // NOLINT(bugprone-suspicious-include) -- vendored data, compiled as published
 
 constexpr int kTableRes = 32;
-
-float lerp1(float a, float b, float t) { return a + ((b - a) * t); }
 
 // The reference's bilinear fetch over [alpha][cos theta], both on [0, 1] edge-aligned, so the last row and column are exact nodes.
 Vector3f coefficients(float roughness, float mu) {

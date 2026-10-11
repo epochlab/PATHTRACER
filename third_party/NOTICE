@@ -5,9 +5,9 @@ This project vendors the libraries below. cgltf, nlohmann/json and Dear ImGui
 are distributed under the MIT Licence, whose terms require the copyright notice
 and permission notice to be included in all copies or substantial portions of
 the software. MikkTSpace is distributed under the zlib Licence, whose notice may
-not be removed from any source distribution. ltc-sheen's coefficient table is
-distributed under the Apache Licence 2.0. Provenance and versions are recorded
-in third_party/README.md.
+not be removed from any source distribution. ltc-sheen's coefficient table and
+openpbr-bsdf are distributed under the Apache Licence 2.0. Provenance and
+versions are recorded in third_party/README.md.
 
 
 --------------------------------------------------------------------------------
@@ -121,3 +121,18 @@ Version 2.0, whose full text is third_party/ltc-sheen/LICENSE. You may not use
 that file except in compliance with the Licence. It is distributed on an "AS
 IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
 implied.
+
+
+--------------------------------------------------------------------------------
+openpbr-bsdf -- https://github.com/adobe/openpbr-bsdf
+--------------------------------------------------------------------------------
+
+Copyright 2026 Adobe
+
+The repository is a git submodule at third_party/openpbr-bsdf, pinned at commit
+c91aad1 and unmodified, used only by the reference validator and report tools
+and never linked into the renderer. It is licensed under the Apache Licence,
+Version 2.0, whose full text is third_party/openpbr-bsdf/LICENSE. You may not
+use those files except in compliance with the Licence. They are distributed on
+an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
+or implied.

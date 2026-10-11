@@ -21,6 +21,7 @@ enum class LobeType { Diffuse, SpecularReflection, Transmission };
 struct BsdfSample {
     glm::vec3 wiLocal;            // sampled direction, local shading frame
     glm::vec3 throughputWeight;   // f(wi)*|cosThetaI| / pdf(wi)
+    glm::vec3 transmitWeight;     // its transmission lobes' share: what a direction crossing the geometric surface carries
     LobeType type;
     // The mixture density wiLocal was drawn from, equal to pdfBsdf's; zero for a delta branch.
     float pdf;
@@ -50,7 +51,7 @@ struct AnisoRows {
 };
 
 // An escape row over the escape-deficit shape, with the reciprocal of its blended total; scale 0 where the shape holds no energy.
-struct MsTransmitRow {
+struct EscapeShape {
     EscapeRow row;
     float scale;
 };
@@ -97,11 +98,11 @@ struct DielectricSlab {
     float refractWeight;
     glm::vec3 transmitTint;  // transmission_color on the surface when transmission_depth is 0; white when the medium carries it
     EscapeRow row;           // forward eta etaI/etaT
-    MsTransmitRow reflectShape;   // escape-deficit shape at the forward eta, sampling the multiple scattering leaving on wo's side
-    MsTransmitRow transmitShape;  // the same at the reciprocal eta, for multiple scattering leaving refracted
+    EscapeShape reflectShape;   // escape-deficit shape at the forward eta, sampling the multiple scattering leaving on wo's side
+    EscapeShape transmitShape;  // the same at the reciprocal eta, for multiple scattering leaving refracted
     glm::vec3 reflectSingle;   // R_ss(mu_o), the film's through the kernel rule; F(mu_o) when smooth
-    glm::vec3 transmitSingle;  // T_ss(mu_o) of the bare interface, a selection mass; 1 - F(mu_o) when smooth, the delta's value
-    float multiReflect;      // the escape deficit at mu_o times the reflected share of the mean escape, Ravg/(Ravg + Tavg)
+    glm::vec3 transmitSingle;  // T_ss(mu_o), a selection mass: 1 - F(mu_o) when smooth; undeviated, plus transmitted multiple scattering
+    float multiReflect;      // the escape deficit at mu_o times the random walks' reflected share of 2+ bounce energy
     float multiReflectScaleWo;  // multiReflect / (pi * (1 - Eavg)), the wo half of the reflected multiple-scattering lobe
     float multiTransmit;     // the same deficit's transmitted share
     float etaSq;             // (etaI/etaT)^2, the radiance compression refraction carries
@@ -112,7 +113,7 @@ struct DielectricSlab {
 
 // OpenPBR's diffuse slab at one wo: EON (Portsmouth, Kutz, Hill 2025) with its clipped-LTC/uniform sampling state.
 struct DiffuseSlab {
-    glm::vec3 rho;       // EON's single-scattering albedo whose observed albedo is base_weight * base_color
+    glm::vec3 rho;       // base_weight * base_color: in albedo scaling OpenPBR states rho = C, no inversion to an observed albedo
     float roughness;     // base_diffuse_roughness
     float uniformMix;    // the uniform hemisphere's share of the one-sample MIS, a function of mu_o and roughness alone
     glm::vec4 ltcM;      // clipped-LTC coefficients (a,b,c,d)
@@ -164,7 +165,7 @@ struct BsdfClosure {
     float coatIor;
     float coatRoughness;
     float coatAnisotropy;
-    // The base under the coat: reflection weighs baseBare + baseUnder * T(mu_i), entering refraction transmitUnder (OpenPBR).
+    // The base under the coat: reflection weighs baseBare + baseUnder * T(mu_i) under Delta, refraction transmitUnder under 1/(1 - E_b K).
     glm::vec3 baseBare;
     glm::vec3 baseUnder;
     glm::vec3 transmitUnder;
@@ -229,23 +230,20 @@ struct BsdfClosure {
 // Cosine-weighted hemisphere direction about +z, pdf = cos(theta)/pi. The AO lane relies on the pdf cancelling the cosine (Miller 1994).
 [[nodiscard]] glm::vec3 sampleCosineHemisphere(glm::vec2 u);
 
-// The metal's cosine-weighted average Fresnel 2*int_0^1 F82(mu)*mu dmu in closed form, the Kulla-Conty tint input.
+// The metal's cosine-weighted average Fresnel 2*int_0^1 F82(mu)*mu dmu of the clamped F82, the Kulla-Conty tint input.
 [[nodiscard]] glm::vec3 metalFresnelAvg(const glm::vec3& f0, const glm::vec3& tint);
 
 // The dielectric's 2*int_0^1 F(mu) mu dmu entering a medium of relative index eta, in closed form; 0 at eta = 1. The coat's E_F.
 [[nodiscard]] float fresnelAverage(float eta);
 
-// F82-split directional albedo E = F0*a + b - k*c and the deficit 1 - E, as (a, b, c, 1 - E), and its cosine-weighted mean.
+// F82-split directional albedo E = F0*a + b - k*c and the deficit 1 - E, as (a, b, c, 1 - E), and the deficit's cosine-weighted mean.
 [[nodiscard]] glm::vec4 directionalAlbedoSplit(float mu, float roughness);
-[[nodiscard]] glm::vec4 averageAlbedoSplit(float roughness);
+[[nodiscard]] float averageAlbedoDeficit(float roughness);
 
 // The grid those two index. mu is uniform in sqrt(mu), so never assume k/(res-1).
 [[nodiscard]] glm::ivec2 albedoGridRes();
 [[nodiscard]] float albedoGridRoughness(float index);
 [[nodiscard]] float albedoGridMu(float index);
-
-// EON Appendix A: the rho whose normal-incidence directional albedo equals albedo under uniform light. Identity at r=0 and at albedo=1.
-[[nodiscard]] glm::vec3 eonAlbedoInversion(const glm::vec3& albedo, float r);
 
 // Representative wavelength per RGB channel (Adobe's OpenPBR reference); three discrete bands, so dispersion shows RGB banding.
 inline constexpr glm::vec3 kRgbWavelengthsNm(620.0F, 540.0F, 450.0F);

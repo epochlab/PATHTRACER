@@ -93,7 +93,7 @@ void forEachInput(Visit&& visit, Inputs&... inputs) {
     visit(InputSpec{"transmission_scatter", NonNegative, kColour, false, InputUse::Volume, true}, inputs.transmissionScatter...);
     visit(InputSpec{"transmission_scatter_anisotropy", Signed, kData, false, InputUse::Volume}, inputs.transmissionScatterAnisotropy...);
     visit(InputSpec{"transmission_dispersion_scale", Unit, kData, false}, inputs.transmissionDispersionScale...);
-    visit(InputSpec{"transmission_dispersion_abbe_number", Positive, kData, false}, inputs.transmissionDispersionAbbeNumber...);
+    visit(InputSpec{"transmission_dispersion_abbe_number", NonNegative, kData, false}, inputs.transmissionDispersionAbbeNumber...);
     visit(InputSpec{"subsurface_weight", Unit, kData, false, InputUse::Volume, true}, inputs.subsurfaceWeight...);
     visit(InputSpec{"subsurface_color", Unit, kColour, false, InputUse::Volume}, inputs.subsurfaceColor...);
     visit(InputSpec{"subsurface_radius", NonNegative, kData, false, InputUse::Volume}, inputs.subsurfaceRadius...);

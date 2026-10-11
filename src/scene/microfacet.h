@@ -87,6 +87,6 @@ struct InterfaceSample {
                                                                     float uSplit);
 
 // Escape-table multiple scattering's direction about +z; the caller mirrors z for the refracted lobe.
-[[nodiscard]] glm::vec3 sampleEscapeShape(const MsTransmitRow& shape, glm::vec2 u);
+[[nodiscard]] glm::vec3 sampleEscapeShape(const EscapeShape& shape, glm::vec2 u);
 
 }  // namespace pathtracer::scene

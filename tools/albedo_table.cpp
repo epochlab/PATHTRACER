@@ -5,10 +5,12 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <random>
 #include <limits>
 #include <atomic>
 #include <string>
@@ -19,15 +21,18 @@
 
 #include <glm/glm.hpp>
 
+#include "microfacet_quadrature.h"
 #include "pathtracer/scene/fresnel_dielectric.h"
 
 namespace {
 
 // The shading path's own dielectric interface, so the table is baked against exactly what reads it.
-using pathtracer::scene::cos2Transmitted;
 using pathtracer::scene::fresnelDielectric;
-
-constexpr double kPi = 3.14159265358979323846;
+using tools::quadrature::EscapeSums;
+using tools::quadrature::GaussLegendre;
+using tools::quadrature::HeightCorrelated;
+using tools::quadrature::gaussLegendre;
+using tools::quadrature::kPi;
 
 // Reflect side, three resolutions each sized by what checkAlbedoTableInterpolation measures on that axis; the bilinear read dominates.
 constexpr int kAlbedoRoughnessRes = 256;
@@ -45,6 +50,10 @@ constexpr double kEtaMax = 3.0;
 
 // Gauss-Legendre nodes per transmit panel, in phi and each psi panel; verifyTransmit reports the residual against a doubled rule.
 constexpr int kTransmitNodes = 48;
+// Gauss-Legendre nodes per mu panel of the escape means; verifyTransmit doubles them with the angular rule.
+constexpr int kTransmitMeanNodes = 16;
+// Jittered incidence strata per axis for the random walks: 2^20 walks per (roughness, eta) cell.
+constexpr int kWalkStrata = 1024;
 
 // The reflection kernel's Gauss rules over x = dot(wo, h): E[F] for any Fresnel of x, the thin film's among them, on a coarse grid.
 constexpr int kKernelRoughnessRes = 32;
@@ -61,16 +70,6 @@ constexpr int kAnisoSquareNodes = 128;
 constexpr int kAnisoMeanMuNodes = 16;
 constexpr int kAnisoMeanPhiNodes = 8;
 
-double smithRadical(double cosTheta, double alpha) {
-    const double alpha2 = alpha * alpha;
-    return std::sqrt(alpha2 + ((1.0 - alpha2) * cosTheta * cosTheta));
-}
-
-// Height-correlated G2 over cosO, 2 cosI/(cosI s(cosO) + cosO s(cosI)): no cosine divides, so it holds to cosO = 0, where it is 2/alpha.
-double smithG2OverCosO(double cosO, double cosI, double alpha) {
-    return 2.0 * cosI / ((cosI * smithRadical(cosO, alpha)) + (cosO * smithRadical(cosI, alpha)));
-}
-
 // Reflect side, exact-domain Gauss-Legendre: E = F0*a + b - k*c for F82's F0 + (1-F0)(1-x)^5 - k*x(1-x)^6, linear in (F0, k).
 struct Split {
     double a;
@@ -84,65 +83,6 @@ double deficitOf(const Split& split) {
     return std::max(1.0 - (split.a + split.b), 0.0);
 }
 
-// Gauss-Legendre nodes/weights on [0,1] by Newton on P_n through Bonnet's recurrence (Numerical Recipes 3rd ed. 4.6.1); weights sum to 1.
-struct GaussLegendre {
-    std::vector<double> node;
-    std::vector<double> weight;
-};
-
-GaussLegendre gaussLegendre(int n) {
-    GaussLegendre quadrature{std::vector<double>(static_cast<std::size_t>(n)),
-                              std::vector<double>(static_cast<std::size_t>(n))};
-    for (int i = 0; i < n; ++i) {
-        double x = std::cos(kPi * (i + 0.75) / (n + 0.5));
-        double derivative = 0.0;
-        for (int iteration = 0; iteration < 100; ++iteration) {
-            double p0 = 1.0;
-            double p1 = 0.0;
-            for (int k = 0; k < n; ++k) {
-                const double p2 = p1;
-                p1 = p0;
-                p0 = ((((2.0 * k) + 1.0) * x * p1) - (k * p2)) / (k + 1.0);
-            }
-            derivative = n * ((x * p0) - p1) / ((x * x) - 1.0);
-            const double step = p0 / derivative;
-            x -= step;
-            if (std::abs(step) <= 1e-16) {
-                break;
-            }
-        }
-        quadrature.node[static_cast<std::size_t>(i)] = 0.5 * (1.0 - x);
-        quadrature.weight[static_cast<std::size_t>(i)] =
-            1.0 / ((1.0 - (x * x)) * derivative * derivative);
-    }
-    return quadrature;
-}
-
-// Every node of the reflect measure at (mu, alpha > 0): visit(weight, dot(wo, h)), the weight carrying D, G2 and the Jacobian.
-template <typename Visit>
-void forEachReflectNode(double mu, double alpha, const GaussLegendre& phiRule, const GaussLegendre& psiRule, Visit visit) {
-    const double sinTv = std::sqrt(std::max(0.0, 1.0 - (mu * mu)));
-    // phi is even about 0, so half the circle is integrated and doubled; the panels meet at pi/2, resolving the |cos phi| < mu layer.
-    for (int panel = 0; panel < 2; ++panel) {
-        const double phiBase = 0.5 * kPi * panel;
-        for (std::size_t p = 0; p < phiRule.node.size(); ++p) {
-            const double horizontal = sinTv * std::cos(phiBase + (0.5 * kPi * phiRule.node[p]));
-            const double radius = std::sqrt((horizontal * horizontal) + (mu * mu));
-            const double delta = std::atan2(horizontal, mu);
-            const double psiMax = std::atan(std::tan(0.5 * (delta + (0.5 * kPi))) / alpha);
-            for (std::size_t s = 0; s < psiRule.node.size(); ++s) {
-                const double psi = psiMax * psiRule.node[s];
-                const double thetaH = std::atan(alpha * std::tan(psi));
-                const double woDotH = radius * std::cos(thetaH - delta);
-                const double wiZ = radius * std::cos((2.0 * thetaH) - delta);
-                visit(phiRule.weight[p] * psiRule.weight[s] * psiMax * (woDotH / std::cos(thetaH)) * smithG2OverCosO(mu, wiZ, alpha) *
-                          std::sin(psi) * std::cos(psi),
-                      woDotH);
-            }
-        }
-    }
-}
-
 Split reflectAlbedo(double mu, double alpha, const GaussLegendre& phiRule, const GaussLegendre& psiRule) {
     // alpha = 0 is the smooth mirror, every facet the macro normal: E(F) = F(mu) exactly, where the measure below degenerates.
     if (alpha == 0.0) {
@@ -152,13 +92,13 @@ Split reflectAlbedo(double mu, double alpha, const GaussLegendre& phiRule, const
     double a = 0.0;
     double b = 0.0;
     double c = 0.0;
-    forEachReflectNode(mu, alpha, phiRule, psiRule, [&](double weight, double woDotH) {
+    tools::quadrature::forEachReflectNode<HeightCorrelated>(mu, alpha, phiRule, psiRule, [&](double weight, double woDotH) {
         const double fc = std::pow(std::clamp(1.0 - woDotH, 0.0, 1.0), 5.0);
         a += weight * (1.0 - fc);
         b += weight * fc;
         c += weight * woDotH * std::pow(std::clamp(1.0 - woDotH, 0.0, 1.0), 6.0);
     });
-    // The 1/mu is inside smithG2OverCosO, which lets mu = 0 be a node; never 0/0, psiMax being unreachable on panel one and 0 on panel two.
+    // The 1/mu is inside the G2 over cosO, so mu = 0 is a node; never 0/0: psiMax is unreachable on panel one and 0 on panel two.
     return {a, b, c};
 }
 
@@ -168,91 +108,6 @@ Split reflectAlbedo(double mu, double alpha, const GaussLegendre& phiRule, const
 double etaAtIndex(int index) {
     const double u = static_cast<double>(index) / static_cast<double>(kEtaRes - 1);
     return std::exp(std::log(kEtaMin) + (u * (std::log(kEtaMax) - std::log(kEtaMin))));
-}
-
-struct EscapeSums {
-    std::array<double, kEtaRes> reflect;
-    std::array<double, kEtaRes> transmit;
-};
-
-// Escaping fraction of a dielectric interface, reflected and transmitted shares: exact Fresnel, 1.0 inside TIR where Schlick reads ~0.1.
-EscapeSums escapeAlbedo(double mu, double alpha, const GaussLegendre& rule) {
-    EscapeSums sums{};
-    // alpha = 0 is the smooth interface: it reflects F(mu) and transmits the rest, F being 1 past the critical angle.
-    if (alpha == 0.0) {
-        for (int ei = 0; ei < kEtaRes; ++ei) {
-            const double fresnel = fresnelDielectric(static_cast<float>(mu), static_cast<float>(etaAtIndex(ei)), 1.0F);
-            sums.reflect[static_cast<std::size_t>(ei)] = fresnel;
-            sums.transmit[static_cast<std::size_t>(ei)] = 1.0 - fresnel;
-        }
-        return sums;
-    }
-    const double sinTv = std::sqrt(std::max(0.0, 1.0 - (mu * mu)));
-    const glm::dvec3 wo(sinTv, 0.0, mu);
-    for (int ei = 0; ei < kEtaRes; ++ei) {
-        const auto e = static_cast<std::size_t>(ei);
-        const auto eta = static_cast<float>(etaAtIndex(ei));
-        // wo.h below which a facet totally internally reflects; zero when entering, where there is no cone.
-        const double criticalCos = eta > 1.0F ? std::sqrt(1.0 - (1.0 / (static_cast<double>(eta) * eta))) : 0.0;
-        // phi even about 0, so half the circle is doubled; split at pi/2 and the TIR tangency, where 1-F is sqrt-singular (3.9e-3 without).
-        std::array<double, 5> phiBreaks{0.0, 0.5 * kPi, kPi, 0.0, 0.0};
-        int phiCount = 3;
-        if (criticalCos > mu && sinTv > 0.0) {
-            const double tangent = std::acos(std::sqrt((criticalCos * criticalCos) - (mu * mu)) / sinTv);
-            phiBreaks[3] = tangent;
-            phiBreaks[4] = kPi - tangent;
-            phiCount = 5;
-        }
-        std::sort(phiBreaks.begin(), phiBreaks.begin() + phiCount);
-        for (int phiPanel = 0; phiPanel + 1 < phiCount; ++phiPanel) {
-            const double phiLo = phiBreaks[static_cast<std::size_t>(phiPanel)];
-            const double phiHi = phiBreaks[static_cast<std::size_t>(phiPanel) + 1];
-            for (std::size_t p = 0; p < rule.node.size(); ++p) {
-                const double phi = phiLo + ((phiHi - phiLo) * rule.node[p]);
-                const double horizontal = sinTv * std::cos(phi);
-                const double radius = std::hypot(horizontal, mu);
-                const double delta = std::atan2(horizontal, mu);
-                const double visible = std::min(0.5 * kPi, delta + (0.5 * kPi));
-                std::array<double, 5> breaks{0.0, visible, std::min(visible, 0.5 * (delta + (0.5 * kPi))), 0.0, 0.0};
-                int count = 3;
-                if (criticalCos > 0.0 && criticalCos < radius) {
-                    const double half = std::acos(criticalCos / radius);
-                    for (const double at : {delta - half, delta + half}) {
-                        if (at > 0.0 && at < visible) {
-                            breaks[static_cast<std::size_t>(count++)] = at;
-                        }
-                    }
-                }
-                std::sort(breaks.begin(), breaks.begin() + count);
-                for (int panel = 0; panel + 1 < count; ++panel) {
-                    const double psiLo = std::atan(std::tan(breaks[static_cast<std::size_t>(panel)]) / alpha);
-                    const double psiHi = std::atan(std::tan(breaks[static_cast<std::size_t>(panel) + 1]) / alpha);
-                    for (std::size_t q = 0; q < rule.node.size(); ++q) {
-                        const double psi = psiLo + ((psiHi - psiLo) * rule.node[q]);
-                        const double thetaH = std::atan(alpha * std::tan(psi));
-                        const glm::dvec3 h(std::sin(thetaH) * std::cos(phi), std::sin(thetaH) * std::sin(phi), std::cos(thetaH));
-                        const double woDotH = glm::dot(wo, h);
-                        // phi and psi panel widths, measure sin(psi)cos(psi)/pi doubled; the 1/mu is in smithG2OverCosO.
-                        const double weight = rule.weight[p] * rule.weight[q] * (phiHi - phiLo) * (psiHi - psiLo) *
-                                              (2.0 * std::sin(psi) * std::cos(psi) / kPi) * (woDotH / h.z);
-                        const double fresnel = fresnelDielectric(static_cast<float>(woDotH), eta, 1.0F);
-                        const double wiZ = (2.0 * woDotH * h.z) - mu;
-                        if (wiZ > 0.0) {
-                            sums.reflect[e] += weight * fresnel * smithG2OverCosO(mu, wiZ, alpha);
-                        }
-                        const double cos2T = cos2Transmitted(static_cast<float>(woDotH), eta);
-                        if (cos2T >= 0.0) {
-                            const double wtZ = (((eta * woDotH) - std::sqrt(cos2T)) * h.z) - (eta * mu);
-                            if (wtZ < 0.0) {
-                                sums.transmit[e] += weight * (1.0 - fresnel) * smithG2OverCosO(mu, -wtZ, alpha);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    return sums;
 }
 
 // Rows are independent and each writes only its own slice, so the split is a pure speedup with no effect on the values.
@@ -281,20 +136,19 @@ struct AlbedoTable {
     std::vector<float> b;
     std::vector<float> c;
     std::vector<float> d;  // 1 - E in double
-    std::vector<float> aavg;  // cosine-weighted means, 2*integral(.(mu)*mu dmu)
-    std::vector<float> bavg;
-    std::vector<float> cavg;
-    std::vector<float> davg;
+    std::vector<float> davg;  // the deficit's cosine-weighted mean, 2*integral((1 - E(mu))*mu dmu)
     std::vector<float> r;  // [roughnessIndex][muIndex][etaIndex], kTransmitRoughnessRes * kTransmitMuRes * kEtaRes
     std::vector<float> t;
     std::vector<float> escapeDeficit;  // 1 - R - T in double, at the physical bound 0 where the quadrature lands past unity
     std::vector<float> ravg;
     std::vector<float> tavg;
     std::vector<float> escapeAvgDeficit;  // 1 - Ravg - Tavg in double, at the physical bound 0
+    std::vector<float> walkReflect;   // [roughness][eta], the cosine-weighted energy escaping on the incident side after 2+ bounces
+    std::vector<float> walkTransmit;  // the same escaping across the interface
     std::vector<float> msDensity;  // [roughnessIndex][muIndex], the reflected multiple-scattering lobe's own shape
     std::vector<float> msCdf;
-    std::vector<float> msTransmitDensity;  // [roughnessIndex][muIndex][etaIndex], the transmitted twin, unnormalised
-    std::vector<float> msTransmitCdf;
+    std::vector<float> escapeShapeDensity;  // [roughnessIndex][muIndex][etaIndex], the transmitted twin, unnormalised
+    std::vector<float> escapeShapeCdf;
     std::vector<float> kernelNode;    // [roughnessIndex][muIndex][order], the reflect kernel's Gauss nodes in x = dot(wo, h)
     std::vector<float> kernelWeight;
     std::vector<float> averageNode;   // the Gauss rule of 2 mu dmu on [0, 1], the hemispherical average's
@@ -315,7 +169,7 @@ double reflectMu(int index) {
     return t * t;
 }
 
-// The escape tables' mu axis, uniform in sqrt(mu), node 0 being mu = 0 itself: the grazing limit smithG2OverCosO holds to.
+// The escape tables' mu axis, uniform in sqrt(mu), node 0 being mu = 0 itself: the grazing limit G2 over cosO holds to.
 double escapeMu(int index) {
     const double t = static_cast<double>(index) / static_cast<double>(kTransmitMuRes - 1);
     return t * t;
@@ -336,9 +190,6 @@ void buildReflect(AlbedoTable& table, int phiNodes, int psiNodes, int muNodes) {
     table.b.assign(static_cast<std::size_t>(kAlbedoRoughnessRes) * kAlbedoMuRes, 0.0F);
     table.c.assign(static_cast<std::size_t>(kAlbedoRoughnessRes) * kAlbedoMuRes, 0.0F);
     table.d.assign(static_cast<std::size_t>(kAlbedoRoughnessRes) * kAlbedoMuRes, 0.0F);
-    table.aavg.assign(kAlbedoRoughnessRes, 0.0F);
-    table.bavg.assign(kAlbedoRoughnessRes, 0.0F);
-    table.cavg.assign(kAlbedoRoughnessRes, 0.0F);
     table.davg.assign(kAlbedoRoughnessRes, 0.0F);
     // One roughness row per worker, sharing no accumulator, so the result is identical to serial order: the artifact stays deterministic.
     parallelRows(kAlbedoRoughnessRes, [&](int ri) {
@@ -360,23 +211,20 @@ void buildReflect(AlbedoTable& table, int phiNodes, int psiNodes, int muNodes) {
         }
         double aMean = 0.0;
         double bMean = 0.0;
-        double cMean = 0.0;
         for (std::size_t k = 0; k < muRule.node.size(); ++k) {
             const double mu = muRule.node[k];
             const Split split = reflectAlbedo(mu, alpha, phiRule, psiRule);
             aMean += muRule.weight[k] * 2.0 * split.a * mu;
             bMean += muRule.weight[k] * 2.0 * split.b * mu;
-            cMean += muRule.weight[k] * 2.0 * split.c * mu;
         }
-        table.aavg[static_cast<std::size_t>(ri)] = static_cast<float>(aMean);
-        table.bavg[static_cast<std::size_t>(ri)] = static_cast<float>(bMean);
-        table.cavg[static_cast<std::size_t>(ri)] = static_cast<float>(cMean);
-        table.davg[static_cast<std::size_t>(ri)] = static_cast<float>(deficitOf({aMean, bMean, cMean}));
+        table.davg[static_cast<std::size_t>(ri)] = static_cast<float>(deficitOf({aMean, bMean, 0.0}));
     });
 }
 
-void buildTransmit(AlbedoTable& table, int nodes) {
+// The directional tables on the escapeMu grid; each mean is its own Gauss rule in mu, panelled at the critical cosine where E kinks.
+void buildTransmit(AlbedoTable& table, int nodes, int meanNodes) {
     const GaussLegendre rule = gaussLegendre(nodes);
+    const GaussLegendre meanRule = gaussLegendre(meanNodes);
     const auto cells = static_cast<std::size_t>(kTransmitRoughnessRes) * kTransmitMuRes * kEtaRes;
     table.r.assign(cells, 0.0F);
     table.t.assign(cells, 0.0F);
@@ -386,36 +234,31 @@ void buildTransmit(AlbedoTable& table, int nodes) {
     table.escapeAvgDeficit.assign(static_cast<std::size_t>(kTransmitRoughnessRes) * kEtaRes, 0.0F);
     parallelRows(kTransmitRoughnessRes, [&](int ri) {
         const double alpha = gridAlpha(ri, kTransmitRoughnessRes);
-        std::array<double, kEtaRes> rWeighted{};
-        std::array<double, kEtaRes> tWeighted{};
-        EscapeSums previous{};
-        for (int mi = 0; mi < kTransmitMuRes; ++mi) {
-            const double mu = escapeMu(mi);
-            const EscapeSums sums = escapeAlbedo(mu, alpha, rule);
-            // Trapezoid of 2*E*mu over the node spacing, which sqrt spacing makes non-uniform. First order.
-            const double previousMu = mi > 0 ? escapeMu(mi - 1) : 0.0;
-            const double width = mu - previousMu;
-            for (int ei = 0; ei < kEtaRes; ++ei) {
-                const auto e = static_cast<std::size_t>(ei);
-                const double r = sums.reflect[e];
-                const double t = sums.transmit[e];
-                table.r[static_cast<std::size_t>((((ri * kTransmitMuRes) + mi) * kEtaRes) + ei)] =
-                    static_cast<float>(r);
-                table.t[static_cast<std::size_t>((((ri * kTransmitMuRes) + mi) * kEtaRes) + ei)] =
-                    static_cast<float>(t);
-                table.escapeDeficit[static_cast<std::size_t>((((ri * kTransmitMuRes) + mi) * kEtaRes) + ei)] =
-                    static_cast<float>(std::max(1.0 - r - t, 0.0));
-                rWeighted[e] += width * ((r * mu) + (previous.reflect[e] * previousMu));
-                tWeighted[e] += width * ((t * mu) + (previous.transmit[e] * previousMu));
-            }
-            previous = sums;
-        }
         for (int ei = 0; ei < kEtaRes; ++ei) {
-            const auto e = static_cast<std::size_t>(ei);
-            table.ravg[static_cast<std::size_t>((ri * kEtaRes) + ei)] = static_cast<float>(rWeighted[e]);
-            table.tavg[static_cast<std::size_t>((ri * kEtaRes) + ei)] = static_cast<float>(tWeighted[e]);
-            table.escapeAvgDeficit[static_cast<std::size_t>((ri * kEtaRes) + ei)] =
-                static_cast<float>(std::max(1.0 - rWeighted[e] - tWeighted[e], 0.0));
+            const double eta = etaAtIndex(ei);
+            for (int mi = 0; mi < kTransmitMuRes; ++mi) {
+                const EscapeSums sums = tools::quadrature::escapeAlbedo<HeightCorrelated>(escapeMu(mi), alpha, eta, rule);
+                const auto cell = static_cast<std::size_t>((((ri * kTransmitMuRes) + mi) * kEtaRes) + ei);
+                table.r[cell] = static_cast<float>(sums.reflect);
+                table.t[cell] = static_cast<float>(sums.transmit);
+                table.escapeDeficit[cell] = static_cast<float>(std::max(1.0 - sums.reflect - sums.transmit, 0.0));
+            }
+            // 2 int E mu dmu over [0, mu_c] and [mu_c, 1]: past the critical cosine sqrt(1 - 1/eta^2) a smooth interface stops TIR.
+            const double critical = eta > 1.0 ? std::sqrt(1.0 - (1.0 / (eta * eta))) : 0.0;
+            double reflect = 0.0;
+            double transmit = 0.0;
+            for (const auto& [lo, hi] : {std::pair{0.0, critical}, std::pair{critical, 1.0}}) {
+                for (std::size_t k = 0; k < meanRule.node.size() && hi > lo; ++k) {
+                    const double mu = lo + ((hi - lo) * meanRule.node[k]);
+                    const EscapeSums sums = tools::quadrature::escapeAlbedo<HeightCorrelated>(mu, alpha, eta, rule);
+                    reflect += meanRule.weight[k] * (hi - lo) * 2.0 * mu * sums.reflect;
+                    transmit += meanRule.weight[k] * (hi - lo) * 2.0 * mu * sums.transmit;
+                }
+            }
+            const auto mean = static_cast<std::size_t>((ri * kEtaRes) + ei);
+            table.ravg[mean] = static_cast<float>(reflect);
+            table.tavg[mean] = static_cast<float>(transmit);
+            table.escapeAvgDeficit[mean] = static_cast<float>(std::max(1.0 - reflect - transmit, 0.0));
         }
     });
 }
@@ -481,8 +324,8 @@ float escapeDeficitAtUniformMu(const AlbedoTable& table, int ri, int mi, int ei)
 void buildTransmitMultipleScatteringShape(AlbedoTable& table) {
     const double step = 1.0 / (kTransmitMuRes - 1);
     const auto size = static_cast<std::size_t>(kTransmitRoughnessRes) * kTransmitMuRes * kEtaRes;
-    table.msTransmitDensity.assign(size, 0.0F);
-    table.msTransmitCdf.assign(size, 0.0F);
+    table.escapeShapeDensity.assign(size, 0.0F);
+    table.escapeShapeCdf.assign(size, 0.0F);
     for (int ri = 0; ri < kTransmitRoughnessRes; ++ri) {
         for (int ei = 0; ei < kEtaRes; ++ei) {
             double cdf = 0.0;
@@ -491,10 +334,10 @@ void buildTransmitMultipleScatteringShape(AlbedoTable& table) {
                 const auto density = static_cast<float>(static_cast<double>(escapeDeficitAtUniformMu(table, ri, mi, ei)) * mi * step);
                 if (mi > 0) {
                     // Trapezoid over the float density as emitted, not the double behind it, so the stored pair agrees at read precision.
-                    cdf += 0.5 * (table.msTransmitDensity[index - kEtaRes] + density) * step;
+                    cdf += 0.5 * (table.escapeShapeDensity[index - kEtaRes] + density) * step;
                 }
-                table.msTransmitDensity[index] = density;
-                table.msTransmitCdf[index] = static_cast<float>(cdf);
+                table.escapeShapeDensity[index] = density;
+                table.escapeShapeCdf[index] = static_cast<float>(cdf);
             }
         }
     }
@@ -644,7 +487,7 @@ GaussRule kernelRule(double mu, double alpha, const GaussLegendre& phiRule, cons
     }
     std::vector<double> x;
     std::vector<double> w;
-    forEachReflectNode(mu, alpha, phiRule, psiRule, [&](double weight, double woDotH) {
+    tools::quadrature::forEachReflectNode<HeightCorrelated>(mu, alpha, phiRule, psiRule, [&](double weight, double woDotH) {
         x.push_back(woDotH);
         w.push_back(weight);
     });
@@ -679,7 +522,7 @@ double buildKernel(AlbedoTable& table, int nodes) {
             }
             for (const auto probe : kKernelProbes) {
                 double exact = 0.0;
-                forEachReflectNode(mu, alpha, rule, rule, [&](double weight, double woDotH) { exact += weight * probe(woDotH); });
+                tools::quadrature::forEachReflectNode<HeightCorrelated>(mu, alpha, rule, rule, [&](double weight, double woDotH) { exact += weight * probe(woDotH); });
                 double ruled = 0.0;
                 for (int k = 0; k < kKernelOrder; ++k) {
                     ruled += gauss.weight[static_cast<std::size_t>(k)] * probe(gauss.node[static_cast<std::size_t>(k)]);
@@ -898,14 +741,11 @@ Residual verifyReflect(const AlbedoTable& table, int phiNodes, int psiNodes, int
     AlbedoTable reference;
     buildReflect(reference, phiNodes * 2, psiNodes * 2, muNodes * 2);
     Residual worst{0.0, "a", 0, 0};
-    const std::array<std::tuple<const char*, const std::vector<float>*, const std::vector<float>*>, 8>
+    const std::array<std::tuple<const char*, const std::vector<float>*, const std::vector<float>*>, 5>
         channels = {{{"a", &table.a, &reference.a},
                      {"b", &table.b, &reference.b},
                      {"c", &table.c, &reference.c},
                      {"d", &table.d, &reference.d},
-                     {"aavg", &table.aavg, &reference.aavg},
-                     {"bavg", &table.bavg, &reference.bavg},
-                     {"cavg", &table.cavg, &reference.cavg},
                      {"davg", &table.davg, &reference.davg}}};
     for (const auto& [name, shipped, exact] : channels) {
         Residual channelWorst{0.0, name, 0, 0};
@@ -913,7 +753,7 @@ Residual verifyReflect(const AlbedoTable& table, int phiNodes, int psiNodes, int
             const double delta = std::abs(static_cast<double>((*shipped)[i]) -
                                            static_cast<double>((*exact)[i]));
             if (delta > channelWorst.value) {
-                const int stride = shipped->size() == table.aavg.size() ? 1 : kAlbedoMuRes;
+                const int stride = shipped->size() == table.davg.size() ? 1 : kAlbedoMuRes;
                 channelWorst = {delta, name, static_cast<int>(i) / stride,
                                  stride == 1 ? -1 : static_cast<int>(i) % kAlbedoMuRes};
             }
@@ -929,9 +769,9 @@ Residual verifyReflect(const AlbedoTable& table, int phiNodes, int psiNodes, int
 }
 
 // Largest disagreement between the shipped transmit tables and a rebake at twice the nodes per axis: the quadrature's own error.
-double verifyTransmit(const AlbedoTable& table, int nodes) {
+double verifyTransmit(const AlbedoTable& table, int nodes, int meanNodes) {
     AlbedoTable reference;
-    buildTransmit(reference, nodes * 2);
+    buildTransmit(reference, nodes * 2, meanNodes * 2);
     double worst = 0.0;
     const std::array<std::pair<const char*, std::pair<const std::vector<float>*, const std::vector<float>*>>, 6>
         channels = {{{"r", {&table.r, &reference.r}},
@@ -962,6 +802,120 @@ double verifyTransmit(const AlbedoTable& table, int nodes) {
     return worst;
 }
 
+// --- The interface's multiple scattering by Smith random walks (Heitz, Hanika, d'Eon & Dachsbacher 2016), height-uniform microsurface.
+
+// Lambda(w) = (radical / w.z - 1) / 2 for any w.z != 0: negative below the horizon, where the walk descends.
+double walkLambda(const glm::dvec3& w, double alpha) {
+    return 0.5 * ((std::sqrt((w.z * w.z) + (alpha * alpha * ((w.x * w.x) + (w.y * w.y)))) / w.z) - 1.0);
+}
+
+// The next intersection height along w from h, C1(h) = (h + 1)/2; infinity where the ray leaves, G1 = C1(h)^Lambda (Heitz 2016 eq. 9).
+double walkHeight(const glm::dvec3& w, double h, double alpha, double u) {
+    // A horizontal ray keeps its height, the Smith microsurface being statistically flat.
+    if (w.z == 0.0) {
+        return h;
+    }
+    const double c1 = std::clamp(0.5 * (h + 1.0), 0.0, 1.0);
+    const double lambda = walkLambda(w, alpha);
+    // Only a rising ray can leave, with probability G1; a falling one always meets the surface below.
+    if (w.z > 0.0 && u > 1.0 - std::pow(c1, lambda)) {
+        return std::numeric_limits<double>::infinity();
+    }
+    return std::clamp((2.0 * c1 * std::pow(1.0 - u, -1.0 / lambda)) - 1.0, -1.0, 1.0);
+}
+
+// Visible normals for wi anywhere off the downward pole (Dupuy & Benyoub 2023): a spherical cap in the stretched configuration.
+glm::dvec3 walkVisibleNormal(const glm::dvec3& wi, double alpha, double u1, double u2) {
+    const glm::dvec3 stretched = glm::normalize(glm::dvec3(alpha * wi.x, alpha * wi.y, wi.z));
+    const double phi = 2.0 * kPi * u1;
+    const double z = ((1.0 - u2) * (1.0 + stretched.z)) - stretched.z;
+    const double sine = std::sqrt(std::clamp(1.0 - (z * z), 0.0, 1.0));
+    const glm::dvec3 h = glm::dvec3(sine * std::cos(phi), sine * std::sin(phi), z) + stretched;
+    return glm::normalize(glm::dvec3(alpha * h.x, alpha * h.y, h.z));
+}
+
+// One walk from incident wi (z > 0) through an interface of ratio eta = etaI/etaT: its exit side and scattering order.
+struct WalkExit {
+    bool reflected;
+    int order;
+};
+
+WalkExit randomWalk(const glm::dvec3& wi, double alpha, double eta, std::mt19937_64& rng) {
+    std::uniform_real_distribution<double> uniform(0.0, 1.0);
+    glm::dvec3 ray = -wi;
+    double height = 1.0;
+    bool outside = true;
+    int order = 0;
+    while (true) {
+        // Inside, the walk is the outside one mirrored through the mean plane: heights and directions negate.
+        const double next = outside ? walkHeight(ray, height, alpha, uniform(rng)) : -walkHeight(-ray, -height, alpha, uniform(rng));
+        if (std::isinf(next)) {
+            return {outside, order};
+        }
+        height = next;
+        ++order;
+        const glm::dvec3 toward = -ray;
+        const glm::dvec3 normal = outside ? walkVisibleNormal(toward, alpha, uniform(rng), uniform(rng))
+                                          : -walkVisibleNormal(-toward, alpha, uniform(rng), uniform(rng));
+        const double ratio = outside ? eta : 1.0 / eta;
+        const double cosine = glm::dot(toward, normal);
+        const double fresnel = fresnelDielectric(static_cast<float>(cosine), static_cast<float>(ratio), 1.0F);
+        if (uniform(rng) < fresnel) {
+            ray = (2.0 * cosine * normal) - toward;
+        } else {
+            const double cos2T = (1.0 - ((1.0 - (cosine * cosine)) * ratio * ratio));
+            ray = glm::normalize((((ratio * cosine) - std::sqrt(std::max(cos2T, 0.0))) * normal) - (ratio * toward));
+            outside = !outside;
+        }
+    }
+}
+
+// Cosine-weighted walks per (roughness, eta) cell on jittered incidence: order 1 must reproduce ravg/tavg, 2+ give the interface's split.
+double buildEscapeWalk(AlbedoTable& table, int strata) {
+    const auto cells = static_cast<std::size_t>(kTransmitRoughnessRes) * kEtaRes;
+    table.walkReflect.assign(cells, 0.0F);
+    table.walkTransmit.assign(cells, 0.0F);
+    std::vector<double> worstZ(kTransmitRoughnessRes, 0.0);
+    std::vector<double> worstNoise(kTransmitRoughnessRes, 0.0);
+    parallelRows(kTransmitRoughnessRes, [&](int ri) {
+        const double alpha = gridAlpha(ri, kTransmitRoughnessRes);
+        for (int ei = 0; ei < kEtaRes; ++ei) {
+            const auto cell = static_cast<std::size_t>((ri * kEtaRes) + ei);
+            std::mt19937_64 rng((static_cast<std::uint64_t>(ri) << 32U) | static_cast<std::uint64_t>(ei));
+            std::uniform_real_distribution<double> uniform(0.0, 1.0);
+            std::array<double, 4> counts{};  // order-1 reflect, order-1 transmit, 2+ reflect, 2+ transmit
+            for (int i = 0; i < strata; ++i) {
+                for (int j = 0; j < strata; ++j) {
+                    const double u1 = (i + uniform(rng)) / strata;
+                    const double u2 = (j + uniform(rng)) / strata;
+                    const double radius = std::sqrt(u1);
+                    const glm::dvec3 wi(radius * std::cos(2.0 * kPi * u2), radius * std::sin(2.0 * kPi * u2), std::sqrt(1.0 - u1));
+                    const WalkExit exit = randomWalk(wi, alpha, etaAtIndex(ei), rng);
+                    counts[static_cast<std::size_t>((exit.order > 1 ? 2 : 0) + (exit.reflected ? 0 : 1))] += 1.0;
+                }
+            }
+            const double walks = static_cast<double>(strata) * strata;
+            table.walkReflect[cell] = static_cast<float>(counts[2] / walks);
+            table.walkTransmit[cell] = static_cast<float>(counts[3] / walks);
+            // Binomial standard errors, conservative under stratification, for the order-1 means against the quadrature's.
+            for (const auto& [count, exact] : {std::pair{counts[0], table.ravg[cell]}, std::pair{counts[1], table.tavg[cell]}}) {
+                const double p = count / walks;
+                const double sigma = std::sqrt(std::max(p * (1.0 - p), 1.0 / walks) / walks);
+                worstZ[static_cast<std::size_t>(ri)] = std::max(worstZ[static_cast<std::size_t>(ri)], std::abs(p - exact) / sigma);
+            }
+            for (const double count : {counts[2], counts[3]}) {
+                const double p = count / walks;
+                worstNoise[static_cast<std::size_t>(ri)] = std::max(worstNoise[static_cast<std::size_t>(ri)], std::sqrt(p * (1.0 - p) / walks));
+            }
+        }
+    });
+    const double z = *std::max_element(worstZ.begin(), worstZ.end());
+    const double noise = *std::max_element(worstNoise.begin(), worstNoise.end());
+    std::cout << "albedo_table: random walks, " << strata * strata << " per cell; order-1 vs quadrature worst |z| " << z
+              << ", 2+ order standard error at most " << noise << "\n";
+    return z;
+}
+
 // %.9g is FLT_DECIMAL_DIG, round-tripping float32 exactly; it drops the point on a whole number, so "1" becomes "1.0F".
 std::string floatLiteral(float value) {
     std::array<char, 32> buffer{};
@@ -979,7 +933,7 @@ void writeArray(std::ofstream& out, const char* name, const std::vector<float>& 
 }
 
 bool writeInc(const std::string& path, const AlbedoTable& table, double residual, int transmitNodes, double transmitResidual,
-              double kernelResidual, double anisoResidual) {
+              double walkZ, double kernelResidual, double anisoResidual) {
     std::ofstream out(path);
     if (!out) {
         std::cerr << "albedo_table: cannot write " << path << "\n";
@@ -997,8 +951,11 @@ bool writeInc(const std::string& path, const AlbedoTable& table, double residual
            "// kAlbedoDeficit, kEscapeDeficit and their means are 1 - E and 1 - R - T formed in double, never cancelled in float.\n"
            "// kEscape*: the dielectric's R, T and deficit over (roughness, mu, log eta) at "
         << transmitNodes << " nodes per panel, residual " << transmitResidual << " vs a doubled rule.\n"
+           "// Refraction's shadowing is height-correlated Smith's B(1 + Lambda_o, 1 + Lambda_i) (Heitz 2014 sec. 6), not reflection's.\n"
+           "// kEscapeWalkReflect/Transmit: 2+ bounce energy leaving each side by Smith random walks (Heitz et al. 2016), order 1 at |z| "
+        << walkZ << ".\n"
            "// kMsReflectDensity/Cdf: the conductor's (1 - E(mu)) mu lobe as a normalised piecewise-linear density with exact prefix sums.\n"
-           "// kMsTransmitDensity/Cdf: the escape deficit's shape, unnormalised so a blend of four rows divides by its own blended total.\n"
+           "// kEscapeShapeDensity/Cdf: the escape deficit's shape, unnormalised so a blend of four rows divides by its own blended total.\n"
            "// kKernelNode/Weight: Gauss rules of order " << kKernelOrder << " for E[F] over x = dot(wo, h), any Fresnel; probe residual "
         << kernelResidual << ".\n"
            "// kAverageNode/Weight: the Gauss rule of 2 mu dmu on [0, 1], the hemispherical average of a Fresnel with no closed form.\n"
@@ -1023,20 +980,17 @@ bool writeInc(const std::string& path, const AlbedoTable& table, double residual
     writeArray(out, "kAlbedoB", table.b);
     writeArray(out, "kAlbedoC", table.c);
     writeArray(out, "kAlbedoDeficit", table.d);
-    writeArray(out, "kAlbedoAvgA", table.aavg);
-    writeArray(out, "kAlbedoAvgB", table.bavg);
-    writeArray(out, "kAlbedoAvgC", table.cavg);
     writeArray(out, "kAlbedoAvgDeficit", table.davg);
     writeArray(out, "kEscapeReflect", table.r);
     writeArray(out, "kEscapeTransmit", table.t);
     writeArray(out, "kEscapeDeficit", table.escapeDeficit);
-    writeArray(out, "kEscapeAvgReflect", table.ravg);
-    writeArray(out, "kEscapeAvgTransmit", table.tavg);
+    writeArray(out, "kEscapeWalkReflect", table.walkReflect);
+    writeArray(out, "kEscapeWalkTransmit", table.walkTransmit);
     writeArray(out, "kEscapeAvgDeficit", table.escapeAvgDeficit);
     writeArray(out, "kMsReflectDensity", table.msDensity);
     writeArray(out, "kMsReflectCdf", table.msCdf);
-    writeArray(out, "kMsTransmitDensity", table.msTransmitDensity);
-    writeArray(out, "kMsTransmitCdf", table.msTransmitCdf);
+    writeArray(out, "kEscapeShapeDensity", table.escapeShapeDensity);
+    writeArray(out, "kEscapeShapeCdf", table.escapeShapeCdf);
     writeArray(out, "kKernelNode", table.kernelNode);
     writeArray(out, "kKernelWeight", table.kernelWeight);
     writeArray(out, "kAverageNode", table.averageNode);
@@ -1081,8 +1035,21 @@ int main(int argc, char** argv) {
     AlbedoTable table;
     buildReflect(table, phiNodes, psiNodes, muNodes);
     const Residual residual = verifyReflect(table, phiNodes, psiNodes, muNodes);
-    buildTransmit(table, transmitNodes);
-    const double transmitResidual = verifyTransmit(table, transmitNodes);
+    buildTransmit(table, transmitNodes, kTransmitMeanNodes);
+    const double transmitResidual = verifyTransmit(table, transmitNodes, kTransmitMeanNodes);
+    // Order-1 walks must match the quadrature: a two-sided Bonferroni bound at a 1-in-1000 false alarm over every cell's two means.
+    const double walkZ = buildEscapeWalk(table, kWalkStrata);
+    const double perTest = 1e-3 / (2.0 * kTransmitRoughnessRes * kEtaRes);
+    double zLow = 0.0;
+    double zHigh = 40.0;
+    while (zHigh - zLow > 1e-9) {
+        const double mid = 0.5 * (zLow + zHigh);
+        (std::erfc(mid / std::sqrt(2.0)) > perTest ? zLow : zHigh) = mid;
+    }
+    if (walkZ > zHigh) {
+        std::cerr << "albedo_table: the random walk's single scattering departs from the quadrature at |z| " << walkZ << " > " << zHigh << "\n";
+        return EXIT_FAILURE;
+    }
     buildMultipleScatteringShape(table);
     buildTransmitMultipleScatteringShape(table);
     const double kernelResidual = buildKernel(table, phiNodes);
@@ -1093,7 +1060,7 @@ int main(int argc, char** argv) {
         std::cerr << "albedo_table: anisotropic E exceeds 1 by " << table.anisoExcess << ", past the quadrature residual " << anisoResidual << "\n";
         return EXIT_FAILURE;
     }
-    if (!writeInc(outPath, table, residual.value, transmitNodes, transmitResidual, kernelResidual, anisoResidual)) {
+    if (!writeInc(outPath, table, residual.value, transmitNodes, transmitResidual, walkZ, kernelResidual, anisoResidual)) {
         return EXIT_FAILURE;
     }
     std::cout << "albedo_table: wrote " << outPath << " (reflect " << kAlbedoRoughnessRes << "x" << kAlbedoMuRes

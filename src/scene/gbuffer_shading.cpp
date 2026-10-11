@@ -6,6 +6,8 @@
 #include <type_traits>
 #include <variant>
 
+#include "microfacet.h"
+
 namespace pathtracer::scene {
 
 namespace {
@@ -86,15 +88,22 @@ glm::vec3 emittedRadiance(const Material& material, const ShadingTriangle& trian
         return glm::vec3(0.0F);
     }
     glm::vec3 emitted = luminance * evaluate(material.emissionColor, shading.uv, footprint, InputRange::NonNegative);
-    // OpenPBR's layers over the emitter, their inputs as a vertex reads them: the coat's lerp(1, T_coat, C), one pass along wo.
+    // OpenPBR's layers over the emitter, their inputs as a vertex reads them, the coat's lerp(1, T_coat (1 - E_coat(wo)), C) along wo.
     const float coatWeight = evaluate(material.coatWeight, shading.uv, {}, InputRange::Unit);
     const auto normalOf = [&](const NormalInput& input) { return buildShadingFrame(triangle, shading, input)[2]; };
-    const glm::vec3 coatNormal = coatWeight > 0.0F ? normalOf(material.geometryCoatNormal) : glm::vec3(0.0F);
+    glm::vec3 coatNormal(0.0F);
     if (coatWeight > 0.0F) {
-        const glm::vec3 transmittance = coatTransmittance(evaluate(material.coatColor, shading.uv, {}, InputRange::Unit),
-                                                          evaluate(material.coatIor, shading.uv, {}, InputRange::Positive),
-                                                          std::abs(glm::dot(coatNormal, wo)));
-        emitted *= glm::vec3(1.0F - coatWeight) + (coatWeight * transmittance);
+        const ShadingFrame coatFrame = buildShadingFrame(triangle, shading, material.geometryCoatNormal);
+        coatNormal = coatFrame[2];
+        // Emission is two-sided, so wo is taken on the coat's own side; the coat's Fresnel and TIR withhold E_coat(wo) by reciprocity.
+        glm::vec3 coatWo = wo * coatFrame;
+        coatWo.z = std::abs(coatWo.z);
+        const float coatIor = evaluate(material.coatIor, shading.uv, {}, InputRange::Positive);
+        const float coatAlbedo = reflectionAlbedo(evaluate(material.coatRoughness, shading.uv, {}, InputRange::Unit),
+                                                  evaluate(material.coatRoughnessAnisotropy, shading.uv, {}, InputRange::Unit), 1.0F, coatIor,
+                                                  coatWo);
+        const glm::vec3 transmittance = coatTransmittance(evaluate(material.coatColor, shading.uv, {}, InputRange::Unit), coatIor, coatWo.z);
+        emitted *= glm::vec3(1.0F - coatWeight) + (coatWeight * (1.0F - coatAlbedo) * transmittance);
     }
     // The fuzz withholds what it reflects, 1 - F E_fuzz, its normal lerp(base, coat, C) as at a vertex: emission is "further reduced".
     const float fuzzWeight = evaluate(material.fuzzWeight, shading.uv, footprint, InputRange::Unit);
