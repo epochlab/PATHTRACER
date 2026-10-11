@@ -274,9 +274,17 @@ void addCoat(BsdfClosure& closure, const OpenPbrInputs<Constant>& inputs, const 
     closure.transmitUnder = ((1.0F - weight) + throughCoat) * transmitGain;
 }
 
+// Each technique's own density at wi given its discrete branch (facet split, wall side), unscaled by its selection mass.
+using LobePdfs = std::array<float, kTechniqueCount>;
+
 // Every slab's continuous value and the mixture density at wi, wo's hemisphere being +z; the base's values carry its weight under the coat.
-BsdfEval evaluateSlabs(const BsdfClosure& closure, const glm::vec3& wi) {
+BsdfEval evaluateSlabs(const BsdfClosure& closure, const glm::vec3& wi, LobePdfs* lobePdfs) {
     BsdfEval eval{};
+    const auto record = [lobePdfs](Technique technique, float pdf) {
+        if (lobePdfs != nullptr) {
+            (*lobePdfs)[static_cast<std::size_t>(technique)] = pdf;
+        }
+    };
     const glm::vec3& wo = closure.wo;
     const float beneath = underFuzz(closure, wi);
     const glm::vec3 under = beneath * underCoat(closure, wi);
@@ -284,6 +292,8 @@ BsdfEval evaluateSlabs(const BsdfClosure& closure, const glm::vec3& wi) {
         const ConductorEval metal = evaluateConductor(closure.metal, wo, wi);
         eval.specular += (closure.metalWeight * under) * metal.value;
         eval.pdf += (massOf(closure, Technique::MetalSingle) * metal.pdfSingle) + (massOf(closure, Technique::MetalMulti) * metal.pdfMulti);
+        record(Technique::MetalSingle, metal.pdfSingle);
+        record(Technique::MetalMulti, metal.pdfMulti);
     }
     if (closure.dielectricWeight > 0.0F) {
         const DielectricEval dielectric = evaluateDielectric(closure.dielectric, wo, wi);
@@ -292,11 +302,15 @@ BsdfEval evaluateSlabs(const BsdfClosure& closure, const glm::vec3& wi) {
         eval.pdf += (massOf(closure, Technique::DielectricSingle) * dielectric.pdfSingle) +
                     (massOf(closure, Technique::DielectricMultiReflect) * dielectric.pdfMultiReflect) +
                     (massOf(closure, Technique::DielectricMultiTransmit) * dielectric.pdfMultiTransmit);
+        record(Technique::DielectricSingle, dielectric.lobePdfSingle);
+        record(Technique::DielectricMultiReflect, dielectric.pdfMultiReflect);
+        record(Technique::DielectricMultiTransmit, dielectric.pdfMultiTransmit);
     }
     if (massOf(closure, Technique::Diffuse) > 0.0F) {
         const DiffuseEval diffuse = evaluateDiffuse(closure.diffuse, wo, wi);
         eval.diffuse = (closure.diffuseWeight * under) * diffuse.value;
         eval.pdf += massOf(closure, Technique::Diffuse) * diffuse.pdf;
+        record(Technique::Diffuse, diffuse.pdf);
     }
     // A thin wall's lobes transmit as their reflection mirrored through the wall: one lobe, evaluated at wi's mirror below.
     const bool reflected = wi.z > 0.0F;
@@ -307,35 +321,43 @@ BsdfEval evaluateSlabs(const BsdfClosure& closure, const glm::vec3& wi) {
         (reflected ? eval.specular : eval.transmission) += (under * (reflected ? sheet.reflect : sheet.transmit)) * lobe.value;
         eval.pdf += (reflected ? sheet.reflectShare : 1.0F - sheet.reflectShare) *
                     ((massOf(closure, Technique::SheetSingle) * lobe.pdfSingle) + (massOf(closure, Technique::SheetMulti) * lobe.pdfMulti));
+        record(Technique::SheetSingle, lobe.pdfSingle);
+        record(Technique::SheetMulti, lobe.pdfMulti);
     }
     if (massOf(closure, Technique::ThinSubsurface) > 0.0F) {
         const float share = reflected ? closure.subsurfaceReflectShare : 1.0F - closure.subsurfaceReflectShare;
         const DiffuseEval subsurface = evaluateDiffuse(closure.subsurface, wo, above);
         (reflected ? eval.diffuse : eval.transmission) += (share * closure.subsurfaceWeight * under) * subsurface.value;
         eval.pdf += massOf(closure, Technique::ThinSubsurface) * share * subsurface.pdf;
+        record(Technique::ThinSubsurface, subsurface.pdf);
     }
     // The coat reflects in its own frame, cosine-weighted about its own normal; its slab exists only where it can be drawn.
     if (massOf(closure, Technique::CoatSingle) + massOf(closure, Technique::CoatMulti) > 0.0F) {
         const DielectricEval coat = evaluateDielectric(closure.coat, closure.toCoat * wo, closure.toCoat * wi);
         eval.specular += (closure.coatWeight * beneath) * coat.reflect;
         eval.pdf += (massOf(closure, Technique::CoatSingle) * coat.pdfSingle) + (massOf(closure, Technique::CoatMulti) * coat.pdfMultiReflect);
+        record(Technique::CoatSingle, coat.lobePdfSingle);
+        record(Technique::CoatMulti, coat.pdfMultiReflect);
     }
     // The fuzz reflects in its own frame, its color tinting its own lobe alone; a sheen is reflection, so it reports as specular.
     if (massOf(closure, Technique::Fuzz) > 0.0F) {
         const FuzzEval fuzz = evaluateFuzz(closure.fuzz, closure.toFuzz * wi);
         eval.specular += closure.fuzzWeight * fuzz.value;
         eval.pdf += massOf(closure, Technique::Fuzz) * fuzz.pdf;
+        record(Technique::Fuzz, fuzz.pdf);
     }
     return eval;
 }
 
 // One-sample MIS: whichever technique drew wi, the throughput divides by the whole mixture's density at it.
-std::optional<BsdfSample> weighSample(const BsdfClosure& closure, const glm::vec3& wi, LobeType type) {
-    const BsdfEval eval = evaluateSlabs(closure, wi);
+std::optional<BsdfSample> weighSample(const BsdfClosure& closure, const glm::vec3& wi, LobeType type, Technique technique) {
+    LobePdfs lobePdfs{};
+    const BsdfEval eval = evaluateSlabs(closure, wi, &lobePdfs);
     if (!(eval.pdf > 0.0F)) {
         return std::nullopt;
     }
-    return BsdfSample{glm::vec3(wi.x, wi.y, wi.z * closure.sign), eval.total() / eval.pdf, eval.transmission / eval.pdf, type, eval.pdf, false};
+    return BsdfSample{glm::vec3(wi.x, wi.y, wi.z * closure.sign), eval.total() / eval.pdf, eval.transmission / eval.pdf, type, eval.pdf, false,
+                      false, lobePdfs[static_cast<std::size_t>(technique)]};
 }
 
 // A delta technique's sample: its value over its own mass, pdf 0, so NEE has no density to double-count against.
@@ -381,7 +403,8 @@ std::optional<BsdfSample> sampleTechnique(const BsdfClosure& closure, Technique 
     const glm::vec3 mirror(-wo.x, -wo.y, wo.z);
     switch (technique) {
         case Technique::Fuzz:
-            return weighSample(closure, glm::transpose(closure.toFuzz) * sampleFuzz(closure.fuzz, sampler.next2D()), LobeType::SpecularReflection);
+            return weighSample(closure, glm::transpose(closure.toFuzz) * sampleFuzz(closure.fuzz, sampler.next2D()), LobeType::SpecularReflection,
+                               technique);
         case Technique::CoatSingle: {
             const DielectricSlab& slab = closure.coat;
             const glm::vec3 woCoat = closure.toCoat * wo;
@@ -392,11 +415,11 @@ std::optional<BsdfSample> sampleTechnique(const BsdfClosure& closure, Technique 
                 return deltaSample(closure, wi, value, technique, LobeType::SpecularReflection);
             }
             const std::optional<InterfaceSample> sample = sampleDielectricSingle(slab, woCoat, sampler.next2D(), uSplit);
-            return sample ? weighSample(closure, fromCoat * sample->wi, LobeType::SpecularReflection) : std::nullopt;
+            return sample ? weighSample(closure, fromCoat * sample->wi, LobeType::SpecularReflection, technique) : std::nullopt;
         }
         case Technique::CoatMulti:
             return weighSample(closure, glm::transpose(closure.toCoat) * sampleEscapeShape(closure.coat.reflectShape, sampler.next2D()),
-                               LobeType::SpecularReflection);
+                               LobeType::SpecularReflection, technique);
         case Technique::MetalSingle: {
             const ConductorSlab& slab = closure.metal;
             if (isSmooth(slab.alpha.x)) {
@@ -405,10 +428,10 @@ std::optional<BsdfSample> sampleTechnique(const BsdfClosure& closure, Technique 
                 return deltaSample(closure, mirror, value, technique, LobeType::SpecularReflection);
             }
             const std::optional<glm::vec3> wi = sampleConductorSingle(slab, wo, sampler.next2D());
-            return wi ? weighSample(closure, *wi, LobeType::SpecularReflection) : std::nullopt;
+            return wi ? weighSample(closure, *wi, LobeType::SpecularReflection, technique) : std::nullopt;
         }
         case Technique::MetalMulti:
-            return weighSample(closure, sampleConductorMulti(closure.metal, sampler.next2D()), LobeType::SpecularReflection);
+            return weighSample(closure, sampleConductorMulti(closure.metal, sampler.next2D()), LobeType::SpecularReflection, technique);
         case Technique::DielectricSingle: {
             const DielectricSlab& slab = closure.dielectric;
             if (isSmooth(slab.alpha.x)) {
@@ -420,19 +443,20 @@ std::optional<BsdfSample> sampleTechnique(const BsdfClosure& closure, Technique 
             if (!sample) {
                 return std::nullopt;
             }
-            return weighSample(closure, sample->wi, sample->refracted ? LobeType::Transmission : LobeType::SpecularReflection);
+            return weighSample(closure, sample->wi, sample->refracted ? LobeType::Transmission : LobeType::SpecularReflection, technique);
         }
         case Technique::DielectricRefract:
             return sampleDeltaRefraction(closure);
         // The multiple-scattering lobes report SpecularReflection: repeated GGX bounces are specular however broad their exitant lobe.
         case Technique::DielectricMultiReflect:
-            return weighSample(closure, sampleEscapeShape(closure.dielectric.reflectShape, sampler.next2D()), LobeType::SpecularReflection);
+            return weighSample(closure, sampleEscapeShape(closure.dielectric.reflectShape, sampler.next2D()), LobeType::SpecularReflection,
+                               technique);
         case Technique::DielectricMultiTransmit: {
             const glm::vec3 wi = sampleEscapeShape(closure.dielectric.transmitShape, sampler.next2D());
-            return weighSample(closure, glm::vec3(wi.x, wi.y, -wi.z), LobeType::Transmission);
+            return weighSample(closure, glm::vec3(wi.x, wi.y, -wi.z), LobeType::Transmission, technique);
         }
         case Technique::Diffuse:
-            return weighSample(closure, sampleDiffuse(closure.diffuse, sampler.next2D()), LobeType::Diffuse);
+            return weighSample(closure, sampleDiffuse(closure.diffuse, sampler.next2D()), LobeType::Diffuse, technique);
         case Technique::SheetSingle: {
             const SheetSlab& sheet = closure.sheet;
             if (isSmooth(sheet.lobe.alpha.x)) {
@@ -443,15 +467,15 @@ std::optional<BsdfSample> sampleTechnique(const BsdfClosure& closure, Technique 
                 return std::nullopt;
             }
             const glm::vec3 side = throughWall(*wi, uSplit, sheet.reflectShare);
-            return weighSample(closure, side, side.z > 0.0F ? LobeType::SpecularReflection : LobeType::Transmission);
+            return weighSample(closure, side, side.z > 0.0F ? LobeType::SpecularReflection : LobeType::Transmission, technique);
         }
         case Technique::SheetMulti: {
             const glm::vec3 side = throughWall(sampleConductorMulti(closure.sheet.lobe, sampler.next2D()), uSplit, closure.sheet.reflectShare);
-            return weighSample(closure, side, side.z > 0.0F ? LobeType::SpecularReflection : LobeType::Transmission);
+            return weighSample(closure, side, side.z > 0.0F ? LobeType::SpecularReflection : LobeType::Transmission, technique);
         }
         case Technique::ThinSubsurface: {
             const glm::vec3 side = throughWall(sampleDiffuse(closure.subsurface, sampler.next2D()), uSplit, closure.subsurfaceReflectShare);
-            return weighSample(closure, side, side.z > 0.0F ? LobeType::Diffuse : LobeType::Transmission);
+            return weighSample(closure, side, side.z > 0.0F ? LobeType::Diffuse : LobeType::Transmission, technique);
         }
         case Technique::Count:
             break;
@@ -564,7 +588,7 @@ BsdfClosure makeBsdfClosure(const OpenPbrInputs<Constant>& inputs, const glm::ve
 }
 
 BsdfEval evaluateBsdfSplit(const BsdfClosure& closure, const glm::vec3& wiLocal) {
-    return evaluateSlabs(closure, glm::vec3(wiLocal.x, wiLocal.y, wiLocal.z * closure.sign));
+    return evaluateSlabs(closure, glm::vec3(wiLocal.x, wiLocal.y, wiLocal.z * closure.sign), nullptr);
 }
 
 glm::vec3 passThrough(const BsdfClosure& closure) {
@@ -826,7 +850,8 @@ std::optional<BsdfSample> sampleBsdf(const NormalMappedBsdf& bsdf, Sampler& samp
     if (!(eval.pdf > 0.0F)) {
         return std::nullopt;
     }
-    return BsdfSample{wi, eval.total() / eval.pdf, eval.transmission / eval.pdf, type, eval.pdf, false};
+    // The wall is a mirror, an isometry of directions, so the drawn lobe's density carries over unchanged.
+    return BsdfSample{wi, eval.total() / eval.pdf, eval.transmission / eval.pdf, type, eval.pdf, false, false, drawn->lobePdf};
 }
 
 glm::vec3 fresnelAtMicrofacet(const NormalMappedBsdf& bsdf, glm::vec2 u) {

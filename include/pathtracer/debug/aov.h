@@ -47,6 +47,8 @@ enum class AovId : int {
     IndirectSpecular,
     Refraction,
     Shadow,
+    // OIDN's estimate of Beauty, guided by albedo and normal lanes averaged over Beauty's own samples (kDenoiseFeatureLanes).
+    Denoised,
     Count  // sentinel, == array size, not itself a selectable value
 };
 
@@ -57,6 +59,7 @@ inline constexpr const char* kAovNames[] = {
     "normal", "geomNormal", "albedo", "metallic", "roughness", "tangent", "objectID", "ao",
     "fresnel", "ior", "bounceCount", "snr",
     "directDiffuse", "indirectDiffuse", "directSpecular", "indirectSpecular", "refraction", "shadow",
+    "denoised",
 };
 static_assert(sizeof(kAovNames) / sizeof(kAovNames[0]) == static_cast<int>(AovId::Count),
               "kAovNames must stay index-parallel with AovId");
@@ -68,11 +71,12 @@ inline constexpr const char* kAovLabels[] = {
     "Normal", "Geom Normal", "Albedo", "Metallic", "Roughness", "Tangent", "Object ID", "AO",
     "Fresnel", "IOR", "Bounce Count", "SNR",
     "Direct Diffuse", "Indirect Diffuse", "Direct Specular", "Indirect Specular", "Refraction", "Shadow",
+    "Denoised",
 };
 static_assert(sizeof(kAovLabels) / sizeof(kAovLabels[0]) == static_cast<int>(AovId::Count),
               "kAovLabels must stay index-parallel with AovId");
 
-// Which of the three producers computes each AOV: 11 accumulated path-traced lanes, 14 G-buffer lanes, 7 filters over Beauty.
+// Which of the three producers computes each AOV: 11 accumulated path-traced lanes, 14 G-buffer lanes, 8 filters over Beauty.
 enum class AovSource { PathTraced, GBuffer, BeautyFilter };
 
 [[nodiscard]] AovSource aovSource(AovId aov);
@@ -82,6 +86,13 @@ enum class AovSource { PathTraced, GBuffer, BeautyFilter };
 
 // True where the AOV's value is proportional to scene radiance, so the display exposure is a gain on it rather than a distortion.
 [[nodiscard]] bool aovCarriesRadiance(AovId aov);
+
+// True for the rendered picture, Beauty or its denoised estimate: the AOVs the user's LUT, lens effects and alpha apply to.
+[[nodiscard]] bool aovIsPicture(AovId aov);
+
+// The AOVs before Denoised: last in AovId, so a disabled denoiser truncates the selectable list rather than holing it.
+inline constexpr int kAovCountWithoutDenoiser = static_cast<int>(AovId::Denoised);
+static_assert(kAovCountWithoutDenoiser == static_cast<int>(AovId::Count) - 1, "Denoised must stay last in AovId");
 
 // True where the AOV is RGB in the working space's primaries, so a file carries it as Colour and a change of space converts it.
 [[nodiscard]] bool aovIsColour(AovId aov);

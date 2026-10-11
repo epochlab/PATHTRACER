@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <span>
 
 #include "pathtracer/debug/aov.h"
@@ -19,7 +20,11 @@ using GBufferLane = pathtracer::gfx::HdrImage pathtracer::scene::GBuffer::*;
 // Non-null exactly when aovSource(aov) == AovSource::GBuffer.
 [[nodiscard]] GBufferLane gbufferLane(AovId aov);
 
-// Every lane of each producer in AovId order, built once from the two maps above, so a loop over a buffer's lanes misses none.
+// Denoised's guides: path-traced lanes no AOV exposes, averaged over Beauty's samples and read by the denoiser alone.
+inline constexpr std::array<PathTracedLane, 2> kDenoiseFeatureLanes{&pathtracer::scene::PathTraceResult::denoiseAlbedo,
+                                                                    &pathtracer::scene::PathTraceResult::denoiseNormal};
+
+// Every lane of each producer in AovId order, the path tracer's then kDenoiseFeatureLanes, so a loop over a buffer's lanes misses none.
 [[nodiscard]] std::span<const PathTracedLane> pathTracedLanes();
 [[nodiscard]] std::span<const GBufferLane> gbufferLanes();
 

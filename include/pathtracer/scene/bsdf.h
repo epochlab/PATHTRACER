@@ -27,6 +27,8 @@ struct BsdfSample {
     float pdf;
     bool delta;  // a smooth reflection or refraction: no density for NEE to share, so MIS gives its continuation full weight
     bool passThrough = false;  // a smooth thin wall's undeviated transmission along -wo: a null vertex, the ray continues unchanged
+    // The drawn lobe's own solid-angle density at wiLocal given its discrete branch, unscaled by selection mass: how narrow it is.
+    float lobePdf = 0.0F;
 };
 
 // The BSDF's continuous lobes at one wi, cosine-weighted, f*|cos| about each lobe's own normal (Mitsuba 3's convention), by type.

@@ -229,6 +229,7 @@ PathTraceSettings makeSettings(int maxBounces, int rrStartBounce) {
     settings.samplesPerPixel = kSamplesPerPixel;
     settings.maxBounces = maxBounces;
     settings.russianRouletteStartBounce = rrStartBounce;
+    settings.denoiseFeatures = true;  // the shipped profile's default
     return settings;
 }
 
@@ -2115,6 +2116,236 @@ PT_CHECK(omnidirectional_film_filter_reaches_across_the_seam, Fast, Exact) {
         PT_EXPECT(ctx, dark, "column " + std::to_string(inward) + ", past the filter's reach of the band, was lit");
         PT_EXPECT(ctx, result.wrapsHorizontally, "the result does not record that its lens wraps, so its filters and display would clamp");
     }
+}
+
+// A quad at origin spanned by edge0 then edge1, facing cross(edge0, edge1) by geometricNormalOf's winding, as one new instance.
+void appendQuad(TestScene& scene, const glm::vec3& origin, const glm::vec3& edge0, const glm::vec3& edge1, const Material& material) {
+    const glm::vec3 normal = glm::normalize(glm::cross(edge0, edge1));
+    const glm::vec4 tangent(glm::normalize(edge0), 1.0F);
+    const auto vertex = [&](const glm::vec3& position) { return ShadingVertex{position, normal, glm::vec2(0.5F, 0.5F), tangent}; };
+    const ShadingVertex v0 = vertex(origin);
+    const ShadingVertex v1 = vertex(origin + edge0);
+    const ShadingVertex v2 = vertex(origin + edge0 + edge1);
+    const ShadingVertex v3 = vertex(origin + edge1);
+    const int instance = static_cast<int>(scene.instances.size());
+    scene.worldTriangles.push_back(Triangle{v0.position, v1.position, v2.position});
+    scene.worldTriangles.push_back(Triangle{v0.position, v2.position, v3.position});
+    scene.shadingTriangles.push_back(ShadingTriangle{v0, v1, v2, instance});
+    scene.shadingTriangles.push_back(ShadingTriangle{v0, v2, v3, instance});
+    scene.instances.push_back(MeshInstance{material, glm::mat4(1.0F), ""});
+}
+
+// One channel of an RGB image over the half-open block [x0,x1) x [y0,y1), one Welford sample per pixel: pixels are independent scrambles.
+tools::stats::Welford pixelChannel(const pathtracer::gfx::HdrImage& image, int channel, int x0, int y0, int x1, int y1) {
+    tools::stats::Welford welford;
+    for (int y = y0; y < y1; ++y) {
+        for (int x = x0; x < x1; ++x) {
+            welford.add(image.rgb((static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width)) + static_cast<std::size_t>(x))[channel]);
+        }
+    }
+    return welford;
+}
+
+// Whether every texel of an RGB image in the block is exactly `value`: a per-sample constant survives the plain mean bit for bit.
+bool blockEquals(const pathtracer::gfx::HdrImage& image, const glm::vec3& value, int x0, int y0, int x1, int y1) {
+    for (int y = y0; y < y1; ++y) {
+        for (int x = x0; x < x1; ++x) {
+            if (image.rgb((static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width)) + static_cast<std::size_t>(x)) != value) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+// Recursive summation's forward error bound (Higham 2002, eq. 4.4) on the plain mean of kSamplesPerPixel equal samples, each a few ulps.
+constexpr float kMeanOfEqualSamplesTolerance = static_cast<float>(kSamplesPerPixel) * 0x1p-23F;
+
+// A Lambertian plane is rough at the first vertex: cosine sampling makes f cos / pdf = rho per sample, and the normal is the plane's.
+PT_CHECK(denoise_features_of_a_lambertian_plane, Fast, Exact) {
+    const glm::vec3 rho(0.8F, 0.5F, 0.2F);
+    const TestScene scene = withSurface(makeQuadScene(1.0F), [&](Material& material) {
+        indexMatched(material);
+        material.baseColor = rho;
+    });
+    std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+    ctx.plan(2);
+    if (!accel.has_value()) {
+        PT_EXPECT(ctx, false, "failed to build the plane");
+        PT_EXPECT(ctx, false, "failed to build the plane");
+        return;
+    }
+    const EnvironmentMap env = makeUniformEnvironment();
+    const pathtracer::scene::PathTraceResult result = renderPass(scene, env, makeSettings(1, 999), *accel, sharedPool(ctx.threads()), true);
+    glm::vec3 worst(0.0F);
+    for (std::size_t texel = 0; texel < static_cast<std::size_t>(kImageSize) * kImageSize; ++texel) {
+        worst = glm::max(worst, glm::abs(result.denoiseAlbedo.rgb(texel) - rho) / rho);
+    }
+    std::cout << "  albedo lane worst relative error " << worst.x << ", " << worst.y << ", " << worst.z << '\n';
+    // EON at zero diffuse roughness is Lambertian and cosine-sampled: each weight is rho to rounding, so only float error remains.
+    PT_EXPECT(ctx, glm::all(glm::lessThanEqual(worst, glm::vec3(kMeanOfEqualSamplesTolerance))),
+              "the albedo lane of a Lambertian plane is not its rho");
+    PT_EXPECT(ctx, blockEquals(result.denoiseNormal, glm::vec3(0.0F, 0.0F, 1.0F), 0, 0, kImageSize, kImageSize),
+              "the normal lane of a plane facing +z is not (0, 0, 1) in every texel");
+}
+
+// A smooth mirror is followed to the wall it images: the albedo is the mirror's reflectance times the wall's rho, the normal the wall's.
+PT_CHECK(denoise_features_follow_a_mirror_to_the_wall, Fast, Exact) {
+    constexpr float kCameraPitch = 70.0F;
+    const glm::vec3 rho(0.3F, 0.5F, 0.7F);
+    // F82 at F0 = 1 and a white specular_color is 1 at every angle, so specular_weight alone sets an angle-independent reflectance.
+    TestScene scene = withSurface(makeQuadScene(0.0F), [](Material& material) {
+        material.baseMetalness = 1.0F;
+        material.specularWeight = 0.5F;
+    });
+    // At y = 1 facing -y: the floor's mirror ray from the centre pixels, (0, sin p, cos p), meets it at z = cot p.
+    Material wall = makeLambertianFloor().instances[0].material;
+    wall.baseColor = rho;
+    appendQuad(scene, glm::vec3(-kQuadExtent, 1.0F, 0.0F), glm::vec3(2.0F * kQuadExtent, 0.0F, 0.0F), glm::vec3(0.0F, 0.0F, kQuadExtent), wall);
+    std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+    ctx.plan(3);
+    if (!accel.has_value()) {
+        for (int i = 0; i < 3; ++i) {
+            PT_EXPECT(ctx, false, "failed to build the mirror and wall");
+        }
+        return;
+    }
+    const float pitch = glm::radians(kCameraPitch);
+    const Camera camera(glm::vec3(0.0F, -5.0F * std::sin(pitch), 5.0F * std::cos(pitch)), glm::vec3(kCameraPitch, 0.0F, 0.0F),
+                        Camera::FilmBack{36.0F, 24.0F}, kFocalLengthMm, 0.01F, 1000.0F, 2.8F, 1.0F / 125.0F, 100.0F);
+    const EnvironmentMap env = makeUniformEnvironment();
+    const pathtracer::scene::PathTraceResult result =
+        renderPass(scene, env, makeSettings(2, 999), *accel, sharedPool(ctx.threads()), true, 7U, camera);
+    // The mirror's weight from the closure the integrator draws, at the centre ray's wo: a delta, so one deterministic value.
+    const OpenPbrInputs<Constant> inputs = resolveInputs(scene.instances[0].material, glm::vec2(0.5F), {}, glm::vec3(1.0F));
+    pathtracer::scene::Sampler sampler(0, 0, 0, 1, 7U);
+    const std::optional<pathtracer::scene::BsdfSample> mirror =
+        pathtracer::scene::sampleBsdf(inputs, glm::vec3(0.0F, -std::sin(pitch), std::cos(pitch)), sampler);
+    PT_EXPECT(ctx, mirror.has_value() && mirror->delta && mirror->throughputWeight == glm::vec3(0.5F),
+              "the smooth metal at specular_weight 0.5 is not a 0.5 delta mirror");
+    const glm::vec3 expected = 0.5F * rho;
+    const int lo = (kImageSize / 2) - 2;
+    const int hi = (kImageSize / 2) + 2;
+    glm::vec3 worst(0.0F);
+    for (int y = lo; y < hi; ++y) {
+        for (int x = lo; x < hi; ++x) {
+            const std::size_t texel = (static_cast<std::size_t>(y) * kImageSize) + static_cast<std::size_t>(x);
+            worst = glm::max(worst, glm::abs(result.denoiseAlbedo.rgb(texel) - expected) / expected);
+        }
+    }
+    std::cout << "  albedo lane past the mirror, worst relative error " << worst.x << ", " << worst.y << ", " << worst.z << '\n';
+    PT_EXPECT(ctx, glm::all(glm::lessThanEqual(worst, glm::vec3(kMeanOfEqualSamplesTolerance))),
+              "the albedo lane past a mirror is not its reflectance times the wall's rho");
+    PT_EXPECT(ctx, blockEquals(result.denoiseNormal, glm::vec3(0.0F, -1.0F, 0.0F), lo, lo, hi, hi), "the normal lane past a mirror is not the wall's");
+}
+
+// On the axis the VNDF draws at D(h)/4 and a GGX slope passes sqrt(k) alpha at odds 1/(1+k): 2 alpha sqrt(pi/Omega) are wider than a pixel.
+PT_CHECK(denoise_features_follow_lobes_narrower_than_a_pixel, Slow, Statistical) {
+    constexpr float kNearDeltaRoughness = 0.01F;  // alpha = 1e-4: far above kLeastAlpha, so drawn as a lobe and never as the mirror
+    constexpr float kRoughRoughness = 0.5F;
+    // Omega on the axis: viewBasis fits the 24 mm gate height, so pixels are square; the 4.9 degree half-diagonal moves the odds under 1%.
+    const double pitch = 24.0 / kImageSize / kFocalLengthMm;
+    const double omega = pitch * pitch;
+    const double alpha = static_cast<double>(kNearDeltaRoughness) * kNearDeltaRoughness;
+    const double predicted = 2.0 * alpha * std::sqrt(std::numbers::pi / omega);
+    const EnvironmentMap env = makeUniformEnvironment();
+    ctx.plan(3);
+    const auto render = [&](float roughness) -> std::optional<pathtracer::scene::PathTraceResult> {
+        const TestScene scene = withSurface(makeQuadScene(roughness), metallic(1.0F));
+        std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+        if (!accel.has_value()) {
+            return std::nullopt;
+        }
+        return renderPass(scene, env, makeSettings(1, 999), *accel, sharedPool(ctx.threads()), true);
+    };
+    const std::optional<pathtracer::scene::PathTraceResult> nearDelta = render(kNearDeltaRoughness);
+    const std::optional<pathtracer::scene::PathTraceResult> rough = render(kRoughRoughness);
+    if (!nearDelta.has_value() || !rough.has_value()) {
+        for (int i = 0; i < 3; ++i) {
+            PT_EXPECT(ctx, false, "failed to build the metal plane");
+        }
+        return;
+    }
+    // A followed draw reflects into the sky and leaves the normal 0; a closed one leaves (0, 0, 1): the z lane counts the closed draws.
+    double closed = 0.0;
+    for (std::size_t texel = 0; texel < static_cast<std::size_t>(kImageSize) * kImageSize; ++texel) {
+        closed += static_cast<double>(nearDelta->denoiseNormal.rgb(texel).z) * kSamplesPerPixel;
+    }
+    const long long trials = static_cast<long long>(kImageSize) * kImageSize * kSamplesPerPixel;
+    const tools::stats::Band band = tools::stats::wilsonBand(std::llround(closed), trials, ctx.alpha());
+    std::cout << "  alpha 1e-4: " << closed / static_cast<double>(trials) << " of draws close at the floor, predicted " << predicted << '\n';
+    PT_EXPECT(ctx, band.contains(predicted), "a lobe narrower than a pixel is not followed in proportion to its sub-pixel mass");
+    PT_EXPECT(ctx, blockEquals(rough->denoiseNormal, glm::vec3(0.0F, 0.0F, 1.0F), 0, 0, kImageSize, kImageSize),
+              "a lobe wider than a pixel was followed past its own surface");
+    PT_EXPECT(ctx, glm::all(glm::greaterThan(centreMean(rough->denoiseAlbedo), glm::vec3(0.0F))), "a rough metal's albedo lane is zero");
+}
+
+// The hero draw's one-sample spectral estimator keeps each channel's albedo: channel c matches a non-dispersive render at c's own IOR.
+PT_CHECK(denoise_albedo_through_dispersive_glass, Slow, Statistical) {
+    constexpr float kIor = 1.5F;
+    constexpr float kAbbe = 20.0F;
+    const glm::vec3 rho(0.8F, 0.6F, 0.4F);
+    Material floor = makeLambertianFloor().instances[0].material;
+    floor.baseColor = rho;
+    // A smooth slab over a diffuse floor: the chain follows both deltas to the floor, the first rough vertex.
+    const auto sceneWith = [&](float ior, float dispersionScale) {
+        TestScene scene = withSurface(makeSlabScene(0.0F, 0.5F), [&](Material& material) {
+            transmissive(material);
+            material.specularIor = ior;
+            material.transmissionDispersionAbbeNumber = kAbbe;
+            material.transmissionDispersionScale = dispersionScale;
+        });
+        appendQuad(scene, glm::vec3(-kQuadExtent, -kQuadExtent, -1.0F), glm::vec3(2.0F * kQuadExtent, 0.0F, 0.0F),
+                   glm::vec3(0.0F, 2.0F * kQuadExtent, 0.0F), floor);
+        return scene;
+    };
+    const EnvironmentMap env = makeUniformEnvironment();
+    const PathTraceSettings settings = makeSettings(16, 999);
+    ctx.plan(3);
+    const TestScene dispersive = sceneWith(kIor, 1.0F);
+    std::optional<EmbreeAccel> accel = EmbreeAccel::build(dispersive.worldTriangles);
+    if (!accel.has_value()) {
+        for (int i = 0; i < 3; ++i) {
+            PT_EXPECT(ctx, false, "failed to build the slab over the floor");
+        }
+        return;
+    }
+    const pathtracer::scene::PathTraceResult hero = renderPass(dispersive, env, settings, *accel, sharedPool(ctx.threads()), true, 7U);
+    const OpenPbrInputs<Constant> inputs = resolveInputs(dispersive.instances[0].material, glm::vec2(0.5F), {}, glm::vec3(1.0F));
+    for (int c = 0; c < 3; ++c) {
+        // Its own seed, so the two estimates are independent as differenceBand assumes; the geometry, and so the accel, is shared.
+        const float ior = pathtracer::scene::modulatedIor(inputs, c);
+        const pathtracer::scene::PathTraceResult reference =
+            renderPass(sceneWith(ior, 0.0F), env, settings, *accel, sharedPool(ctx.threads()), true, 11U);
+        const tools::stats::Welford heroChannel = pixelChannel(hero.denoiseAlbedo, c, 0, 0, kImageSize, kImageSize);
+        const tools::stats::Welford referenceChannel = pixelChannel(reference.denoiseAlbedo, c, 0, 0, kImageSize, kImageSize);
+        const double difference = heroChannel.mean() - referenceChannel.mean();
+        std::cout << "  channel " << c << " at IOR " << ior << ": dispersive " << heroChannel.mean() << ", reference "
+                  << referenceChannel.mean() << '\n';
+        PT_EXPECT(ctx, tools::stats::differenceBand(heroChannel, referenceChannel, ctx.alpha()).contains(difference),
+                  "a dispersive channel's albedo differs from a non-dispersive render at that channel's IOR");
+    }
+}
+
+// Disabled, the chain never opens: both lanes read exactly 0, and Beauty is the enabled render's bit for bit.
+PT_CHECK(denoise_features_off_leave_the_lanes_zero_and_beauty_unchanged, Fast, Exact) {
+    const TestScene scene = withSurface(makeQuadScene(0.5F), metallic(0.5F));
+    std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+    ctx.plan(2);
+    if (!accel.has_value()) {
+        PT_EXPECT(ctx, false, "failed to build the plane");
+        PT_EXPECT(ctx, false, "failed to build the plane");
+        return;
+    }
+    const EnvironmentMap env = makeUniformEnvironment();
+    PathTraceSettings settings = makeSettings(4, 1);
+    const pathtracer::scene::PathTraceResult on = renderPass(scene, env, settings, *accel, sharedPool(ctx.threads()), true);
+    settings.denoiseFeatures = false;
+    const pathtracer::scene::PathTraceResult off = renderPass(scene, env, settings, *accel, sharedPool(ctx.threads()), true);
+    PT_EXPECT(ctx, blockEquals(off.denoiseAlbedo, glm::vec3(0.0F), 0, 0, kImageSize, kImageSize) &&
+                       blockEquals(off.denoiseNormal, glm::vec3(0.0F), 0, 0, kImageSize, kImageSize),
+              "a disabled feature chain wrote its lanes");
+    PT_EXPECT(ctx, on.beauty.texels == off.beauty.texels, "the feature chain changed Beauty");
 }
 
 PT_CHECK_MAIN("integrator")

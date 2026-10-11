@@ -1414,4 +1414,67 @@ PT_CHECK(gltf_generated_tangents_agree_with_authored_mikktspace, Fast, Exact) {
 
 }  // namespace
 
+// The denoiser block: each quality name maps, anything else and any missing key is refused, and a disabled denoiser takes Denoised along.
+PT_CHECK(profile_config_denoiser, Fast, Exact) {
+    struct Case {
+        std::string name;
+        nlohmann::json denoiser;
+        int defaultAov;
+        bool accepted;
+    };
+    const std::filesystem::path shippedPath = std::filesystem::path(ASSET_ROOT_DIR) / "config" / "profile.json";
+    std::ifstream shippedFile(shippedPath);
+    const nlohmann::json shipped = nlohmann::json::parse(shippedFile);
+    const nlohmann::json block = shipped["denoiser"];
+    const auto with = [&](const char* key, const nlohmann::json& value) {
+        nlohmann::json edited = block;
+        if (value.is_null()) {
+            edited.erase(key);
+        } else {
+            edited[key] = value;
+        }
+        return edited;
+    };
+    constexpr int kBeauty = static_cast<int>(pathtracer::debug::AovId::Beauty);
+    constexpr int kDenoised = static_cast<int>(pathtracer::debug::AovId::Denoised);
+    std::vector<Case> cases;
+    for (const char* quality : pathtracer::debug::kDenoiseQualityNames) {
+        cases.push_back({std::string("quality ") + quality, with("quality", quality), kBeauty, true});
+    }
+    cases.push_back({"quality ultra", with("quality", "ultra"), kBeauty, false});
+    cases.push_back({"quality High, case differs", with("quality", "High"), kBeauty, false});
+    cases.push_back({"disabled, Beauty first", with("enabled", false), kBeauty, true});
+    cases.push_back({"disabled, Denoised first", with("enabled", false), kDenoised, false});
+    cases.push_back({"enabled, Denoised first", with("enabled", true), kDenoised, true});
+    cases.push_back({"prefilterAuxiliary false", with("prefilterAuxiliary", false), kBeauty, true});
+    cases.push_back({"enabled as a string", with("enabled", "true"), kBeauty, false});
+    for (const char* key : {"enabled", "quality", "prefilterAuxiliary"}) {
+        cases.push_back({std::string(key) + " missing", with(key, nullptr), kBeauty, false});
+    }
+    cases.push_back({"block missing", nullptr, kBeauty, false});
+    ctx.plan(static_cast<int>(cases.size()));
+    for (const Case& testCase : cases) {
+        nlohmann::json edited = shipped;
+        if (testCase.denoiser.is_null()) {
+            edited.erase("denoiser");
+        } else {
+            edited["denoiser"] = testCase.denoiser;
+        }
+        edited["render"]["defaultAOV"] = testCase.defaultAov;
+        const std::filesystem::path path = writeJson("engine_io_profile_denoiser.json", edited.dump());
+        const std::optional<pathtracer::config::ProfileConfig> loaded = pathtracer::config::loadProfileConfig(path.string());
+        std::filesystem::remove(path);
+        if (!testCase.accepted) {
+            PT_EXPECT(ctx, !loaded.has_value(), "loadProfileConfig accepted " + testCase.name);
+            continue;
+        }
+        const std::string quality = testCase.denoiser["quality"].get<std::string>();
+        PT_EXPECT(ctx,
+                  loaded.has_value() && loaded->denoiser.enabled == testCase.denoiser["enabled"].get<bool>() &&
+                      pathtracer::debug::kDenoiseQualityNames[static_cast<int>(loaded->denoiser.options.quality)] == quality &&
+                      loaded->denoiser.options.prefilterAuxiliary == testCase.denoiser["prefilterAuxiliary"].get<bool>(),
+                  "loadProfileConfig rejected or mis-mapped " + testCase.name);
+    }
+}
+
 PT_CHECK_MAIN("io")

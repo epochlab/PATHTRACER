@@ -92,6 +92,7 @@ PathTraceSettings makeSettings() {
     settings.replicates = 4;  // interleaved, so every check below crosses replicate boundaries rather than one sequence
     settings.maxBounces = 1;
     settings.russianRouletteStartBounce = 8;
+    settings.denoiseFeatures = true;  // the feature lanes accumulate too, so the lane checks below cover them
     return settings;
 }
 
@@ -180,7 +181,7 @@ struct Lane {
     pathtracer::gfx::HdrImage PathTraceResult::*image;
     const char* name;
 };
-constexpr std::array<Lane, 11> kLanes{{{&PathTraceResult::beauty, "beauty"},
+constexpr std::array<Lane, 13> kLanes{{{&PathTraceResult::beauty, "beauty"},
                                       {&PathTraceResult::bounceHeatmap, "bounceHeatmap"},
                                       {&PathTraceResult::ao, "ao"},
                                       {&PathTraceResult::shadow, "shadow"},
@@ -190,7 +191,9 @@ constexpr std::array<Lane, 11> kLanes{{{&PathTraceResult::beauty, "beauty"},
                                       {&PathTraceResult::indirectSpecular, "indirectSpecular"},
                                       {&PathTraceResult::refraction, "refraction"},
                                       {&PathTraceResult::fresnel, "fresnel"},
-                                      {&PathTraceResult::alpha, "alpha"}}};
+                                      {&PathTraceResult::alpha, "alpha"},
+                                      {&PathTraceResult::denoiseAlbedo, "denoiseAlbedo"},
+                                      {&PathTraceResult::denoiseNormal, "denoiseNormal"}}};
 
 // Per float: the batch mean rounded once to float and the bound on the driver's distance from it; per lane, whether any float moved.
 struct OracleMean {

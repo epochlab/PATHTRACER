@@ -14,7 +14,7 @@ namespace pathtracer::debug {
 
 AovSource aovSource(AovId aov) {
     switch (aov) {
-        // Accumulated by renderPathTraced into PathTraceResult's 11 lanes.
+        // Accumulated by renderPathTraced into PathTraceResult's 11 AOV lanes.
         case AovId::Beauty:
         case AovId::Alpha:
         case AovId::BounceCount:
@@ -36,6 +36,7 @@ AovSource aovSource(AovId aov) {
         case AovId::DoG:
         case AovId::ColourOpponent:
         case AovId::SNR:
+        case AovId::Denoised:
             return AovSource::BeautyFilter;
 
         // The 14 primary-hit lanes renderGBuffer ray-casts. No default: -Werror makes an unclassified AovId a compile error.
@@ -100,6 +101,7 @@ int aovChannels(AovId aov) {
         case AovId::DirectSpecular:
         case AovId::IndirectSpecular:
         case AovId::Refraction:
+        case AovId::Denoised:
         case AovId::Count:
             return 3;
     }
@@ -110,6 +112,7 @@ bool aovCarriesRadiance(AovId aov) {
     switch (aov) {
         // Radiance lanes and the filters that are positively homogeneous of degree one in it, so a gain commutes with the filter.
         case AovId::Beauty:
+        case AovId::Denoised:
         case AovId::DirectDiffuse:
         case AovId::IndirectDiffuse:
         case AovId::DirectSpecular:
@@ -150,6 +153,10 @@ bool aovCarriesRadiance(AovId aov) {
     return false;
 }
 
+bool aovIsPicture(AovId aov) {
+    return aov == AovId::Beauty || aov == AovId::Denoised;
+}
+
 bool aovIsColour(AovId aov) {
     switch (aov) {
         // Working-space RGB: radiance lanes and per-channel reflectances, whose values change with the primaries they are written in.
@@ -161,6 +168,7 @@ bool aovIsColour(AovId aov) {
         case AovId::Refraction:
         case AovId::Albedo:
         case AovId::Fresnel:
+        case AovId::Denoised:
             return true;
 
         // Scalars, geometry, derived colour coordinates and false colours: no change of primaries applies to them.
@@ -232,6 +240,7 @@ bool aovIsBipolar(AovId aov) {
         case AovId::IndirectSpecular:
         case AovId::Refraction:
         case AovId::Shadow:
+        case AovId::Denoised:
         case AovId::Count:
             return false;
     }
@@ -414,7 +423,11 @@ std::vector<Lane> collectLanes(Lane (*laneOf)(AovId)) {
 }  // namespace
 
 std::span<const PathTracedLane> pathTracedLanes() {
-    static const std::vector<PathTracedLane> lanes = collectLanes(&pathTracedLane);
+    static const std::vector<PathTracedLane> lanes = [] {
+        std::vector<PathTracedLane> all = collectLanes(&pathTracedLane);
+        all.insert(all.end(), kDenoiseFeatureLanes.begin(), kDenoiseFeatureLanes.end());
+        return all;
+    }();
     return lanes;
 }
 

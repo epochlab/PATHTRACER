@@ -10,6 +10,8 @@
 #include "pathtracer/config/profile_config.h"
 #include "pathtracer/config/scene_config.h"
 #include "pathtracer/debug/aov.h"
+#include "pathtracer/debug/aov_routing.h"
+#include "pathtracer/debug/denoiser.h"
 #include "pathtracer/debug/render_stats.h"
 #include "pathtracer/gfx/scalar_type.h"
 #include "pathtracer/gfx/hdr_image.h"
@@ -118,6 +120,8 @@ private:
     // Rebuilds geometry_ for the request's root and light rotations unless already built for them; false leaves it untouched.
     [[nodiscard]] bool applyPose(const Request& request, std::string& error);
 
+    // The running mean of one accumulated lane, an AOV's or a denoise feature's; the lane must be in accumulatedLanes_.
+    [[nodiscard]] const pathtracer::gfx::HdrImage& accumulatedImage(pathtracer::debug::PathTracedLane lane) const;
     // Sizes the reused path-traced and G-buffer buffers to this request, reallocating only on a resolution change.
     void resizeBuffers(int width, int height);
     // Traces request.samples one-sample passes and folds each into accumulators_, the running means PathTraceDriver publishes.
@@ -145,12 +149,14 @@ private:
     // Reused across render() calls, reallocated only when the resolution changes; its replicateLuminance is the running replicate means.
     pathtracer::scene::PathTraceResult pathTraced_;
     pathtracer::scene::GBuffer gbuffer_;
-    // One running mean per path-traced lane this request needs, parallel to accumulatedAovs_.
-    std::vector<pathtracer::debug::AovId> accumulatedAovs_;
+    // One running mean per path-traced lane this request needs, parallel to accumulatedLanes_.
+    std::vector<pathtracer::debug::PathTracedLane> accumulatedLanes_;
     std::vector<pathtracer::gfx::HdrImage> accumulators_;
     // One evaluated filter per distinct BeautyFilter AOV, so lastImage() can return one and two AOVs sharing a filter evaluate it once.
     std::vector<pathtracer::debug::AovId> filteredAovs_;
     std::vector<pathtracer::gfx::HdrImage> filtered_;
+    // Created at the first Denoised request and kept: OIDN's device and filter commits are paid once, not per render.
+    std::unique_ptr<pathtracer::debug::Denoiser> denoiser_;
     RenderStats stats_;
     int bufferWidth_ = 0;
     int bufferHeight_ = 0;

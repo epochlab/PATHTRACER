@@ -7,12 +7,13 @@
 #include <glm/glm.hpp>
 
 #include "pathtracer/debug/aov.h"
+#include "pathtracer/debug/denoiser.h"
 #include "pathtracer/gfx/hdr_image.h"
 #include "pathtracer/scene/thread_pool.h"
 
 namespace pathtracer::debug {
 
-// CPU implementations of the seven Beauty-reading AOVs. Sobel clamps at the edge, DoG and Gabor mirror; all three wrap a periodic x.
+// CPU implementations of the eight Beauty-reading AOVs. Sobel clamps at the edge, DoG and Gabor mirror; all three wrap a periodic x.
 
 // Rec.709 luminance weights (ITU-R BT.709-6), the one triple every luminance reduction in the engine dots against.
 inline constexpr glm::vec3 kRec709LuminanceWeights{0.2126F, 0.7152F, 0.0722F};
@@ -92,6 +93,10 @@ struct FilterInput {
     int replicates = 1;
     int samples = 0;
     bool wrapsHorizontally = false;  // the lens joins the image's left and right edges, so neighbourhood filters wrap in x
+    // Denoised's auxiliary features from Beauty's own samples, and the OIDN filter state reused across calls; Denoised needs all three.
+    const pathtracer::gfx::HdrImage* denoiseAlbedo = nullptr;
+    const pathtracer::gfx::HdrImage* denoiseNormal = nullptr;
+    Denoiser* denoiser = nullptr;
 };
 
 // The one dispatch for every BeautyFilter AOV; a non-filter id yields an empty image. No default arm, so a new filter must be routed.

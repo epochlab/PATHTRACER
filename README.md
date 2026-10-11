@@ -9,7 +9,7 @@
 C++20, built with CMake. Currently developed against macOS only.
 
 ```
-brew install cmake glfw glew glm imath openexr opencolorio openimageio embree
+brew install cmake glfw glew glm imath openexr opencolorio openimageio embree open-image-denoise
 ```
 ```
 git submodule update --init --recursive

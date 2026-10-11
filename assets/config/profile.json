@@ -37,5 +37,10 @@
         "aoMaxDistance": 1.0,
         "lookaheadDistance": 10.0,
         "replicates": 4
+    },
+    "denoiser": {
+        "enabled": true,
+        "quality": "fast",
+        "prefilterAuxiliary": false
     }
 }

@@ -718,7 +718,7 @@ PT_CHECK(show_sky_changes_only_the_background, Slow, Exact) {
 // A new filter AOV reaching the dispatch's default arm is exactly the class of bug this catches: identical output for two distinct AOVs.
 PT_CHECK(aov_filter_dispatch_is_total, Fast, Exact) {
     pathtracer::scene::ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    // Wider than DoG's coarse support, so its band is not legitimately empty, and chromatic so no two of the seven filters agree.
+    // Wider than DoG's coarse support, so its band is not legitimately empty, and chromatic so no two of the eight filters agree.
     constexpr int kWidth = 96;
     constexpr int kHeight = 64;
     HdrImage source = makeRgbImage(kWidth, kHeight, 0.0F);
@@ -739,11 +739,22 @@ PT_CHECK(aov_filter_dispatch_is_total, Fast, Exact) {
     const int pairs = static_cast<int>(filters.size() * (filters.size() - 1) / 2);
     ctx.plan(static_cast<int>(filters.size()) + pairs);
 
+    // Denoised's auxiliary features: a uniform grey albedo and a camera-facing normal, so its output is the source's own denoising.
+    const HdrImage albedo = makeRgbImage(kWidth, kHeight, 0.5F);
+    HdrImage normal = makeRgbImage(kWidth, kHeight, 0.0F);
+    for (std::size_t texel = 0; texel < static_cast<std::size_t>(kWidth) * kHeight; ++texel) {
+        normal.texels[(texel * 3) + 2] = 1.0F;
+    }
+    pathtracer::debug::Denoiser denoiser({pathtracer::debug::DenoiseQuality::High, true});
+    pathtracer::debug::FilterInput input{source};
+    input.denoiseAlbedo = &albedo;
+    input.denoiseNormal = &normal;
+    input.denoiser = &denoiser;
+
     std::vector<HdrImage> outputs;
     outputs.reserve(filters.size());
     for (const AovId aov : filters) {
-        outputs.push_back(pathtracer::debug::evaluateFilterAov(
-            aov, pathtracer::debug::FilterInput{source}, pool));
+        outputs.push_back(pathtracer::debug::evaluateFilterAov(aov, input, pool));
         const HdrImage& out = outputs.back();
         const int channels = pathtracer::debug::aovChannels(aov);
         PT_EXPECT(ctx, out.width == kWidth && out.height == kHeight && out.channels == channels &&
@@ -860,6 +871,54 @@ PT_CHECK(render_rejects_an_invalid_camera, Fast, Exact) {
               "a zero field of view was not rejected by name: " + error);
     PT_EXPECT(ctx, !render(camera, zeroFieldOfView) && error.starts_with("previousCamera: "),
               "an invalid previous camera was not rejected under its own name: " + error);
+}
+
+// An asset root whose config/profile.json disables the denoiser, every other file and directory linked to the real one.
+[[nodiscard]] std::filesystem::path denoiserDisabledAssetRoot() {
+    const std::filesystem::path assets(ASSET_ROOT_DIR);
+    const std::filesystem::path root = std::filesystem::temp_directory_path() / "engine_api_denoiser_off_assets";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root / "config");
+    for (const char* directory : {"scenes", "geometry", "materials", "textures"}) {
+        std::filesystem::create_directory_symlink(assets / directory, root / directory);
+    }
+    for (const std::filesystem::directory_entry& entry : std::filesystem::directory_iterator(assets / "config")) {
+        if (entry.path().filename() != "profile.json") {
+            std::filesystem::create_symlink(entry.path(), root / "config" / entry.path().filename());
+        }
+    }
+    std::ifstream file(assets / "config" / "profile.json");
+    nlohmann::json profile = nlohmann::json::parse(file);
+    profile["denoiser"]["enabled"] = false;
+    std::ofstream(root / "config" / "profile.json") << profile.dump();
+    return root;
+}
+
+// Disabled, Denoised is refused by name, and Beauty is bit for bit what an enabled profile renders: the chain costs no float.
+PT_CHECK(disabled_denoiser_refuses_denoised_and_leaves_beauty, Fast, Exact) {
+    ctx.plan(3);
+    const std::filesystem::path offRoot = denoiserDisabledAssetRoot();
+    std::string error;
+    const auto enabled = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", error);
+    const auto disabled = pathtracer::api::HeadlessRenderer::open(offRoot.string(), "scenes/cornell.json", error);
+    if (!enabled || !disabled) {
+        for (int i = 0; i < 3; ++i) {
+            PT_EXPECT(ctx, false, "scene load failed: " + error);
+        }
+        std::filesystem::remove_all(offRoot);
+        return;
+    }
+    const auto request = [&](std::vector<AovId> aovs) {
+        return pathtracer::api::HeadlessRenderer::Request{
+            .camera = enabled->defaultCamera(), .width = 32, .height = 24, .samples = 4, .scrambleSeed = 5, .aovs = std::move(aovs)};
+    };
+    PT_EXPECT(ctx, !disabled->render(request({AovId::Beauty, AovId::Denoised}), error) && error.find("disables the denoiser") != std::string::npos,
+              "denoised was not refused by a disabled denoiser: " + error);
+    const bool rendered = enabled->render(request({AovId::Beauty}), error) && disabled->render(request({AovId::Beauty}), error);
+    PT_EXPECT(ctx, rendered, "a Beauty render failed: " + error);
+    PT_EXPECT(ctx, rendered && enabled->lastImage(AovId::Beauty).texels == disabled->lastImage(AovId::Beauty).texels,
+              "disabling the denoiser changed Beauty");
+    std::filesystem::remove_all(offRoot);
 }
 
 // Cornell's scene.json, parsed, for a check to re-author in another pose.

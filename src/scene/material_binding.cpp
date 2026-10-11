@@ -307,6 +307,7 @@ PathTraceSettings baseSettingsOf(const pathtracer::config::ProfileConfig& profil
         .aoMaxDistance = profile.pathTracer.aoMaxDistance,
         .lookaheadDistance = profile.pathTracer.lookaheadDistance,
         .replicates = profile.pathTracer.replicates,
+        .denoiseFeatures = profile.denoiser.enabled,
     };
 }
 

@@ -1,4 +1,4 @@
-// Correctness gate for the shared scale space and the Beauty filters: kernel identities, DoG, Colour Opponent, SNR, the Morlet bank.
+// Correctness gate for the shared scale space and the Beauty filters: kernel identities, DoG, Colour Opponent, SNR, the Morlet bank, OIDN.
 
 #include <algorithm>
 #include <array>
@@ -7,12 +7,14 @@
 #include <cstddef>
 #include <numbers>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "check.h"
 #include "pathtracer/debug/aov_filters.h"
+#include "pathtracer/debug/denoiser.h"
 #include "pathtracer/debug/scale_space.h"
 #include "pathtracer/gfx/hdr_image.h"
 #include "pathtracer/scene/thread_pool.h"
@@ -593,6 +595,121 @@ PT_CHECK(wrapped_filters_commute_with_a_cyclic_column_shift, Fast, Exact) {
     const double bound = 4.0 * ((2.0 * radius) + 1.0) * static_cast<double>(kFloatEpsilon * greyLuminanceGain());
     const float gabor = worstShiftError(pathtracer::debug::gaborAov(image, pool, true), pathtracer::debug::gaborAov(rolled, pool, true));
     PT_EXPECT(ctx, gabor <= bound, "Gabor moved by " + std::to_string(gabor) + " under a cyclic shift, bound " + std::to_string(bound));
+}
+
+// A smooth radiance ramp, Denoised's ground truth: any noise added to it is error a denoiser must remove, not detail it must keep.
+[[nodiscard]] HdrImage rampImage(int width, int height) {
+    HdrImage image = pathtracer::gfx::makeImage(width, height, pathtracer::gfx::kRgbChannels);
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const float u = static_cast<float>(x) / static_cast<float>(width);
+            const float v = static_cast<float>(y) / static_cast<float>(height);
+            float* texel = image.texels.data() + ((static_cast<std::size_t>(y) * static_cast<std::size_t>(width)) + static_cast<std::size_t>(x)) * 3;
+            texel[0] = 0.2F + (0.6F * u);
+            texel[1] = 0.3F + (0.4F * v);
+            texel[2] = 0.5F;
+        }
+    }
+    return image;
+}
+
+[[nodiscard]] HdrImage constantImage(int width, int height, const glm::vec3& value) {
+    HdrImage image = pathtracer::gfx::makeImage(width, height, pathtracer::gfx::kRgbChannels);
+    for (std::size_t texel = 0; texel < image.texels.size(); texel += 3) {
+        image.texels[texel] = value.x;
+        image.texels[texel + 1] = value.y;
+        image.texels[texel + 2] = value.z;
+    }
+    return image;
+}
+
+[[nodiscard]] double rmse(const HdrImage& a, const HdrImage& b) {
+    double sum = 0.0;
+    for (std::size_t i = 0; i < a.texels.size(); ++i) {
+        const double d = static_cast<double>(a.texels[i]) - static_cast<double>(b.texels[i]);
+        sum += d * d;
+    }
+    return std::sqrt(sum / static_cast<double>(a.texels.size()));
+}
+
+// Every profile setting removes noise from a clean ramp, keeps its shape, and only reads its inputs: published lanes must never be written.
+PT_CHECK(denoised_reduces_error_and_leaves_its_inputs_unchanged, Fast, Exact) {
+    using pathtracer::debug::DenoiseQuality;
+    constexpr std::array<DenoiseQuality, 3> kQualities{DenoiseQuality::Fast, DenoiseQuality::Balanced, DenoiseQuality::High};
+    ctx.plan(static_cast<int>(kQualities.size()) * 2 * 4);
+    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    constexpr int kWidth = 64;
+    constexpr int kHeight = 48;
+    const HdrImage clean = rampImage(kWidth, kHeight);
+    HdrImage noisy = clean;
+    // Multiplicative, as Monte Carlo noise scales with the signal; fixed seed, so the check is deterministic.
+    std::mt19937 rng(1234U);
+    std::normal_distribution<float> gauss(0.0F, 0.3F);
+    for (float& value : noisy.texels) {
+        value = std::max(0.0F, value * (1.0F + gauss(rng)));
+    }
+    const HdrImage albedo = constantImage(kWidth, kHeight, glm::vec3(0.5F));
+    const HdrImage normal = constantImage(kWidth, kHeight, glm::vec3(0.0F, 0.0F, 1.0F));
+    const HdrImage noisyCopy = noisy;
+    const HdrImage albedoCopy = albedo;
+    const HdrImage normalCopy = normal;
+    std::vector<pathtracer::debug::DenoiserOptions> settings;
+    for (const DenoiseQuality quality : kQualities) {
+        for (const bool prefilter : {true, false}) {
+            settings.push_back({quality, prefilter});
+        }
+    }
+    for (const pathtracer::debug::DenoiserOptions& options : settings) {
+        const std::string setting = std::string(pathtracer::debug::kDenoiseQualityNames[static_cast<int>(options.quality)]) +
+                                    (options.prefilterAuxiliary ? ", prefiltered" : ", unprefiltered");
+        pathtracer::debug::Denoiser denoiser(options);
+        pathtracer::debug::FilterInput input{noisy};
+        input.denoiseAlbedo = &albedo;
+        input.denoiseNormal = &normal;
+        input.denoiser = &denoiser;
+        const HdrImage denoised = pathtracer::debug::evaluateFilterAov(pathtracer::debug::AovId::Denoised, input, pool);
+        PT_EXPECT(ctx, denoised.width == kWidth && denoised.height == kHeight && denoised.channels == pathtracer::gfx::kRgbChannels &&
+                           denoised.texels.size() == noisy.texels.size(),
+                  setting + ": denoised is not an RGB image of the beauty's size");
+        PT_EXPECT(ctx, std::all_of(denoised.texels.begin(), denoised.texels.end(), [](float value) { return std::isfinite(value); }),
+                  setting + ": denoised holds a non-finite value");
+        PT_EXPECT(ctx, rmse(denoised, clean) < rmse(noisy, clean), setting + ": denoising did not bring the noisy ramp closer to the clean one");
+        PT_EXPECT(ctx, noisy.texels == noisyCopy.texels && albedo.texels == albedoCopy.texels && normal.texels == normalCopy.texels,
+                  setting + ": denoising wrote to one of its inputs");
+    }
+}
+
+// Every misuse is reported, never absorbed: a shape mismatch and a missing feature are std::invalid_argument, OIDN's own errors runtime.
+PT_CHECK(denoised_reports_misuse_and_oidn_errors, Fast, Exact) {
+    ctx.plan(5);
+    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    const HdrImage beauty = rampImage(16, 8);
+    const HdrImage albedo = constantImage(16, 8, glm::vec3(0.5F));
+    const HdrImage normal = constantImage(16, 8, glm::vec3(0.0F, 0.0F, 1.0F));
+    pathtracer::debug::Denoiser denoiser({pathtracer::debug::DenoiseQuality::High, true});
+    const auto throwsInvalid = [](const auto& call) {
+        try {
+            static_cast<void>(call());
+        } catch (const std::invalid_argument&) {
+            return true;
+        }
+        return false;
+    };
+    PT_EXPECT(ctx, throwsInvalid([&] { return denoiser.denoise(beauty, rampImage(8, 8), normal); }), "an albedo of another size was accepted");
+    PT_EXPECT(ctx, throwsInvalid([&] { return denoiser.denoise(beauty, albedo, pathtracer::gfx::makeImage(16, 8, 1)); }),
+              "a one-channel normal was accepted");
+    PT_EXPECT(ctx, throwsInvalid([&] { return pathtracer::debug::evaluateFilterAov(pathtracer::debug::AovId::Denoised, {beauty}, pool); }),
+              "Denoised ran without its features and a Denoiser");
+    // OIDN rejects an empty image as unbound, which only it can detect: its message must reach the caller, prefixed so its origin shows.
+    std::string message;
+    try {
+        static_cast<void>(denoiser.denoise(rampImage(0, 0), rampImage(0, 0), rampImage(0, 0)));
+    } catch (const std::runtime_error& error) {
+        message = error.what();
+    }
+    PT_EXPECT(ctx, message.rfind("OIDN: ", 0) == 0 && message.size() > 6, "OIDN's error did not surface with its own message: " + message);
+    // The failure is the call's alone: OIDN clears its error on read, so the same denoiser serves the next valid call.
+    PT_EXPECT(ctx, denoiser.denoise(beauty, albedo, normal).texels.size() == beauty.texels.size(), "a denoiser stayed broken after an OIDN error");
 }
 
 PT_CHECK_MAIN("filter")

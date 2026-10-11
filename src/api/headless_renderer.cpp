@@ -22,6 +22,7 @@ namespace {
 
 using pathtracer::debug::AovId;
 using pathtracer::debug::AovSource;
+using pathtracer::debug::PathTracedLane;
 
 // The files a scene names, loaded and parsed before any geometry: what open() needs to build everything else.
 struct SceneInputs {
@@ -102,7 +103,7 @@ struct SceneInputs {
 }
 
 // Rejects a request no producer can serve, before any buffer is touched; error names the first fault.
-[[nodiscard]] bool validRequest(const HeadlessRenderer::Request& request, std::size_t lightCount, std::string& error) {
+[[nodiscard]] bool validRequest(const HeadlessRenderer::Request& request, std::size_t lightCount, bool denoiserEnabled, std::string& error) {
     if (request.width <= 0 || request.height <= 0) {
         error = "resolution must be positive";
         return false;
@@ -113,6 +114,10 @@ struct SceneInputs {
     }
     if (request.aovs.empty()) {
         error = "no AOVs requested";
+        return false;
+    }
+    if (!denoiserEnabled && std::find(request.aovs.begin(), request.aovs.end(), AovId::Denoised) != request.aovs.end()) {
+        error = "denoised was requested, but profile.json disables the denoiser";
         return false;
     }
     if (!request.camera.validate(error)) {
@@ -146,16 +151,26 @@ struct SceneInputs {
 }
 
 // The path-traced lanes a request needs, each once. Beauty joins whenever a filter is asked for, every filter reading accumulated Beauty.
-[[nodiscard]] std::vector<AovId> accumulatedAovsFor(const std::vector<AovId>& aovs, bool wantsFilter) {
-    std::vector<AovId> accumulated;
+[[nodiscard]] std::vector<PathTracedLane> accumulatedLanesFor(const std::vector<AovId>& aovs, bool wantsFilter) {
+    std::vector<PathTracedLane> accumulated;
+    const auto add = [&accumulated](PathTracedLane lane) {
+        if (std::find(accumulated.begin(), accumulated.end(), lane) == accumulated.end()) {
+            accumulated.push_back(lane);
+        }
+    };
     for (const AovId aov : aovs) {
-        if (pathtracer::debug::aovSource(aov) == AovSource::PathTraced &&
-            std::find(accumulated.begin(), accumulated.end(), aov) == accumulated.end()) {
-            accumulated.push_back(aov);
+        if (const PathTracedLane lane = pathtracer::debug::pathTracedLane(aov)) {
+            add(lane);
+        }
+        // Denoised reads OIDN's auxiliary features, which must come from the same samples as the Beauty it denoises.
+        if (aov == AovId::Denoised) {
+            for (const PathTracedLane lane : pathtracer::debug::kDenoiseFeatureLanes) {
+                add(lane);
+            }
         }
     }
-    if (wantsFilter && std::find(accumulated.begin(), accumulated.end(), AovId::Beauty) == accumulated.end()) {
-        accumulated.push_back(AovId::Beauty);
+    if (wantsFilter) {
+        add(&pathtracer::scene::PathTraceResult::beauty);
     }
     return accumulated;
 }
@@ -273,15 +288,19 @@ void HeadlessRenderer::resizeBuffers(int width, int height) {
     bufferHeight_ = height;
 }
 
+const pathtracer::gfx::HdrImage& HeadlessRenderer::accumulatedImage(PathTracedLane lane) const {
+    // at(), not []: a lane absent from the parallel lane vector indexes exactly one past the end, which render() must not do silently.
+    const auto it = std::find(accumulatedLanes_.begin(), accumulatedLanes_.end(), lane);
+    return accumulators_.at(static_cast<std::size_t>(it - accumulatedLanes_.begin()));
+}
+
 const pathtracer::gfx::HdrImage& HeadlessRenderer::lastImage(AovId aov) const {
     switch (pathtracer::debug::aovSource(aov)) {
-        // at(), not []: an AOV absent from the parallel name vector indexes exactly one past the end, which render() must not do silently.
-        case AovSource::PathTraced: {
-            const auto it = std::find(accumulatedAovs_.begin(), accumulatedAovs_.end(), aov);
-            return accumulators_.at(static_cast<std::size_t>(it - accumulatedAovs_.begin()));
-        }
+        case AovSource::PathTraced:
+            return accumulatedImage(pathtracer::debug::pathTracedLane(aov));
         case AovSource::GBuffer:
             return gbuffer_.*pathtracer::debug::gbufferLane(aov);
+        // at(), not []: an AOV absent from the parallel name vector indexes exactly one past the end, which render() must not do silently.
         case AovSource::BeautyFilter: {
             const auto it = std::find(filteredAovs_.begin(), filteredAovs_.end(), aov);
             return filtered_.at(static_cast<std::size_t>(it - filteredAovs_.begin()));
@@ -309,18 +328,18 @@ bool HeadlessRenderer::render(const Request& request, std::span<float* const> ou
 }
 
 bool HeadlessRenderer::render(const Request& request, std::string& error) {
-    if (!validRequest(request, scene_.lights.size(), error) || !applyPose(request, error)) {
+    if (!validRequest(request, scene_.lights.size(), profile_.denoiser.enabled, error) || !applyPose(request, error)) {
         return false;
     }
     const bool wantsFilter = requestsSource(request.aovs, AovSource::BeautyFilter);
     resizeBuffers(request.width, request.height);
-    accumulatedAovs_ = accumulatedAovsFor(request.aovs, wantsFilter);
+    accumulatedLanes_ = accumulatedLanesFor(request.aovs, wantsFilter);
 
     stats_.passMilliseconds.clear();
     stats_.gbufferMilliseconds = 0.0;
     stats_.filterMilliseconds = 0.0;
     stats_.rays = pathtracer::debug::RayCounts{};
-    if (!accumulatedAovs_.empty()) {
+    if (!accumulatedLanes_.empty()) {
         accumulatePathTraced(request);
     }
     if (requestsSource(request.aovs, AovSource::GBuffer)) {
@@ -336,9 +355,8 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
 
 void HeadlessRenderer::accumulatePathTraced(const Request& request) {
     accumulators_.clear();
-    for (const AovId aov : accumulatedAovs_) {
-        accumulators_.push_back(
-            pathtracer::gfx::makeImage(request.width, request.height, pathtracer::debug::aovChannels(aov)));
+    for (const PathTracedLane lane : accumulatedLanes_) {
+        accumulators_.push_back(pathtracer::gfx::makeImage(request.width, request.height, (pathTraced_.*lane).channels));
     }
     // A synchronous caller uses no cooperative cancellation, so generation stays where requestedGeneration asks and never goes stale.
     const std::atomic<std::uint64_t> generation{1};
@@ -352,15 +370,15 @@ void HeadlessRenderer::accumulatePathTraced(const Request& request) {
     stats_.passMilliseconds.reserve(static_cast<std::size_t>(request.samples));
     // Resolved once: the lane set is fixed for this request, and pathTracedLane is a switch the row loop would otherwise re-run.
     std::vector<const std::vector<float>*> laneSources;
-    laneSources.reserve(accumulatedAovs_.size());
-    for (const AovId aov : accumulatedAovs_) {
-        laneSources.push_back(&(pathTraced_.*pathtracer::debug::pathTracedLane(aov)).texels);
+    laneSources.reserve(accumulatedLanes_.size());
+    for (const PathTracedLane lane : accumulatedLanes_) {
+        laneSources.push_back(&(pathTraced_.*lane).texels);
     }
     // Only Beauty carries replicate means, and only where it is accumulated at all; -1 leaves the lane zero and SNR black.
-    const auto beautyLane = std::find(accumulatedAovs_.begin(), accumulatedAovs_.end(), AovId::Beauty);
-    const auto beautyIndex = beautyLane == accumulatedAovs_.end()
+    const auto beautyLane = std::find(accumulatedLanes_.begin(), accumulatedLanes_.end(), &pathtracer::scene::PathTraceResult::beauty);
+    const auto beautyIndex = beautyLane == accumulatedLanes_.end()
                                  ? -1
-                                 : static_cast<int>(beautyLane - accumulatedAovs_.begin());
+                                 : static_cast<int>(beautyLane - accumulatedLanes_.begin());
     // renderPathTraced writes images only, so pathTraced_ holds the replicate means across passes, folded in place from zero.
     std::fill(pathTraced_.replicateLuminance.begin(), pathTraced_.replicateLuminance.end(), 0.0F);
     for (int pass = 0; pass < request.samples; ++pass) {
@@ -431,9 +449,18 @@ void HeadlessRenderer::renderGBufferLanes(const Request& request) {
 void HeadlessRenderer::evaluateFilters(const Request& request) {
     const auto filterStart = std::chrono::steady_clock::now();
     const pathtracer::gfx::HdrImage& beauty = lastImage(AovId::Beauty);
-    const pathtracer::debug::FilterInput filterInput{beauty, pathTraced_.replicateLuminance.data(), pathTraced_.replicates,
+    const bool denoises = std::find(request.aovs.begin(), request.aovs.end(), AovId::Denoised) != request.aovs.end();
+    if (denoises && denoiser_ == nullptr) {
+        denoiser_ = std::make_unique<pathtracer::debug::Denoiser>(profile_.denoiser.options);
+    }
+    const pathtracer::debug::FilterInput filterInput{beauty,
+                                                     pathTraced_.replicateLuminance.data(),
+                                                     pathTraced_.replicates,
                                                      request.samples,
-                                                     pathtracer::scene::wrapsHorizontally(request.camera.lens().projection)};
+                                                     pathtracer::scene::wrapsHorizontally(request.camera.lens().projection),
+                                                     denoises ? &accumulatedImage(pathtracer::debug::kDenoiseFeatureLanes[0]) : nullptr,
+                                                     denoises ? &accumulatedImage(pathtracer::debug::kDenoiseFeatureLanes[1]) : nullptr,
+                                                     denoiser_.get()};
     for (const AovId aov : request.aovs) {
         if (pathtracer::debug::aovSource(aov) != AovSource::BeautyFilter ||
             std::find(filteredAovs_.begin(), filteredAovs_.end(), aov) != filteredAovs_.end()) {

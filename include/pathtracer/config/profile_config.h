@@ -6,6 +6,7 @@
 
 #include <glm/glm.hpp>
 
+#include "pathtracer/debug/denoiser.h"
 #include "pathtracer/gfx/ocio_display_transform.h"
 #include "pathtracer/gfx/scalar_type.h"
 #include "pathtracer/scene/camera.h"
@@ -59,12 +60,19 @@ struct PathTracerConfig {
     int replicates;  // independent scrambles interleaved by pass, whose spread is the SNR's standard error; divides maxSamples
 };
 
+// profile.json's denoiser block: OIDN for the Denoised AOV, and the feature chain its albedo and normal come from.
+struct DenoiserConfig {
+    bool enabled;  // false skips the integrator's feature chain and withholds the Denoised AOV
+    pathtracer::debug::DenoiserOptions options;
+};
+
 // Session-wide defaults: the controller's initial and reset pose, lens, exposure and tuning constants -- what is not specific to one scene.
 struct ProfileConfig {
     CameraConfig camera;
     ControlsConfig controls;
     RenderConfig render;
     PathTracerConfig pathTracer;
+    DenoiserConfig denoiser;
 };
 
 // Reads and parses path; nullopt and a stderr log if missing, unreadable or unparseable. User input: failure is surfaced, not asserted.

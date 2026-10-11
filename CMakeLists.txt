@@ -20,6 +20,8 @@ find_package(OpenEXR REQUIRED)
 find_package(OpenColorIO REQUIRED)
 find_package(OpenImageIO 3 CONFIG REQUIRED)
 find_package(embree 4 CONFIG REQUIRED)
+# The Denoised AOV's CPU denoiser; private to pathtracer_core, so no OIDN header reaches a consumer.
+find_package(OpenImageDenoise 2 CONFIG REQUIRED)
 # bench_log's floatCrc32 only. Not a new dependency: OpenImageIO already links zlib, so naming it makes the direct use explicit.
 find_package(ZLIB REQUIRED)
 
@@ -137,6 +139,7 @@ add_library(pathtracer_core STATIC
     src/debug/aov.cpp
     src/debug/aov_filters.cpp
     src/debug/bench_log.cpp
+    src/debug/denoiser.cpp
     src/debug/frame_stats.cpp
     src/debug/host_info.cpp
     src/debug/memory_tracker.cpp
@@ -179,6 +182,7 @@ target_compile_definitions(pathtracer_core PRIVATE ${PATHTRACER_PROVENANCE_DEFIN
 target_compile_definitions(pathtracer_core PUBLIC GLM_ENABLE_EXPERIMENTAL)
 pathtracer_target_defaults(pathtracer_core NATIVE IPO TIDY)
 target_link_libraries(pathtracer_core PUBLIC glm::glm embree OpenColorIO::OpenColorIO OpenImageIO::OpenImageIO ZLIB::ZLIB)
+target_link_libraries(pathtracer_core PRIVATE OpenImageDenoise)
 
 # The C ABI a foreign runtime binds to via ctypes. Shared, not static: it is dlopen'd, not linked.
 add_library(pathtracer_c SHARED src/api/pathtracer_c.cpp)
