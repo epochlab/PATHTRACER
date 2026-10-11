@@ -2097,6 +2097,9 @@ struct ChiSquareCase {
     float anisotropy = 0.0F;     // specular_roughness_anisotropy
     float coatAnisotropy = 0.0F;
     float woAzimuth = 0.0F;      // wo's azimuth from the tangent, which only an anisotropic lobe distinguishes
+    bool thinWalled = false;     // geometry_thin_walled, its translucent share the sheet and its subsurface the albedo-1 split
+    float subsurface = 0.0F;
+    float subsurfaceAnisotropy = 0.0F;
 };
 
 PT_CHECK(sampling_chi_square, Slow, Statistical) {
@@ -2111,7 +2114,7 @@ PT_CHECK(sampling_chi_square, Slow, Statistical) {
     constexpr std::uint32_t kSeed = 0x9E3779B9U;
 
     // Transmissive rows sit either side of the interface; coated, fuzzed and filmed rows put each layer's lobe and masses in the draw.
-    const std::array<ChiSquareCase, 24> cases = {{
+    const std::array<ChiSquareCase, 27> cases = {{
         {0.2F, 0.0F, 1.0F, 0.8F},  {0.2F, 0.0F, 1.0F, -0.6F},
         {0.4F, 0.0F, 1.0F, 0.8F},  {0.4F, 0.0F, 1.0F, -0.6F},
         {0.7F, 0.0F, 1.0F, 0.8F},  {0.7F, 0.0F, 1.0F, -0.6F},
@@ -2124,6 +2127,9 @@ PT_CHECK(sampling_chi_square, Slow, Statistical) {
         {0.6F, 1.0F, 0.0F, 0.7F, 0.0F, 0.0F, 0.0F, 0.5F, 0.0F, 0.8F, 0.0F, 0.6F}, {0.5F, 0.0F, 0.0F, 0.6F, 0.0F, 0.0F, 0.0F, 0.5F, 0.0F, 0.9F, 0.0F, 1.0F},
         {0.6F, 0.0F, 1.0F, 0.8F, 0.0F, 0.0F, 0.0F, 0.5F, 0.0F, 0.6F, 0.0F, 0.6F}, {0.6F, 0.0F, 1.0F, -0.6F, 0.0F, 0.0F, 0.0F, 0.5F, 0.0F, 0.6F, 0.0F, 0.6F},
         {0.5F, 1.0F, 0.0F, 0.7F, 1.0F, 0.5F, 0.0F, 0.5F, 0.0F, 0.0F, 0.8F, 0.6F},
+        {.roughness = 0.4F, .metallic = 0.0F, .transmission = 1.0F, .ndotV = 0.7F, .thinWalled = true},
+        {.roughness = 0.6F, .metallic = 0.0F, .transmission = 0.6F, .ndotV = -0.5F, .anisotropy = 0.5F, .woAzimuth = 0.6F, .thinWalled = true},
+        {.roughness = 0.5F, .metallic = 0.0F, .transmission = 0.0F, .ndotV = 0.6F, .thinWalled = true, .subsurface = 1.0F, .subsurfaceAnisotropy = 0.4F},
     }};
     // The suite's corrected significance, split across the grid by Sidak so the independent cases share it.
     ctx.plan(1);
@@ -2140,6 +2146,9 @@ PT_CHECK(sampling_chi_square, Slow, Statistical) {
         params = filmed(params, testCase.filmThickness > 0.0F ? 1.0F : 0.0F, testCase.filmThickness, 1.33F);
         params.specularRoughnessAnisotropy = testCase.anisotropy;
         params.coatRoughnessAnisotropy = testCase.coatAnisotropy;
+        params.geometryThinWalled = testCase.thinWalled;
+        params.subsurfaceWeight = testCase.subsurface;
+        params.subsurfaceScatterAnisotropy = testCase.subsurfaceAnisotropy;
         const float sinV = std::sqrt(std::max(0.0F, 1.0F - (testCase.ndotV * testCase.ndotV)));
         const glm::vec3 wo(sinV * std::cos(testCase.woAzimuth), sinV * std::sin(testCase.woAzimuth), testCase.ndotV);
 
@@ -3017,6 +3026,170 @@ PT_CHECK(anisotropic_albedo_matches_lobe, Slow, Exact) {
     finish(ctx, worst <= kTolerance, "an anisotropic slab's albedo does not match the energy its lobe reflects");
 }
 
+// A thin wall over the inputs: transmission_weight its translucent share, subsurface_weight the rest's white subsurface share.
+Surface thinWalled(Surface inputs, float transmission, float subsurface = 0.0F, float anisotropy = 0.0F) {
+    inputs.geometryThinWalled = true;
+    inputs.subsurfaceColor = glm::vec3(1.0F);
+    inputs.transmissionWeight = transmission;
+    inputs.subsurfaceWeight = subsurface;
+    inputs.subsurfaceScatterAnisotropy = anisotropy;
+    return inputs;
+}
+
+// A white, lossless thin wall reflects or transmits all it receives (R + T = 1) at every roughness, layer and subsurface anisotropy.
+PT_CHECK(thin_wall_white_furnace, Slow, Statistical) {
+    constexpr int kSampleCount = 200000;
+    constexpr float kTolerance = 0.02F;
+    const Surface clear = makeParams(0.3F, 0.0F, 0.0F);
+    const std::array<std::pair<const char*, Surface>, 11> surfaces = {{
+        {"smooth sheet", thinWalled(makeParams(0.0F, 0.0F, 0.0F), 1.0F)},
+        {"sheet r=0.3", thinWalled(clear, 1.0F)},
+        {"sheet r=1", thinWalled(makeParams(1.0F, 0.0F, 0.0F), 1.0F)},
+        {"anisotropic sheet", anisotropic(thinWalled(makeParams(0.5F, 0.0F, 0.0F), 1.0F), 0.7F, 0.0F)},
+        {"half sheet, half glossy-diffuse", thinWalled(clear, 0.5F)},
+        {"coated sheet", coated(thinWalled(clear, 1.0F), 1.0F, glm::vec3(1.0F), 0.2F, 1.6F, 0.0F)},
+        {"fuzzed sheet", fuzzed(thinWalled(clear, 1.0F), 1.0F, glm::vec3(1.0F), 0.5F)},
+        {"filmed sheet", filmed(thinWalled(clear, 1.0F), 1.0F, 0.4F, 1.33F)},
+        {"subsurface g=-1", thinWalled(clear, 0.0F, 1.0F, -1.0F)},
+        {"subsurface g=0", thinWalled(clear, 0.0F, 1.0F, 0.0F)},
+        {"subsurface g=1", thinWalled(clear, 0.0F, 1.0F, 1.0F)},
+    }};
+    bool ok = true;
+    std::uint32_t seed = 69000;
+    for (const auto& [label, surface] : surfaces) {
+        for (float mu : {1.0F, 0.5F, 0.2F, -0.6F}) {
+            const glm::vec3 lo = furnaceLo(surface, directionAt(mu, 0.4F), kSampleCount, ++seed);
+            if (!withinBand(lo, 1.0F, kTolerance)) {
+                std::cerr << "bsdf_validate: FAILED thin-wall furnace for " << label << " at mu=" << mu << " Lo=[" << minChannel(lo) << ", "
+                          << maxChannel(lo) << "]\n";
+                ok = false;
+            }
+        }
+    }
+    finish(ctx, ok, "thin_wall_white_furnace failed; see the rows above");
+}
+
+// One polarisation's reflectance from index 1 onto n at cosine mu, in double (Born & Wolf 1.5.3).
+std::pair<double, double> referencePolarisedFresnel(double mu, double n) {
+    const double cosT = std::sqrt(1.0 - ((1.0 - (mu * mu)) / (n * n)));
+    const double parallel = ((n * mu) - cosT) / ((n * mu) + cosT);
+    const double perpendicular = (mu - (n * cosT)) / (mu + (n * cosT));
+    return {parallel * parallel, perpendicular * perpendicular};
+}
+
+// The smooth sheet's closed forms against the ladder summed bounce by bounce in double, per polarisation, with absorption between faces.
+PT_CHECK(thin_wall_ladder_series, Fast, Exact) {
+    constexpr double kTolerance = 1e-5;
+    const glm::dvec3 color(0.9, 0.6, 0.3);
+    double worst = 0.0;
+    for (const float ior : {1.5F, 1.33F, 2.4F}) {
+        for (const float mu : {1.0F, 0.7F, 0.3F, 0.05F}) {
+            Surface surface = thinWalled(makeParams(0.0F, 0.0F, 0.0F), 1.0F);
+            surface.specularIor = ior;
+            surface.transmissionColor = glm::vec3(color);
+            const pathtracer::scene::BsdfClosure closure = pathtracer::scene::makeBsdfClosure(surface, directionAt(mu, 0.0F));
+            const double cosT = std::sqrt(1.0 - ((1.0 - (static_cast<double>(mu) * mu)) / (static_cast<double>(ior) * ior)));
+            const glm::dvec3 crossing = glm::pow(color, glm::dvec3(1.0 / cosT));
+            const auto [rp, rs] = referencePolarisedFresnel(mu, ior);
+            glm::dvec3 reflect(0.0);
+            glm::dvec3 transmit(0.0);
+            for (const double r : {rp, rs}) {
+                // Entry reflection, then each round trip: T1 down, n bounces between the faces, T1 or T2 out.
+                glm::dvec3 inside = (1.0 - r) * crossing;
+                reflect += 0.5 * glm::dvec3(r);
+                for (int bounce = 0; bounce < 200; ++bounce) {
+                    transmit += 0.5 * inside * (1.0 - r);
+                    inside *= r * crossing;
+                    reflect += 0.5 * inside * (1.0 - r);
+                    inside *= r * crossing;
+                }
+            }
+            const glm::dvec3 closureReflect(closure.sheet.reflect);
+            const glm::dvec3 closureTransmit(closure.sheet.transmit);
+            const double delta = std::max(static_cast<double>(maxChannel(glm::vec3(glm::abs(closureReflect - reflect)))),
+                                          static_cast<double>(maxChannel(glm::vec3(glm::abs(closureTransmit - transmit)))));
+            if (delta > kTolerance) {
+                std::cerr << "  ior=" << ior << " mu=" << mu << " |closed form - series|=" << delta << '\n';
+            }
+            worst = std::max(worst, delta);
+        }
+    }
+    std::cout << "bsdf_validate: thin-wall ladder against its bounce series, worst " << worst << '\n';
+    finish(ctx, worst <= kTolerance, "the thin wall's ladder sums differ from the bounce-by-bounce series");
+}
+
+// A thin wall has no inside: viewed from its back it is the same closure, every value, density and draw mirrored through it.
+PT_CHECK(thin_wall_two_sided, Fast, Exact) {
+    constexpr int kDraws = 64;
+    const Surface clear = makeParams(0.3F, 0.0F, 0.0F);
+    const std::array<Surface, 5> surfaces = {thinWalled(clear, 1.0F), thinWalled(makeParams(0.0F, 0.0F, 0.0F), 0.7F),
+                                             thinWalled(clear, 0.0F, 1.0F, 0.3F),
+                                             coated(thinWalled(clear, 0.5F, 0.5F), 1.0F, glm::vec3(0.8F), 0.2F, 1.6F, 1.0F),
+                                             fuzzed(thinWalled(clear, 1.0F), 1.0F, glm::vec3(0.7F), 0.5F)};
+    const auto mirrored = [](const glm::vec3& w) { return glm::vec3(w.x, w.y, -w.z); };
+    bool ok = true;
+    for (std::size_t c = 0; c < surfaces.size(); ++c) {
+        for (const float mu : {0.9F, 0.4F}) {
+            const glm::vec3 wo = directionAt(mu, 0.3F);
+            const pathtracer::scene::BsdfClosure front = pathtracer::scene::makeBsdfClosure(surfaces[c], wo);
+            const pathtracer::scene::BsdfClosure back = pathtracer::scene::makeBsdfClosure(surfaces[c], mirrored(wo));
+            bool same = true;
+            for (const float muI : {0.8F, 0.3F, -0.5F}) {
+                const glm::vec3 wi = directionAt(muI, 1.7F);
+                const pathtracer::scene::BsdfEval a = pathtracer::scene::evaluateBsdfSplit(front, wi);
+                const pathtracer::scene::BsdfEval b = pathtracer::scene::evaluateBsdfSplit(back, mirrored(wi));
+                same = same && a.total() == b.total() && a.transmission == b.transmission && a.pdf == b.pdf;
+            }
+            for (int i = 0; i < kDraws; ++i) {
+                pathtracer::scene::Sampler frontSampler(0, 0, i, kDraws, 71000U);
+                pathtracer::scene::Sampler backSampler(0, 0, i, kDraws, 71000U);
+                const std::optional<pathtracer::scene::BsdfSample> a = pathtracer::scene::sampleBsdf(front, frontSampler);
+                const std::optional<pathtracer::scene::BsdfSample> b = pathtracer::scene::sampleBsdf(back, backSampler);
+                same = same && a.has_value() == b.has_value() &&
+                       (!a || (a->wiLocal == mirrored(b->wiLocal) && a->throughputWeight == b->throughputWeight && a->pdf == b->pdf));
+            }
+            if (!same) {
+                std::cerr << "bsdf_validate: FAILED thin wall two-sidedness for surface " << c << " at mu=" << mu << '\n';
+                ok = false;
+            }
+        }
+    }
+    finish(ctx, ok, "a thin wall seen from its back differs from its front");
+}
+
+// A smooth sheet's pass-through is its undeviated delta's weight times the probability of drawing it, and nothing else passes.
+PT_CHECK(thin_wall_pass_through, Fast, Exact) {
+    constexpr int kDraws = 256;
+    const std::array<Surface, 3> smooth = {thinWalled(makeParams(0.0F, 0.0F, 0.0F), 1.0F),
+                                           coated(thinWalled(makeParams(0.0F, 0.0F, 0.0F), 0.6F), 1.0F, glm::vec3(0.7F), 0.3F, 1.5F, 1.0F),
+                                           fuzzed(filmed(thinWalled(makeParams(0.0F, 0.0F, 0.0F), 1.0F), 1.0F, 0.3F, 1.4F), 0.5F, glm::vec3(1.0F), 0.4F)};
+    bool ok = true;
+    int passes = 0;
+    for (const Surface& surface : smooth) {
+        for (const float mu : {0.9F, 0.4F, -0.7F}) {
+            const glm::vec3 wo = directionAt(mu, 0.8F);
+            const pathtracer::scene::BsdfClosure closure = pathtracer::scene::makeBsdfClosure(surface, wo);
+            const glm::vec3 through = pathtracer::scene::passThrough(closure);
+            const float drawn = closure.mass[static_cast<std::size_t>(pathtracer::scene::Technique::SheetSingle)] * (1.0F - closure.sheet.reflectShare);
+            for (int i = 0; i < kDraws; ++i) {
+                pathtracer::scene::Sampler sampler(0, 0, i, kDraws, 72000U);
+                const std::optional<pathtracer::scene::BsdfSample> sample = pathtracer::scene::sampleBsdf(closure, sampler);
+                if (!sample || !sample->passThrough) {
+                    continue;
+                }
+                ++passes;
+                const glm::vec3 delta = glm::abs((sample->throughputWeight * drawn) - through);
+                ok = ok && sample->wiLocal == -wo && sample->delta && maxChannel(delta) <= 1e-6F * maxChannel(through);
+            }
+        }
+    }
+    const pathtracer::scene::BsdfClosure rough = pathtracer::scene::makeBsdfClosure(thinWalled(makeParams(0.3F, 0.0F, 0.0F), 1.0F), directionAt(0.7F, 0.0F));
+    const pathtracer::scene::BsdfClosure glass = pathtracer::scene::makeBsdfClosure(makeParams(0.0F, 0.0F, 1.0F), directionAt(0.7F, 0.0F));
+    ok = ok && pathtracer::scene::passThrough(rough) == glm::vec3(0.0F) && pathtracer::scene::passThrough(glass) == glm::vec3(0.0F);
+    std::cout << "bsdf_validate: thin-wall pass-through over " << passes << " undeviated draws\n";
+    finish(ctx, ok && passes > 0, "a smooth sheet's pass-through differs from its delta, or a rough sheet or bulk glass passes light");
+}
+
 // The layer branches the sweeps above leave untouched, each an audit regression: every draw finite, non-negative and self-consistent.
 PT_CHECK(layer_branch_invariants, Fast, Exact) {
     struct Case {
@@ -3036,7 +3209,9 @@ PT_CHECK(layer_branch_invariants, Fast, Exact) {
     // specular_ior 1 bends nothing, so refraction is a delta, while the coat's n_b/n_c still reflects and leaves an escape deficit.
     Surface unbent = coated(makeParams(0.4F, 0.0F, 1.0F), 1.0F, glm::vec3(1.0F), 0.1F, 1.5F, 1.0F);
     unbent.specularIor = 1.0F;
-    const std::array<Case, 11> cases{{
+    Surface rare = thinWalled(makeParams(0.3F, 0.0F, 0.0F), 1.0F);
+    rare.specularIor = 0.7F;
+    const std::array<Case, 16> cases{{
         {"coat exiting a transmissive base", coated(glass, 1.0F, glm::vec3(0.8F), 0.2F, 1.5F, 1.0F), -0.6F, std::nullopt, up},
         {"fuzz exiting a transmissive base", fuzzed(glass, 1.0F, glm::vec3(0.9F), 0.5F), -0.6F, std::nullopt, up},
         {"film under a coat", filmed(coated(makeParams(0.3F, 0.0F, 0.0F), 1.0F, glm::vec3(1.0F), 0.1F, 1.6F, 1.0F), 1.0F, 0.4F, 1.3F), 0.7F,
@@ -3052,6 +3227,12 @@ PT_CHECK(layer_branch_invariants, Fast, Exact) {
          0.3F, std::nullopt, up},
         {"Airy series as r12 r23 -> 1: film on a perfect conductor at grazing", filmed(makeParams(0.3F, 1.0F, 0.0F), 1.0F, 0.4F, 2.0F), 1e-3F,
          std::nullopt, up},
+        {"smooth thin wall from behind", thinWalled(makeParams(0.0F, 0.0F, 0.0F), 1.0F), -0.6F, std::nullopt, up},
+        {"rough thin wall under coat and fuzz from behind", fuzzed(coated(thinWalled(glass, 0.7F), 1.0F, glm::vec3(0.8F), 0.2F, 1.5F, 1.0F), 1.0F,
+                                                                   glm::vec3(0.9F), 0.4F), -0.5F, std::nullopt, tilt},
+        {"thin-wall subsurface, all reflected", thinWalled(makeParams(0.4F, 0.0F, 0.0F), 0.0F, 1.0F, -1.0F), 0.7F, std::nullopt, up},
+        {"filmed thin wall with a dispersive hero ignored", filmed(thinWalled(dispersive, 1.0F), 1.0F, 0.4F, 1.3F), 0.6F, 2, up},
+        {"thin wall past its critical angle, specular_ior < 1", rare, 0.2F, std::nullopt, up},
     }};
     const auto finiteNonNegative = [](const glm::vec3& v) {
         return glm::all(glm::greaterThanEqual(v, glm::vec3(0.0F))) && glm::all(glm::lessThan(v, glm::vec3(std::numeric_limits<float>::infinity())));

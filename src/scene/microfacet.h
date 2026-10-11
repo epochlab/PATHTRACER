@@ -56,6 +56,16 @@ struct InterfaceInputs {
     return slab.fresnelEtaI == slab.fresnelEtaT && slab.film.weight == 0.0F;
 }
 
+// A thin wall's albedos at cosine mu, every internal bounce summed per polarisation: exact for a smooth wall (Born & Wolf 1.6).
+struct SheetLadder {
+    glm::vec3 reflect;   // R', untinted
+    glm::vec3 transmit;  // T', transmission_color along the refracted path included
+};
+[[nodiscard]] SheetLadder sheetLadder(const SheetInterfaces& sheet, float mu);
+
+// The thin wall's translucent share at wo, weight (1 - M) T, its lobe the white conductor at the base roughness.
+[[nodiscard]] SheetSlab makeSheetSlab(const SheetInterfaces& interfaces, float weight, float roughness, float anisotropy, const glm::vec3& wo);
+
 // A slab's cosine-weighted value at wi and the density of each of its techniques there, unweighted by selection mass.
 struct ConductorEval {
     glm::vec3 value;

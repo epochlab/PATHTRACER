@@ -13,8 +13,8 @@ namespace pathtracer::scene {
     return (1.0F - r2) + (r2 * cosThetaI * cosThetaI);
 }
 
-// Exact unpolarized dielectric Fresnel (PBRT's FrDielectric); 1.0 from the critical angle inward, where both polarisations are 1.
-[[nodiscard]] inline float fresnelDielectric(float cosThetaI, float etaI, float etaT) {
+// Exact dielectric reflectance per polarisation (parallel, perpendicular); both 1 from the critical angle inward.
+[[nodiscard]] inline std::pair<float, float> fresnelDielectricPolarised(float cosThetaI, float etaI, float etaT) {
     cosThetaI = std::clamp(cosThetaI, -1.0F, 1.0F);
     if (cosThetaI < 0.0F) {
         std::swap(etaI, etaT);
@@ -22,14 +22,20 @@ namespace pathtracer::scene {
     }
     const float cos2ThetaT = cos2Transmitted(cosThetaI, etaI / etaT);
     if (cos2ThetaT < 0.0F) {
-        return 1.0F;
+        return {1.0F, 1.0F};
     }
     const float cosThetaT = std::sqrt(cos2ThetaT);
     const float rParallel =
         ((etaT * cosThetaI) - (etaI * cosThetaT)) / ((etaT * cosThetaI) + (etaI * cosThetaT));
     const float rPerpendicular =
         ((etaI * cosThetaI) - (etaT * cosThetaT)) / ((etaI * cosThetaI) + (etaT * cosThetaT));
-    return ((rParallel * rParallel) + (rPerpendicular * rPerpendicular)) * 0.5F;
+    return {rParallel * rParallel, rPerpendicular * rPerpendicular};
+}
+
+// Exact unpolarized dielectric Fresnel (PBRT's FrDielectric), the polarisations' mean.
+[[nodiscard]] inline float fresnelDielectric(float cosThetaI, float etaI, float etaT) {
+    const auto [parallel, perpendicular] = fresnelDielectricPolarised(cosThetaI, etaI, etaT);
+    return (parallel + perpendicular) * 0.5F;
 }
 
 }  // namespace pathtracer::scene

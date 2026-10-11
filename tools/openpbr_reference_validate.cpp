@@ -316,6 +316,69 @@ PT_CHECK(coat_transmittance_matches_reference, Fast, Exact) {
     expectWithin(ctx, "coatTransmittance vs openpbr_coat_passage_color_multiplier", worst, kFloatAgreement, where);
 }
 
+// A thin wall's absorption, transmission_color per normal crossing along the refracted path, as Adobe's view-dependent tint has it.
+PT_CHECK(thin_wall_tint_matches_reference, Fast, Exact) {
+    ctx.plan(1);
+    const glm::vec3 color(0.2F, 0.6F, 0.95F);
+    double worst = 0.0;
+    std::string where;
+    for (const float ior : {1.2F, 1.5F, 2.4F}) {
+        // An index-matched facing face isolates the tint: T' = (1 - R_far) tau with nothing reflected back between the faces.
+        const scene::SheetInterfaces sheet{glm::vec3(1.0F), color, 1.0F, ior, scene::FilmLayer{}};
+        for (int i = 1; i <= 64; ++i) {
+            const float mu = static_cast<float>(i) / 64.0F;
+            const glm::vec3 ours = scene::sheetLadder(sheet, mu).transmit / (1.0F - scene::fresnelDielectric(mu, 1.0F, ior));
+            const vec3 reference = openpbr_compute_final_transmission_tint(color, true, mu, ior);
+            for (int c = 0; c < 3; ++c) {
+                const double gap = relativeGap(ours[c], reference[c]);
+                if (gap > worst) {
+                    worst = gap;
+                    where = format("ior %.2f mu %.4f", ior, mu);
+                }
+            }
+        }
+    }
+    expectWithin(ctx, "sheet tint vs openpbr_compute_final_transmission_tint", worst, kFloatAgreement, where);
+}
+
+// At normal incidence both polarisations reflect alike, so the polarised ladder is Adobe's window reflectance 2R/(1 + R) exactly.
+PT_CHECK(thin_wall_fresnel_matches_reference_at_normal, Fast, Exact) {
+    ctx.plan(1);
+    double worst = 0.0;
+    std::string where;
+    for (const float ior : {0.5F, 0.8F, 1.1F, 1.33F, 1.5F, 2.0F, 2.5F}) {
+        const scene::SheetInterfaces sheet{glm::vec3(1.0F), glm::vec3(1.0F), ior, ior, scene::FilmLayer{}};
+        const double gap = relativeGap(scene::sheetLadder(sheet, 1.0F).reflect.x, openpbr_thin_wall_fresnel(ior, 1.0F));
+        if (gap > worst) {
+            worst = gap;
+            where = format("ior %.2f", ior);
+        }
+    }
+    expectWithin(ctx, "sheet R'(1) vs openpbr_thin_wall_fresnel", worst, kFloatAgreement, where);
+}
+
+// The thin wall's subsurface splits (1 - g)/2 reflected, (1 + g)/2 transmitted, as Adobe's diffuse reflection and transmission do.
+PT_CHECK(thin_wall_subsurface_split_matches_reference, Fast, Exact) {
+    ctx.plan(1);
+    double worst = 0.0;
+    std::string where;
+    for (const float g : {-1.0F, -0.4F, 0.0F, 0.3F, 1.0F}) {
+        Surface surface;
+        surface.geometryThinWalled = true;
+        surface.subsurfaceWeight = 1.0F;
+        surface.subsurfaceScatterAnisotropy = g;
+        const scene::BsdfClosure closure = scene::makeBsdfClosure(surface, glm::vec3(0.0F, 0.0F, 1.0F));
+        // Adobe's proportions, openpbr_prepare_lobes: transmission (g + 1)/2, reflection its complement.
+        const double reference = 1.0 - ((g + 1.0) * 0.5);
+        const double gap = std::abs(closure.subsurfaceReflectShare - reference);
+        if (gap > worst) {
+            worst = gap;
+            where = format("g %.2f", g);
+        }
+    }
+    expectWithin(ctx, "thin-wall subsurface reflected share vs Adobe's proportions", worst, kFloatAgreement, where);
+}
+
 // The coat's E_F, 2 int F mu dmu in closed form, against Gauss-Legendre over Adobe's exact Fresnel, panelled at the critical cosine.
 PT_CHECK(fresnel_average_matches_reference, Fast, Exact) {
     ctx.plan(1);

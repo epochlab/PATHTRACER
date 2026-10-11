@@ -124,18 +124,113 @@ struct TraceResult {
 // Which transport bucket a path belongs to: set at bounce 0's lobe, stickily overridden to Refraction by any transmission sample.
 enum class PathBucket { Diffuse, SpecularReflection, Refraction };
 
+// What a ray may cross without scattering: an instance whose opacity may fall below 1, or a thin wall that may transmit undeviated.
+struct PassThroughScene {
+    const EmbreeAccel& accel;
+    const std::vector<ShadingTriangle>& shadingTriangles;
+    const std::vector<MeshInstance>& instances;
+    const std::vector<std::uint8_t>& mayPassThrough;  // per instance
+    bool any;  // no instance may: every shadow ray is a plain occlusion query
+};
+
+template <typename T>
+bool isConstant(const MaterialInput<T>& input, T value) {
+    const T* constant = std::get_if<T>(&input);
+    return constant != nullptr && *constant == value;
+}
+
+std::vector<std::uint8_t> passThroughInstances(const std::vector<MeshInstance>& instances) {
+    std::vector<std::uint8_t> may(instances.size());
+    for (std::size_t i = 0; i < instances.size(); ++i) {
+        const Material& material = instances[i].material;
+        may[i] = !isConstant(material.geometryOpacity, 1.0F) ||
+                 (material.geometryThinWalled && !isConstant(material.transmissionWeight, 0.0F));
+    }
+    return may;
+}
+
+// The vertex's closure toward woWorld in its shading frame; unbound, the coat follows the interpolated normal, not the base's maps.
+BsdfClosure closureAt(const Material& material, const ShadingTriangle& triangle, const ShadingVertex& shading,
+                      const OpenPbrInputs<Constant>& inputs, const ShadingFrame& frame, const glm::vec3& woWorld, std::optional<int> hero) {
+    const ShadingFrame coatFrame = inputs.coatWeight > 0.0F ? buildShadingFrame(triangle, shading, material.geometryCoatNormal) : frame;
+    return makeBsdfClosure(inputs, woWorld * frame, hero, coatFrame[2] * frame, coatFrame[0] * frame);
+}
+
+// The share of light a shadow ray carries to its end: (1 - alpha) + alpha * passThrough at each crossable surface, 0 at any other.
+glm::vec3 transmittanceAlong(Ray ray, const PassThroughScene& scene, std::optional<int> hero, std::uint64_t& shadowRays) {
+    if (!scene.any) {
+        return glm::vec3(scene.accel.occluded(ray) ? 0.0F : 1.0F);
+    }
+    glm::vec3 transmittance(1.0F);
+    // Closest hit first, so each surface is met in order along the same ray: exact for presence and for an undeviated sheet.
+    while (const std::optional<Hit> hit = scene.accel.intersect(ray)) {
+        const ShadingTriangle& triangle = scene.shadingTriangles[static_cast<std::size_t>(hit->triangleIndex)];
+        const auto instance = static_cast<std::size_t>(triangle.instanceIndex);
+        if (!scene.mayPassThrough[instance]) {
+            return glm::vec3(0.0F);
+        }
+        const Material& material = scene.instances[instance].material;
+        const ShadingVertex shading = interpolateShading(triangle, hit->u, hit->v);
+        const float opacity = opacityAt(material, shading.uv, {});
+        glm::vec3 crossing(1.0F - opacity);
+        if (opacity > 0.0F) {
+            const OpenPbrInputs<Constant> inputs = resolveInputs(material, shading.uv, {}, shading.colour);
+            const ShadingFrame frame = buildShadingFrame(triangle, shading, material.geometryNormal);
+            crossing += opacity * passThrough(closureAt(material, triangle, shading, inputs, frame, -ray.dir, hero));
+        }
+        transmittance *= crossing;
+        if (transmittance == glm::vec3(0.0F)) {
+            return transmittance;
+        }
+        ray.tMin = std::nextafter(hit->t, std::numeric_limits<float>::infinity());
+        ++shadowRays;
+    }
+    return transmittance;
+}
+
+// Obscurance through cutouts, Sum T_i alpha_i rho(t_i) + T_end; closest-hit, as rho needs the distance (under 1.3% of frame time).
+float obscuranceAlong(Ray ray, const PassThroughScene& scene, float maxDistance) {
+    // rho(x) = 1 - (1-x)^2 is the lowest-degree polynomial with rho(0)=0, rho(1)=1 and rho'(1)=0, so nothing steps at D.
+    const auto rho = [&](float t) {
+        const float k = 1.0F - (t / maxDistance);
+        return 1.0F - (k * k);
+    };
+    float ao = 0.0F;
+    float transmittance = 1.0F;
+    while (const std::optional<Hit> hit = scene.accel.intersect(ray)) {
+        const ShadingTriangle& triangle = scene.shadingTriangles[static_cast<std::size_t>(hit->triangleIndex)];
+        const auto instance = static_cast<std::size_t>(triangle.instanceIndex);
+        const float opacity = scene.mayPassThrough[instance]
+                                  ? opacityAt(scene.instances[instance].material, interpolateShading(triangle, hit->u, hit->v).uv, {})
+                                  : 1.0F;
+        ao += transmittance * opacity * rho(hit->t);
+        transmittance *= 1.0F - opacity;
+        if (transmittance == 0.0F) {
+            return ao;
+        }
+        ray.tMin = std::nextafter(hit->t, std::numeric_limits<float>::infinity());
+    }
+    return ao + transmittance;
+}
+
 // dirFootprint: the primary ray's direction offsets across its sample's stratum, filtering bounce 0's lookups; deeper ones point-sample.
-TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, const EmbreeAccel& accel,
-                       const std::vector<ShadingTriangle>& shadingTriangles,
-                       const std::vector<MeshInstance>& instances,
+TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, const PassThroughScene& scene,
                        const std::vector<int>& instanceLightIndex, const LightSet& lights,
                        bool showSky, const PathTraceSettings& settings,
                        Sampler& sampler, glm::vec2 aoSample, glm::vec2 fresnelSample,
                        pathtracer::debug::RayCounts& __restrict rays) {
+    const EmbreeAccel& accel = scene.accel;
     glm::vec3 radiance(0.0F);
     glm::vec3 throughput(1.0F);
     Ray ray = primaryRay;
     int bounce = 0;
+    // Where the ray's current segment began: a ray continued past an absent surface or through a window keeps its origin.
+    float segmentStart = 0.0F;
+    // Past an absent surface or through a window's undeviated share: the same ray strictly past the hit, with no change to MIS state.
+    const auto continuePast = [&](float t) {
+        segmentStart = t;
+        ray.tMin = std::nextafter(t, std::numeric_limits<float>::infinity());
+    };
     std::optional<PathBucket> pathBucket;  // unset until bounce 0 successfully samples a lobe
     // Single-level medium stack: nullopt = vacuum, set = the medium the ray is inside. Enough for one glass object, not two overlapping.
     std::optional<Medium> medium;
@@ -171,8 +266,8 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
 
     // MIS state for the previous bounce's BSDF sample: reweights this bounce's miss against NEE's pdf so neither double-counts.
     float lastBsdfPdf = 0.0F;
-    // A delta lobe has no density for NEE to double-count, so its miss takes full weight: smooth reflection and refraction alike.
-    bool lastSampleWasDelta = false;
+    // A delta lobe has no density for NEE to double-count, so its miss takes full weight: smooth reflection, refraction, the camera.
+    bool lastSampleWasDelta = true;
     // The previous vertex's shading position, not ray.origin: MIS needs the pdf NEE would have had, taken from shading.position.
     glm::vec3 lastShadingPosition(0.0F);
 
@@ -186,7 +281,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
 
         // Beer-Lambert for the segment just travelled; a miss is unbounded, t = inf.
         if (medium.has_value()) {
-            throughput *= medium->transmittance(hit.has_value() ? hit->t : std::numeric_limits<float>::infinity());
+            throughput *= medium->transmittance(hit.has_value() ? hit->t - segmentStart : std::numeric_limits<float>::infinity());
         }
 
         if (!hit.has_value()) {
@@ -196,9 +291,9 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
             }
             const glm::vec3 envRadiance =
                 bounce == 0 ? lights.environmentRadiance(ray.dir, dirFootprint) : lights.environmentRadiance(ray.dir);
-            // Power heuristic (Veach 1997): full weight at bounce 0 and after a delta sample, neither having a density to balance.
+            // Power heuristic (Veach 1997): full weight after the camera or a delta sample, neither having a density to balance.
             float misWeight = 1.0F;
-            if (bounce > 0 && !lastSampleWasDelta) {
+            if (!lastSampleWasDelta) {
                 const float lightPdf = lights.pdfEnvironment(ray.dir);
                 const float bsdfPdf2 = lastBsdfPdf * lastBsdfPdf;
                 misWeight = bsdfPdf2 / (bsdfPdf2 + (lightPdf * lightPdf));
@@ -210,14 +305,14 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
         }
 
         const ShadingTriangle& triangle =
-            shadingTriangles[static_cast<std::size_t>(hit->triangleIndex)];
+            scene.shadingTriangles[static_cast<std::size_t>(hit->triangleIndex)];
 
         // An emitter hit, a quad light's triangles being in the BVH: Le, MIS-weighted like a miss, then terminate. Before the depth cap.
         const int lightIndex = instanceLightIndex[static_cast<std::size_t>(triangle.instanceIndex)];
         if (lightIndex >= 0) {
             const glm::vec3 emitted = lights.quadRadianceToward(lightIndex, ray.dir);
             float misWeight = 1.0F;
-            if (bounce > 0 && !lastSampleWasDelta) {
+            if (!lastSampleWasDelta) {
                 const float lightPdf = lights.pdfQuad(lightIndex, lastShadingPosition);
                 const float bsdfPdf2 = lastBsdfPdf * lastBsdfPdf;
                 misWeight = bsdfPdf2 / (bsdfPdf2 + (lightPdf * lightPdf));
@@ -228,14 +323,24 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
             break;
         }
 
-        const Material& material =
-            instances[static_cast<std::size_t>(triangle.instanceIndex)].material;
+        const auto instance = static_cast<std::size_t>(triangle.instanceIndex);
+        const Material& material = scene.instances[instance].material;
         // Secondary vertices lack propagated differentials (Igehy's BSDF transfer), so they read level 0 as a zero footprint does.
         const pathtracer::gfx::TextureFootprint footprint =
             bounce == 0 ? primaryHitFootprint(triangle, ray, hit->t, dirFootprint) : pathtracer::gfx::TextureFootprint{};
         const ShadingVertex shading = interpolateShading(triangle, hit->u, hit->v);
 
-        // Surface emission, two-sided and absent from LightSet, so the hit takes MIS weight 1. Before the depth cap, as an emitter hit.
+        // OpenPBR's presence, mix(ambient, surface, alpha) (spec eq. 23): absent, the same ray continues, no bounce and no vertex.
+        if (scene.mayPassThrough[instance]) {
+            const float opacity = opacityAt(material, shading.uv, footprint);
+            if (opacity < 1.0F && sampler.next1D() >= opacity) {
+                continuePast(hit->t);
+                --bounce;
+                continue;
+            }
+        }
+
+        // Surface emission, absent from LightSet, so the hit takes MIS weight 1. Before the depth cap, as an emitter hit.
         const glm::vec3 emitted = emittedRadiance(material, triangle, shading, -ray.dir, footprint);
         if (emitted != glm::vec3(0.0F)) {
             const glm::vec3 hitRadiance = throughput * emitted;
@@ -244,7 +349,8 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
         }
 
         // Depth cap. The extra iteration exists only so the final BSDF ray can collect its MIS-weighted miss or emitter hit.
-        if (bounce > settings.maxBounces) {
+        const bool capped = bounce > settings.maxBounces;
+        if (capped && !scene.mayPassThrough[instance]) {
             break;
         }
 
@@ -266,11 +372,20 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
         // True flat plane normal, for light-leak rejection and ray-origin offsets: both need geometry, not the shading normal.
         const glm::vec3 geoNormal = geometricNormalOf(triangle);
 
-        const glm::vec3 woLocal = woWorld * frame;
-        // The coat's frame in the base frame; unbound, the coat follows the interpolated normal and tangent, not the base's maps.
-        const ShadingFrame coatFrame = inputs.coatWeight > 0.0F ? buildShadingFrame(triangle, shading, material.geometryCoatNormal) : frame;
         // Built once for both estimators below: the continuation draw and NEE's evaluation share every wo-side lookup it holds.
-        const BsdfClosure closure = makeBsdfClosure(inputs, woLocal, heroChannel, coatFrame[2] * frame, coatFrame[0] * frame);
+        const BsdfClosure closure = closureAt(material, triangle, shading, inputs, frame, woWorld, heroChannel);
+
+        // Past the cap a window still passes the final ray on to its emitter, by its expected undeviated share, as NEE's shadow rays do.
+        if (capped) {
+            const glm::vec3 through = passThrough(closure);
+            if (through == glm::vec3(0.0F)) {
+                break;
+            }
+            throughput *= through;
+            continuePast(hit->t);
+            --bounce;
+            continue;
+        }
 
         if (bounce == 0) {
             gShadow = 1.0F;  // assume shadowed once we know there's a real surface; the NEE check below may clear this
@@ -284,16 +399,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
             const glm::vec3 aoOrigin = shadowTerminatorOffset(triangle, hit->u, hit->v, frontSide) +
                                         (geoNormal * kRayEpsilon * (frontSide ? 1.0F : -1.0F));
             ++rays.ao;
-            // Closest-hit, not any-hit, because rho needs the distance; measured under 1.3% of frame time at this ray length.
-            const std::optional<Hit> aoHit =
-                accel.intersect(Ray{aoOrigin, aoDir, kRayEpsilon, settings.aoMaxDistance});
-            // rho(x) = 1 - (1-x)^2 is the lowest-degree polynomial with rho(0)=0, rho(1)=1 and rho'(1)=0, so nothing steps at D.
-            if (aoHit.has_value()) {
-                const float k = 1.0F - (aoHit->t / settings.aoMaxDistance);
-                gAo = 1.0F - (k * k);
-            } else {
-                gAo = 1.0F;
-            }
+            gAo = obscuranceAlong(Ray{aoOrigin, aoDir, kRayEpsilon, settings.aoMaxDistance}, scene, settings.aoMaxDistance);
         }
 
         // A zero BSDF, emission alone, carries no light onward: the path ends here, its AO and Fresnel lanes already written.
@@ -347,14 +453,15 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
                     const Ray shadowRay{shadowOrigin, finiteLight ? toLight / shadowDistance : toLight,
                                          shadowEpsilon, shadowDistance * (1.0F - kShadowDistanceEpsilon)};
                     ++rays.shadow;
-                    if (!accel.occluded(shadowRay)) {
+                    const glm::vec3 visibility = transmittanceAlong(shadowRay, scene, heroChannel, rays.shadow);
+                    if (visibility != glm::vec3(0.0F)) {
                         if (bounce == 0) {
-                            gShadow = 0.0F;
+                            gShadow = 1.0F - channelMean(visibility);
                         }
                         const float lightPdf2 = lightSample->pdf * lightSample->pdf;
                         const float bsdfPdf2 = eval.pdf * eval.pdf;
                         const float misWeightLight = lightPdf2 / (lightPdf2 + bsdfPdf2);
-                        const glm::vec3 common = throughput * lightSample->radiance * misWeightLight / lightSample->pdf;
+                        const glm::vec3 common = visibility * throughput * lightSample->radiance * misWeightLight / lightSample->pdf;
                         const glm::vec3 neeContribution = bsdfValue * common;
                         radiance += neeContribution;
                         if (bounce == 0) {
@@ -379,11 +486,14 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
             break;
         }
 
-        lastBsdfPdf = sample->pdf;
-        lastSampleWasDelta = sample->delta;
-        lastShadingPosition = shading.position;
+        // A window's undeviated transmission is a null vertex: MIS keeps the last scattering vertex, whose density this ray still carries.
+        if (!sample->passThrough) {
+            lastBsdfPdf = sample->pdf;
+            lastSampleWasDelta = sample->delta;
+            lastShadingPosition = shading.position;
+        }
 
-        const glm::vec3 wiWorld = frame * sample->wiLocal;
+        const glm::vec3 wiWorld = sample->passThrough ? ray.dir : frame * sample->wiLocal;
 
         // The side rule NEE applied, a stand-in for Schussler et al. 2017: a direction keeps only the lobes its geometric side admits.
         const bool crosses = (glm::dot(wiWorld, geoNormal) > 0.0F) != woAbove;
@@ -391,8 +501,8 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
         if (weight == glm::vec3(0.0F)) {
             break;
         }
-        // The ray enters or leaves the medium exactly when it crosses the surface; reflection and TIR leave it untouched.
-        if (crosses) {
+        // A bulk ray enters or leaves the medium exactly when it crosses the surface; a thin wall has no interior to enter.
+        if (crosses && !inputs.geometryThinWalled) {
             medium = medium.has_value() ? std::nullopt : std::make_optional(Medium{inputs.transmissionColor, inputs.transmissionDepth});
         }
 
@@ -408,6 +518,11 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
             throughput /= continueProb;
         }
 
+        if (sample->passThrough) {
+            continuePast(hit->t);
+            continue;
+        }
+
         // Chiang/Li/Burley origin nudged toward wi's side: unmirrored, it desynced the medium stack on 0.93% of cornell's glass entries.
         const bool leavingOnNormalSide = glm::dot(wiWorld, geoNormal) > 0.0F;
         const float offsetEpsilon = sample->type == LobeType::Transmission
@@ -417,6 +532,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
             shadowTerminatorOffset(triangle, hit->u, hit->v, leavingOnNormalSide) +
             (geoNormal * offsetEpsilon * (leavingOnNormalSide ? 1.0F : -1.0F));
         ray = Ray{offsetOrigin, wiWorld, offsetEpsilon, std::numeric_limits<float>::max()};
+        segmentStart = 0.0F;
     }
 
     return {radiance,           bounce,               gShadow,              gAo,
@@ -461,6 +577,9 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
     const int tileSize = pathTraceTileSize(width, height, threadPool.threadCount());
     const int tilesX = (width + tileSize - 1) / tileSize;
     const int tilesY = (height + tileSize - 1) / tileSize;
+    const std::vector<std::uint8_t> mayPassThrough = passThroughInstances(instances);
+    const PassThroughScene scene{accel, shadingTriangles, instances, mayPassThrough,
+                                 std::any_of(mayPassThrough.begin(), mayPassThrough.end(), [](std::uint8_t may) { return may != 0; })};
 
     // One worker owns every output pixel of one tile and traces every pixel within the filter radius: the halo is traced twice.
     const auto renderTile = [&](int tileIndex) {
@@ -505,7 +624,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                     const glm::vec2 fresnelSample = fresnelSampler.next2D();
                     // Nullopt is a fisheye sample outside the image circle: no ray exists, so every lane reads zero for it.
                     const TraceResult trace =
-                        primary ? tracePath(primary->ray, primary->dirPerNdc * ndcPerStratum, accel, shadingTriangles, instances,
+                        primary ? tracePath(primary->ray, primary->dirPerNdc * ndcPerStratum, scene,
                                             instanceLightIndex, lights, showSky, settings, sampler,
                                             aoSample, fresnelSample, tileRays)
                                 : TraceResult{};

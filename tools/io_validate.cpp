@@ -446,6 +446,17 @@ PT_CHECK(material_config_accepts_the_shipped_materials, Fast, Exact) {
     }
 }
 
+// geometry_thin_walled is read before the inputs: a thin wall accepts the subsurface its sheet shades, and the flag reaches the material.
+PT_CHECK(material_config_thin_walled, Fast, Exact) {
+    const std::filesystem::path path = writeJson("engine_io_material_thin.json",
+                                                 "{\"geometry_thin_walled\":true,\"subsurface_weight\":0.5,\"geometry_opacity\":0.25}");
+    const std::optional<pathtracer::config::MaterialConfig> material = pathtracer::config::loadMaterialConfig(path.string());
+    std::filesystem::remove(path);
+    ctx.plan(1);
+    PT_EXPECT(ctx, material && material->geometryThinWalled && material->subsurfaceWeight == 0.5F && material->geometryOpacity == 0.25F,
+              "a thin-walled material with subsurface and opacity did not load as written");
+}
+
 // Each row names the BSDF failure it prevents; without the loader's bounds these reach the integrator as NaN or negative energy.
 PT_CHECK(material_config_rejects_malformed_input, Fast, Exact) {
     struct Case {
@@ -487,6 +498,10 @@ PT_CHECK(material_config_rejects_malformed_input, Fast, Exact) {
         // In-volume scattering needs transport the renderer lacks: a non-zero switch must fail, not render as if zero.
         {"non-zero subsurface_weight", "engine_io_material_subsurface.json", material(",\"subsurface_weight\":0.5")},
         {"non-zero transmission_scatter", "engine_io_material_scatter.json", material(",\"transmission_scatter\":[0.1,0,0]")},
+        // A presence probability: past [0, 1] the mix with the ambient takes a negative weight.
+        {"geometry_opacity above 1", "engine_io_material_opacity.json", material(",\"geometry_opacity\":1.5")},
+        // A uniform bool: a number is a type error, not a truthy switch.
+        {"geometry_thin_walled as a number", "engine_io_material_thinnumber.json", material(",\"geometry_thin_walled\":1")},
     };
 
     const std::filesystem::path basePath = writeJson("engine_io_material_base.json", material(""));

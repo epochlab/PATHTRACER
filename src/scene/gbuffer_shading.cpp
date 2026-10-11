@@ -73,18 +73,26 @@ OpenPbrInputs<Constant> resolveInputs(const Material& material, glm::vec2 uv, co
         },
         inputs, material);
     inputs.baseColor *= vertexColour;
+    inputs.geometryThinWalled = material.geometryThinWalled;
     return inputs;
 }
 
+float opacityAt(const Material& material, glm::vec2 uv, const pathtracer::gfx::TextureFootprint& footprint) {
+    return evaluate(material.geometryOpacity, uv, footprint, InputRange::Unit);
+}
+
 bool isDispersive(const OpenPbrInputs<Constant>& inputs) {
-    return inputs.transmissionDispersionScale > 0.0F && inputs.transmissionWeight > 0.0F && inputs.baseMetalness < 1.0F;
+    // A thin wall transmits undeviated, so no wavelength bends apart from another.
+    return !inputs.geometryThinWalled && inputs.transmissionDispersionScale > 0.0F && inputs.transmissionWeight > 0.0F &&
+           inputs.baseMetalness < 1.0F;
 }
 
 glm::vec3 emittedRadiance(const Material& material, const ShadingTriangle& triangle, const ShadingVertex& shading, const glm::vec3& wo,
                           const pathtracer::gfx::TextureFootprint& footprint) {
     // Most surfaces emit nothing: a zero luminance needs no colour lookup.
     const float luminance = evaluate(material.emissionLuminance, shading.uv, footprint, InputRange::NonNegative);
-    if (!(luminance > 0.0F)) {
+    // A bulk surface bounds an interior, so it emits outward alone; a thin wall has no interior and emits from both faces.
+    if (!(luminance > 0.0F) || (!material.geometryThinWalled && !(glm::dot(wo, geometricNormalOf(triangle)) > 0.0F))) {
         return glm::vec3(0.0F);
     }
     glm::vec3 emitted = luminance * evaluate(material.emissionColor, shading.uv, footprint, InputRange::NonNegative);
@@ -95,7 +103,7 @@ glm::vec3 emittedRadiance(const Material& material, const ShadingTriangle& trian
     if (coatWeight > 0.0F) {
         const ShadingFrame coatFrame = buildShadingFrame(triangle, shading, material.geometryCoatNormal);
         coatNormal = coatFrame[2];
-        // Emission is two-sided, so wo is taken on the coat's own side; the coat's Fresnel and TIR withhold E_coat(wo) by reciprocity.
+        // wo on the coat's own side, a thin wall's back or a tilted coat; the coat's Fresnel and TIR withhold E_coat(wo) by reciprocity.
         glm::vec3 coatWo = wo * coatFrame;
         coatWo.z = std::abs(coatWo.z);
         const float coatIor = evaluate(material.coatIor, shading.uv, {}, InputRange::Positive);

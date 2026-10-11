@@ -35,6 +35,7 @@ struct Material : OpenPbrInputs<MaterialInput> {
 [[nodiscard]] inline Material materialOf(const OpenPbrInputs<Constant>& constants) {
     Material material;
     forEachInput([](const InputSpec&, auto& input, const auto& value) { input = value; }, material, constants);
+    material.geometryThinWalled = constants.geometryThinWalled;
     return material;
 }
 

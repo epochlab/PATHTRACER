@@ -89,9 +89,13 @@ struct ResolvedBinding {
     float bumpHeightMetres = 0.0F;
 };
 
-// The images a binding opens, or why it cannot apply to its input, from the binding alone.
-std::variant<ResolvedBinding, std::string> resolveBinding(const std::string& name, const pathtracer::config::TextureConfig& texture) {
+// The images a binding opens, or why it cannot apply to its input, from the binding and its material's thin-walled flag.
+std::variant<ResolvedBinding, std::string> resolveBinding(const std::string& name, const pathtracer::config::TextureConfig& texture,
+                                                          bool thinWalled) {
     using pathtracer::gfx::ImageRole;
+    if (name == "geometry_thin_walled") {
+        return "is uniform: not textureable";
+    }
     if (kNormalInputs.contains(name)) {
         if (texture.channel != 0) {
             return "a normal map reads R, G and B, so it takes no channel";
@@ -123,8 +127,8 @@ std::variant<ResolvedBinding, std::string> resolveBinding(const std::string& nam
     if (!input) {
         return "is not an OpenPBR input";
     }
-    if (input->spec.requiresVolumes) {
-        return "requires volumetric transport";
+    if (input->spec.requiresVolumes && !thinWalled) {
+        return "requires volumetric transport or geometry_thin_walled";
     }
     if (!texture.path) {
         return "binds no path";
@@ -244,9 +248,12 @@ bool bindSceneTextures(std::vector<MeshInstance>& instances,
     std::map<std::pair<std::string, std::string>, ResolvedBinding> resolved;
     std::map<TextureKey, OpenedTexture> loaded;
     for (const auto& [nodeName, inputs] : textures) {
+        // Every instance of one node shares its material, the one materialOverrides names it by, so the first speaks for all.
+        const bool thinWalled =
+            std::find_if(instances.begin(), instances.end(), [&](const MeshInstance& i) { return i.name == nodeName; })->material.geometryThinWalled;
         for (const auto& [name, texture] : inputs) {
             const std::string where = "'" + nodeName + "' " + name;
-            std::variant<ResolvedBinding, std::string> binding = resolveBinding(name, texture);
+            std::variant<ResolvedBinding, std::string> binding = resolveBinding(name, texture, thinWalled);
             if (const std::string* fault = std::get_if<std::string>(&binding)) {
                 std::cerr << "bindSceneTextures: " << where << ": " << *fault << "\n";
                 return false;

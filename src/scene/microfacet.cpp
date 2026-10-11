@@ -728,6 +728,58 @@ DielectricSlab makeDielectricSlab(const InterfaceInputs& interface, const glm::v
     return slab;
 }
 
+SheetLadder sheetLadder(const SheetInterfaces& sheet, float mu) {
+    const float cos2Inside = cos2Transmitted(mu, 1.0F / sheet.ior);
+    // Past the critical angle no refracted direction exists, and at grazing both faces reflect all: either way nothing enters.
+    if (!(cos2Inside > 0.0F) || mu == 0.0F) {
+        return {glm::vec3(1.0F), glm::vec3(0.0F)};
+    }
+    // One crossing at angle theta_t is 1/cos(theta_t) normal crossings, Beer-Lambert's power of the normal-incidence colour.
+    const glm::vec3 crossing = glm::pow(sheet.color, glm::vec3(1.0F / std::sqrt(cos2Inside)));
+    const glm::vec3 roundTrip = crossing * crossing;
+    const auto [farParallel, farPerpendicular] = fresnelDielectricPolarised(mu, 1.0F, sheet.ior);
+    const auto [nearParallel, nearPerpendicular] = fresnelDielectricPolarised(mu, 1.0F, sheet.fresnelIor);
+    glm::vec3 nearP(nearParallel);
+    glm::vec3 nearS(nearPerpendicular);
+    // A lossless film reflects alike from either side (Stokes), so one reflectance serves the entry and every internal bounce.
+    if (sheet.film.weight > 0.0F) {
+        const ThinFilm film{sheet.film.thicknessNm, sheet.film.ior};
+        PolarisedReflectance filmed{glm::vec3(0.0F), glm::vec3(0.0F)};
+        const auto addAmbient = [&](float ambient, float share) {
+            const PolarisedReflectance r = filmReflectancePolarised(film, mu, ambient, glm::vec3(sheet.ior), glm::vec3(0.0F));
+            filmed.parallel += share * r.parallel;
+            filmed.perpendicular += share * r.perpendicular;
+        };
+        if (sheet.film.coatWeight < 1.0F) {
+            addAmbient(1.0F, 1.0F - sheet.film.coatWeight);
+        }
+        if (sheet.film.coatWeight > 0.0F) {
+            addAmbient(sheet.film.coatIor, sheet.film.coatWeight);
+        }
+        nearP = glm::mix(nearP, filmed.parallel, sheet.film.weight);
+        nearS = glm::mix(nearS, filmed.perpendicular, sheet.film.weight);
+    }
+    // R' = R1 + T1^2 R2 t^2/(1 - R1 R2 t^2), T' = T1 T2 t/(1 - R1 R2 t^2): the geometric series of bounces between the faces.
+    const auto ladder = [&](const glm::vec3& near, float far) {
+        const glm::vec3 nearT = 1.0F - near;
+        const glm::vec3 loss = 1.0F - (near * far * roundTrip);
+        return SheetLadder{near + (nearT * nearT * far * roundTrip / loss), nearT * (1.0F - far) * crossing / loss};
+    };
+    const SheetLadder parallel = ladder(nearP, farParallel);
+    const SheetLadder perpendicular = ladder(nearS, farPerpendicular);
+    return {0.5F * (parallel.reflect + perpendicular.reflect), 0.5F * (parallel.transmit + perpendicular.transmit)};
+}
+
+SheetSlab makeSheetSlab(const SheetInterfaces& interfaces, float weight, float roughness, float anisotropy, const glm::vec3& wo) {
+    SheetSlab slab{interfaces, weight, makeConductorSlab(roughness, anisotropy, glm::vec3(1.0F), glm::vec3(1.0F), 1.0F, FilmLayer{}, wo), {}, {}, 0.0F};
+    const SheetLadder ladder = sheetLadder(interfaces, wo.z);
+    slab.reflect = weight * interfaces.tint * ladder.reflect;
+    slab.transmit = weight * ladder.transmit;
+    const float total = channelMean(slab.reflect) + channelMean(slab.transmit);
+    slab.reflectShare = total > 0.0F ? channelMean(slab.reflect) / total : 0.0F;
+    return slab;
+}
+
 float reflectionAlbedo(float roughness, float anisotropy, float etaI, float etaT, const glm::vec3& w) {
     if (etaI == etaT) {
         return 0.0F;

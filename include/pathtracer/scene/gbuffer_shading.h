@@ -26,10 +26,13 @@ struct LineProximity {
 [[nodiscard]] OpenPbrInputs<Constant> resolveInputs(const Material& material, glm::vec2 uv,
                                                    const pathtracer::gfx::TextureFootprint& footprint, const glm::vec3& vertexColour);
 
-// A positive dispersion scale on a transmissive base: the path must commit to one wavelength there.
+// geometry_opacity at uv, prefiltered over footprint: the probability the surface is present (OpenPBR's mix with the ambient).
+[[nodiscard]] float opacityAt(const Material& material, glm::vec2 uv, const pathtracer::gfx::TextureFootprint& footprint);
+
+// A positive dispersion scale on a transmissive bulk base: the path must commit to one wavelength there.
 [[nodiscard]] bool isDispersive(const OpenPbrInputs<Constant>& inputs);
 
-// emission_luminance * emission_color toward wo through the coat and fuzz above it; one unit is 1 cd/m^2; both inputs filtered.
+// emission_luminance * emission_color toward wo through the coat and fuzz above it, a bulk surface's front alone; 1 cd/m^2 a unit.
 [[nodiscard]] glm::vec3 emittedRadiance(const Material& material, const ShadingTriangle& triangle, const ShadingVertex& shading,
                                         const glm::vec3& wo, const pathtracer::gfx::TextureFootprint& footprint);
 
