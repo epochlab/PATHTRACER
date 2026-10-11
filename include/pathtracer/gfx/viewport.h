@@ -10,7 +10,7 @@ struct ViewportRect {
     int height;
 };
 
-// Largest rect of the image's aspect that fits the viewport, centred, so the authored framing is what the display shows.
-[[nodiscard]] ViewportRect fitAspect(int imageWidth, int imageHeight, int viewportWidth, int viewportHeight);
+// Largest rect of the image's film extent's aspect that fits the viewport, centred, so the authored framing is what the display shows.
+[[nodiscard]] ViewportRect fitAspect(double imageWidth, double imageHeight, int viewportWidth, int viewportHeight);
 
 }  // namespace pathtracer::gfx

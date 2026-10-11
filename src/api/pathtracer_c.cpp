@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <memory>
 #include <optional>
@@ -15,6 +16,8 @@
 #include "pathtracer/api/headless_renderer.h"
 #include "pathtracer/debug/aov.h"
 #include "pathtracer/gfx/ocio_cpu_transform.h"
+#include "pathtracer/gfx/pixel_lattice.h"
+#include "pathtracer/scene/lens.h"
 
 namespace {
 
@@ -333,6 +336,47 @@ int pt_display_encode(const float* rgb, int width, int height, float exposure_ev
         return PT_ERROR;
     } catch (...) {
         writeError(err, err_cap, "unknown error during display encode");
+        return PT_ERROR;
+    }
+}
+
+int pt_lattice_preview(const float* image, int width, int height, int channels, const PtCamera* camera, int out_width,
+                       int out_height, float* out, char* err, int err_cap) {
+    try {
+        if (image == nullptr || camera == nullptr || out == nullptr) {
+            writeError(err, err_cap, "null image, camera or output buffer");
+            return PT_ERROR;
+        }
+        if (width <= 0 || height <= 0 || channels <= 0 || out_width <= 0 || out_height <= 0) {
+            writeError(err, err_cap, "extents and channel count must be positive");
+            return PT_ERROR;
+        }
+        std::string error;
+        const auto decoded = toCamera(*camera, error);
+        if (!decoded) {
+            writeError(err, err_cap, error);
+            return PT_ERROR;
+        }
+        const auto lattice = decoded->pixelLattice();
+        const bool wraps = pathtracer::scene::wrapsHorizontally(decoded->lens().projection);
+        const glm::vec2 filmPerTexel = pathtracer::gfx::frameExtent(lattice, width, height) / glm::vec2(out_width, out_height);
+        const auto stride = static_cast<std::size_t>(channels);
+        const auto columns = static_cast<std::size_t>(width);
+        float* to = out;
+        for (int y = 0; y < out_height; ++y) {
+            for (int x = 0; x < out_width; ++x, to += stride) {
+                const glm::vec2 film = (glm::vec2(static_cast<float>(x), static_cast<float>(y)) + 0.5F) * filmPerTexel;
+                const glm::ivec2 pixel = pathtracer::gfx::nearestPixel(lattice, film, width, height, wraps);
+                const std::size_t source = (static_cast<std::size_t>(pixel.y) * columns) + static_cast<std::size_t>(pixel.x);
+                std::copy_n(image + (source * stride), stride, to);
+            }
+        }
+        return PT_OK;
+    } catch (const std::exception& e) {
+        writeError(err, err_cap, e.what());
+        return PT_ERROR;
+    } catch (...) {
+        writeError(err, err_cap, "unknown error during lattice preview");
         return PT_ERROR;
     }
 }

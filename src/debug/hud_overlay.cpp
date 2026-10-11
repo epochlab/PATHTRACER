@@ -330,18 +330,26 @@ void drawResolutionAndSceneSection(const HudFrameData& frame) {
     ImGui::Separator();
 }
 
-// Labels/order come from the shared AovId enum (pathtracer/debug/aov.h), not a locally duplicated array.
-void drawAovSection(int& aov, int aovCount) {
+// Labels/order come from the shared AovId enum (pathtracer/debug/aov.h); entries the camera's lattice cannot render are greyed.
+void drawAovSection(int& aov, int aovCount, int pixelLattice) {
     ImGui::TextColored(kCyan, "AOV");
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-    ImGui::Combo("##aov", &aov, kAovLabels, aovCount);
+    if (ImGui::BeginCombo("##aov", kAovLabels[aov])) {
+        for (int i = 0; i < aovCount; ++i) {
+            const bool supported = aovSupportsLattice(static_cast<AovId>(i), static_cast<pathtracer::gfx::PixelLattice>(pixelLattice));
+            if (ImGui::Selectable(kAovLabels[i], i == aov, supported ? 0 : ImGuiSelectableFlags_Disabled)) {
+                aov = i;
+            }
+        }
+        ImGui::EndCombo();
+    }
     ImGui::Separator();
 }
 
-// pos/rot/clip read-only; projection and filmback dropdowns; focal length, aperture, shutter, ISO, aberration, bloom sliders.
+// pos/rot/clip read-only; projection, lattice and filmback dropdowns; focal length, aperture, shutter, ISO, aberration, bloom sliders.
 void drawCameraSection(const HudFrameData& frame, float& focalLengthMm, float& aperture,
                         float& shutterSeconds, float& iso, int& filmBackPresetIndex,
-                        const std::vector<const char*>& filmBackPresetNames, int& lensProjection,
+                        const std::vector<const char*>& filmBackPresetNames, int& lensProjection, int& pixelLattice,
                         float& aberrationStrength, float& bloomStrength) {
     ImGui::TextColored(kCyan, "Camera");
     const glm::vec3 camPos = frame.camera.position();
@@ -361,6 +369,8 @@ void drawCameraSection(const HudFrameData& frame, float& focalLengthMm, float& a
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
     ImGui::Combo("##lensProjection", &lensProjection, pathtracer::scene::kLensProjectionNames,
                  IM_ARRAYSIZE(pathtracer::scene::kLensProjectionNames));
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+    ImGui::Combo("##pixelLattice", &pixelLattice, pathtracer::gfx::kPixelLatticeNames, IM_ARRAYSIZE(pathtracer::gfx::kPixelLatticeNames));
     // The lat-long maps ndc straight to angles, so the gate and focal length frame nothing: greyed, values kept for the other lenses.
     ImGui::BeginDisabled(lensProjection == static_cast<int>(pathtracer::scene::LensProjection::Omnidirectional));
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
@@ -381,8 +391,10 @@ void drawCameraSection(const HudFrameData& frame, float& focalLengthMm, float& a
     // Beauty only -- main.cpp zeroes this elsewhere -- ranged so the full sweep stays a lens effect rather than an unreadable smear.
     ImGui::SliderFloat("##aberrationStrength", &aberrationStrength, 0.0F, 0.05F, "Aberration  %.3f");
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-    // The scattered fraction's whole domain, logarithmic so the small fractions where glare stays subtle get most of the travel.
+    // The scattered fraction's whole domain, logarithmic so subtle glare gets most of the travel; greyed off the square lattice.
+    ImGui::BeginDisabled(pixelLattice != static_cast<int>(pathtracer::gfx::PixelLattice::Square));
     ImGui::SliderFloat("##bloomStrength", &bloomStrength, 0.0F, 1.0F, "Bloom  %.3f", ImGuiSliderFlags_Logarithmic);
+    ImGui::EndDisabled();
     ImGui::Separator();
 }
 
@@ -506,8 +518,8 @@ void HudOverlay::beginFrame() const {
 
 void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm, float& aperture,
                        float& shutterSeconds, float& iso, int& filmBackPresetIndex,
-                       const std::vector<const char*>& filmBackPresetNames, int& lensProjection, bool& showSky,
-                       bool& envLightEnabled, int& envRotationDegrees, float& envExposureStops,
+                       const std::vector<const char*>& filmBackPresetNames, int& lensProjection, int& pixelLattice,
+                       bool& showSky, bool& envLightEnabled, int& envRotationDegrees, float& envExposureStops,
                        float& aberrationStrength, float& bloomStrength, const FramingOverlayState& framing,
                        const PixelProbeSample& pixelProbe) const {
     ImGui::SetNextWindowPos(ImVec2(8, 8), ImGuiCond_Always);
@@ -528,9 +540,9 @@ void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm,
         ImGui::Separator();
     }
 
-    drawAovSection(aov, frame.aovCount);
+    drawAovSection(aov, frame.aovCount, pixelLattice);
     drawCameraSection(frame, focalLengthMm, aperture, shutterSeconds, iso, filmBackPresetIndex,
-                       filmBackPresetNames, lensProjection, aberrationStrength, bloomStrength);
+                       filmBackPresetNames, lensProjection, pixelLattice, aberrationStrength, bloomStrength);
     drawHdriSection(showSky, envLightEnabled, envRotationDegrees, envExposureStops);
 
     ImGui::End();

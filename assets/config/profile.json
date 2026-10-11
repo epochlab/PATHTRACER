@@ -13,7 +13,8 @@
             "projection": "rectilinear",
             "maxFieldOfViewDegrees": 180.0,
             "radialCoefficients": [0.0, 0.0, 0.0, 0.0]
-        }
+        },
+        "pixelLattice": "square"
     },
     "controls": {
         "flySpeedMetersPerSecond": 1.0,

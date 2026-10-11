@@ -82,6 +82,8 @@ struct ViewInputState {
     float filmBackHeightMm = 0.0F;
     // The HUD switches it, and it changes every primary ray; the polynomial and field of view cannot change, so they are not tracked.
     pathtracer::scene::LensProjection lensProjection = pathtracer::scene::LensProjection::Rectilinear;
+    // The HUD switches it too, and it moves every pixel centre and the frame's aspect.
+    pathtracer::gfx::PixelLattice pixelLattice = pathtracer::gfx::PixelLattice::Square;
 
     bool operator==(const ViewInputState&) const = default;
 };
@@ -89,7 +91,7 @@ struct ViewInputState {
 // One definition for the current and previous views, so the G-buffer trigger compares the two on identical fields.
 ViewInputState viewInputState(const pathtracer::scene::Camera& camera) {
     return ViewInputState{camera.position(), camera.rotationDegrees(), camera.focalLengthMm(),
-                          camera.filmBack().heightMm, camera.lens().projection};
+                          camera.filmBack().heightMm, camera.lens().projection, camera.pixelLattice()};
 }
 
 // Every input renderPathTraced depends on bar the resolution, compared frame to frame.
@@ -182,6 +184,7 @@ struct DisplayedAovSource {
     std::uint64_t generation = 0;
     int samples = 0;
     bool wrapsHorizontally = false;  // the image's lens joins its left and right edges, so the display texture repeats in s
+    pathtracer::gfx::PixelLattice pixelLattice = pathtracer::gfx::PixelLattice::Square;  // where the image's texels sit on the film
 
     bool operator==(const DisplayedAovSource&) const = default;
 };
@@ -337,7 +340,7 @@ pathtracer::scene::DebugCameraController makeDebugCamera(const pathtracer::confi
                                                          const pathtracer::scene::Camera::FilmBack& filmBack) {
     const pathtracer::config::CameraConfig& camera = profileConfig.camera;
     return {camera.position, camera.rotation, filmBack, camera.focalLengthMm, camera.nearClip,
-            camera.farClip, camera.aperture, camera.shutterSeconds, camera.iso, camera.lens,
+            camera.farClip, camera.aperture, camera.shutterSeconds, camera.iso, camera.lens, camera.pixelLattice,
             profileConfig.controls.flySpeedMetersPerSecond, profileConfig.controls.orbitSensitivityDegPerPixel};
 }
 
@@ -628,15 +631,18 @@ DisplayedAovSource resolveAovImage(AppResources& app,
         // The buffer is allocated for the process's life now, so a null check no longer distinguishes "no render yet" -- generation 0 does.
         return app.gbuffer->generation == 0
                    ? DisplayedAovSource{}
-                   : DisplayedAovSource{&(*app.gbuffer.*lane), app.gbuffer->generation, 0, app.gbuffer->wrapsHorizontally};
+                   : DisplayedAovSource{&(*app.gbuffer.*lane), app.gbuffer->generation, 0, app.gbuffer->wrapsHorizontally,
+                                        app.gbuffer->pixelLattice};
     }
     if (const pathtracer::debug::PathTracedLane lane = pathtracer::debug::pathTracedLane(aov)) {
-        return snapshot ? DisplayedAovSource{&(*snapshot.*lane), snapshot->generation, snapshot->samples, snapshot->wrapsHorizontally}
+        return snapshot ? DisplayedAovSource{&(*snapshot.*lane), snapshot->generation, snapshot->samples, snapshot->wrapsHorizontally,
+                                             snapshot->pixelLattice}
                         : DisplayedAovSource{};
     }
     const pathtracer::gfx::HdrImage* filtered = ensureFilterImage(app, snapshot, aov);
-    return filtered != nullptr ? DisplayedAovSource{filtered, app.filterCache.revision, 0, snapshot->wrapsHorizontally}
-                               : DisplayedAovSource{};
+    return filtered != nullptr
+               ? DisplayedAovSource{filtered, app.filterCache.revision, 0, snapshot->wrapsHorizontally, snapshot->pixelLattice}
+               : DisplayedAovSource{};
 }
 
 // Cursor offset within imageRect, in framebuffer pixels with GL's bottom-left origin. Nullopt off-window or over a letterbox bar.
@@ -679,11 +685,13 @@ pathtracer::debug::PixelProbeSample samplePixelProbe(
     // Normalised by the rect, not the window: the image occupies only the rect, and its rows run top-down.
     const double u = rectX / static_cast<double>(imageRect.width);
     const double v = (imageRect.height - 1 - rectY) / static_cast<double>(imageRect.height);
-    const int imgX = std::min(source.image->width - 1, static_cast<int>(u * source.image->width));
-    const int imgY = std::min(source.image->height - 1, static_cast<int>(v * source.image->height));
+    const glm::vec2 frame = pathtracer::gfx::frameExtent(source.pixelLattice, source.image->width, source.image->height);
+    // The cell the display draws under the cursor: the shader's own Voronoi lookup, so the probe reads the colour on screen.
+    const glm::ivec2 cell = pathtracer::gfx::nearestPixel(source.pixelLattice, glm::vec2(u * frame.x, v * frame.y), source.image->width,
+                                                          source.image->height, source.wrapsHorizontally);
     // Direct texel read, no bilinear: G-buffer AOVs are per-pixel snapshots, expanded as the display texture's swizzle does.
-    const glm::vec3 texel = source.image->rgb((static_cast<std::size_t>(imgY) * static_cast<std::size_t>(source.image->width)) +
-                                              static_cast<std::size_t>(imgX));
+    const glm::vec3 texel = source.image->rgb((static_cast<std::size_t>(cell.y) * static_cast<std::size_t>(source.image->width)) +
+                                              static_cast<std::size_t>(cell.x));
     const glm::vec3 color =
         pathtracer::debug::aovIsPicture(aovId) ? applyBeautyDisplayTransform(texel, app) : texel;
     return {true, glm::vec4(color, 1.0F)};
@@ -753,8 +761,8 @@ void presentFrame(AppResources& app,
     // The picture only -- an artistic lens effect over the rendered image, not meaningful on a raw data AOV like Normal/Depth/Albedo.
     app.ocioTransform.setAberration(isPicture ? app.aberrationStrength : 0.0F);
     const unsigned int displayTexture = app.pathTraceDisplayTexture->id();
-    // Built only on a new upload, being linear and threshold-free; before bind() and draw(), which rebind the units the build used.
-    const bool bloomOn = isPicture && app.bloomStrength > 0.0F;
+    // Built only on a new upload, before bind() and draw() rebind its units; a square grid's pyramid, so a hexagonal image takes none.
+    const bool bloomOn = isPicture && app.bloomStrength > 0.0F && source.pixelLattice == pathtracer::gfx::PixelLattice::Square;
     if (bloomOn && app.bloomStale) {
         const pathtracer::gfx::HdrImage& shown =
             app.pathTraceDisplay.mapped.texels.empty() ? *source.image : app.pathTraceDisplay.mapped;
@@ -763,6 +771,7 @@ void presentFrame(AppResources& app,
     }
     app.bloom.bind(pathtracer::gfx::kBloomTextureUnit);
     app.ocioTransform.setBloomStrength(bloomOn ? app.bloomStrength : 0.0F);
+    app.ocioTransform.setPixelLattice(source.pixelLattice, source.wrapsHorizontally);
     app.ocioTransform.setImageRect(imageRect);
     app.ocioTransform.bind();
     app.postProcess.draw(displayTexture, app.ocioTransform.activeShader(), imageRect);
@@ -852,11 +861,13 @@ struct CameraEdits {
     float iso;
     int filmBackPresetIndex;
     int lensProjection;
+    int pixelLattice;
 };
 
 CameraEdits cameraEditsOf(const AppResources& app) {
     return {app.debugCamera.focalLengthMm(), app.debugCamera.aperture(), app.debugCamera.shutterSeconds(),
-            app.debugCamera.iso(), app.filmBackPresetIndex, static_cast<int>(app.debugCamera.lens().projection)};
+            app.debugCamera.iso(), app.filmBackPresetIndex, static_cast<int>(app.debugCamera.lens().projection),
+            static_cast<int>(app.debugCamera.pixelLattice())};
 }
 
 void applyCameraEdits(AppResources& app, const CameraEdits& edits) {
@@ -865,6 +876,12 @@ void applyCameraEdits(AppResources& app, const CameraEdits& edits) {
     app.debugCamera.setShutterSeconds(edits.shutterSeconds);
     app.debugCamera.setIso(edits.iso);
     app.debugCamera.setLensProjection(static_cast<pathtracer::scene::LensProjection>(edits.lensProjection));
+    const auto lattice = static_cast<pathtracer::gfx::PixelLattice>(edits.pixelLattice);
+    app.debugCamera.setPixelLattice(lattice);
+    // A square-neighbourhood AOV has nothing to show on another lattice, so the view falls back to the picture.
+    if (!pathtracer::debug::aovSupportsLattice(static_cast<pathtracer::debug::AovId>(app.aov), lattice)) {
+        app.aov = static_cast<int>(pathtracer::debug::AovId::Beauty);
+    }
     app.filmBackPresetIndex = edits.filmBackPresetIndex;
     app.debugCamera.setFilmBack(app.filmBackPresets[static_cast<std::size_t>(edits.filmBackPresetIndex)].filmBack);
 }
@@ -915,7 +932,7 @@ void updateHud(AppResources& app, const pathtracer::platform::Window& window,
     const pathtracer::debug::ScopedCpuTimer hudTimer(app.stages.hudMs);
     if (app.showHud) {
         app.hud.draw(hudFrameData, app.aov, edits.focalLengthMm, edits.aperture, edits.shutterSeconds, edits.iso,
-                     edits.filmBackPresetIndex, app.filmBackPresetNames, edits.lensProjection, app.showSky,
+                     edits.filmBackPresetIndex, app.filmBackPresetNames, edits.lensProjection, edits.pixelLattice, app.showSky,
                      app.envLightEnabled, app.envRotationDegrees, app.envExposureStops, app.aberrationStrength,
                      app.bloomStrength, app.framingState, pixelProbe);
     }
@@ -1069,6 +1086,10 @@ nlohmann::json benchConfig(const AppResources& app, const BenchCapture& bench) {
     if (!schedule.empty()) {
         config["aov_schedule"] = schedule;
     }
+    // Only off the square lattice, for the same reason.
+    if (camera.pixelLattice() != pathtracer::gfx::PixelLattice::Square) {
+        config["camera"]["pixel_lattice"] = pathtracer::gfx::kPixelLatticeNames[static_cast<int>(camera.pixelLattice())];
+    }
     return config;
 }
 
@@ -1206,8 +1227,8 @@ void renderFrame(pathtracer::platform::Window& window, pathtracer::platform::Dis
     }();
     const auto [viewportWidth, viewportHeight] = window.framebufferSize();
     // The window only frames the image; what is traced is the authored resolution, so a resize never restarts an accumulation.
-    const pathtracer::gfx::ViewportRect imageRect =
-        pathtracer::gfx::fitAspect(app.imageWidth, app.imageHeight, viewportWidth, viewportHeight);
+    const glm::vec2 frame = pathtracer::gfx::frameExtent(camera.pixelLattice(), app.imageWidth, app.imageHeight);
+    const pathtracer::gfx::ViewportRect imageRect = pathtracer::gfx::fitAspect(frame.x, frame.y, viewportWidth, viewportHeight);
 
     requestPathTraceIfTriggerChanged(app, camera, frameNow);
 
@@ -1386,6 +1407,12 @@ bool validStartup(const Options& options, const std::optional<pathtracer::config
     if (!profileConfig->denoiser.enabled && std::find(options.benchAovs.begin(), options.benchAovs.end(),
                                                       static_cast<int>(pathtracer::debug::AovId::Denoised)) != options.benchAovs.end()) {
         std::cerr << "main: -bench-aovs names denoised, but profile.json disables the denoiser\n";
+        return false;
+    }
+    if (!std::all_of(options.benchAovs.begin(), options.benchAovs.end(), [&](int aov) {
+            return pathtracer::debug::aovSupportsLattice(static_cast<pathtracer::debug::AovId>(aov), profileConfig->camera.pixelLattice);
+        })) {
+        std::cerr << "main: -bench-aovs names a square-neighbourhood AOV the profile's pixelLattice cannot render\n";
         return false;
     }
     return true;

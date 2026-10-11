@@ -17,7 +17,7 @@ DebugCameraController::DebugCameraController(const glm::vec3& position, const gl
                                               Camera::FilmBack filmBack,
                                               float focalLengthMm, float nearClip, float farClip,
                                               float aperture, float shutterSeconds, float iso, Lens lens,
-                                              float flySpeedMetersPerSecond,
+                                              pathtracer::gfx::PixelLattice pixelLattice, float flySpeedMetersPerSecond,
                                               float orbitSensitivityDegPerPixel)
     : position_(position),
       orientation_(glm::quat_cast(rotationXyz(rotationDegrees))),
@@ -31,6 +31,7 @@ DebugCameraController::DebugCameraController(const glm::vec3& position, const gl
       shutterSeconds_(shutterSeconds),
       iso_(iso),
       lens_(lens),
+      pixelLattice_(pixelLattice),
       defaultAperture_(aperture),
       defaultShutterSeconds_(shutterSeconds),
       defaultIso_(iso),
@@ -39,7 +40,7 @@ DebugCameraController::DebugCameraController(const glm::vec3& position, const gl
 
 Camera DebugCameraController::snapshot() const {
     return Camera(position_, eulerXyzDegrees(glm::mat3_cast(orientation_)), filmBack_, focalLengthMm_, nearClip_,
-                  farClip_, aperture_, shutterSeconds_, iso_, lens_);
+                  farClip_, aperture_, shutterSeconds_, iso_, lens_, pixelLattice_);
 }
 
 void DebugCameraController::applyFlyInput(const pathtracer::platform::Window& window,

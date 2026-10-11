@@ -694,6 +694,44 @@ PT_CHECK(profile_config_camera_lens, Fast, Exact) {
     }
 }
 
+// camera.pixelLattice names a lattice, and a hexagonal one refuses a defaultAOV whose stencil needs a square neighbourhood.
+PT_CHECK(profile_config_camera_pixel_lattice, Fast, Exact) {
+    using pathtracer::gfx::PixelLattice;
+    struct Case {
+        std::string name;
+        nlohmann::json lattice;
+        pathtracer::debug::AovId defaultAov;
+        std::optional<PixelLattice> expected;  // nullopt where the load must be refused
+    };
+    const std::vector<Case> cases = {
+        {"square", "square", pathtracer::debug::AovId::Sobel, PixelLattice::Square},
+        {"hexagonal", "hexagonal", pathtracer::debug::AovId::Beauty, PixelLattice::Hexagonal},
+        {"hexagonal opening on a per-texel filter", "hexagonal", pathtracer::debug::AovId::Luminance, PixelLattice::Hexagonal},
+        {"hexagonal opening on sobel", "hexagonal", pathtracer::debug::AovId::Sobel, std::nullopt},
+        {"an unknown lattice name", "triangular", pathtracer::debug::AovId::Beauty, std::nullopt},
+        {"no lattice at all", nlohmann::json(nullptr), pathtracer::debug::AovId::Beauty, std::nullopt},
+    };
+    const std::filesystem::path shippedPath = std::filesystem::path(ASSET_ROOT_DIR) / "config" / "profile.json";
+    std::ifstream shippedFile(shippedPath);
+    const nlohmann::json shipped = nlohmann::json::parse(shippedFile);
+    ctx.plan(static_cast<int>(cases.size()));
+    for (const Case& testCase : cases) {
+        nlohmann::json edited = shipped;
+        if (testCase.lattice.is_null()) {
+            edited["camera"].erase("pixelLattice");
+        } else {
+            edited["camera"]["pixelLattice"] = testCase.lattice;
+        }
+        edited["render"]["defaultAOV"] = static_cast<int>(testCase.defaultAov);
+        const std::filesystem::path path = writeJson("engine_io_profile_lattice.json", edited.dump());
+        const std::optional<pathtracer::config::ProfileConfig> loaded = pathtracer::config::loadProfileConfig(path.string());
+        std::filesystem::remove(path);
+        const std::optional<PixelLattice> lattice = loaded ? std::optional(loaded->camera.pixelLattice) : std::nullopt;
+        PT_EXPECT(ctx, lattice == testCase.expected,
+                  "loadProfileConfig " + std::string(testCase.expected ? "mis-read or rejected " : "accepted ") + testCase.name);
+    }
+}
+
 // render.defaultAOV is a raw index main.cpp dereferences unchecked, so the bound holds at load: both ends plus the first past the top.
 PT_CHECK(profile_config_default_aov_is_in_range, Fast, Exact) {
     const int aovCount = static_cast<int>(pathtracer::debug::AovId::Count);

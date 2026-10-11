@@ -77,7 +77,7 @@ struct SceneInputs {
     const pathtracer::config::CameraConfig& config = profile.camera;
     pathtracer::scene::Camera camera(config.position, config.rotation, preset->filmBack,
                                      config.focalLengthMm, config.nearClip, config.farClip, config.aperture,
-                                     config.shutterSeconds, config.iso, config.lens);
+                                     config.shutterSeconds, config.iso, config.lens, config.pixelLattice);
     if (!camera.validate(error)) {
         error = "profile.json camera: " + error;
         return std::nullopt;

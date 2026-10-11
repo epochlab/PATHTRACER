@@ -4,6 +4,7 @@
 
 #include <glm/glm.hpp>
 
+#include "pathtracer/gfx/pixel_lattice.h"
 #include "pathtracer/gfx/shader_program.h"
 #include "pathtracer/gfx/texture.h"
 #include "pathtracer/gfx/viewport.h"
@@ -46,6 +47,12 @@ public:
 
     // 0 = off; the fraction of energy scattered by the glare PSF, sampled from kBloomTextureUnit while nonzero.
     void setBloomStrength(float bloomStrength) { bloomStrength_ = bloomStrength; }
+
+    // The displayed image's lattice and lens wrap: a hexagonal one is drawn cell by cell, its columns wrapping where the lens does.
+    void setPixelLattice(PixelLattice pixelLattice, bool wrapsHorizontally) {
+        pixelLattice_ = pixelLattice;
+        wrapsHorizontally_ = wrapsHorizontally;
+    }
 
     // The window rect the image is drawn into, which anchors the dither tile at the image's top-left as encodeForDisplay does.
     void setImageRect(ViewportRect imageRect) { imageRect_ = imageRect; }
@@ -94,6 +101,12 @@ private:
     int rawBloomStrengthLoc_;
     int srgbBloomStrengthLoc_;
     int rec709BloomStrengthLoc_;
+    int rawHexagonalLoc_;
+    int srgbHexagonalLoc_;
+    int rec709HexagonalLoc_;
+    int rawWrapsHorizontallyLoc_;
+    int srgbWrapsHorizontallyLoc_;
+    int rec709WrapsHorizontallyLoc_;
     Lut activeLut_ = Lut::SRGB;
     glm::vec3 gain_{1.0F};
     int channelView_ = 0;
@@ -101,6 +114,8 @@ private:
     float aberration_ = 0.0F;
     float bloomStrength_ = 0.0F;
     glm::vec3 displayOffset_{0.0F};
+    PixelLattice pixelLattice_ = PixelLattice::Square;
+    bool wrapsHorizontally_ = false;
     ViewportRect imageRect_{};
 };
 

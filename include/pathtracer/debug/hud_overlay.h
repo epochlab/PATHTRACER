@@ -80,8 +80,8 @@ public:
     // Call after beginFrame(), before render(). Editable fields are passed by reference and written back in place, so nothing is returned.
     void draw(const HudFrameData& frame, int& aov, float& focalLengthMm, float& aperture,
               float& shutterSeconds, float& iso, int& filmBackPresetIndex,
-              const std::vector<const char*>& filmBackPresetNames, int& lensProjection, bool& showSky,
-              bool& envLightEnabled, int& envRotationDegrees, float& envExposureStops,
+              const std::vector<const char*>& filmBackPresetNames, int& lensProjection, int& pixelLattice,
+              bool& showSky, bool& envLightEnabled, int& envRotationDegrees, float& envExposureStops,
               float& aberrationStrength, float& bloomStrength, const FramingOverlayState& framing,
               const PixelProbeSample& pixelProbe) const;
 

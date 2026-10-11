@@ -3,6 +3,34 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Hexagonal pixels
+
+The camera can now render a hexagonal sensor: `camera.pixelLattice` in profile.json, the HUD's lattice dropdown,
+`render_beauty --hexagonal`, `PtCamera.pixel_lattice` (ABI 7) and Python's `Camera.pixel_lattice`.
+- **The lattice:** offset rows of regular hexagons (Mersereau 1979). Odd rows sit half a pitch right of even ones,
+  rows sqrt(3)/2 apart, so every pixel has six neighbours one pitch away. The buffer stays row-major `(H, W, C)`: pixel
+  (x, y) is centred at (x + 0.25 + 0.5 (y mod 2), (y + 0.5) sqrt(3)/2) column pitches, symmetric about the frame centre.
+- **The frame:** `width x height` still counts columns and rows, so the film is `width` by `height sqrt(3)/2` pitches.
+  At one vertical field of view, a hexagonal frame of the same buffer is 15.5% wider in aspect.
+- **The film filter:** the same 1.5-pitch Blackman-Harris window, made radially symmetric, so it reaches the six
+  neighbours and not the next ring at sqrt(3). It is importance-sampled through the concentric map (Shirley and Chiu
+  1997) and the closed-form inverse of its radial CDF, weight 1. Strata, ray-differential footprints, wireframe widths
+  and the pixel solid angle are measured in pixel sides: sqrt(sqrt(3)/2) pitch, the side of a square of the cell's
+  area.
+- **The dither:** a second void-and-cluster mask, generated on the hexagonal film, shifted per channel by even rows
+  only, since an odd row shift is not a lattice translation. The square mask would leak 110x its low-band power there.
+- **Output:** EXRs carry `pathtracer:pixelLattice` and `PixelAspectRatio` 2/sqrt(3). Motion vectors are in column
+  pitches. The viewer draws each cell's texel over its Voronoi cell, and the probe reads the same cell.
+  `pt_lattice_preview` and Python's `lattice_preview(image, camera, scale=8)` draw the same cells into a square-pixel
+  array for `imshow` or `display_encode`, sharing the viewer's nearest-cell lookup.
+- **Refused:** Sobel, Gabor, DoG and Denoised, by name at every boundary, and bloom is off; their hexagonal forms are
+  on the roadmap.
+- **Measured:** square output is bit-identical (33/33 EXRs), and the square viewer is pixel-identical. Hexagonal pixels
+  are independent (neighbour noise correlation within 0.04 of zero) and agree with square ones over one view-plane
+  window (|z| <= 0.85). Cost per pass is the same within scene framing (0.93-1.10x).
+
+Evidence is in `results/hex_pixels`.
+
 ## Energy-conserving bloom
 
 The viewer can now mix a glare PSF into the picture in scene-linear, before the display transform:

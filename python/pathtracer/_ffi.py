@@ -151,6 +151,20 @@ def load_library() -> ctypes.CDLL:
     ]
     library.pt_display_encode.restype = ctypes.c_int
 
+    library.pt_lattice_preview.argtypes = [
+        ctypes.POINTER(ctypes.c_float),
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.POINTER(PtCamera),
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.POINTER(ctypes.c_float),
+        ctypes.c_char_p,
+        ctypes.c_int,
+    ]
+    library.pt_lattice_preview.restype = ctypes.c_int
+
     library.pt_abi_version.argtypes = []
     library.pt_abi_version.restype = ctypes.c_int
     # Checked at load, the only point before a by-value struct is passed: a mismatched layout would otherwise read as garbage floats.

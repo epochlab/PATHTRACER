@@ -110,6 +110,7 @@ struct PathTraceResult {
     OverRangeStats overRange;
     std::uint64_t generation = 0;  // the request whose accumulation this is, stamped by PathTraceDriver at publish; 0 from renderPathTraced
     bool wrapsHorizontally = false;  // the lens it was traced through joins its left and right edges, so neighbour reads wrap in x
+    pathtracer::gfx::PixelLattice pixelLattice = pathtracer::gfx::PixelLattice::Square;  // where its texels sit on the film
     int samples = 0;  // passes averaged in, stamped with generation so image and count publish as one snapshot
 };
 

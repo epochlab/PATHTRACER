@@ -887,7 +887,8 @@ PT_CHECK(euler_extraction_recomposes_the_rotation, Fast, Exact) {
 
 // The viewer's orbit rig at cornell's eye: 6 m from the origin, looking down -Z at it, a quarter degree per pixel.
 pathtracer::scene::DebugCameraController makeOrbitRig(const glm::vec3& rotationDegrees) {
-    return {glm::vec3(0.0F, 0.0F, 6.0F), rotationDegrees, kFullFrame, 35.0F, 0.01F, 100.0F, 2.8F, 0.008F, 400.0F, Lens{}, 1.0F, 0.25F};
+    return {glm::vec3(0.0F, 0.0F, 6.0F), rotationDegrees, kFullFrame, 35.0F, 0.01F, 100.0F, 2.8F, 0.008F, 400.0F, Lens{},
+            pathtracer::gfx::PixelLattice::Square, 1.0F, 0.25F};
 }
 
 // Orbit turns the rig rigidly about its pivot: the pivot stays on the view axis, the pole is passed, roll is kept, and it inverts.
@@ -1043,6 +1044,58 @@ PT_CHECK(hexagonal_lattice_is_regular_and_centred, Fast, Exact) {
     PT_EXPECT(ctx, worstSymmetry <= budget, "the lattice is off the frame centre by " + std::to_string(worstSymmetry));
     PT_EXPECT(ctx, std::abs((side * side) - (std::sqrt(3.0) / 2.0)) <= 4.0 * kEps,
               "the pixel side's square " + std::to_string(side * side) + " is not the hexagon's area sqrt(3)/2");
+}
+
+// nearestPixel is the lattice's Voronoi lookup: the identity on every centre and the brute-force nearest centre anywhere on the film.
+PT_CHECK(nearest_pixel_is_the_nearest_centre, Fast, Exact) {
+    using pathtracer::gfx::PixelLattice;
+    constexpr int kWidth = 24;
+    constexpr int kHeight = 16;
+    std::mt19937 rng(static_cast<std::mt19937::result_type>(ctx.seed()));
+    ctx.plan(4);
+    for (const PixelLattice lattice : {PixelLattice::Square, PixelLattice::Hexagonal}) {
+        const glm::vec2 frame = pathtracer::gfx::frameExtent(lattice, kWidth, kHeight);
+        int centreMisses = 0;
+        for (int y = 0; y < kHeight; ++y) {
+            for (int x = 0; x < kWidth; ++x) {
+                const glm::vec2 centre = pathtracer::gfx::pixelCentre(lattice, x, y);
+                const glm::ivec2 cell = pathtracer::gfx::nearestPixel(lattice, centre, kWidth, kHeight, false);
+                centreMisses += cell == glm::ivec2(x, y) ? 0 : 1;
+            }
+        }
+        // Ties within float rounding of the centres' spacing may go either way, so a miss counts only beyond that.
+        const float tieBudget = kClosedFormUlps * kEps * frame.x;
+        std::uniform_real_distribution<float> along(0.0F, frame.x);
+        std::uniform_real_distribution<float> down(0.0F, frame.y);
+        int misses = 0;
+        for (int trial = 0; trial < 20000; ++trial) {
+            const glm::vec2 film(along(rng), down(rng));
+            const bool wraps = trial % 2 == 1;
+            const glm::ivec2 cell = pathtracer::gfx::nearestPixel(lattice, film, kWidth, kHeight, wraps);
+            float best = std::numeric_limits<float>::infinity();
+            for (int y = 0; y < kHeight; ++y) {
+                for (int x = 0; x < kWidth; ++x) {
+                    for (const float turn : {-frame.x, 0.0F, frame.x}) {
+                        if (turn != 0.0F && !wraps) {
+                            continue;
+                        }
+                        best = std::min(best, glm::length(pathtracer::gfx::pixelCentre(lattice, x, y) + glm::vec2(turn, 0.0F) - film));
+                    }
+                }
+            }
+            float found = std::numeric_limits<float>::infinity();
+            for (const float turn : {-frame.x, 0.0F, frame.x}) {
+                if (turn == 0.0F || wraps) {
+                    const glm::vec2 centre = pathtracer::gfx::pixelCentre(lattice, cell.x, cell.y) + glm::vec2(turn, 0.0F);
+                    found = std::min(found, glm::length(centre - film));
+                }
+            }
+            misses += cell.x >= 0 && cell.x < kWidth && found <= best + tieBudget ? 0 : 1;
+        }
+        const std::string name = pathtracer::gfx::kPixelLatticeNames[static_cast<int>(lattice)];
+        PT_EXPECT(ctx, centreMisses == 0, name + ": " + std::to_string(centreMisses) + " centres did not map to their own pixel");
+        PT_EXPECT(ctx, misses == 0, name + ": " + std::to_string(misses) + " film points mapped to a cell other than the nearest");
+    }
 }
 
 PT_CHECK_MAIN("camera_validate")
