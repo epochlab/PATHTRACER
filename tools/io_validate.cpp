@@ -699,6 +699,36 @@ PT_CHECK(profile_config_default_aov_is_in_range, Fast, Exact) {
     }
 }
 
+// render.bloomStrength is an energy fraction, so [0,1] closed: both ends and an interior value load, one step past either end does not.
+PT_CHECK(profile_config_bloom_strength_is_in_range, Fast, Exact) {
+    const std::vector<std::pair<nlohmann::json, bool>> cases = {
+        {0.0, true}, {0.05, true}, {1.0, true}, {-0.01, false}, {1.01, false}, {nlohmann::json(nullptr), false},
+    };
+
+    const std::filesystem::path shippedPath = std::filesystem::path(ASSET_ROOT_DIR) / "config" / "profile.json";
+    std::ifstream shippedFile(shippedPath);
+    const nlohmann::json shipped = nlohmann::json::parse(shippedFile);
+    ctx.plan(static_cast<int>(cases.size()) + 1);
+    PT_EXPECT(ctx, pathtracer::config::loadProfileConfig(shippedPath.string()).has_value(),
+                  "the shipped profile does not load, so no row below means anything");
+    for (const auto& [value, accepted] : cases) {
+        nlohmann::json edited = shipped;
+        if (value.is_null()) {
+            edited["render"].erase("bloomStrength");
+        } else {
+            edited["render"]["bloomStrength"] = value;
+        }
+        const std::filesystem::path path = writeJson("engine_io_profile_bloom.json", edited.dump());
+        const std::optional<pathtracer::config::ProfileConfig> loaded = pathtracer::config::loadProfileConfig(path.string());
+        std::filesystem::remove(path);
+        char detail[224];
+        std::snprintf(detail, sizeof(detail), "loadProfileConfig %s bloomStrength %s", accepted ? "rejected" : "accepted",
+                      value.dump().c_str());
+        PT_EXPECT(ctx, loaded.has_value() == accepted && (!accepted || loaded->render.bloomStrength == value.get<float>()),
+                      detail);
+    }
+}
+
 // The two scene-scale distances, each a divisor at its point of use: at or below zero the lane is inf/NaN, not a bounded gradient.
 PT_CHECK(profile_config_scene_scale_distances, Fast, Exact) {
     struct Case {
@@ -1062,7 +1092,8 @@ PT_CHECK(json_float_reads_refuse_float_overflow, Fast, Exact) {
          {"/camera/position/0", "/camera/rotation/0", "/camera/rotation/2", "/camera/focalLengthMm", "/camera/nearClip",
           "/camera/farClip", "/camera/aperture", "/camera/shutterSeconds", "/camera/iso", "/camera/lens/radialCoefficients/3",
           "/camera/lens/maxFieldOfViewDegrees", "/controls/flySpeedMetersPerSecond", "/controls/orbitSensitivityDegPerPixel",
-          "/render/renderScale", "/render/interactiveRenderScale", "/pathTracer/aoMaxDistance", "/pathTracer/lookaheadDistance"}},
+          "/render/renderScale", "/render/interactiveRenderScale", "/render/bloomStrength", "/pathTracer/aoMaxDistance",
+          "/pathTracer/lookaheadDistance"}},
         {"loadFilmBackPresets", nlohmann::json::array({{{"name", "gate"}, {"widthMm", 36.0}, {"heightMm", 24.0}}}),
          [](const std::string& path) { return pathtracer::config::loadFilmBackPresets(path).has_value(); },
          {"/0/widthMm", "/0/heightMm"}},

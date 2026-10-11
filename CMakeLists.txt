@@ -198,6 +198,7 @@ add_executable(pathtracer
     src/gfx/gl_debug.cpp
     src/gfx/shader_program.cpp
     src/gfx/texture.cpp
+    src/gfx/bloom_pass.cpp
     src/gfx/post_process_pass.cpp
     src/gfx/ocio_display_transform.cpp
     src/scene/debug_camera_controller.cpp

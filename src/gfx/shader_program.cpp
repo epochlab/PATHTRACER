@@ -14,17 +14,6 @@ namespace pathtracer::gfx {
 
 namespace {
 
-std::optional<std::string> readFile(const std::string& path) {
-    const std::ifstream file(path);
-    if (!file) {
-        std::cerr << "ShaderProgram: failed to open " << path << '\n';
-        return std::nullopt;
-    }
-    std::ostringstream contents;
-    contents << file.rdbuf();
-    return contents.str();
-}
-
 std::optional<unsigned int> compileStage(GLenum stage, const std::string& source) {
     unsigned int shader = 0;
     GL_CALL(shader = glCreateShader(stage));
@@ -87,13 +76,24 @@ std::optional<ShaderProgram> ShaderProgram::loadFromSource(const std::string& ve
     return ShaderProgram(program);
 }
 
+std::optional<std::string> ShaderProgram::readSource(const std::string& path) {
+    const std::ifstream file(path);
+    if (!file) {
+        std::cerr << "ShaderProgram: failed to open " << path << '\n';
+        return std::nullopt;
+    }
+    std::ostringstream contents;
+    contents << file.rdbuf();
+    return contents.str();
+}
+
 std::optional<ShaderProgram> ShaderProgram::loadFromFiles(const std::string& vertPath,
                                                            const std::string& fragPath) {
-    const auto vertSrc = readFile(vertPath);
+    const auto vertSrc = readSource(vertPath);
     if (!vertSrc) {
         return std::nullopt;
     }
-    const auto fragSrc = readFile(fragPath);
+    const auto fragSrc = readSource(fragPath);
     if (!fragSrc) {
         return std::nullopt;
     }
