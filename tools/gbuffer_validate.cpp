@@ -230,7 +230,7 @@ bool matchesOracle(const GBuffer& g, int x, int y, const Ray& ray, const glm::ma
     const Material& material = fixture.instances[instance].material;
     const ShadingVertex shading = interpolateShading(triangle, hit.u, hit.v);
     const pathtracer::gfx::TextureFootprint footprint = primaryHitFootprint(triangle, ray, hit.t, dirPerPixel);
-    const ShadingFrame frame = buildShadingFrame(triangle, shading, material);
+    const ShadingFrame frame = buildShadingFrame(triangle, shading, material.geometryNormal);
     const OpenPbrInputs<Constant> inputs = resolveInputs(material, shading.uv, footprint, shading.colour);
     return texelAt(g.depth, x, y).x == hit.t &&
            texelAt(g.lookahead, x, y).x == std::clamp(1.0F - (hit.t / fixture.settings.lookaheadDistance), 0.0F, 1.0F) &&
@@ -907,8 +907,8 @@ PT_CHECK(constant_inputs_match_unit_textures, Fast, Exact) {
         constexpr glm::vec3 kFlatEncoding(0.5F, 0.5F, 1.0F);
         Material mapped;
         mapped.geometryNormal.map = unitTexture(&kFlatEncoding.x, pathtracer::gfx::kRgbChannels);
-        const ShadingFrame flat = buildShadingFrame(triangle, vertex, Material{});
-        const ShadingFrame viaMap = buildShadingFrame(triangle, vertex, mapped);
+        const ShadingFrame flat = buildShadingFrame(triangle, vertex, NormalInput{});
+        const ShadingFrame viaMap = buildShadingFrame(triangle, vertex, mapped.geometryNormal);
         frameMismatches += glm::all(glm::lessThanEqual(glm::abs(viaMap[2] - flat[2]), glm::vec3(8.0F * std::numeric_limits<float>::epsilon()))) ? 0 : 1;
         // A constant's B-spline slope is a sum of derivative weights, exactly 0, with sum |w'| <= 1: rounding leaves at most 6u|h|.
         const float height = unit(rng);
@@ -978,7 +978,7 @@ PT_CHECK(bump_gradient_is_world_height, Fast, Exact) {
                 v = 1.0F - v;
             }
             material.geometryNormal.heightMetres = scale * signedUnit(rng);
-            const glm::vec3 bumped = buildShadingFrame(triangle, interpolateShading(triangle, u, v), material)[2];
+            const glm::vec3 bumped = buildShadingFrame(triangle, interpolateShading(triangle, u, v), material.geometryNormal)[2];
 
             // Rows e1, e2, n: grad . e_k = dh_k with grad . n = 0, an independent route to the in-plane gradient.
             const glm::dvec3 e1 = glm::dvec3(triangle.v1.position) - glm::dvec3(triangle.v0.position);

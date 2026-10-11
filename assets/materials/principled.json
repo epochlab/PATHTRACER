@@ -19,6 +19,11 @@
     "subsurface_radius": 1.0,
     "subsurface_radius_scale": [1.0, 0.5, 0.25],
     "subsurface_scatter_anisotropy": 0.0,
+    "coat_weight": 0.0,
+    "coat_color": [1.0, 1.0, 1.0],
+    "coat_roughness": 0.0,
+    "coat_ior": 1.6,
+    "coat_darkening": 1.0,
     "emission_luminance": 0.0,
     "emission_color": [1.0, 1.0, 1.0]
 }

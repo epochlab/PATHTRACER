@@ -29,11 +29,12 @@ struct LineProximity {
 // A positive dispersion scale on a transmissive base: the path must commit to one wavelength there.
 [[nodiscard]] bool isDispersive(const OpenPbrInputs<Constant>& inputs);
 
-// emission_luminance * emission_color at a hit: scene-linear radiance, one unit a luminance of 1 cd/m^2; both inputs filtered.
-[[nodiscard]] glm::vec3 emittedRadiance(const Material& material, glm::vec2 uv, const pathtracer::gfx::TextureFootprint& footprint);
+// emission_luminance * emission_color toward wo, under the coat's one-pass transmittance; one unit is 1 cd/m^2; both inputs filtered.
+[[nodiscard]] glm::vec3 emittedRadiance(const Material& material, const ShadingTriangle& triangle, const ShadingVertex& shading,
+                                        const glm::vec3& wo, const pathtracer::gfx::TextureFootprint& footprint);
 
-// Gram-Schmidt re-orthogonalized tangent frame, normal- and bump-mapped. triangle: the hit's corners, whose edges carry dP/duv.
-[[nodiscard]] ShadingFrame buildShadingFrame(const ShadingTriangle& triangle, const ShadingVertex& shading, const Material& material);
+// Gram-Schmidt re-orthogonalized tangent frame, normal- and bump-mapped by one normal input; triangle's edges carry dP/duv.
+[[nodiscard]] ShadingFrame buildShadingFrame(const ShadingTriangle& triangle, const ShadingVertex& shading, const NormalInput& geometryNormal);
 
 [[nodiscard]] glm::vec3 geometricNormalOf(const ShadingTriangle& tri);
 

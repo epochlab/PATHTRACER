@@ -43,7 +43,9 @@ glm::mat4 placementTransform(const glm::vec3& position, const glm::vec3& rotatio
     return glm::translate(glm::mat4(1.0F), position) * glm::mat4(rotationXyz(rotationDegrees));
 }
 
-constexpr std::string_view kGeometryNormal = "geometry_normal";
+// The two normal inputs: each a tangent-space map, a bump, or both, rather than a texture replacing a constant.
+const std::map<std::string_view, NormalInput Material::*> kNormalInputs = {{"geometry_normal", &Material::geometryNormal},
+                                                                          {"geometry_coat_normal", &Material::geometryCoatNormal}};
 
 // Every input at its specification default, the instance inputNamed reads specifications and types from.
 const OpenPbrInputs<Constant> kSpecificationDefaults{};
@@ -76,7 +78,7 @@ struct ImageKey {
     std::optional<InputRange> range;
 };
 
-// A binding resolved against its input: the input's image (geometry_normal's normal map) and geometry_normal's height map.
+// A binding resolved against its input: the input's image (a normal input's map) and a normal input's height map.
 struct ResolvedBinding {
     std::optional<ImageKey> image;
     std::optional<ImageKey> bump;
@@ -86,7 +88,7 @@ struct ResolvedBinding {
 // The images a binding opens, or why it cannot apply to its input, from the binding alone.
 std::variant<ResolvedBinding, std::string> resolveBinding(const std::string& name, const pathtracer::config::TextureConfig& texture) {
     using pathtracer::gfx::ImageRole;
-    if (name == kGeometryNormal) {
+    if (kNormalInputs.contains(name)) {
         if (texture.channel != 0) {
             return "a normal map reads R, G and B, so it takes no channel";
         }
@@ -114,7 +116,7 @@ std::variant<ResolvedBinding, std::string> resolveBinding(const std::string& nam
         return "binds no path";
     }
     if (texture.bump) {
-        return "only geometry_normal takes a bump";
+        return "only a normal input takes a bump";
     }
     if (input->channels != pathtracer::gfx::kScalarChannels && texture.channel != 0) {
         return "a colour input reads R, G and B, so it takes no channel";
@@ -161,12 +163,12 @@ bool openImage(std::map<TextureKey, OpenedTexture>& loaded, const ImageKey& imag
     return true;
 }
 
-// Writes one resolved binding into the material: its input's texture, or geometry_normal's normal and height maps.
+// Writes one resolved binding into the material: its input's texture, or a normal input's map and height map.
 void assignBinding(Material& material, const std::string& name, const ResolvedBinding& binding,
                    const std::map<TextureKey, OpenedTexture>& loaded) {
     const auto textureOf = [&](const std::optional<ImageKey>& image) { return image ? loaded.at(image->key).texture : nullptr; };
-    if (name == kGeometryNormal) {
-        material.geometryNormal = NormalInput{textureOf(binding.image), textureOf(binding.bump), binding.bumpHeightMetres};
+    if (const auto normal = kNormalInputs.find(name); normal != kNormalInputs.end()) {
+        material.*(normal->second) = NormalInput{textureOf(binding.image), textureOf(binding.bump), binding.bumpHeightMetres};
         return;
     }
     forEachInput(

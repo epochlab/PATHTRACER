@@ -940,6 +940,20 @@ PT_CHECK(average_fresnel, Fast, Exact) {
         }
         std::cout << "    F0 " << reflectivity << "   worst " << worst << " at specular_color " << worstTint << '\n';
     }
+    // The dielectric's closed form against the same quadrature, entering and (eta < 1) leaving, where Simpson meets the TIR kink.
+    constexpr double kEnteringTolerance = 2e-6;
+    constexpr double kLeavingTolerance = 1e-5;
+    std::cout << "  dielectric: |fresnelAverage - truth| per relative index\n";
+    for (double eta : {0.5, 0.8, 0.95, 1.0, 1.05, 1.33, 1.5, 1.6, 2.0, 3.0}) {
+        const double truth = cosineAverageFresnel([&](double mu) { return referenceDielectricFresnel(mu, eta); });
+        const double error = std::abs(static_cast<double>(pathtracer::scene::fresnelAverage(static_cast<float>(eta))) - truth);
+        const double tolerance = eta < 1.0 ? kLeavingTolerance : kEnteringTolerance;
+        std::cout << "    eta " << eta << "   error " << error << '\n';
+        if (!(error <= tolerance)) {
+            std::cerr << "bsdf_validate: FAILED dielectric F_avg at eta=" << eta << " error " << error << " (tolerance " << tolerance << ")\n";
+            ok = false;
+        }
+    }
 
     finish(ctx, ok, "average_fresnel failed; see the rows above");
     return;
@@ -2118,6 +2132,8 @@ struct ChiSquareCase {
     float metallic;
     float transmission;
     float ndotV;
+    float coat = 0.0F;
+    float coatRoughness = 0.0F;
 };
 
 PT_CHECK(sampling_chi_square, Slow, Statistical) {
@@ -2131,14 +2147,15 @@ PT_CHECK(sampling_chi_square, Slow, Statistical) {
     constexpr double kMinExpected = 5.0;
     constexpr std::uint32_t kSeed = 0x9E3779B9U;
 
-    // Transmissive rows sit either side of the interface, so the transmitted multiple-scattering lobe is drawn at both eta orientations.
-    const std::array<ChiSquareCase, 12> cases = {{
+    // Transmissive rows sit either side of the interface; the last three put a coat over each base kind, its lobe and masses drawn.
+    const std::array<ChiSquareCase, 15> cases = {{
         {0.2F, 0.0F, 1.0F, 0.8F},  {0.2F, 0.0F, 1.0F, -0.6F},
         {0.4F, 0.0F, 1.0F, 0.8F},  {0.4F, 0.0F, 1.0F, -0.6F},
         {0.7F, 0.0F, 1.0F, 0.8F},  {0.7F, 0.0F, 1.0F, -0.6F},
         {1.0F, 0.0F, 1.0F, 0.8F},  {1.0F, 0.0F, 1.0F, -0.6F},
         {0.3F, 1.0F, 0.0F, 0.7F},  {0.8F, 1.0F, 0.0F, 0.7F},
         {0.5F, 0.0F, 0.0F, 0.5F},  {1.0F, 0.0F, 0.0F, 0.5F},
+        {0.5F, 0.0F, 0.0F, 0.6F, 1.0F, 0.3F}, {0.3F, 1.0F, 0.0F, 0.7F, 0.5F, 0.6F}, {0.4F, 0.0F, 1.0F, 0.8F, 1.0F, 0.2F},
     }};
     // The suite's corrected significance, split across the grid by Sidak so twelve independent cases share it.
     ctx.plan(1);
@@ -2147,7 +2164,9 @@ PT_CHECK(sampling_chi_square, Slow, Statistical) {
     bool ok = true;
     double worstP = 1.0;
     for (const ChiSquareCase& testCase : cases) {
-        const Surface params = makeParams(testCase.roughness, testCase.metallic, testCase.transmission);
+        Surface params = makeParams(testCase.roughness, testCase.metallic, testCase.transmission);
+        params.coatWeight = testCase.coat;
+        params.coatRoughness = testCase.coatRoughness;
         const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (testCase.ndotV * testCase.ndotV))), 0.0F, testCase.ndotV);
 
         std::vector<double> expected(static_cast<std::size_t>(kCosBins) * kPhiBins + 1, 0.0);
@@ -2217,7 +2236,7 @@ PT_CHECK(sampling_chi_square, Slow, Statistical) {
             continue;
         }
         std::cerr << "bsdf_validate: FAILED sampling chi-square at roughness=" << testCase.roughness
-                  << " metallic=" << testCase.metallic << " transmission=" << testCase.transmission
+                  << " metallic=" << testCase.metallic << " transmission=" << testCase.transmission << " coat=" << testCase.coat
                   << " ndotV=" << testCase.ndotV << " chi2=" << chiSquare << " dof=" << dof << " p=" << p
                   << " (threshold " << perCase << ", sampled mass " << mass << ")\n";
         ok = false;
@@ -2338,6 +2357,237 @@ PT_CHECK(microfacet_fresnel, Slow, Statistical) {
                   static_cast<double>(spread), static_cast<double>(tintedMean.x),
                   static_cast<double>(tintedMean.y), static_cast<double>(tintedMean.z));
     PT_EXPECT(ctx, spread > 1e-3F, chromaDetail);
+}
+
+
+// --- OpenPBR's coat: a dielectric slab over the whole base, absorbing by coat_color and darkening it.
+Surface coated(Surface inputs, float weight, const glm::vec3& color, float roughness, float ior, float darkening) {
+    inputs.coatWeight = weight;
+    inputs.coatColor = color;
+    inputs.coatRoughness = roughness;
+    inputs.coatIor = ior;
+    inputs.coatDarkening = darkening;
+    return inputs;
+}
+
+// Non-coplanar (wo, wi) at two cosines, checkReciprocity's construction: a shared azimuth would leave a swapped-phi bug invisible.
+std::pair<glm::vec3, glm::vec3> pairAt(float muO, float muI) {
+    const float sinO = std::sqrt(std::max(0.0F, 1.0F - (muO * muO)));
+    const float sinI = std::sqrt(std::max(0.0F, 1.0F - (muI * muI)));
+    return {glm::vec3(sinO, 0.0F, muO), glm::vec3(sinI * std::cos(1.1F), sinI * std::sin(1.1F), muI)};
+}
+
+// coat_weight 0 is no coat whatever its other inputs: every value, density and draw bit-identical to the uncoated surface.
+PT_CHECK(coat_weight_zero_is_identity, Fast, Exact) {
+    constexpr int kDraws = 64;
+    const std::array<Surface, 4> bases = {makeParams(0.4F, 0.0F, 0.0F), makeParams(0.0F, 1.0F, 0.0F), makeParams(0.3F, 0.0F, 1.0F),
+                                          makeColoredMetalParams(0.6F)};
+    const std::array<float, 4> cosines = {1.0F, 0.6F, 0.2F, -0.6F};
+    bool ok = true;
+    for (const Surface& base : bases) {
+        const Surface inert = coated(base, 0.0F, glm::vec3(0.3F, 0.6F, 0.9F), 0.5F, 2.0F, 1.0F);
+        for (float muO : cosines) {
+            for (float muI : cosines) {
+                const auto [wo, wi] = pairAt(muO, muI);
+                const pathtracer::scene::BsdfEval a = pathtracer::scene::evaluateBsdfSplit(base, wo, wi);
+                const pathtracer::scene::BsdfEval b = pathtracer::scene::evaluateBsdfSplit(inert, wo, wi);
+                ok = ok && a.total() == b.total() && a.pdf == b.pdf;
+            }
+            const auto [wo, unused] = pairAt(muO, 1.0F);
+            for (int i = 0; i < kDraws; ++i) {
+                pathtracer::scene::Sampler first(0, 0, i, kDraws, 77U);
+                pathtracer::scene::Sampler second(0, 0, i, kDraws, 77U);
+                const auto a = pathtracer::scene::sampleBsdf(base, wo, first);
+                const auto b = pathtracer::scene::sampleBsdf(inert, wo, second);
+                ok = ok && a.has_value() == b.has_value() &&
+                     (!a || (a->wiLocal == b->wiLocal && a->throughputWeight == b->throughputWeight && a->pdf == b->pdf));
+            }
+        }
+    }
+    finish(ctx, ok, "coat_weight 0 changed a value, density or draw: an absent coat must not reach the base");
+}
+
+// An index-matched coat (coat_ior 1) reflects and darkens nothing: the base under it is the base times (1-C) + C T(mu_o) T(mu_i).
+PT_CHECK(index_matched_coat_is_absorption, Fast, Exact) {
+    // Base roughening at coat_roughness 0 is lerp(r, (r^4)^(1/4), C): r up to the two square roots' rounding.
+    constexpr float kRelativeTolerance = 1e-5F;
+    const glm::vec3 color(0.3F, 0.6F, 0.9F);
+    const std::array<Surface, 2> bases = {makeParams(0.4F, 0.0F, 0.0F), makeColoredMetalParams(0.5F)};
+    const std::array<float, 3> cosines = {1.0F, 0.6F, 0.25F};
+    bool ok = true;
+    for (const Surface& base : bases) {
+        for (float weight : {0.5F, 1.0F}) {
+            const Surface coat = coated(base, weight, color, 0.0F, 1.0F, 1.0F);
+            for (float muO : cosines) {
+                for (float muI : cosines) {
+                    const auto [wo, wi] = pairAt(muO, muI);
+                    const glm::vec3 plain = pathtracer::scene::evaluateBsdf(base, wo, wi);
+                    const glm::vec3 measured = pathtracer::scene::evaluateBsdf(coat, wo, wi);
+                    const glm::vec3 absorbed = glm::vec3(1.0F - weight) + (weight * glm::pow(color, glm::vec3((0.5F / muO) + (0.5F / muI))));
+                    const glm::vec3 expected = plain * absorbed;
+                    if (!(maxChannel(glm::abs(measured - expected)) <= kRelativeTolerance * maxChannel(expected))) {
+                        std::cerr << "bsdf_validate: FAILED index-matched coat at C=" << weight << " muO=" << muO << " muI=" << muI << " f "
+                                  << measured.x << " vs " << expected.x << '\n';
+                        ok = false;
+                    }
+                }
+            }
+        }
+    }
+    finish(ctx, ok, "index_matched_coat_is_absorption failed; see the rows above");
+}
+
+// Over a base that reflects all, a clear coat conserves energy exactly: E_coat + (1 - E_coat) * 1, darkening being 1 at E_b = 1.
+PT_CHECK(coated_white_furnace, Slow, Statistical) {
+    constexpr int kSampleCount = 200000;
+    constexpr float kTolerance = 0.02F;
+    const std::array<Surface, 3> bases = {makeParams(0.2F, 1.0F, 0.0F), makeParams(0.6F, 1.0F, 0.0F), makeParams(0.5F, 0.0F, 0.0F)};
+    const std::array<float, 3> coatRoughnesses = {0.0F, 0.3F, 0.7F};
+    const std::array<float, 3> ndotVs = {1.0F, 0.6F, 0.25F};
+    bool ok = true;
+    std::uint32_t seed = 61000;
+    std::cout << "bsdf_validate: clear coat over white bases (1.0 = energy conserved)\n";
+    for (const Surface& base : bases) {
+        for (float weight : {0.5F, 1.0F}) {
+            for (float coatRoughness : coatRoughnesses) {
+                for (float ndotV : ndotVs) {
+                    const Surface coat = coated(base, weight, glm::vec3(1.0F), coatRoughness, 1.5F, 1.0F);
+                    const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
+                    const glm::vec3 lo = furnaceLo(coat, wo, kSampleCount, ++seed);
+                    if (!withinBand(lo, 1.0F, kTolerance)) {
+                        std::cerr << "bsdf_validate: FAILED coated furnace at metal=" << base.baseMetalness << " C=" << weight
+                                  << " coat_roughness=" << coatRoughness << " ndotV=" << ndotV << " Lo=" << minChannel(lo) << '\n';
+                        ok = false;
+                    }
+                }
+            }
+        }
+    }
+    finish(ctx, ok, "coated_white_furnace failed; see the rows above");
+}
+
+// Over a base that reflects nothing, the coat alone remains: a GGX interface whose multiple scattering is Kulla-Conty's symmetric form.
+PT_CHECK(coat_reciprocity, Fast, Exact) {
+    constexpr float kRelativeTolerance = 1e-4F;
+    const Surface black = paramsWith([](Surface& inputs) {
+        inputs.baseWeight = 0.0F;
+        inputs.specularWeight = 0.0F;
+    });
+    const std::array<float, 4> cosines = {1.0F, 0.7F, 0.4F, 0.15F};
+    bool ok = true;
+    int rows = 0;
+    for (float coatRoughness : {0.1F, 0.3F, 0.6F, 1.0F}) {
+        for (float ior : {1.3F, 1.6F, 2.0F}) {
+            const Surface coat = coated(black, 0.7F, glm::vec3(1.0F), coatRoughness, ior, 1.0F);
+            for (float muA : cosines) {
+                for (float muB : cosines) {
+                    const auto [wo, wi] = pairAt(muA, muB);
+                    const glm::vec3 f = pathtracer::scene::evaluateBsdfSplit(coat, wo, wi).specular / muB;
+                    const glm::vec3 g = pathtracer::scene::evaluateBsdfSplit(coat, wi, wo).specular / muA;
+                    const float scale = std::max(maxChannel(f), maxChannel(g));
+                    rows += scale > 0.0F ? 1 : 0;
+                    if (!(maxChannel(glm::abs(f - g)) <= kRelativeTolerance * std::max(scale, 1e-4F))) {
+                        std::cerr << "bsdf_validate: FAILED coat reciprocity at coat_roughness=" << coatRoughness << " ior=" << ior
+                                  << " muO=" << muA << " muI=" << muB << " f=" << f.x << " vs " << g.x << '\n';
+                        ok = false;
+                    }
+                }
+            }
+        }
+    }
+    // Anti-vacuity: a coat reflecting nothing would pass every pair at zero.
+    finish(ctx, ok && rows > 0, "coat_reciprocity failed; see the rows above");
+}
+
+// A tilted geometry_coat_normal: every draw's density is pdfBsdf's exactly, and the mixture integrates to at most one.
+PT_CHECK(tilted_coat_normal_sampling, Slow, Statistical) {
+    constexpr int kDraws = 20000;
+    constexpr int kUniform = 50000;
+    constexpr float kTolerance = 0.05F;
+    const std::array<glm::vec3, 2> normals = {glm::normalize(glm::vec3(0.0F, std::sin(0.3F), std::cos(0.3F))),
+                                              glm::normalize(glm::vec3(0.25F, 0.25F, 1.0F))};
+    const std::array<Surface, 2> bases = {makeParams(0.4F, 0.0F, 0.0F), makeColoredMetalParams(0.3F)};
+    std::mt19937 rng(97);
+    bool ok = true;
+    long long compared = 0;
+    double worstIntegral = 0.0;
+    for (const glm::vec3& normal : normals) {
+        for (const Surface& base : bases) {
+            for (float ndotV : {0.9F, 0.5F}) {
+                const Surface coat = coated(base, 0.8F, glm::vec3(0.9F, 0.8F, 0.7F), 0.3F, 1.5F, 1.0F);
+                const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
+                const pathtracer::scene::BsdfClosure closure = pathtracer::scene::makeBsdfClosure(coat, wo, std::nullopt, normal);
+                double integral = 0.0;
+                const auto combined = [&](double p) { return (kUniform / (2.0 * kPi)) + (kDraws * p); };
+                for (int i = 0; i < kDraws; ++i) {
+                    pathtracer::scene::Sampler sampler(0, 0, i, kDraws, 4100U);
+                    const auto sample = pathtracer::scene::sampleBsdf(closure, sampler);
+                    if (!sample || sample->delta) {
+                        continue;
+                    }
+                    ++compared;
+                    ok = ok && pathtracer::scene::evaluateBsdfSplit(closure, sample->wiLocal).pdf == sample->pdf;
+                    integral += sample->pdf / combined(sample->pdf);
+                }
+                for (int i = 0; i < kUniform; ++i) {
+                    const double p = pathtracer::scene::evaluateBsdfSplit(closure, sampleUniformHemisphere(rng)).pdf;
+                    integral += p / combined(p);
+                }
+                worstIntegral = std::max(worstIntegral, integral);
+                ok = ok && integral <= 1.0 + kTolerance;
+            }
+        }
+    }
+    std::cout << "bsdf_validate: tilted coat normal, " << compared << " draws re-evaluated, worst pdf integral " << worstIntegral << '\n';
+    finish(ctx, ok && compared > 0, "a tilted coat normal broke sample/pdf consistency or normalisation");
+}
+
+// OpenPBR's darkening over a smooth metal, where E_b = F0 and K = F_coat(mu_o) exactly: Delta = (1-K)/(1-F0 K), lerp(1, Delta, C delta).
+PT_CHECK(coat_darkening, Fast, Exact) {
+    constexpr double kRelativeTolerance = 1e-5;
+    constexpr double kF0 = 0.5;
+    constexpr double kCoatIor = 1.5;
+    bool ok = true;
+    for (float weight : {0.5F, 1.0F}) {
+        for (float darkening : {0.0F, 0.5F, 1.0F}) {
+            for (float mu : {1.0F, 0.6F, 0.2F}) {
+                const Surface coat = coated(makeParams(0.0F, 1.0F, 0.0F), weight, glm::vec3(1.0F), 0.0F, static_cast<float>(kCoatIor), darkening);
+                Surface metal = coat;
+                metal.baseColor = glm::vec3(static_cast<float>(kF0));
+                const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (mu * mu))), 0.0F, mu);
+                const pathtracer::scene::BsdfClosure closure = pathtracer::scene::makeBsdfClosure(metal, wo);
+                const double fresnel = referenceDielectricFresnel(mu, kCoatIor);
+                const double delta = (1.0 - fresnel) / (1.0 - (kF0 * fresnel));
+                const double factor = 1.0 + (weight * darkening * (delta - 1.0));
+                const double bare = (1.0 - weight) * factor;
+                const double under = weight * (1.0 - fresnel) * factor;
+                const auto close = [&](double measured, double expected) {
+                    return std::abs(measured - expected) <= kRelativeTolerance * std::max(std::abs(expected), 1e-6);
+                };
+                if (!close(closure.baseBare.x, bare) || !close(closure.baseUnder.x, under)) {
+                    std::cerr << "bsdf_validate: FAILED coat darkening at C=" << weight << " delta=" << darkening << " mu=" << mu << " bare "
+                              << closure.baseBare.x << " vs " << bare << ", under " << closure.baseUnder.x << " vs " << under << '\n';
+                    ok = false;
+                }
+            }
+        }
+    }
+    finish(ctx, ok, "coat_darkening failed; see the rows above");
+}
+
+// The coat's one-pass transmittance: a white coat is no absorber, normal incidence crosses sqrt(coat_color), grazing paths are longer.
+PT_CHECK(coat_transmittance, Fast, Exact) {
+    const glm::vec3 color(0.25F, 0.5F, 0.81F);
+    bool ok = true;
+    for (float ior : {1.0F, 1.5F, 2.5F}) {
+        for (float mu : {1.0F, 0.5F, 0.1F}) {
+            ok = ok && pathtracer::scene::coatTransmittance(glm::vec3(1.0F), ior, mu) == glm::vec3(1.0F);
+        }
+        ok = ok && maxChannel(glm::abs(pathtracer::scene::coatTransmittance(color, ior, 1.0F) - glm::sqrt(color))) <= 1e-6F;
+        ok = ok && glm::all(glm::lessThan(pathtracer::scene::coatTransmittance(color, ior, 0.3F),
+                                          pathtracer::scene::coatTransmittance(color, ior, 0.9F)));
+    }
+    finish(ctx, ok, "coat_transmittance broke an identity: white is clear, mu = 1 gives sqrt(coat_color), grazing absorbs more");
 }
 
 PT_CHECK_MAIN("bsdf")

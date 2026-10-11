@@ -236,7 +236,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
         const ShadingVertex shading = interpolateShading(triangle, hit->u, hit->v);
 
         // Surface emission, two-sided and absent from LightSet, so the hit takes MIS weight 1. Before the depth cap, as an emitter hit.
-        const glm::vec3 emitted = emittedRadiance(material, shading.uv, footprint);
+        const glm::vec3 emitted = emittedRadiance(material, triangle, shading, -ray.dir, footprint);
         if (emitted != glm::vec3(0.0F)) {
             const glm::vec3 hitRadiance = throughput * emitted;
             radiance += hitRadiance;
@@ -261,14 +261,18 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
             }
         }
 
-        const ShadingFrame frame = buildShadingFrame(triangle, shading, material);
+        const ShadingFrame frame = buildShadingFrame(triangle, shading, material.geometryNormal);
         const glm::vec3 woWorld = -ray.dir;
         // True flat plane normal, for light-leak rejection and ray-origin offsets: both need geometry, not the shading normal.
         const glm::vec3 geoNormal = geometricNormalOf(triangle);
 
         const glm::vec3 woLocal = woWorld * frame;
+        // geometry_coat_normal in the base frame; unbound, the coat follows the interpolated normal, not the base's map or bump.
+        const glm::vec3 coatNormalLocal = inputs.coatWeight > 0.0F
+                                              ? buildShadingFrame(triangle, shading, material.geometryCoatNormal)[2] * frame
+                                              : glm::vec3(0.0F, 0.0F, 1.0F);
         // Built once for both estimators below: the continuation draw and NEE's evaluation share every wo-side lookup it holds.
-        const BsdfClosure closure = makeBsdfClosure(inputs, woLocal, heroChannel);
+        const BsdfClosure closure = makeBsdfClosure(inputs, woLocal, heroChannel, coatNormalLocal);
 
         if (bounce == 0) {
             gShadow = 1.0F;  // assume shadowed once we know there's a real surface; the NEE check below may clear this

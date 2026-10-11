@@ -24,9 +24,10 @@ struct NormalInput {
     float heightMetres = 0.0F;
 };
 
-// One instance's OpenPBR surface: every input a constant or a texture, plus the shading normal's sources.
+// One instance's OpenPBR surface: every input a constant or a texture, plus the base's and the coat's shading-normal sources.
 struct Material : OpenPbrInputs<MaterialInput> {
     NormalInput geometryNormal;
+    NormalInput geometryCoatNormal;  // unbound, the coat follows the interpolated surface normal, not the base's map or bump
 };
 
 // A material file's constants as an unbound Material.

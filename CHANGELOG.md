@@ -3,6 +3,30 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## OpenPBR coat
+
+OpenPBR's coat layer: a GGX dielectric over the whole base, `layer(coat, base)`, with the specification's absorption,
+darkening, base roughening and Fresnel shift. With `coat_weight` 0 every shipped scene is bit-identical. Evidence, with a
+clear, tinted and rough coat over cornell's clay, is in `results/openpbr/pr4`.
+
+- feat: `coat_weight`, `coat_color`, `coat_roughness`, `coat_ior`, `coat_darkening`, and `geometry_coat_normal` (a normal
+  map, a bump, or both, as `geometry_normal`; unbound, the coat follows the interpolated normal). `principled.json` lists
+  them at their defaults.
+- feat: the coat is the dielectric-interface slab at (`coat_roughness`, `coat_ior`) in its own frame, its multiple
+  scattering the escape tables'. The base weighs `lerp(1, T_coat (1 - E_coat(wo)), C)` with
+  `T_coat = coat_color^(1/(2 mu_t))` per crossing, both crossings for reflection and one for refraction; from inside only
+  transmission crosses the coat.
+- feat: darkening `lerp(1, (1-K)/(1-E_b K), C*delta)`, K between the smooth (F) and Lambertian limits by the base's
+  roughness; the hemispherical Fresnel average is the closed form, exact at index match.
+- feat: under the coat the base's roughness is `lerp(r, min(1, r^4 + 2 r_c^4)^(1/4), C)` and its Fresnel ratio
+  `lerp(n_b, n_b/n_c, C)` (inverted where n_c > n_b); refraction still bends by n_b, the specification applying the shift
+  to the Fresnel factor alone.
+- feat: emission under the coat is `lerp(1, T_coat, C)`, one crossing along wo.
+- perf: an unbuilt slab is never written, so the larger closure costs no per-vertex zeroing.
+- test: `coat_weight_zero_is_identity`, `index_matched_coat_is_absorption`, `coated_white_furnace`, `coat_reciprocity`,
+  `tilted_coat_normal_sampling`, `coat_darkening`, `coat_transmittance`, coated chi-square rows, the closed-form Fresnel
+  average against quadrature, the `geometry_coat_normal` binding and emission under a coat.
+
 ## OpenPBR closure: the specification's slab graph
 
 The BSDF kept the previous pipeline's structure: one flat state struct with named per-strategy masses, a `BsdfParams` layer

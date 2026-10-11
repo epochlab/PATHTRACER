@@ -64,8 +64,11 @@ struct ConductorSlab {
 // A GGX dielectric interface at one wo (OpenPBR's specular slab): reflection, refraction and their escape-table multiple scattering.
 struct DielectricSlab {
     float alpha;
-    float etaI;
+    float etaI;            // the media either side, wo's first: refraction bends by etaI/etaT
     float etaT;
+    float fresnelEtaI;     // the ratio Fresnel and the escape tables read; OpenPBR's coat moves it toward n_b/n_c, not the bend
+    float fresnelEtaT;
+    bool deltaRefraction;  // smooth, or index-matched media: refraction is undeviated or Snell's, never a lobe
     glm::vec3 tint;          // specular_color on reflection from above, white from inside
     float tintMean;
     // Of the light the interface transmits, the share leaving refracted: transmission_weight from above, 1 from inside, the rest diffuse.
@@ -94,6 +97,8 @@ struct DiffuseSlab {
 
 // One slab's sampling strategy; the closure's selection masses are indexed by it, so the order is the sample stream's contract.
 enum class Technique : std::uint8_t {
+    CoatSingle,              // the coat's VNDF reflection in its own frame, or its mirror when smooth
+    CoatMulti,               // the coat's reflected multiple scattering
     MetalSingle,             // VNDF reflection, or the mirror when smooth
     MetalMulti,              // the Kulla-Conty lobe, drawn from kMsReflectDensity
     DielectricSingle,        // VNDF reflection or refraction split by the facet's Fresnel (Walter 2007), or the mirror when smooth
@@ -105,23 +110,36 @@ enum class Technique : std::uint8_t {
 };
 inline constexpr std::size_t kTechniqueCount = static_cast<std::size_t>(Technique::Count);
 
-// One shading vertex's OpenPBR surface: mix(dielectric, metal, base_metalness), dielectric = layer(diffuse, interface) mixed by T.
+// One vertex's OpenPBR surface, layer(coat, mix(dielectric, metal, M)); a slab is read only where built, so unbuilt ones stay unwritten.
 struct BsdfClosure {
     glm::vec3 wo;  // woLocal mirrored into the +z hemisphere, which every slab assumes
     float sign;    // the mirror that produced wo; wiLocal crosses it on the way in and the sampled wi on the way out
+    bool exiting;  // wo inside a transmissive base: only its interface faces the ray, and only transmission crosses the coat
+    // OpenPBR's coat: coat_weight of the surface, a dielectric slab in the frame toCoat takes the mirrored base frame to.
+    float coatWeight = 0.0F;
+    glm::mat3 toCoat;
+    DielectricSlab coat;       // built where coatWeight > 0 and wo is outside
+    glm::vec3 coatColor;       // coat_color, the coat's squared normal-incidence transmittance
+    float coatIor;
+    float coatRoughness;
+    // The base under the coat: reflection weighs baseBare + baseUnder * T(mu_i), entering refraction transmitUnder (OpenPBR).
+    glm::vec3 baseBare;
+    glm::vec3 baseUnder;
+    glm::vec3 transmitUnder;
     float metalWeight;        // base_metalness
     float dielectricWeight;   // 1 - base_metalness
     // OpenPBR's albedo scaling of the diffuse under the interface: (1 - M)(1 - T)(1 - E_spec(mu_o)), zero from inside.
-    glm::vec3 diffuseWeight;
+    glm::vec3 diffuseWeight = glm::vec3(0.0F);
     ConductorSlab metal;        // built where metalWeight > 0
     DielectricSlab dielectric;  // built where dielectricWeight > 0
     DiffuseSlab diffuse;        // built where its selection mass is positive
-    std::array<float, kTechniqueCount> mass;  // selection probabilities: each technique's energy at wo over the total, or all zero
+    std::array<float, kTechniqueCount> mass{};  // selection probabilities: each technique's energy at wo over the total, or all zero
 };
 
-// The surface's resolved inputs and wo build the closure; heroChannel disperses specular_ior to one RGB band. No sampler draws.
+// Resolved inputs, wo, a hero RGB band dispersing specular_ior and geometry_coat_normal in the base frame build it. No sampler draws.
 [[nodiscard]] BsdfClosure makeBsdfClosure(const OpenPbrInputs<Constant>& inputs, const glm::vec3& woLocal,
-                                          std::optional<int> heroChannel = std::nullopt);
+                                          std::optional<int> heroChannel = std::nullopt,
+                                          const glm::vec3& coatNormalLocal = glm::vec3(0.0F, 0.0F, 1.0F));
 
 // A vertex whose every strategy is massless has a zero BSDF: it can only emit, so neither NEE nor a continuation carries light from it.
 [[nodiscard]] inline bool scatters(const BsdfClosure& closure) {
@@ -144,7 +162,7 @@ struct BsdfClosure {
 // Selects a technique by its mass and draws from it; the throughput divides by the whole mixture's density (one-sample MIS).
 [[nodiscard]] std::optional<BsdfSample> sampleBsdf(const BsdfClosure& closure, Sampler& sampler);
 
-// The slabs' reflected Fresnel at cosTheta = dot(h, wo), each at its mix weight: metal F82 and tinted dielectric. For the Fresnel AOV.
+// The slabs' reflected Fresnel at cosTheta = dot(h, wo), each at its layer and mix weight: coat, metal F82, tinted dielectric.
 [[nodiscard]] glm::vec3 fresnelAtViewAngle(const BsdfClosure& closure, float cosTheta);
 
 // fresnelAtViewAngle at one VNDF half-vector (Heitz 2018), per Walter 2007. One sample of E[F]: THE CALLER MUST AVERAGE.
@@ -159,11 +177,17 @@ struct BsdfClosure {
 // The dielectric's index ratio: heroChannel disperses specular_ior, specular_weight modulates it (OpenPBR's epsilon, eta').
 [[nodiscard]] float modulatedIor(const OpenPbrInputs<Constant>& inputs, std::optional<int> heroChannel);
 
+// The coat's one-pass transmittance at coat cosine mu: coat_color^(1/(2 mu_t)), mu_t refracted into the coat (OpenPBR).
+[[nodiscard]] glm::vec3 coatTransmittance(const glm::vec3& coatColor, float coatIor, float mu);
+
 // Cosine-weighted hemisphere direction about +z, pdf = cos(theta)/pi. The AO lane relies on the pdf cancelling the cosine (Miller 1994).
 [[nodiscard]] glm::vec3 sampleCosineHemisphere(glm::vec2 u);
 
 // The metal's cosine-weighted average Fresnel 2*int_0^1 F82(mu)*mu dmu in closed form, the Kulla-Conty tint input.
 [[nodiscard]] glm::vec3 metalFresnelAvg(const glm::vec3& f0, const glm::vec3& tint);
+
+// The dielectric's 2*int_0^1 F(mu) mu dmu entering a medium of relative index eta, in closed form; 0 at eta = 1. The coat's E_F.
+[[nodiscard]] float fresnelAverage(float eta);
 
 // F82-split directional albedo E = F0*a + b - k*c and the deficit 1 - E, as (a, b, c, 1 - E), and its cosine-weighted mean.
 [[nodiscard]] glm::vec4 directionalAlbedoSplit(float mu, float roughness);

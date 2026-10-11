@@ -26,7 +26,7 @@ struct EnvironmentConfig {
     std::optional<std::string> colorSpace;  // the map's OCIO colour space, overriding its file's tag. Optional
 };
 
-// A height map supplying geometry_normal by bump: the image and the world-space height, in metres, of one unit of its value.
+// A height map supplying a normal input by bump: the image and the world-space height, in metres, of one unit of its value.
 struct BumpConfig {
     std::string path;
     float heightMetres;
@@ -34,7 +34,7 @@ struct BumpConfig {
 
 // One input's texture relative to ASSET_ROOT_DIR; colorSpace only on a colour input, channel only on a scalar one, bump only on a normal.
 struct TextureConfig {
-    std::optional<std::string> path;  // required except on geometry_normal, which may be a bump alone
+    std::optional<std::string> path;  // required except on a normal input, which may be a bump alone
     std::optional<std::string> colorSpace;  // OCIO space overriding the file's tag
     int channel = 0;  // R, G or B as 0, 1, 2: the channel a scalar input reads, so a packed glTF metallic-roughness map binds
     std::optional<BumpConfig> bump;
