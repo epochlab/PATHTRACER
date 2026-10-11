@@ -105,7 +105,7 @@ bool validCounts(const RenderConfig& render, const PathTracerConfig& pathTracer,
     return ok;
 }
 
-// The render block's output fields: display LUT, the display bit depth and the image size. Scales, AOV and vsync are read after controls.
+// The render block's output fields: display LUT, bit depth, image size and bloom. Scales, AOV and vsync are read after controls.
 std::optional<RenderConfig> parseRenderOutput(const nlohmann::json& render, const std::string& path) {
     const std::string defaultLutName = render.at("defaultLUT").get<std::string>();
     const std::optional<pathtracer::gfx::OcioDisplayTransform::Lut> defaultLut =
@@ -129,7 +129,7 @@ std::optional<RenderConfig> parseRenderOutput(const nlohmann::json& render, cons
     }
     const int width = render.at("width").get<int>();
     const int height = render.at("height").get<int>();
-    return RenderConfig{width, height, 0.0F, 0.0F, 0, *defaultLut, false, *displayFormat};
+    return RenderConfig{width, height, 0.0F, 0.0F, 0, *defaultLut, false, *displayFormat, toFloat(render.at("bloomStrength"))};
 }
 
 // The camera block in field order, then its lens. Ranges need the film back, so Camera::validate runs where sensor.json supplies it.
@@ -160,6 +160,11 @@ bool validRender(const RenderConfig& render, const std::string& path) {
         render.interactiveRenderScale > 1.0F) {
         std::cerr << "loadProfileConfig: " << path
                    << " has a renderScale/interactiveRenderScale outside (0,1]\n";
+        return false;
+    }
+    // A fraction of energy: below 0 the mix extrapolates away from the glare, above 1 it subtracts the direct image.
+    if (!(render.bloomStrength >= 0.0F && render.bloomStrength <= 1.0F)) {
+        std::cerr << "loadProfileConfig: " << path << " has a bloomStrength outside [0,1]\n";
         return false;
     }
     // A raw index into kAovNames, dereferenced unchecked by the spec block, so out of range is an out-of-bounds read.

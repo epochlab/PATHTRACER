@@ -18,6 +18,9 @@ inline constexpr const char* kOcioView = "Un-tone-mapped";
 inline constexpr const char* kOcioSrgbDisplay = "sRGB - Display";
 inline constexpr const char* kOcioRec709Display = "Rec.1886 Rec.709 - Display";
 
+// Unit the display shaders sample uBloom from: the caller keeps BloomPass's result bound there, as the sampler is declared either way.
+inline constexpr unsigned int kBloomTextureUnit = 2;
+
 // Owns three display shaders (sRGB LUT, Rec.1886/Rec.709 LUT, raw passthrough), compiled at startup, switched by the debug 'L' key.
 class OcioDisplayTransform {
 public:
@@ -40,6 +43,9 @@ public:
 
     // 0 = off. Radial per-channel UV offset (R toward centre, B away) at the texture fetch, before exposure and the display curve.
     void setAberration(float aberration) { aberration_ = aberration; }
+
+    // 0 = off; the fraction of energy scattered by the glare PSF, sampled from kBloomTextureUnit while nonzero.
+    void setBloomStrength(float bloomStrength) { bloomStrength_ = bloomStrength; }
 
     // The window rect the image is drawn into, which anchors the dither tile at the image's top-left as encodeForDisplay does.
     void setImageRect(ViewportRect imageRect) { imageRect_ = imageRect; }
@@ -85,11 +91,15 @@ private:
     int rawDitherOriginLoc_;
     int srgbDitherOriginLoc_;
     int rec709DitherOriginLoc_;
+    int rawBloomStrengthLoc_;
+    int srgbBloomStrengthLoc_;
+    int rec709BloomStrengthLoc_;
     Lut activeLut_ = Lut::SRGB;
     glm::vec3 gain_{1.0F};
     int channelView_ = 0;
     bool invert_ = false;
     float aberration_ = 0.0F;
+    float bloomStrength_ = 0.0F;
     glm::vec3 displayOffset_{0.0F};
     ViewportRect imageRect_{};
 };

@@ -38,6 +38,7 @@
 #include "pathtracer/debug/memory_tracker.h"
 #include "pathtracer/debug/scene_stats.h"
 #include "pathtracer/debug/system_info.h"
+#include "pathtracer/gfx/bloom_pass.h"
 #include "pathtracer/gfx/gl_debug.h"
 #include "pathtracer/gfx/hdr_image.h"
 #include "pathtracer/gfx/ocio_cpu_transform.h"
@@ -204,6 +205,7 @@ struct AppScene {
 
 struct AppResources {
     pathtracer::gfx::OcioDisplayTransform ocioTransform;
+    pathtracer::gfx::BloomPass bloom;
     AppScene scene;
 
     pathtracer::gfx::PostProcessPass postProcess{};
@@ -247,6 +249,10 @@ struct AppResources {
     bool vsync;  // profile.json: pace each frame to the vblank, or run uncapped
     // Chromatic aberration strength (0 = off), radial UV offset passed to OcioDisplayTransform::setAberration -- HUD slider only.
     float aberrationStrength = 0.0F;
+    // Glare PSF's scattered fraction (0 = off), picture AOVs only; starts at profile.json bloomStrength, then the HUD slider.
+    float bloomStrength;
+    // The bloom pyramid no longer matches pathTraceDisplayTexture: set by each upload, cleared by the next build.
+    bool bloomStale = true;
     // Async path-traced view, selected by `aov`; requestTrace() is called only from requestPathTraceIfTriggerChanged.
     int maxSamples;  // accumulated-pass cap for PathTraceDriver; 0 = unbounded
     pathtracer::gfx::ScalarType displayFormat;  // pathTraceDisplayTexture's component type (profile.json displayBitDepth)
@@ -442,10 +448,16 @@ std::optional<AppResources> initializeApp(const pathtracer::config::SceneConfig&
         std::cerr << "main: OCIO setup failed, aborting startup\n";
         return std::nullopt;
     }
+    std::optional<pathtracer::gfx::BloomPass> bloom = pathtracer::gfx::BloomPass::create();
+    if (!bloom) {
+        std::cerr << "main: bloom shader setup failed, aborting startup\n";
+        return std::nullopt;
+    }
     printStartupSpec(*scene, sceneConfig, profileConfig, scenePath, refreshHz, gpuInfo);
 
     return AppResources{
         .ocioTransform = std::move(*ocioTransform),
+        .bloom = std::move(*bloom),
         .scene = std::move(*scene),
         .hud = pathtracer::debug::HudOverlay(window.nativeHandle()),
         .debugCamera = std::move(debugCamera),
@@ -459,6 +471,7 @@ std::optional<AppResources> initializeApp(const pathtracer::config::SceneConfig&
         .envLightEnabled = sceneConfig.environment.lightEnabled,
         .statsEnabled = statsEnabled,
         .vsync = profileConfig.render.vsync,
+        .bloomStrength = profileConfig.render.bloomStrength,
         .maxSamples = profileConfig.pathTracer.maxSamples,
         .displayFormat = profileConfig.render.displayFormat,
         .previousFrameCamera = initialCamera,
@@ -702,6 +715,7 @@ void ensurePathTraceDisplayTexture(AppResources& app, const DisplayedAovSource& 
     // Minification and the aberration taps then read across a lat-long's seam as across any interior column.
     app.pathTraceDisplayTexture->setWrapsHorizontally(source.wrapsHorizontally);
     app.pathTraceDisplayed = source;
+    app.bloomStale = true;
 }
 
 // Clears the whole viewport, so the letterbox bars are black and an AOV with no buffer leaves no stale contents on screen.
@@ -738,9 +752,20 @@ void presentFrame(AppResources& app,
     app.ocioTransform.setInvert(app.invert);
     // The picture only -- an artistic lens effect over the rendered image, not meaningful on a raw data AOV like Normal/Depth/Albedo.
     app.ocioTransform.setAberration(isPicture ? app.aberrationStrength : 0.0F);
+    const unsigned int displayTexture = app.pathTraceDisplayTexture->id();
+    // Built only on a new upload, being linear and threshold-free; before bind() and draw(), which rebind the units the build used.
+    const bool bloomOn = isPicture && app.bloomStrength > 0.0F;
+    if (bloomOn && app.bloomStale) {
+        const pathtracer::gfx::HdrImage& shown =
+            app.pathTraceDisplay.mapped.texels.empty() ? *source.image : app.pathTraceDisplay.mapped;
+        app.bloom.build(displayTexture, shown.width, shown.height, app.displayFormat, source.wrapsHorizontally);
+        app.bloomStale = false;
+    }
+    app.bloom.bind(pathtracer::gfx::kBloomTextureUnit);
+    app.ocioTransform.setBloomStrength(bloomOn ? app.bloomStrength : 0.0F);
     app.ocioTransform.setImageRect(imageRect);
     app.ocioTransform.bind();
-    app.postProcess.draw(app.pathTraceDisplayTexture->id(), app.ocioTransform.activeShader(), imageRect);
+    app.postProcess.draw(displayTexture, app.ocioTransform.activeShader(), imageRect);
 }
 
 // Non-blocking: hands a fresh request to PathTraceDriver, which restarts accumulation at this pose and size on its own thread.
@@ -892,7 +917,7 @@ void updateHud(AppResources& app, const pathtracer::platform::Window& window,
         app.hud.draw(hudFrameData, app.aov, edits.focalLengthMm, edits.aperture, edits.shutterSeconds, edits.iso,
                      edits.filmBackPresetIndex, app.filmBackPresetNames, edits.lensProjection, app.showSky,
                      app.envLightEnabled, app.envRotationDegrees, app.envExposureStops, app.aberrationStrength,
-                     app.framingState, pixelProbe);
+                     app.bloomStrength, app.framingState, pixelProbe);
     }
     applyCameraEdits(app, edits);
     {

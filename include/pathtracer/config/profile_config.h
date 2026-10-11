@@ -48,6 +48,8 @@ struct RenderConfig {
     bool vsync;
     // profile.json displayBitDepth, the path-traced display texture's GL storage: 16 -> Float16, 32 -> Float32. 8-bit UNORM would clamp.
     pathtracer::gfx::ScalarType displayFormat;
+    // The glare PSF's scattered fraction in [0,1], 0 = off: the HUD Bloom slider's starting value, applied to picture AOVs only.
+    float bloomStrength;
 };
 
 struct PathTracerConfig {

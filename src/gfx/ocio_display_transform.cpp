@@ -2,7 +2,6 @@
 
 #include <bit>
 #include <cstdlib>
-#include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -57,6 +56,14 @@ constexpr unsigned int kDitherMaskUnit = 1;
 // The shader wraps by AND, since integer modulo is emulated on GPUs; the CPU's % by a constant power of two compiles to the same.
 static_assert(std::has_single_bit(static_cast<unsigned>(kDitherMaskSize)));
 
+// Energy-conserving glare: (1 - k) I + k (I * PSF) in scene-linear, before the affine map, so exposure scales both terms alike.
+constexpr const char* kBloomGlsl =
+    "uniform sampler2D uBloom;\n"
+    "uniform float uBloomStrength;\n";
+
+constexpr const char* kApplyBloomGlsl =
+    "    if (uBloomStrength > 0.0) { hdrColor = mix(hdrColor, texture(uBloom, vUv).rgb, uBloomStrength); }\n";
+
 // TPDF dither before the 8-bit quantization, else gradients band: encodeForDisplay's table and tiling, so a 1:1 frame matches it.
 constexpr const char* kDitherGlsl =
     "uniform sampler2D uDitherMask;\n"
@@ -65,17 +72,6 @@ constexpr const char* kDitherGlsl =
     "    ivec2 texel = ivec2(int(gl_FragCoord.x) - uDitherOrigin.x, uDitherOrigin.y - int(gl_FragCoord.y));\n"
     "    return vec3(texelFetch(uDitherMask, texel & (textureSize(uDitherMask, 0) - 1), 0).r);\n"
     "}\n";
-
-std::optional<std::string> readFile(const std::string& path) {
-    const std::ifstream file(path);
-    if (!file) {
-        std::cerr << "OcioDisplayTransform: failed to open " << path << '\n';
-        return std::nullopt;
-    }
-    std::ostringstream contents;
-    contents << file.rdbuf();
-    return contents.str();
-}
 
 // Wraps OCIO's generated GLSL in this project's fragment program; the affine gain and offset run before it, so it stays scene-referred.
 std::string buildFragmentSource(const std::string& ocioShaderText, const std::string& functionName) {
@@ -86,11 +82,12 @@ std::string buildFragmentSource(const std::string& ocioShaderText, const std::st
         << "uniform sampler2D uHdrColor;\n"
         << "uniform vec3 uDisplayGain;\n"
         << "uniform vec3 uDisplayOffset;\n"
-        << kChannelViewGlsl << kInvertGlsl << kAberrationGlsl << "\n"
+        << kChannelViewGlsl << kInvertGlsl << kAberrationGlsl << kBloomGlsl << "\n"
         << kDitherGlsl
         << ocioShaderText << "\n"
         << "void main() {\n"
         << "    vec3 hdrColor = sampleAberrated(vUv);\n"
+        << kApplyBloomGlsl
         << "    hdrColor = hdrColor * uDisplayGain + uDisplayOffset;\n"
         << kApplyChannelViewGlsl
         << "    vec4 exposed = vec4(hdrColor, 1.0);\n"
@@ -109,9 +106,10 @@ std::string buildRawFragmentSource() {
                        "uniform sampler2D uHdrColor;\n"
                        "uniform vec3 uDisplayGain;\n"
                        "uniform vec3 uDisplayOffset;\n") +
-           kChannelViewGlsl + kInvertGlsl + kAberrationGlsl + kDitherGlsl +
+           kChannelViewGlsl + kInvertGlsl + kAberrationGlsl + kBloomGlsl + kDitherGlsl +
            "\nvoid main() {\n"
-           "    vec3 hdrColor = sampleAberrated(vUv);\n"
+           "    vec3 hdrColor = sampleAberrated(vUv);\n" +
+           kApplyBloomGlsl +
            "    hdrColor = hdrColor * uDisplayGain + uDisplayOffset;\n" +
            kApplyChannelViewGlsl +
            "    vec3 displayColor = hdrColor;\n"
@@ -155,7 +153,7 @@ std::string buildOcioFragmentSource(const char* display, const char* functionNam
 std::optional<OcioDisplayTransform> OcioDisplayTransform::create() {
     // Same fullscreen-triangle vertex shader for all three; only the fragment side varies.
     const std::optional<std::string> vertSrc =
-        readFile(ASSET_ROOT_DIR "/shaders/fullscreen_triangle.vert");
+        ShaderProgram::readSource(ASSET_ROOT_DIR "/shaders/fullscreen_triangle.vert");
     if (!vertSrc) {
         return std::nullopt;
     }
@@ -178,6 +176,7 @@ std::optional<OcioDisplayTransform> OcioDisplayTransform::create() {
         shader->use();
         GL_CALL(glUniform1i(shader->uniformLocation("uHdrColor"), 0));
         GL_CALL(glUniform1i(shader->uniformLocation("uDitherMask"), static_cast<GLint>(kDitherMaskUnit)));
+        GL_CALL(glUniform1i(shader->uniformLocation("uBloom"), static_cast<GLint>(kBloomTextureUnit)));
     }
 
     // Float32, so the shader adds exactly the offsets the CPU encode adds.
@@ -210,7 +209,10 @@ OcioDisplayTransform::OcioDisplayTransform(ShaderProgram rawShader, ShaderProgra
       rec709DisplayOffsetLoc_(rec709Shader_.uniformLocation("uDisplayOffset")),
       rawDitherOriginLoc_(rawShader_.uniformLocation("uDitherOrigin")),
       srgbDitherOriginLoc_(srgbShader_.uniformLocation("uDitherOrigin")),
-      rec709DitherOriginLoc_(rec709Shader_.uniformLocation("uDitherOrigin")) {}
+      rec709DitherOriginLoc_(rec709Shader_.uniformLocation("uDitherOrigin")),
+      rawBloomStrengthLoc_(rawShader_.uniformLocation("uBloomStrength")),
+      srgbBloomStrengthLoc_(srgbShader_.uniformLocation("uBloomStrength")),
+      rec709BloomStrengthLoc_(rec709Shader_.uniformLocation("uBloomStrength")) {}
 
 // Not wrapped in GL_CALL: runs every frame.
 void OcioDisplayTransform::bind() const {
@@ -221,6 +223,7 @@ void OcioDisplayTransform::bind() const {
     int aberrationLoc = rawAberrationLoc_;
     int displayOffsetLoc = rawDisplayOffsetLoc_;
     int ditherOriginLoc = rawDitherOriginLoc_;
+    int bloomStrengthLoc = rawBloomStrengthLoc_;
     if (activeLut_ == Lut::SRGB) {
         displayGainLoc = srgbDisplayGainLoc_;
         channelViewLoc = srgbChannelViewLoc_;
@@ -228,6 +231,7 @@ void OcioDisplayTransform::bind() const {
         aberrationLoc = srgbAberrationLoc_;
         displayOffsetLoc = srgbDisplayOffsetLoc_;
         ditherOriginLoc = srgbDitherOriginLoc_;
+        bloomStrengthLoc = srgbBloomStrengthLoc_;
     } else if (activeLut_ == Lut::Rec709) {
         displayGainLoc = rec709DisplayGainLoc_;
         channelViewLoc = rec709ChannelViewLoc_;
@@ -235,6 +239,7 @@ void OcioDisplayTransform::bind() const {
         aberrationLoc = rec709AberrationLoc_;
         displayOffsetLoc = rec709DisplayOffsetLoc_;
         ditherOriginLoc = rec709DitherOriginLoc_;
+        bloomStrengthLoc = rec709BloomStrengthLoc_;
     }
     shader.use();
     glUniform3f(displayGainLoc, gain_.r, gain_.g, gain_.b);
@@ -242,6 +247,7 @@ void OcioDisplayTransform::bind() const {
     glUniform1i(invertLoc, invert_ ? 1 : 0);
     glUniform1f(aberrationLoc, aberration_);
     glUniform3f(displayOffsetLoc, displayOffset_.r, displayOffset_.g, displayOffset_.b);
+    glUniform1f(bloomStrengthLoc, bloomStrength_);
     // The image's top-left pixel in window coordinates, whose y axis points up.
     glUniform2i(ditherOriginLoc, imageRect_.x, imageRect_.y + imageRect_.height - 1);
     ditherMask_.bind(kDitherMaskUnit);

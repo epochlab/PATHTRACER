@@ -338,11 +338,11 @@ void drawAovSection(int& aov, int aovCount) {
     ImGui::Separator();
 }
 
-// pos/rot/clip read-only; projection and filmback dropdowns; focal length, aperture, shutter, ISO, aberration sliders.
+// pos/rot/clip read-only; projection and filmback dropdowns; focal length, aperture, shutter, ISO, aberration, bloom sliders.
 void drawCameraSection(const HudFrameData& frame, float& focalLengthMm, float& aperture,
                         float& shutterSeconds, float& iso, int& filmBackPresetIndex,
                         const std::vector<const char*>& filmBackPresetNames, int& lensProjection,
-                        float& aberrationStrength) {
+                        float& aberrationStrength, float& bloomStrength) {
     ImGui::TextColored(kCyan, "Camera");
     const glm::vec3 camPos = frame.camera.position();
     ImGui::Text("pos  x %.2f  y %.2f  z %.2f", camPos.x, camPos.y, camPos.z);
@@ -380,6 +380,9 @@ void drawCameraSection(const HudFrameData& frame, float& focalLengthMm, float& a
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
     // Beauty only -- main.cpp zeroes this elsewhere -- ranged so the full sweep stays a lens effect rather than an unreadable smear.
     ImGui::SliderFloat("##aberrationStrength", &aberrationStrength, 0.0F, 0.05F, "Aberration  %.3f");
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+    // The scattered fraction's whole domain, logarithmic so the small fractions where glare stays subtle get most of the travel.
+    ImGui::SliderFloat("##bloomStrength", &bloomStrength, 0.0F, 1.0F, "Bloom  %.3f", ImGuiSliderFlags_Logarithmic);
     ImGui::Separator();
 }
 
@@ -505,7 +508,7 @@ void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm,
                        float& shutterSeconds, float& iso, int& filmBackPresetIndex,
                        const std::vector<const char*>& filmBackPresetNames, int& lensProjection, bool& showSky,
                        bool& envLightEnabled, int& envRotationDegrees, float& envExposureStops,
-                       float& aberrationStrength, const FramingOverlayState& framing,
+                       float& aberrationStrength, float& bloomStrength, const FramingOverlayState& framing,
                        const PixelProbeSample& pixelProbe) const {
     ImGui::SetNextWindowPos(ImVec2(8, 8), ImGuiCond_Always);
     constexpr ImGuiWindowFlags flags =
@@ -527,7 +530,7 @@ void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm,
 
     drawAovSection(aov, frame.aovCount);
     drawCameraSection(frame, focalLengthMm, aperture, shutterSeconds, iso, filmBackPresetIndex,
-                       filmBackPresetNames, lensProjection, aberrationStrength);
+                       filmBackPresetNames, lensProjection, aberrationStrength, bloomStrength);
     drawHdriSection(showSky, envLightEnabled, envRotationDegrees, envExposureStops);
 
     ImGui::End();

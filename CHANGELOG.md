@@ -3,6 +3,29 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Energy-conserving bloom
+
+The viewer can now mix a glare PSF into the picture in scene-linear, before the display transform:
+(1 - k) I + k (I * P).
+- **The PSF:** P is an equal-weight Gaussian pyramid (Jimenez 2014): a 13-tap downsample, then a tent upsample that adds
+  each octave back. Its scale doubles per octave, so P falls off as 1/r^2, the Stiles-Holladay glare law.
+- **The parameter:** there is no bright-pass threshold. The one parameter, k, is the fraction of energy scattered. The
+  octave count is derived from the frame, not tuned.
+- **When it rebuilds:** the model is linear, so the pyramid depends only on the uploaded image. It is rebuilt once per
+  upload, never when exposure or k changes.
+- **Measured:** a numpy transcription of the passes conserves energy (0.99997) and follows 1/r^2 between 4 and 16 px.
+  At k = 0 the viewer image is byte-identical to before. Data AOVs are never bloomed.
+- **Cost:** about 0.67 ms per rebuild at 256x128, and 0.01-0.02 ms per frame for the composite.
+
+Evidence is in `results/display_bloom`.
+
+- feat: `BloomPass` keeps one texture and framebuffer per octave. It always holds a complete result, so the display
+  shaders' bloom sampler is valid whether bloom is on or off.
+- feat: HUD Bloom slider (0-1, logarithmic) beside Aberration, for picture AOVs only. `profile.json`
+  `render.bloomStrength` sets its starting value and is validated to [0, 1].
+- refactor: `ShaderProgram::readSource` replaces the two private file readers that shader setup had duplicated.
+- test: `io_validate` `profile_config_bloom_strength_is_in_range`.
+
 ## Blue-noise display dither
 
 The 8-bit display encode's triangular-PDF dither used to hash two `sin` per texel, on the CPU and in the viewer shader.
