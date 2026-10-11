@@ -82,7 +82,7 @@ bool validCounts(const RenderConfig& render, const PathTracerConfig& pathTracer,
     return ok;
 }
 
-// The render block's output fields: display LUT, the two bit depths and the image size. Scales, AOV and vsync are read after controls.
+// The render block's output fields: display LUT, the display bit depth and the image size. Scales, AOV and vsync are read after controls.
 std::optional<RenderConfig> parseRenderOutput(const nlohmann::json& render, const std::string& path) {
     const std::string defaultLutName = render.at("defaultLUT").get<std::string>();
     const std::optional<pathtracer::gfx::OcioDisplayTransform::Lut> defaultLut =
@@ -94,17 +94,19 @@ std::optional<RenderConfig> parseRenderOutput(const nlohmann::json& render, cons
     }
 
     const nlohmann::json& displayBitDepth = render.at("displayBitDepth");
-    const nlohmann::json& textureBitDepth = render.at("textureBitDepth");
     const std::optional<pathtracer::gfx::ScalarType> displayFormat = parseBitDepth(displayBitDepth);
-    const std::optional<pathtracer::gfx::ScalarType> textureType = parseBitDepth(textureBitDepth);
-    if (!displayFormat.has_value() || !textureType.has_value()) {
-        std::cerr << "loadProfileConfig: " << path << " has displayBitDepth " << displayBitDepth.dump()
-                   << ", textureBitDepth " << textureBitDepth.dump() << ", each expected 16 or 32\n";
+    if (!displayFormat.has_value()) {
+        std::cerr << "loadProfileConfig: " << path << " has displayBitDepth " << displayBitDepth.dump() << ", expected 16 or 32\n";
+        return std::nullopt;
+    }
+    // Textures keep their own format in the texture cache: a profile-wide texture depth is retired, not ignored.
+    if (render.contains("textureBitDepth")) {
+        std::cerr << "loadProfileConfig: " << path << " sets the retired textureBitDepth; textures keep their own format\n";
         return std::nullopt;
     }
     const int width = render.at("width").get<int>();
     const int height = render.at("height").get<int>();
-    return RenderConfig{width, height, 0.0F, 0.0F, 0, *defaultLut, false, *displayFormat, *textureType};
+    return RenderConfig{width, height, 0.0F, 0.0F, 0, *defaultLut, false, *displayFormat};
 }
 
 // The camera block in field order, then its lens. Ranges need the film back, so Camera::validate runs where sensor.json supplies it.

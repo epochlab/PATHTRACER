@@ -45,9 +45,8 @@ struct RenderConfig {
     pathtracer::gfx::OcioDisplayTransform::Lut defaultLut;
     // true paces each frame to the display's vblank (DisplayLink); false runs uncapped, bounded only by the one-frame-in-flight fence.
     bool vsync;
-    // profile.json bit depths: 16 -> Float16, 32 -> Float32. 8-bit UNORM is not offered: it clamps scene-referred data before exposure.
-    pathtracer::gfx::ScalarType displayFormat;  // displayBitDepth: the path-traced display texture's GL storage
-    pathtracer::gfx::ScalarType textureType;    // textureBitDepth: environment HDRI and every material texture's CPU storage
+    // profile.json displayBitDepth, the path-traced display texture's GL storage: 16 -> Float16, 32 -> Float32. 8-bit UNORM would clamp.
+    pathtracer::gfx::ScalarType displayFormat;
 };
 
 struct PathTracerConfig {

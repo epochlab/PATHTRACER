@@ -9,16 +9,15 @@
 
 #include "pathtracer/config/profile_config.h"
 #include "pathtracer/config/scene_config.h"
-#include "pathtracer/gfx/scalar_type.h"
 #include "pathtracer/scene/gltf_loader.h"
 #include "pathtracer/scene/path_tracer.h"
 
 namespace pathtracer::scene {
 
-// Binds the scene's EXRs (SceneConfig::textures) into each named node's Material slots; false on a bad key, slot or file.
+// Binds the scene's textures (SceneConfig::textures) into each named node's Material slots; false on a bad key, slot or file.
 [[nodiscard]] bool bindSceneTextures(std::vector<MeshInstance>& instances,
-                                     const std::map<std::string, std::map<std::string, std::string>>& textures,
-                                     const std::string& assetRoot, pathtracer::gfx::ScalarType textureType);
+                                     const std::map<std::string, std::map<std::string, pathtracer::config::TextureConfig>>& textures,
+                                     const std::string& assetRoot);
 
 // One PathTraceSettings per instance from the scene's material overrides, parallel to `instances`. nullopt on a bad file or unknown key.
 [[nodiscard]] std::optional<std::vector<PathTraceSettings>> resolvePerInstanceSettings(

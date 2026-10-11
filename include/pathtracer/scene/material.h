@@ -12,7 +12,7 @@ namespace pathtracer::scene {
 // Standard: the metallic-roughness BSDF. Constant: emits its resolved base colour and scatters nothing, an unlit flat surface.
 enum class ShadingModel { Standard, Constant };
 
-// Shared and immutable: one decode serves every slot, primitive and instance binding that file at that channel count.
+// Shared and immutable: one open serves every slot, primitive and instance binding that file at that channel count and role.
 using TextureHandle = std::shared_ptr<const pathtracer::gfx::ImageTexture>;
 
 // The constant an unbound slot holds, or the bound texture filtered per shading vertex. A float input decodes R, a vec3 one RGB.

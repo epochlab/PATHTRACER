@@ -46,7 +46,7 @@ struct BuildInfo {
 // Dependency versions. GLFW and GLEW are queried at runtime, since a header constant could lie about what loaded; glm is header-only.
 struct LibraryVersions {
     std::string embree;
-    std::string openexr;
+    std::string oiio;
     std::string ocio;
     std::string glfw;
     std::string glew;

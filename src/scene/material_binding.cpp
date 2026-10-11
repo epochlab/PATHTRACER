@@ -5,6 +5,7 @@
 #include <memory>
 #include <set>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <variant>
 
@@ -41,49 +42,59 @@ glm::mat4 placementTransform(const glm::vec3& position, const glm::vec3& rotatio
 }  // namespace
 
 bool bindSceneTextures(std::vector<MeshInstance>& instances,
-                       const std::map<std::string, std::map<std::string, std::string>>& textures,
-                       const std::string& assetRoot, pathtracer::gfx::ScalarType textureType) {
+                       const std::map<std::string, std::map<std::string, pathtracer::config::TextureConfig>>& textures,
+                       const std::string& assetRoot) {
     if (!everyKeyNamesAnInstance(textures, instances, "bindSceneTextures", "textures")) {
         return false;
     }
     using ScalarSlot = MaterialInput<float> Material::*;
     using ColorSlot = MaterialInput<glm::vec3> Material::*;
-    static const std::map<std::string_view, std::variant<ScalarSlot, ColorSlot>> kSlots = {
-        {"baseColorTexture", &Material::baseColor}, {"normalTexture", &Material::normal},
-        {"bumpTexture", &Material::bump},           {"roughnessTexture", &Material::roughness},
-        {"specularTexture", &Material::specular},
+    // Albedo and specular f0 are colours, converted into the working space; a normal, height or roughness is data, read raw.
+    struct Slot {
+        std::variant<ScalarSlot, ColorSlot> member;
+        pathtracer::gfx::ImageRole role;
     };
-    // A slot loads at its input type's channel count, so a file shared by an RGB and a scalar slot is decoded once per count.
-    const auto channelsOf = [](const std::string& slot) {
-        return std::holds_alternative<ScalarSlot>(kSlots.at(slot)) ? pathtracer::gfx::kScalarChannels
-                                                                   : pathtracer::gfx::kRgbChannels;
+    static const std::map<std::string_view, Slot> kSlots = {
+        {"baseColorTexture", {&Material::baseColor, pathtracer::gfx::ImageRole::Colour}},
+        {"normalTexture", {&Material::normal, pathtracer::gfx::ImageRole::Data}},
+        {"bumpTexture", {&Material::bump, pathtracer::gfx::ImageRole::Data}},
+        {"roughnessTexture", {&Material::roughness, pathtracer::gfx::ImageRole::Data}},
+        {"specularTexture", {&Material::specular, pathtracer::gfx::ImageRole::Colour}},
     };
-    // Everything validated and loaded before any instance changes, each distinct (file, channel count) once however many slots share it.
-    std::map<std::pair<std::string, int>, TextureHandle> loaded;
+    // A slot opens at its input type's channel count and role, so a file shared by two kinds of slot is opened once per kind.
+    using Key = std::tuple<std::string, int, pathtracer::gfx::ImageRole, std::optional<std::string>>;
+    const auto keyOf = [](const std::string& slot, const pathtracer::config::TextureConfig& texture) {
+        const Slot& bound = kSlots.at(slot);
+        const int channels =
+            std::holds_alternative<ScalarSlot>(bound.member) ? pathtracer::gfx::kScalarChannels : pathtracer::gfx::kRgbChannels;
+        return Key{texture.path, channels, bound.role, texture.colorSpace};
+    };
+    // Everything validated and opened before any instance changes, each distinct key once however many slots share it.
+    std::map<Key, TextureHandle> loaded;
     for (const auto& [nodeName, slots] : textures) {
-        for (const auto& [slot, path] : slots) {
+        for (const auto& [slot, texture] : slots) {
             if (!kSlots.contains(slot)) {
                 std::cerr << "bindSceneTextures: '" << nodeName << "' names unknown slot '" << slot << "'\n";
                 return false;
             }
-            std::pair<std::string, int> key{path, channelsOf(slot)};
+            Key key = keyOf(slot, texture);
             if (loaded.contains(key)) {
                 continue;
             }
-            std::optional<pathtracer::gfx::ImageTexture> texture =
-                pathtracer::gfx::loadImageTexture(assetRoot + "/" + path, textureType, key.second);
-            if (!texture) {
-                std::cerr << "bindSceneTextures: '" << nodeName << "' texture '" << path << "' failed to load\n";
+            TextureHandle opened = pathtracer::gfx::openTexture(assetRoot + "/" + texture.path, std::get<1>(key), std::get<2>(key),
+                                                                pathtracer::gfx::TextureWrap::Repeat, texture.colorSpace);
+            if (!opened) {
+                std::cerr << "bindSceneTextures: '" << nodeName << "' texture '" << texture.path << "' failed to load\n";
                 return false;
             }
-            loaded.emplace(std::move(key), std::make_shared<const pathtracer::gfx::ImageTexture>(std::move(*texture)));
+            loaded.emplace(std::move(key), std::move(opened));
         }
     }
     for (MeshInstance& instance : instances) {
         if (const auto it = textures.find(instance.name); it != textures.end()) {
-            for (const auto& [slot, path] : it->second) {
-                const TextureHandle& texture = loaded.at({path, channelsOf(slot)});
-                std::visit([&](auto member) { instance.material.*member = texture; }, kSlots.at(slot));
+            for (const auto& [slot, texture] : it->second) {
+                const TextureHandle& bound = loaded.at(keyOf(slot, texture));
+                std::visit([&](auto member) { instance.material.*member = bound; }, kSlots.at(slot).member);
             }
         }
     }

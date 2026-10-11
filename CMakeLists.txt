@@ -20,7 +20,7 @@ find_package(OpenEXR REQUIRED)
 find_package(OpenColorIO REQUIRED)
 find_package(OpenImageIO 3 CONFIG REQUIRED)
 find_package(embree 4 CONFIG REQUIRED)
-# bench_log's floatCrc32 only. Not a new dependency: OpenEXR already links zlib, so naming it makes the direct use explicit.
+# bench_log's floatCrc32 only. Not a new dependency: OpenImageIO already links zlib, so naming it makes the direct use explicit.
 find_package(ZLIB REQUIRED)
 
 # Static-analysis gate on every build: -Wall -Wextra -Werror, clang-tidy per compile (non-fatal), cppcheck as its own target.
@@ -174,8 +174,7 @@ target_compile_definitions(pathtracer_core PRIVATE ${PATHTRACER_PROVENANCE_DEFIN
 # glm gates gtx behind this; scene/rotation.h needs gtx/euler_angles' extractEulerAngleZYX, the inverse of its Rz * Ry * Rx.
 target_compile_definitions(pathtracer_core PUBLIC GLM_ENABLE_EXPERIMENTAL)
 pathtracer_target_defaults(pathtracer_core NATIVE IPO TIDY)
-target_link_libraries(pathtracer_core PUBLIC glm::glm embree OpenEXR::OpenEXR Imath::Imath
-                       OpenColorIO::OpenColorIO OpenImageIO::OpenImageIO ZLIB::ZLIB)
+target_link_libraries(pathtracer_core PUBLIC glm::glm embree OpenColorIO::OpenColorIO OpenImageIO::OpenImageIO ZLIB::ZLIB)
 
 # The C ABI a foreign runtime binds to via ctypes. Shared, not static: it is dlopen'd, not linked.
 add_library(pathtracer_c SHARED src/api/pathtracer_c.cpp)
@@ -258,7 +257,7 @@ target_include_directories(metal_fit PRIVATE include tools)
 pathtracer_target_defaults(metal_fit)
 target_link_libraries(metal_fit PRIVATE glm::glm)
 
-# Shared validator harness (check.h, stats.h), depending on nothing but glm so the light validators need not link Embree or OpenEXR.
+# Shared validator harness (check.h, stats.h), depending on nothing but glm so the light validators need not link Embree or OIIO.
 add_library(pathtracer_check OBJECT tools/check.cpp)
 target_include_directories(pathtracer_check PUBLIC tools)
 pathtracer_target_defaults(pathtracer_check NATIVE)

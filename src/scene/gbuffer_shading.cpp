@@ -15,7 +15,7 @@ T evaluate(const MaterialInput<T>& input, glm::vec2 uv) {
     if (const T* constant = std::get_if<T>(&input)) {
         return *constant;
     }
-    const glm::vec3 texel = pathtracer::gfx::sampleBilinear(**std::get_if<TextureHandle>(&input), uv);
+    const glm::vec3 texel = pathtracer::gfx::sampleTexture(**std::get_if<TextureHandle>(&input), uv);
     if constexpr (std::is_same_v<T, float>) {
         return texel.r;
     } else {
@@ -78,15 +78,8 @@ ShadingFrame buildShadingFrame(const ShadingTriangle& triangle, const ShadingVer
     // Bump (Blinn 1978) as Mikkelsen's surface gradient: height h = bumpStrength*H in world units, n' = n - grad_s(h). Constant H: no tilt.
     glm::vec3 bumpedNormal = mappedNormal;
     if (const TextureHandle* bumpTexture = std::get_if<TextureHandle>(&material.bump)) {
-        const pathtracer::gfx::ImageTexture& bump = **bumpTexture;
-        const glm::vec2 texel(1.0F / static_cast<float>(bump.width), 1.0F / static_cast<float>(bump.height));
-        const glm::vec2 heightStep(
-            pathtracer::gfx::sampleBilinear(bump, shading.uv + glm::vec2(texel.x, 0.0F)).r -
-                pathtracer::gfx::sampleBilinear(bump, shading.uv - glm::vec2(texel.x, 0.0F)).r,
-            pathtracer::gfx::sampleBilinear(bump, shading.uv + glm::vec2(0.0F, texel.y)).r -
-                pathtracer::gfx::sampleBilinear(bump, shading.uv - glm::vec2(0.0F, texel.y)).r);
-        // Central difference over its 2-texel span: dh/duv per unit uv, so the slope no longer falls as texture resolution rises.
-        const glm::vec2 dhduv = settings.bumpStrength * heightStep / (2.0F * texel);
+        // The lookup's own analytic dH/duv per unit uv: independent of texture resolution, and C1 across texel boundaries.
+        const glm::vec2 dhduv = settings.bumpStrength * pathtracer::gfx::sampleTextureGradient(**bumpTexture, shading.uv).dst;
         // Mikkelsen 2010, edges for screen derivatives: (dh1*R1 + dh2*R2)/det divides by dP/duv itself, so mirrored uvs keep their sign.
         const glm::vec3 edge1 = triangle.v1.position - triangle.v0.position;
         const glm::vec3 edge2 = triangle.v2.position - triangle.v0.position;

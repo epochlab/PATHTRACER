@@ -25,6 +25,7 @@
 #include "pathtracer/scene/gbuffer_shading.h"
 #include "pathtracer/scene/gltf_loader.h"
 #include "check.h"
+#include "fixtures.h"
 #include "pathtracer/scene/ray_types.h"
 #include "pathtracer/scene/shading_scene.h"
 #include "pathtracer/scene/thread_pool.h"
@@ -834,7 +835,7 @@ bool sameBsdfParams(const BsdfParams& a, const BsdfParams& b) {
            a.diffuseRoughness == b.diffuseRoughness && a.diffuseRho == b.diffuseRho && a.transmissionTint == b.transmissionTint;
 }
 
-// An unbound slot's constant shades bit-identically to the 1x1 texture of that value it replaced: no tolerance, any uv/frame/settings.
+// A 1x1 texture reads its texel to two nested lerps' rounding, 6u, and shades bit-identically to the constant it reads, any uv.
 PT_CHECK(constant_inputs_match_unit_textures, Fast, Exact) {
     constexpr int kCases = 256;
     std::mt19937 rng(static_cast<std::mt19937::result_type>(ctx.seed()));
@@ -842,8 +843,7 @@ PT_CHECK(constant_inputs_match_unit_textures, Fast, Exact) {
     std::uniform_real_distribution<float> wrappedUv(-4.0F, 4.0F);
     const auto randomVec3 = [&] { return glm::vec3(unit(rng), unit(rng), unit(rng)); };
     const auto unitTexture = [](const float* value, int channels) {
-        return std::make_shared<const pathtracer::gfx::ImageTexture>(
-            pathtracer::gfx::ImageTexture{1, 1, channels, std::vector<float>(value, value + channels)});
+        return tools::fixtures::makeTexture(1, 1, channels, std::vector<float>(value, value + channels));
     };
     ctx.plan(3);
     int paramMismatches = 0;
@@ -885,19 +885,32 @@ PT_CHECK(constant_inputs_match_unit_textures, Fast, Exact) {
         triangle.v2.position = glm::cross(normal, glm::vec3(tangent)) * tangent.w;
         triangle.v2.uv += glm::vec2(0.0F, 1.0F);
 
-        const BsdfParams constantParams = resolveBsdfParams(constant, vertex.uv, vertex.colour, settings, std::nullopt);
+        // Bilinear of equal texels is two nested lerps (1 - x)a + xa of 3u each: within 6u = 3 FLT_EPSILON of the texel.
+        const auto read = [&](const MaterialInput<glm::vec3>& input) {
+            return pathtracer::gfx::sampleTexture(**std::get_if<TextureHandle>(&input), vertex.uv);
+        };
+        const auto within = [](glm::vec3 lookup, glm::vec3 texel) {
+            return glm::all(glm::lessThanEqual(glm::abs(lookup - texel), 3.0F * std::numeric_limits<float>::epsilon() * glm::abs(texel)));
+        };
+        const float roughnessRead = pathtracer::gfx::sampleTexture(**std::get_if<TextureHandle>(&textured.roughness), vertex.uv).r;
+        const bool lookupsHold = within(read(textured.baseColor), baseColor) && within(read(textured.normal), encodedNormal) &&
+                                 within(read(textured.specular), specular) && within(glm::vec3(roughnessRead), glm::vec3(roughness));
+        // Shading consumes a lookup exactly as a constant of the value it read: the texture path adds nothing past the filter.
+        const Material asRead{.baseColor = read(textured.baseColor), .normal = read(textured.normal), .bump = height,
+                              .roughness = roughnessRead, .specular = read(textured.specular)};
+        const BsdfParams readParams = resolveBsdfParams(asRead, vertex.uv, vertex.colour, settings, std::nullopt);
         const BsdfParams texturedParams = resolveBsdfParams(textured, vertex.uv, vertex.colour, settings, std::nullopt);
-        paramMismatches += sameBsdfParams(constantParams, texturedParams) ? 0 : 1;
-        const ShadingFrame constantFrame = buildShadingFrame(triangle, vertex, constant, settings);
-        frameMismatches += constantFrame == buildShadingFrame(triangle, vertex, textured, settings) ? 0 : 1;
-        // Four taps of a constant height differ by exactly 0, so the texture path only renormalises the unbumped normal.
-        bumpMismatches += buildShadingFrame(triangle, vertex, bumped, settings)[2] == glm::normalize(constantFrame[2]) ? 0 : 1;
+        paramMismatches += lookupsHold && sameBsdfParams(readParams, texturedParams) ? 0 : 1;
+        frameMismatches += buildShadingFrame(triangle, vertex, asRead, settings) == buildShadingFrame(triangle, vertex, textured, settings) ? 0 : 1;
+        // A constant's B-spline slope is a sum of derivative weights, exactly 0, with sum |w'| <= 1: rounding leaves at most 6u|h|.
+        const glm::vec2 slope = pathtracer::gfx::sampleTextureGradient(**std::get_if<TextureHandle>(&bumped.bump), vertex.uv).dst;
+        bumpMismatches += glm::all(glm::lessThanEqual(glm::abs(slope), glm::vec2(3.0F * std::numeric_limits<float>::epsilon() * height))) ? 0 : 1;
     }
     std::cout << "gbuffer_validate: constant vs 1x1 texture over " << kCases << " cases -- " << paramMismatches << " BsdfParams, "
               << frameMismatches << " frame, " << bumpMismatches << " bump mismatches\n";
-    PT_EXPECT(ctx, paramMismatches == 0, "a constant input resolved BsdfParams differently from its 1x1 texture");
-    PT_EXPECT(ctx, frameMismatches == 0, "a constant normal built a different shading frame from its 1x1 texture");
-    PT_EXPECT(ctx, bumpMismatches == 0, "a constant bump texture tilted the normal: its gradient is not exactly zero");
+    PT_EXPECT(ctx, paramMismatches == 0, "a 1x1 texture read past 6u of its texel, or resolved BsdfParams unlike the constant it read");
+    PT_EXPECT(ctx, frameMismatches == 0, "a 1x1 normal texture built a different shading frame from the constant it read");
+    PT_EXPECT(ctx, bumpMismatches == 0, "a constant bump texture's slope exceeds the rounding of its exactly-zero derivative weights");
 }
 
 // H = a*u + b*v is linear, so bilinear taps reproduce it and the true surface gradient of h = bumpStrength*H is a 3x3 solve per triangle.
@@ -925,8 +938,8 @@ PT_CHECK(bump_gradient_is_world_height, Fast, Exact) {
                     glm::dot(kSlopeUv, (glm::vec2(x, y) + 0.5F) / glm::vec2(resolution));
             }
         }
-        const Material material{.bump = std::make_shared<const pathtracer::gfx::ImageTexture>(pathtracer::gfx::ImageTexture{
-                                    resolution.x, resolution.y, pathtracer::gfx::kScalarChannels, std::move(heights)})};
+        const Material material{
+            .bump = tools::fixtures::makeTexture(resolution.x, resolution.y, pathtracer::gfx::kScalarChannels, std::move(heights))};
         const glm::dvec2 texel = 1.0 / glm::dvec2(resolution);
         for (int i = 0; i < kCases; ++i) {
             const glm::vec3 normal = glm::normalize(glm::vec3(signedUnit(rng), signedUnit(rng), signedUnit(rng)));
