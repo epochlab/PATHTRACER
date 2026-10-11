@@ -28,6 +28,7 @@
 #include "fixtures.h"
 #include "stats.h"
 #include "pathtracer/scene/bsdf.h"
+#include "pathtracer/scene/gbuffer_shading.h"
 #include "pathtracer/scene/camera.h"
 #include "pathtracer/scene/embree_accel.h"
 #include "pathtracer/scene/environment_map.h"
@@ -41,7 +42,6 @@
 
 namespace {
 
-using pathtracer::scene::BsdfParams;
 using pathtracer::scene::Camera;
 using pathtracer::scene::EmbreeAccel;
 using pathtracer::scene::Constant;
@@ -345,8 +345,7 @@ PT_CHECK(depth_and_russian_roulette_invariance, Slow, Statistical) {
         inputs.baseColor = glm::vec3(1.0F);
         inputs.baseMetalness = testCase.metallic;
         inputs.specularRoughness = testCase.roughness;
-        const BsdfParams params = tools::fixtures::paramsOf(inputs);
-        const float reference = referenceLo(params, glm::vec3(0.0F, 0.0F, 1.0F), kReferenceSamples,
+        const float reference = referenceLo(inputs, glm::vec3(0.0F, 0.0F, 1.0F), kReferenceSamples,
                                              referenceRng);
 
         std::cout << "  " << testCase.name;
@@ -406,9 +405,8 @@ PT_CHECK(transmissive_slab_energy, Slow, Statistical) {
         if (!accel.has_value()) {
             continue;
         }
-        // The shading params the integrator resolves for this material, through the same resolution.
-        const pathtracer::scene::BsdfParams params =
-            pathtracer::scene::bsdfParamsOf(resolveInputs(scene.instances[0].material, glm::vec2(0.5F), {}, glm::vec3(1.0F)), std::nullopt);
+        // The inputs the integrator resolves for this material, through the same resolution.
+        const OpenPbrInputs<Constant> inputs = resolveInputs(scene.instances[0].material, glm::vec2(0.5F), {}, glm::vec3(1.0F));
         tools::stats::Welford render;
         tools::stats::Welford walk;
         for (int r = 0; r < tools::stats::kReplicates; ++r) {
@@ -417,10 +415,13 @@ PT_CHECK(transmissive_slab_energy, Slow, Statistical) {
                 regionMean(renderPass(scene, env, settings, *accel, pool, true, seed).beauty, 0, 0, kImageSize, kImageSize);
             render.add(std::max({mean.x, mean.y, mean.z}));
             // Disjoint seeds keep the two estimators independent, as Welch's band assumes.
-            walk.add(tools::fixtures::slabWalkLo(params, kWalkPaths, seed + tools::stats::kReplicates).mean);
+            walk.add(tools::fixtures::slabWalkLo(inputs, kWalkPaths, seed + tools::stats::kReplicates).mean);
         }
         const double difference = render.mean() - walk.mean();
-        const tools::stats::Band band = tools::stats::differenceBand(walk, render, ctx.alpha());
+        // The render's float32 film resolves its mean to one ulp: a smooth slab's exact-Fresnel vertices leave no variance above that.
+        const double filmUlp = std::numeric_limits<float>::epsilon() * render.mean();
+        const tools::stats::Band statistical = tools::stats::differenceBand(walk, render, ctx.alpha());
+        const tools::stats::Band band{statistical.lo - filmUlp, statistical.hi + filmUlp};
         char detail[320];
         std::snprintf(detail, sizeof(detail),
                       "%s: render %.5f, walk %.5f, difference %+.3e vs +/-%.3e -- above means NEE and the BSDF-sampled "

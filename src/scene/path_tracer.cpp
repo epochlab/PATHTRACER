@@ -262,19 +262,18 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
         }
 
         const ShadingFrame frame = buildShadingFrame(triangle, shading, material);
-        const BsdfParams params = bsdfParamsOf(inputs, heroChannel);
         const glm::vec3 woWorld = -ray.dir;
         // True flat plane normal, for light-leak rejection and ray-origin offsets: both need geometry, not the shading normal.
         const glm::vec3 geoNormal = geometricNormalOf(triangle);
 
         const glm::vec3 woLocal = woWorld * frame;
         // Built once for both estimators below: the continuation draw and NEE's evaluation share every wo-side lookup it holds.
-        const BsdfClosure closure = makeBsdfClosure(params, woLocal);
+        const BsdfClosure closure = makeBsdfClosure(inputs, woLocal, heroChannel);
 
         if (bounce == 0) {
             gShadow = 1.0F;  // assume shadowed once we know there's a real surface; the NEE check below may clear this
             // The Fresnel the microfacet lobe evaluates here, one VNDF draw per sample, on its own stream. No ray and no BVH query.
-            gFresnel = fresnelAtMicrofacet(params, woLocal, fresnelSample);
+            gFresnel = fresnelAtMicrofacet(closure, fresnelSample);
             // Obscurance (Zhukov 1998; Iones 2003): sampling at pdf = cos/pi cancels both factors, so the estimator is the mean of rho.
             const bool frontSide = glm::dot(geoNormal, woWorld) > 0.0F;
             const glm::vec3 aoDir =
@@ -326,11 +325,10 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
             const float shadingCos = glm::dot(lightSample->direction, frame[2]);
             // Both sides, not just wo's: on a transmissive surface a light behind the vertex reaches the eye through the transmission lobe.
             const bool nearSide = geoCos > 0.0F && shadingCos > 0.0F;
-            const bool farSide = geoCos < 0.0F && shadingCos < 0.0F && params.transmissionWeight > 0.0F;
+            const bool farSide = geoCos < 0.0F && shadingCos < 0.0F && transmits(closure);
             if (nearSide || farSide) {
                 const glm::vec3 wiLocalLight = lightSample->direction * frame;
-                const float lightCos = std::abs(shadingCos);  // far-side samples carry a negative cosine
-                // One evaluation for the value, the pdf and the per-lobe split: four separate calls recomputed the same lookups.
+                // One evaluation for the value, pdf and per-lobe split, each lobe cosine-weighted about its own normal.
                 const BsdfEval eval = evaluateBsdfSplit(closure, wiLocalLight);
                 const glm::vec3 bsdfValue = eval.total();
                 if (eval.pdf > 0.0F &&
@@ -358,8 +356,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
                         const float lightPdf2 = lightSample->pdf * lightSample->pdf;
                         const float bsdfPdf2 = eval.pdf * eval.pdf;
                         const float misWeightLight = lightPdf2 / (lightPdf2 + bsdfPdf2);
-                        const glm::vec3 common = throughput * lightSample->radiance * lightCos *
-                                                  misWeightLight / lightSample->pdf;
+                        const glm::vec3 common = throughput * lightSample->radiance * misWeightLight / lightSample->pdf;
                         const glm::vec3 neeContribution = bsdfValue * common;
                         radiance += neeContribution;
                         if (bounce == 0) {

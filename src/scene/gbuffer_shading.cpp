@@ -78,35 +78,6 @@ bool isDispersive(const OpenPbrInputs<Constant>& inputs) {
     return inputs.transmissionDispersionScale > 0.0F && inputs.transmissionWeight > 0.0F && inputs.baseMetalness < 1.0F;
 }
 
-float modulatedIor(const OpenPbrInputs<Constant>& inputs, std::optional<int> heroChannel) {
-    // Dispersion enters here alone: every downstream ior consumer reads this one scalar, so the vertex stays spectrally consistent.
-    const float abbe = inputs.transmissionDispersionAbbeNumber / inputs.transmissionDispersionScale;
-    const float dispersed = heroChannel.has_value() ? cauchyIor(inputs.specularIor, abbe, kRgbWavelengthsNm[*heroChannel]) : inputs.specularIor;
-    // OpenPBR's specular_weight: F0 = xi*F_s, capped at the largest float below 1 so the modulated ratio (1+eps)/(1-eps) stays finite.
-    const float reflectance = ((dispersed - 1.0F) / (dispersed + 1.0F)) * ((dispersed - 1.0F) / (dispersed + 1.0F));
-    const float epsilon =
-        std::copysign(std::sqrt(std::min(inputs.specularWeight * reflectance, std::nextafter(1.0F, 0.0F))), dispersed - 1.0F);
-    // At xi = 1 the modulation is the identity; taking the index as authored keeps it free of the ratio's rounding.
-    return inputs.specularWeight == 1.0F ? dispersed : (1.0F + epsilon) / (1.0F - epsilon);
-}
-
-BsdfParams bsdfParamsOf(const OpenPbrInputs<Constant>& inputs, std::optional<int> heroChannel) {
-    const glm::vec3 baseAlbedo = inputs.baseWeight * inputs.baseColor;
-    return BsdfParams{
-        .metalness = inputs.baseMetalness,
-        .transmissionWeight = inputs.transmissionWeight,
-        .roughness = inputs.specularRoughness,
-        .metalF0 = baseAlbedo,
-        .specularColor = inputs.specularColor,
-        .specularWeight = inputs.specularWeight,
-        .ior = modulatedIor(inputs, heroChannel),
-        .diffuseRoughness = inputs.baseDiffuseRoughness,
-        .diffuseRho = eonAlbedoInversion(baseAlbedo, inputs.baseDiffuseRoughness),
-        // OpenPBR's two exclusive regimes: at transmission_depth > 0 the interior medium carries the colour; at 0 it tints the surface.
-        .transmissionTint = inputs.transmissionDepth > 0.0F ? glm::vec3(1.0F) : inputs.transmissionColor,
-    };
-}
-
 glm::vec3 emittedRadiance(const Material& material, glm::vec2 uv, const pathtracer::gfx::TextureFootprint& footprint) {
     // Most surfaces emit nothing: a zero luminance needs no colour lookup.
     const float luminance = evaluate(material.emissionLuminance, uv, footprint, InputRange::NonNegative);

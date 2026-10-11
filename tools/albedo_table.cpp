@@ -32,7 +32,7 @@ constexpr double kPi = 3.14159265358979323846;
 constexpr int kAlbedoRoughnessRes = 256;
 constexpr int kAlbedoMuRes = 256;
 
-// The reflected MS lobe's sampling grid, uniform in mu and its own constant: bsdf.cpp's inversion needs one step width, not that warp.
+// The reflected MS lobe's sampling grid, uniform in mu and its own constant: the runtime inversion needs one step width, not that warp.
 constexpr int kMsReflectMuRes = 128;
 
 // Transmit side, sized by the energy closure it buys: 64 mu and 64 eta nodes close to 3e-4, where 32 each lost 2% at mu 0.02.
@@ -264,8 +264,10 @@ struct AlbedoTable {
     std::vector<float> davg;
     std::vector<float> r;  // [roughnessIndex][muIndex][etaIndex], kTransmitRoughnessRes * kTransmitMuRes * kEtaRes
     std::vector<float> t;
+    std::vector<float> escapeDeficit;  // 1 - R - T in double, at the physical bound 0 where the quadrature lands past unity
     std::vector<float> ravg;
     std::vector<float> tavg;
+    std::vector<float> escapeAvgDeficit;  // 1 - Ravg - Tavg in double, at the physical bound 0
     std::vector<float> msDensity;  // [roughnessIndex][muIndex], the reflected multiple-scattering lobe's own shape
     std::vector<float> msCdf;
     std::vector<float> msTransmitDensity;  // [roughnessIndex][muIndex][etaIndex], the transmitted twin, unnormalised
@@ -284,7 +286,7 @@ double escapeMu(int index) {
     return t * t;
 }
 
-// alpha = r^2 exactly, as bsdf.cpp's alphaForRoughness: row 0 is the smooth surface itself.
+// alpha = r^2 exactly, as microfacet.cpp's alphaForRoughness: row 0 is the smooth surface itself.
 double gridAlpha(int index, int resolution) {
     const double roughness = static_cast<double>(index) / static_cast<double>(resolution - 1);
     return roughness * roughness;
@@ -343,8 +345,10 @@ void buildTransmit(AlbedoTable& table, int nodes) {
     const auto cells = static_cast<std::size_t>(kTransmitRoughnessRes) * kTransmitMuRes * kEtaRes;
     table.r.assign(cells, 0.0F);
     table.t.assign(cells, 0.0F);
+    table.escapeDeficit.assign(cells, 0.0F);
     table.ravg.assign(static_cast<std::size_t>(kTransmitRoughnessRes) * kEtaRes, 0.0F);
     table.tavg.assign(static_cast<std::size_t>(kTransmitRoughnessRes) * kEtaRes, 0.0F);
+    table.escapeAvgDeficit.assign(static_cast<std::size_t>(kTransmitRoughnessRes) * kEtaRes, 0.0F);
     parallelRows(kTransmitRoughnessRes, [&](int ri) {
         const double alpha = gridAlpha(ri, kTransmitRoughnessRes);
         std::array<double, kEtaRes> rWeighted{};
@@ -364,6 +368,8 @@ void buildTransmit(AlbedoTable& table, int nodes) {
                     static_cast<float>(r);
                 table.t[static_cast<std::size_t>((((ri * kTransmitMuRes) + mi) * kEtaRes) + ei)] =
                     static_cast<float>(t);
+                table.escapeDeficit[static_cast<std::size_t>((((ri * kTransmitMuRes) + mi) * kEtaRes) + ei)] =
+                    static_cast<float>(std::max(1.0 - r - t, 0.0));
                 rWeighted[e] += width * ((r * mu) + (previous.reflect[e] * previousMu));
                 tWeighted[e] += width * ((t * mu) + (previous.transmit[e] * previousMu));
             }
@@ -373,6 +379,8 @@ void buildTransmit(AlbedoTable& table, int nodes) {
             const auto e = static_cast<std::size_t>(ei);
             table.ravg[static_cast<std::size_t>((ri * kEtaRes) + ei)] = static_cast<float>(rWeighted[e]);
             table.tavg[static_cast<std::size_t>((ri * kEtaRes) + ei)] = static_cast<float>(tWeighted[e]);
+            table.escapeAvgDeficit[static_cast<std::size_t>((ri * kEtaRes) + ei)] =
+                static_cast<float>(std::max(1.0 - rWeighted[e] - tWeighted[e], 0.0));
         }
     });
 }
@@ -425,15 +433,12 @@ void buildMultipleScatteringShape(AlbedoTable& table) {
     }
 }
 
-// Escape total at a uniform-mu density node, read through the sqrt(mu) axis as bsdf.cpp's escapeAlbedo does, float arithmetic included.
-float escapeAtUniformMu(const AlbedoTable& table, int ri, int mi, int ei) {
+// Escape deficit at a uniform-mu density node, read through the sqrt(mu) axis as microfacet.cpp's escapeAt does, float arithmetic included.
+float escapeDeficitAtUniformMu(const AlbedoTable& table, int ri, int mi, int ei) {
     const float mf = std::sqrt(static_cast<float>(mi) / static_cast<float>(kTransmitMuRes - 1)) * (kTransmitMuRes - 1);
     const int m0 = std::min(static_cast<int>(mf), kTransmitMuRes - 2);
     const float mt = mf - static_cast<float>(m0);
-    const auto at = [&](int m) {
-        const auto index = static_cast<std::size_t>((((ri * kTransmitMuRes) + m) * kEtaRes) + ei);
-        return table.r[index] + table.t[index];
-    };
+    const auto at = [&](int m) { return table.escapeDeficit[static_cast<std::size_t>((((ri * kTransmitMuRes) + m) * kEtaRes) + ei)]; };
     return at(m0) + (mt * (at(m0 + 1) - at(m0)));
 }
 
@@ -448,9 +453,7 @@ void buildTransmitMultipleScatteringShape(AlbedoTable& table) {
             double cdf = 0.0;
             for (int mi = 0; mi < kTransmitMuRes; ++mi) {
                 const auto index = static_cast<std::size_t>((((ri * kTransmitMuRes) + mi) * kEtaRes) + ei);
-                // Clamped: quadrature can land a few 1e-8 past unity, and a negative segment breaks the CDF monotonicity inversion needs.
-                const double deficit = std::max(1.0 - static_cast<double>(escapeAtUniformMu(table, ri, mi, ei)), 0.0);
-                const auto density = static_cast<float>(deficit * mi * step);
+                const auto density = static_cast<float>(static_cast<double>(escapeDeficitAtUniformMu(table, ri, mi, ei)) * mi * step);
                 if (mi > 0) {
                     // Trapezoid over the float density as emitted, not the double behind it, so the stored pair agrees at read precision.
                     cdf += 0.5 * (table.msTransmitDensity[index - kEtaRes] + density) * step;
@@ -509,11 +512,13 @@ double verifyTransmit(const AlbedoTable& table, int nodes) {
     AlbedoTable reference;
     buildTransmit(reference, nodes * 2);
     double worst = 0.0;
-    const std::array<std::pair<const char*, std::pair<const std::vector<float>*, const std::vector<float>*>>, 4>
+    const std::array<std::pair<const char*, std::pair<const std::vector<float>*, const std::vector<float>*>>, 6>
         channels = {{{"r", {&table.r, &reference.r}},
                      {"t", {&table.t, &reference.t}},
+                     {"deficit", {&table.escapeDeficit, &reference.escapeDeficit}},
                      {"ravg", {&table.ravg, &reference.ravg}},
-                     {"tavg", {&table.tavg, &reference.tavg}}}};
+                     {"tavg", {&table.tavg, &reference.tavg}},
+                     {"avg deficit", {&table.escapeAvgDeficit, &reference.escapeAvgDeficit}}}};
     for (const auto& [name, pair] : channels) {
         double channelWorst = 0.0;
         std::size_t at = 0;
@@ -565,9 +570,9 @@ bool writeInc(const std::string& path, const AlbedoTable& table, double residual
            "//   ./build/albedo_table --out src/scene/albedo_table.inc\n"
            "// Kulla-Conty energy tables, indexed by perceptual roughness rather than alpha: E is far better\n"
            "// distributed in sqrt(alpha), and it is what callers already hold. Every grid is edge-aligned, so\n"
-           "// roughness 0 and mu 1 are exact table entries and bsdf.cpp's lookups can interpolate on k/(res-1).\n"
+           "// roughness 0 and mu 1 are exact table entries and microfacet.cpp's lookups can interpolate on k/(res-1).\n"
            "// BOTH mu axes are uniform in sqrt(mu), mu = (k/(res-1))^2, so nodes crowd where E climbs from its\n"
-           "// grazing limit over mu ~ alpha; bsdf.cpp indexes each of them by sqrt(mu). The reflect side's node\n"
+           "// grazing limit over mu ~ alpha; microfacet.cpp indexes each of them by sqrt(mu). The reflect side's node\n"
            "// 0 is mu = 0 itself, where E = 1 exactly for every alpha and the bake asserts that identity. The\n"
            "// two multiple-scattering shapes below stay uniform in mu, where their piecewise-linear inversion\n"
            "// has one step width.\n"
@@ -577,13 +582,14 @@ bool writeInc(const std::string& path, const AlbedoTable& table, double residual
            "// Roughness 0 is alpha = 0, the smooth surface, tabulated analytically: E = F(mu), R = F, T = 1 - F.\n"
            "// Reflect side (a, b, c and their means) is exact-domain Gauss-Legendre, residual "
         << residual << " against a doubled rule.\n"
-           "// Transmit side (r, t, ravg, tavg) is Gauss-Legendre in the NDF measure at "
+           "// kEscapeDeficit and kEscapeAvgDeficit are 1 - R - T and its mean formed in double: no float difference turns negative.\n"
+           "// Transmit side (r, t, deficit and their means) is Gauss-Legendre in the NDF measure at "
         << transmitNodes << " nodes per panel, residual " << transmitResidual << " against a doubled rule.\n"
            "// kMsReflectDensity/kMsReflectCdf are the reflected multiple-scattering lobe's sampling shape: a\n"
            "// piecewise-linear density over mu, proportional to (1-E(mu))*mu and normalised to 1, with its exact\n"
-           "// prefix integrals. bsdf.cpp inverts the first and evaluates it for the matching pdf.\n"
+           "// prefix integrals. microfacet.cpp inverts the first and evaluates it for the matching pdf.\n"
            "// kMsTransmitDensity/kMsTransmitCdf are the same shape for the transmitted twin, carrying the escape\n"
-           "// table's eta axis and stored UNNORMALISED: bsdf.cpp blends four rows over (roughness, eta) and\n"
+           "// table's eta axis and stored UNNORMALISED: microfacet.cpp blends four rows over (roughness, eta) and\n"
            "// divides by the blended total, so the sampled shape is the raw-deficit interpolation escapeAlbedo\n"
            "// performs and a numerically zero row cannot contribute a unit-mass shape of amplified noise.\n";
     out << "\nconstexpr int kAlbedoRoughnessRes = " << kAlbedoRoughnessRes << ";\n"
@@ -604,8 +610,10 @@ bool writeInc(const std::string& path, const AlbedoTable& table, double residual
     writeArray(out, "kAlbedoAvgDeficit", table.davg);
     writeArray(out, "kEscapeReflect", table.r);
     writeArray(out, "kEscapeTransmit", table.t);
+    writeArray(out, "kEscapeDeficit", table.escapeDeficit);
     writeArray(out, "kEscapeAvgReflect", table.ravg);
     writeArray(out, "kEscapeAvgTransmit", table.tavg);
+    writeArray(out, "kEscapeAvgDeficit", table.escapeAvgDeficit);
     writeArray(out, "kMsReflectDensity", table.msDensity);
     writeArray(out, "kMsReflectCdf", table.msCdf);
     writeArray(out, "kMsTransmitDensity", table.msTransmitDensity);

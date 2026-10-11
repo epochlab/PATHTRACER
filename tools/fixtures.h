@@ -11,7 +11,6 @@
 #include "pathtracer/gfx/hdr_image.h"
 #include "pathtracer/scene/bsdf.h"
 #include "pathtracer/scene/environment_map.h"
-#include "pathtracer/scene/gbuffer_shading.h"
 #include "pathtracer/scene/material.h"
 #include "pathtracer/scene/sampler.h"
 
@@ -29,14 +28,14 @@ inline glm::vec3 sampleUniformHemisphere(std::mt19937& rng) {
     return {sinTheta * std::cos(phi), sinTheta * std::sin(phi), cosTheta};
 }
 
-// Independent ground truth: Lo(wo) = int evaluateBsdf(wo,wi)*wi.z dwi at L0 = 1. Uniform MC, so it under-samples a sharp GGX peak.
-inline float referenceLo(const pathtracer::scene::BsdfParams& params, const glm::vec3& wo, int sampleCount,
-                          std::mt19937& rng) {
+// Independent ground truth: Lo(wo) = int evaluateBsdf(wo,wi) dwi at L0 = 1, cosine-weighted. Uniform MC: under-samples a sharp GGX peak.
+inline float referenceLo(const pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant>& inputs, const glm::vec3& wo,
+                         int sampleCount, std::mt19937& rng) {
     constexpr float kUniformPdf = 1.0F / (2.0F * kPi);
     glm::vec3 accum(0.0F);
     for (int i = 0; i < sampleCount; ++i) {
         const glm::vec3 wi = sampleUniformHemisphere(rng);
-        accum += pathtracer::scene::evaluateBsdf(params, wo, wi) * wi.z / kUniformPdf;
+        accum += pathtracer::scene::evaluateBsdf(inputs, wo, wi) / kUniformPdf;
     }
     return std::max({accum.x, accum.y, accum.z}) / static_cast<float>(sampleCount);
 }
@@ -48,7 +47,7 @@ struct SlabWalk {
     long long truncated;
 };
 
-inline SlabWalk slabWalkLo(const pathtracer::scene::BsdfParams& params, int paths, std::uint32_t seed) {
+inline SlabWalk slabWalkLo(const pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant>& inputs, int paths, std::uint32_t seed) {
     constexpr int kMaxVertices = 256;
     double sum = 0.0;
     long long vertices = 0;
@@ -62,7 +61,7 @@ inline SlabWalk slabWalkLo(const pathtracer::scene::BsdfParams& params, int path
         for (; vertex < kMaxVertices; ++vertex) {
             const float zSign = top ? 1.0F : -1.0F;
             const std::optional<pathtracer::scene::BsdfSample> sample =
-                pathtracer::scene::sampleBsdf(params, glm::vec3(-direction.x, -direction.y, -direction.z * zSign), sampler);
+                pathtracer::scene::sampleBsdf(inputs, glm::vec3(-direction.x, -direction.y, -direction.z * zSign), sampler);
             if (!sample.has_value()) {
                 break;
             }
@@ -108,11 +107,6 @@ inline pathtracer::scene::Material makeMaterial(float specularRoughness) {
     material.baseColor = glm::vec3(1.0F);
     material.specularRoughness = specularRoughness;
     return material;
-}
-
-// A validator authors OpenPBR inputs and shades them through the shading path's own resolution, as a hit does.
-inline pathtracer::scene::BsdfParams paramsOf(const pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant>& inputs) {
-    return pathtracer::scene::bsdfParamsOf(inputs, std::nullopt);
 }
 
 }  // namespace tools::fixtures

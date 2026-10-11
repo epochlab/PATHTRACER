@@ -3,6 +3,29 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## OpenPBR closure: the specification's slab graph
+
+The BSDF kept the previous pipeline's structure: one flat state struct with named per-strategy masses, a `BsdfParams` layer
+between inputs and lobes, and two multiple-scattering models for one dielectric interface. It is now OpenPBR's own graph,
+`mix(layer(diffuse, interface) | translucent, metal, base_metalness)`, built from self-contained slabs. Evidence is in
+`results/openpbr/pr3`.
+
+- refactor!: `makeBsdfClosure(inputs, wo, heroChannel)` builds the closure from the resolved OpenPBR inputs; `BsdfParams`
+  and `bsdfParamsOf` are gone, and `modulatedIor` moves to `bsdf.h`. The conductor and dielectric-interface slabs live in
+  `microfacet.cpp`, the EON slab in `eon.cpp`; `bsdf.cpp` composes them, each technique selected by its energy at wo.
+- feat!: glossy-diffuse is the specification's albedo scaling, `f_spec + (1 - E_spec(wo)) f_diffuse`, energy-exact for
+  any substrate and non-reciprocal by the specification's definition. It replaces Kelemen's coupling and its wi-side read.
+- feat!: the dielectric interface has one multiple-scattering model at every transmission weight: the escape tables'
+  deficit split by the mean reflected share, reflected in Kulla-Conty's symmetric form so the slab stays reciprocal. The
+  glossy case's conductor-style tint and the dielectric Fresnel-average quadrature are gone.
+- feat!: metal and dielectric are separate slabs mixed by `base_metalness`, each with its own techniques.
+- feat!: the BSDF returns f*|cos| about each lobe's own normal (Mitsuba 3's convention); NEE drops its cosine.
+- refactor: `albedo_table` bakes the escape deficit and its mean in double (`kEscapeDeficit`, `kEscapeAvgDeficit`), so no
+  runtime 1 - R - T can turn negative; the EON multiple-scattering term is exactly zero at r = 0, the clipped-LTC pdf
+  carries no floor, and the piecewise-linear inversion takes its c = 0 limit exactly.
+- test: reciprocity is asserted per slab; `glossy_diffuse_albedo_scaling` replaces the Kelemen coupling check, asserting
+  wi-invariance of the diffuse weight, the reflected energy the closure integrates to, and R_ss against quadrature.
+
 ## OpenPBR smooth reflection: specular_roughness 0 is a delta
 
 A roughness floor (alpha >= 4e-4) made a mirror a very narrow GGX lobe, and only transmission became a delta below a fixed
