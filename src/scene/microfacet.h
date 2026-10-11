@@ -77,6 +77,7 @@ struct DielectricEval {
     glm::vec3 reflect;
     glm::vec3 transmit;
     float pdfSingle;
+    float lobePdfSingle;  // pdfSingle given its reflect or refract branch: the VNDF lobe's own density, wi and h one-to-one
     float pdfMultiReflect;
     float pdfMultiTransmit;
 };

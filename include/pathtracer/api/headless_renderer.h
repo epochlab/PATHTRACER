@@ -10,6 +10,7 @@
 #include "pathtracer/config/profile_config.h"
 #include "pathtracer/config/scene_config.h"
 #include "pathtracer/debug/aov.h"
+#include "pathtracer/debug/denoiser.h"
 #include "pathtracer/debug/render_stats.h"
 #include "pathtracer/gfx/scalar_type.h"
 #include "pathtracer/gfx/hdr_image.h"
@@ -151,6 +152,8 @@ private:
     // One evaluated filter per distinct BeautyFilter AOV, so lastImage() can return one and two AOVs sharing a filter evaluate it once.
     std::vector<pathtracer::debug::AovId> filteredAovs_;
     std::vector<pathtracer::gfx::HdrImage> filtered_;
+    // Created at the first Denoised request and kept: OIDN's device and filter commits are paid once, not per render.
+    std::unique_ptr<pathtracer::debug::Denoiser> denoiser_;
     RenderStats stats_;
     int bufferWidth_ = 0;
     int bufferHeight_ = 0;

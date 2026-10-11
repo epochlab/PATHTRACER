@@ -14,7 +14,9 @@ namespace pathtracer::debug {
 
 AovSource aovSource(AovId aov) {
     switch (aov) {
-        // Accumulated by renderPathTraced into PathTraceResult's 11 lanes.
+        // Accumulated by renderPathTraced into PathTraceResult's 13 lanes.
+        case AovId::DenoiseAlbedo:
+        case AovId::DenoiseNormal:
         case AovId::Beauty:
         case AovId::Alpha:
         case AovId::BounceCount:
@@ -36,6 +38,7 @@ AovSource aovSource(AovId aov) {
         case AovId::DoG:
         case AovId::ColourOpponent:
         case AovId::SNR:
+        case AovId::Denoised:
             return AovSource::BeautyFilter;
 
         // The 14 primary-hit lanes renderGBuffer ray-casts. No default: -Werror makes an unclassified AovId a compile error.
@@ -100,6 +103,9 @@ int aovChannels(AovId aov) {
         case AovId::DirectSpecular:
         case AovId::IndirectSpecular:
         case AovId::Refraction:
+        case AovId::DenoiseAlbedo:
+        case AovId::DenoiseNormal:
+        case AovId::Denoised:
         case AovId::Count:
             return 3;
     }
@@ -110,6 +116,7 @@ bool aovCarriesRadiance(AovId aov) {
     switch (aov) {
         // Radiance lanes and the filters that are positively homogeneous of degree one in it, so a gain commutes with the filter.
         case AovId::Beauty:
+        case AovId::Denoised:
         case AovId::DirectDiffuse:
         case AovId::IndirectDiffuse:
         case AovId::DirectSpecular:
@@ -144,10 +151,20 @@ bool aovCarriesRadiance(AovId aov) {
         case AovId::BounceCount:
         case AovId::SNR:
         case AovId::Shadow:
+        case AovId::DenoiseAlbedo:
+        case AovId::DenoiseNormal:
         case AovId::Count:
             return false;
     }
     return false;
+}
+
+bool aovIsPicture(AovId aov) {
+    return aov == AovId::Beauty || aov == AovId::Denoised;
+}
+
+bool aovNeedsDenoiser(AovId aov) {
+    return aov == AovId::DenoiseAlbedo || aov == AovId::DenoiseNormal || aov == AovId::Denoised;
 }
 
 bool aovIsColour(AovId aov) {
@@ -161,6 +178,8 @@ bool aovIsColour(AovId aov) {
         case AovId::Refraction:
         case AovId::Albedo:
         case AovId::Fresnel:
+        case AovId::DenoiseAlbedo:
+        case AovId::Denoised:
             return true;
 
         // Scalars, geometry, derived colour coordinates and false colours: no change of primaries applies to them.
@@ -188,6 +207,7 @@ bool aovIsColour(AovId aov) {
         case AovId::BounceCount:
         case AovId::SNR:
         case AovId::Shadow:
+        case AovId::DenoiseNormal:
         case AovId::Count:
             return false;
     }
@@ -232,6 +252,9 @@ bool aovIsBipolar(AovId aov) {
         case AovId::IndirectSpecular:
         case AovId::Refraction:
         case AovId::Shadow:
+        case AovId::DenoiseAlbedo:
+        case AovId::DenoiseNormal:
+        case AovId::Denoised:
         case AovId::Count:
             return false;
     }
@@ -372,6 +395,8 @@ PathTracedLane pathTracedLane(AovId aov) {
         case AovId::Refraction:       return &Result::refraction;
         case AovId::Fresnel:          return &Result::fresnel;
         case AovId::Alpha:            return &Result::alpha;
+        case AovId::DenoiseAlbedo:    return &Result::denoiseAlbedo;
+        case AovId::DenoiseNormal:    return &Result::denoiseNormal;
         default:                      return nullptr;
     }
 }

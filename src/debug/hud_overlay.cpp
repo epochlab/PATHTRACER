@@ -331,10 +331,10 @@ void drawResolutionAndSceneSection(const HudFrameData& frame) {
 }
 
 // Labels/order come from the shared AovId enum (pathtracer/debug/aov.h), not a locally duplicated array.
-void drawAovSection(int& aov) {
+void drawAovSection(int& aov, int aovCount) {
     ImGui::TextColored(kCyan, "AOV");
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-    ImGui::Combo("##aov", &aov, kAovLabels, IM_ARRAYSIZE(kAovLabels));
+    ImGui::Combo("##aov", &aov, kAovLabels, aovCount);
     ImGui::Separator();
 }
 
@@ -525,7 +525,7 @@ void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm,
         ImGui::Separator();
     }
 
-    drawAovSection(aov);
+    drawAovSection(aov, frame.aovCount);
     drawCameraSection(frame, focalLengthMm, aperture, shutterSeconds, iso, filmBackPresetIndex,
                        filmBackPresetNames, lensProjection, aberrationStrength);
     drawHdriSection(showSky, envLightEnabled, envRotationDegrees, envExposureStops);

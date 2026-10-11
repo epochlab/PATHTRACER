@@ -1,6 +1,8 @@
 #include "pathtracer/config/profile_config.h"
 
+#include <algorithm>
 #include <fstream>
+#include <iterator>
 #include <iostream>
 
 #include <nlohmann/json.hpp>
@@ -24,6 +26,26 @@ std::optional<pathtracer::gfx::OcioDisplayTransform::Lut> parseLut(const std::st
         return Lut::Raw;
     }
     return std::nullopt;
+}
+
+// profile.json's denoiser block; quality is one of kDenoiseQualityNames.
+std::optional<DenoiserConfig> parseDenoiser(const nlohmann::json& denoiser, const std::string& path) {
+    const std::string quality = denoiser.at("quality").get<std::string>();
+    const auto* const names = std::begin(pathtracer::debug::kDenoiseQualityNames);
+    const auto* const found = std::find(names, std::end(pathtracer::debug::kDenoiseQualityNames), quality);
+    if (found == std::end(pathtracer::debug::kDenoiseQualityNames)) {
+        std::cerr << "loadProfileConfig: " << path << " has an unrecognised denoiser quality \"" << quality << "\", expected fast, balanced or high\n";
+        return std::nullopt;
+    }
+    // Integer-typed, as displayBitDepth: get<int>() would truncate 2.5. Zero is OIDN's own default; a negative count means nothing.
+    const nlohmann::json& numThreads = denoiser.at("numThreads");
+    if (!numThreads.is_number_integer() || numThreads.get<int>() < 0) {
+        std::cerr << "loadProfileConfig: " << path << ": denoiser numThreads is " << numThreads.dump() << ", expected an integer >= 0\n";
+        return std::nullopt;
+    }
+    return DenoiserConfig{denoiser.at("enabled").get<bool>(),
+                          {static_cast<pathtracer::debug::DenoiseQuality>(found - names), denoiser.at("prefilterAuxiliary").get<bool>(),
+                           numThreads.get<int>()}};
 }
 
 // Integer-typed first: get<int>() would silently truncate 16.5 to 16.
@@ -188,6 +210,10 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
         const nlohmann::json& controls = j.at("controls");
         const nlohmann::json& render = j.at("render");
         const nlohmann::json& pathTracer = j.at("pathTracer");
+        const std::optional<DenoiserConfig> denoiserConfig = parseDenoiser(j.at("denoiser"), path);
+        if (!denoiserConfig.has_value()) {
+            return std::nullopt;
+        }
 
         std::optional<RenderConfig> renderConfig = parseRenderOutput(render, path);
         if (!renderConfig.has_value()) {
@@ -219,7 +245,12 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
             !validPathTracer(pathTracerConfig, path) || !validCounts(*renderConfig, pathTracerConfig, path)) {
             return std::nullopt;
         }
-        return ProfileConfig{*cameraConfig, controlsConfig, *renderConfig, pathTracerConfig};
+        // The viewer would open on an AOV no producer serves.
+        if (!denoiserConfig->enabled && pathtracer::debug::aovNeedsDenoiser(static_cast<pathtracer::debug::AovId>(renderConfig->defaultAov))) {
+            std::cerr << "loadProfileConfig: " << path << ": defaultAOV " << renderConfig->defaultAov << " needs the denoiser, which is disabled\n";
+            return std::nullopt;
+        }
+        return ProfileConfig{*cameraConfig, controlsConfig, *renderConfig, pathTracerConfig, *denoiserConfig};
     } catch (const nlohmann::json::exception& e) {
         std::cerr << "loadProfileConfig: " << path << ": " << e.what() << '\n';
         return std::nullopt;

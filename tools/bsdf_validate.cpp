@@ -3604,4 +3604,71 @@ PT_CHECK(layer_branch_invariants, Fast, Exact) {
     finish(ctx, ok, "a layer branch drew a non-finite, negative or self-inconsistent sample, or none; see the rows above");
 }
 
+// Each technique alone: lobePdf is its density, the mixture's for a branchless lobe and above it where a discrete branch splits it.
+PT_CHECK(lobe_pdf_is_the_drawn_technique_density, Fast, Exact) {
+    using pathtracer::scene::Technique;
+    struct Case {
+        const char* name;
+        Surface surface;
+        float mu;
+    };
+    constexpr int kDraws = 2000;
+    const Surface glass = makeParams(0.3F, 0.0F, 1.0F);
+    const std::array<Case, 7> cases{{
+        {"rough glass from outside", glass, 0.7F},
+        {"rough glass from inside", glass, -0.6F},
+        {"coloured rough metal", makeColoredMetalParams(0.4F), 0.6F},
+        {"rough dielectric over EON", makeParams(0.5F, 0.0F, 0.0F, 0.5F), 0.5F},
+        {"fuzz over a coated dielectric", fuzzed(coated(makeParams(0.4F, 0.0F, 0.0F), 1.0F, glm::vec3(0.9F), 0.3F, 1.5F, 1.0F), 1.0F,
+                                                 glm::vec3(0.8F), 0.4F), 0.6F},
+        {"rough thin wall", thinWalled(glass, 0.7F), 0.6F},
+        {"thin-wall subsurface", thinWalled(makeParams(0.4F, 0.0F, 0.0F), 0.0F, 1.0F), 0.7F},
+    }};
+    // Facet Fresnel or wall side picks a branch inside these techniques: pdf carries that choice's odds, lobePdf is conditioned on it.
+    const auto branched = [](Technique technique) {
+        return technique == Technique::CoatSingle || technique == Technique::DielectricSingle || technique == Technique::SheetSingle ||
+               technique == Technique::SheetMulti || technique == Technique::ThinSubsurface;
+    };
+    std::array<bool, pathtracer::scene::kTechniqueCount> drawn{};
+    bool ok = true;
+    for (const Case& c : cases) {
+        const glm::vec3 wo(std::sqrt(1.0F - (c.mu * c.mu)), 0.0F, c.mu);
+        const pathtracer::scene::BsdfClosure closure = pathtracer::scene::makeBsdfClosure(c.surface, wo);
+        for (std::size_t t = 0; t < pathtracer::scene::kTechniqueCount; ++t) {
+            if (!(closure.mass[t] > 0.0F)) {
+                continue;
+            }
+            // All mass on t: the draw is t's and the mixture density t's alone, while every slab's own density is still evaluated.
+            pathtracer::scene::BsdfClosure single = closure;
+            single.mass.fill(0.0F);
+            single.mass[t] = 1.0F;
+            const auto technique = static_cast<Technique>(t);
+            for (int i = 0; i < kDraws; ++i) {
+                pathtracer::scene::Sampler sampler(0, 0, i, kDraws, 9200U);
+                const std::optional<pathtracer::scene::BsdfSample> sample = pathtracer::scene::sampleBsdf(single, sampler);
+                if (!sample || sample->delta) {
+                    continue;
+                }
+                drawn[t] = true;
+                const bool valid = sample->lobePdf > 0.0F && std::isfinite(sample->lobePdf) &&
+                                   (branched(technique) ? sample->lobePdf >= sample->pdf : sample->lobePdf == sample->pdf);
+                if (!valid) {
+                    std::cerr << "bsdf_validate: FAILED lobePdf for " << c.name << ", technique " << t << ": lobePdf " << sample->lobePdf
+                              << ", pdf " << sample->pdf << '\n';
+                    ok = false;
+                    break;
+                }
+            }
+        }
+    }
+    // DielectricRefract alone is a delta, never weighed; every other technique must have been drawn for the identity to mean anything.
+    for (std::size_t t = 0; t < pathtracer::scene::kTechniqueCount; ++t) {
+        if (!drawn[t] && static_cast<Technique>(t) != Technique::DielectricRefract) {
+            std::cerr << "bsdf_validate: FAILED lobePdf coverage, technique " << t << " never drew a continuous sample\n";
+            ok = false;
+        }
+    }
+    finish(ctx, ok, "a drawn technique's lobePdf is not its own density; see the rows above");
+}
+
 PT_CHECK_MAIN("bsdf")

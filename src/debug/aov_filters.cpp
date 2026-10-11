@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <numbers>
 #include <numeric>
+#include <stdexcept>
 #include <vector>
 
 #include "pathtracer/debug/scale_space.h"
@@ -305,6 +306,11 @@ HdrImage evaluateFilterAov(AovId aov, const FilterInput& input, ThreadPool& thre
         case AovId::ColourOpponent:  return colourOpponentAov(input.beauty, threadPool);
         case AovId::SNR:
             return snrAov(input.beauty.width, input.beauty.height, input.replicateLuminance, input.replicates, input.samples, threadPool);
+        case AovId::Denoised:
+            if (input.denoiseAlbedo == nullptr || input.denoiseNormal == nullptr || input.denoiser == nullptr) {
+                throw std::invalid_argument("denoised: needs the denoiseAlbedo and denoiseNormal lanes and a Denoiser");
+            }
+            return input.denoiser->denoise(input.beauty, *input.denoiseAlbedo, *input.denoiseNormal);
 
         // The lanes their own producers write. No default arm: -Werror then makes an unrouted new filter a compile error.
         case AovId::Beauty:
@@ -332,6 +338,8 @@ HdrImage evaluateFilterAov(AovId aov, const FilterInput& input, ThreadPool& thre
         case AovId::IndirectSpecular:
         case AovId::Refraction:
         case AovId::Shadow:
+        case AovId::DenoiseAlbedo:
+        case AovId::DenoiseNormal:
         case AovId::Count:
             break;
     }

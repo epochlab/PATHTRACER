@@ -849,7 +849,8 @@ DielectricEval evaluateDielectric(const DielectricSlab& slab, const glm::vec3& w
         const float d = distributionGGX(h, slab.alpha);
         const glm::vec3 fresnel = interfaceFresnel(slab, woDotH);
         eval.reflect = slab.tint * fresnel * (d * smithVisibility(wo, wi, slab.alpha) * wi.z);
-        eval.pdfSingle = 0.25F * d * smithG1OverCos(wo, slab.alpha) * facetReflectProbability(slab, fresnel);
+        eval.lobePdfSingle = 0.25F * d * smithG1OverCos(wo, slab.alpha);
+        eval.pdfSingle = eval.lobePdfSingle * facetReflectProbability(slab, fresnel);
         // Kulla-Conty's form over the escape deficit, share_R (1-E(mu_o))(1-E(mu_i))/(pi(1-Eavg)): symmetric, so reflection is reciprocal.
         if (slab.multiReflect > 0.0F) {
             eval.reflect += slab.tint * (slab.multiReflectScaleWo * escapeAt(kEscapeDeficit, slab.row, wi.z) * wi.z);
@@ -887,7 +888,8 @@ DielectricEval evaluateDielectric(const DielectricSlab& slab, const glm::vec3& w
     const float value = (d * smithTransmitG2(wo, wi, slab.alpha) * -wiDotH * woDotH) / (wo.z * denom2);
     const float vndfPdf = d * woDotH * smithG1OverCos(wo, slab.alpha);
     eval.transmit += slab.transmitTint * (1.0F - fresnel) * (slab.refractWeight * value);
-    eval.pdfSingle = (1.0F - facetReflectProbability(slab, fresnel)) * vndfPdf * etaR * etaR * -wiDotH / denom2;
+    eval.lobePdfSingle = vndfPdf * etaR * etaR * -wiDotH / denom2;
+    eval.pdfSingle = (1.0F - facetReflectProbability(slab, fresnel)) * eval.lobePdfSingle;
     return eval;
 }
 

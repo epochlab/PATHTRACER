@@ -60,6 +60,7 @@ struct HudFrameData {
     float overRangeFraction;
     float overRangePeakMultiple;
     bool vsync;  // profile.json frame cap, for the Cap readout
+    int aovCount;  // the AOV dropdown's length: kAovCountWithoutDenoiser while profile.json disables the denoiser
 };
 
 // Owns the ImGui context and GLFW/OpenGL3 backends for one window's lifetime, move-only. Composites the debug panel onto the backbuffer.

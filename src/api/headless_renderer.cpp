@@ -102,7 +102,7 @@ struct SceneInputs {
 }
 
 // Rejects a request no producer can serve, before any buffer is touched; error names the first fault.
-[[nodiscard]] bool validRequest(const HeadlessRenderer::Request& request, std::size_t lightCount, std::string& error) {
+[[nodiscard]] bool validRequest(const HeadlessRenderer::Request& request, std::size_t lightCount, bool denoiserEnabled, std::string& error) {
     if (request.width <= 0 || request.height <= 0) {
         error = "resolution must be positive";
         return false;
@@ -113,6 +113,10 @@ struct SceneInputs {
     }
     if (request.aovs.empty()) {
         error = "no AOVs requested";
+        return false;
+    }
+    if (!denoiserEnabled && std::any_of(request.aovs.begin(), request.aovs.end(), pathtracer::debug::aovNeedsDenoiser)) {
+        error = "a Denoising AOV was requested, but profile.json disables the denoiser";
         return false;
     }
     if (!request.camera.validate(error)) {
@@ -148,10 +152,19 @@ struct SceneInputs {
 // The path-traced lanes a request needs, each once. Beauty joins whenever a filter is asked for, every filter reading accumulated Beauty.
 [[nodiscard]] std::vector<AovId> accumulatedAovsFor(const std::vector<AovId>& aovs, bool wantsFilter) {
     std::vector<AovId> accumulated;
-    for (const AovId aov : aovs) {
-        if (pathtracer::debug::aovSource(aov) == AovSource::PathTraced &&
-            std::find(accumulated.begin(), accumulated.end(), aov) == accumulated.end()) {
+    const auto add = [&accumulated](AovId aov) {
+        if (std::find(accumulated.begin(), accumulated.end(), aov) == accumulated.end()) {
             accumulated.push_back(aov);
+        }
+    };
+    for (const AovId aov : aovs) {
+        if (pathtracer::debug::aovSource(aov) == AovSource::PathTraced) {
+            add(aov);
+        }
+        // Denoised reads OIDN's auxiliary features, which must come from the same samples as the Beauty it denoises.
+        if (aov == AovId::Denoised) {
+            add(AovId::DenoiseAlbedo);
+            add(AovId::DenoiseNormal);
         }
     }
     if (wantsFilter && std::find(accumulated.begin(), accumulated.end(), AovId::Beauty) == accumulated.end()) {
@@ -309,7 +322,7 @@ bool HeadlessRenderer::render(const Request& request, std::span<float* const> ou
 }
 
 bool HeadlessRenderer::render(const Request& request, std::string& error) {
-    if (!validRequest(request, scene_.lights.size(), error) || !applyPose(request, error)) {
+    if (!validRequest(request, scene_.lights.size(), profile_.denoiser.enabled, error) || !applyPose(request, error)) {
         return false;
     }
     const bool wantsFilter = requestsSource(request.aovs, AovSource::BeautyFilter);
@@ -431,9 +444,18 @@ void HeadlessRenderer::renderGBufferLanes(const Request& request) {
 void HeadlessRenderer::evaluateFilters(const Request& request) {
     const auto filterStart = std::chrono::steady_clock::now();
     const pathtracer::gfx::HdrImage& beauty = lastImage(AovId::Beauty);
-    const pathtracer::debug::FilterInput filterInput{beauty, pathTraced_.replicateLuminance.data(), pathTraced_.replicates,
+    const bool denoises = std::find(request.aovs.begin(), request.aovs.end(), AovId::Denoised) != request.aovs.end();
+    if (denoises && denoiser_ == nullptr) {
+        denoiser_ = std::make_unique<pathtracer::debug::Denoiser>(profile_.denoiser.options);
+    }
+    const pathtracer::debug::FilterInput filterInput{beauty,
+                                                     pathTraced_.replicateLuminance.data(),
+                                                     pathTraced_.replicates,
                                                      request.samples,
-                                                     pathtracer::scene::wrapsHorizontally(request.camera.lens().projection)};
+                                                     pathtracer::scene::wrapsHorizontally(request.camera.lens().projection),
+                                                     denoises ? &lastImage(AovId::DenoiseAlbedo) : nullptr,
+                                                     denoises ? &lastImage(AovId::DenoiseNormal) : nullptr,
+                                                     denoiser_.get()};
     for (const AovId aov : request.aovs) {
         if (pathtracer::debug::aovSource(aov) != AovSource::BeautyFilter ||
             std::find(filteredAovs_.begin(), filteredAovs_.end(), aov) != filteredAovs_.end()) {

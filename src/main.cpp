@@ -220,6 +220,9 @@ struct AppResources {
     pathtracer::scene::DebugCameraController debugCamera;
     pathtracer::debug::GpuInfo gpuInfo;
     FilterCache filterCache{};
+    // Created at the first Denoised view and kept: OIDN's device and filter commits are paid once, re-committed only on a resize.
+    std::unique_ptr<pathtracer::debug::Denoiser> denoiser{};
+    pathtracer::config::DenoiserConfig denoiserConfig;
 
     // HUD-editable UI/run state.
     int aov;  // the lane the snapshot supplies; userLut stays apart, as non-Beauty AOVs force Raw and must not overwrite it
@@ -447,6 +450,7 @@ std::optional<AppResources> initializeApp(const pathtracer::config::SceneConfig&
         .hud = pathtracer::debug::HudOverlay(window.nativeHandle()),
         .debugCamera = std::move(debugCamera),
         .gpuInfo = gpuInfo,
+        .denoiserConfig = profileConfig.denoiser,
         .aov = profileConfig.render.defaultAov,
         .filmBackPresets = std::move(filmBacks->presets),
         .filmBackPresetNames = std::move(filmBacks->names),
@@ -587,10 +591,14 @@ const pathtracer::gfx::HdrImage* ensureFilterImage(
         return &cache.image;
     }
     const pathtracer::debug::ScopedCpuTimer filterTimer(app.stages.filterMs);
+    if (aov == pathtracer::debug::AovId::Denoised && app.denoiser == nullptr) {
+        app.denoiser = std::make_unique<pathtracer::debug::Denoiser>(app.denoiserConfig.options);
+    }
     cache.image = pathtracer::debug::evaluateFilterAov(
         aov,
         pathtracer::debug::FilterInput{snapshot->beauty, snapshot->replicateLuminance.data(), snapshot->replicates, snapshot->samples,
-                                       snapshot->wrapsHorizontally},
+                                       snapshot->wrapsHorizontally, &snapshot->denoiseAlbedo, &snapshot->denoiseNormal,
+                                       app.denoiser.get()},
         *app.gbufferThreadPool);
     cache.aov = aov;
     cache.generation = snapshot->generation;
@@ -664,7 +672,7 @@ pathtracer::debug::PixelProbeSample samplePixelProbe(
     const glm::vec3 texel = source.image->rgb((static_cast<std::size_t>(imgY) * static_cast<std::size_t>(source.image->width)) +
                                               static_cast<std::size_t>(imgX));
     const glm::vec3 color =
-        aovId == pathtracer::debug::AovId::Beauty ? applyBeautyDisplayTransform(texel, app) : texel;
+        pathtracer::debug::aovIsPicture(aovId) ? applyBeautyDisplayTransform(texel, app) : texel;
     return {true, glm::vec4(color, 1.0F)};
 }
 
@@ -704,7 +712,7 @@ void clearToBlack(int viewportWidth, int viewportHeight) {
     GL_CALL(glClear(GL_COLOR_BUFFER_BIT));
 }
 
-// Blits the selected AOV through the shared OCIO path. Beauty uses the user's LUT; everything else forces Raw, not being radiance.
+// Blits the selected AOV through the shared OCIO path. The picture uses the user's LUT; everything else forces Raw, not being radiance.
 void presentFrame(AppResources& app,
                    const std::shared_ptr<const pathtracer::scene::PathTraceResult>& pathTraceSnapshot,
                    int viewportWidth, int viewportHeight, pathtracer::gfx::ViewportRect imageRect) {
@@ -717,9 +725,9 @@ void presentFrame(AppResources& app,
         return;
     }
     ensurePathTraceDisplayTexture(app, source, pathTraceSnapshot != nullptr ? pathTraceSnapshot->samples : 0);
-    const bool isBeauty = aovId == pathtracer::debug::AovId::Beauty;
-    app.ocioTransform.setActiveLut(isBeauty ? app.userLut
-                                             : pathtracer::gfx::OcioDisplayTransform::Lut::Raw);
+    const bool isPicture = pathtracer::debug::aovIsPicture(aovId);
+    app.ocioTransform.setActiveLut(isPicture ? app.userLut
+                                              : pathtracer::gfx::OcioDisplayTransform::Lut::Raw);
     // The photographic exposure is the one arm that cannot be cached with the upload: the slider moves without rebuilding the texture.
     pathtracer::debug::BipolarDisplay display = app.pathTraceDisplay.affine;
     if (pathtracer::debug::aovTakesDisplayExposure(aovId)) {
@@ -728,8 +736,8 @@ void presentFrame(AppResources& app,
     app.ocioTransform.setDisplayAffine(display.gain, display.offset);
     app.ocioTransform.setChannelView(app.channelView);
     app.ocioTransform.setInvert(app.invert);
-    // Beauty only -- an artistic lens effect over the rendered image, not meaningful on a raw data AOV like Normal/Depth/Albedo.
-    app.ocioTransform.setAberration(isBeauty ? app.aberrationStrength : 0.0F);
+    // The picture only -- an artistic lens effect over the rendered image, not meaningful on a raw data AOV like Normal/Depth/Albedo.
+    app.ocioTransform.setAberration(isPicture ? app.aberrationStrength : 0.0F);
     app.ocioTransform.bind();
     app.postProcess.draw(app.pathTraceDisplayTexture->id(), app.ocioTransform.activeShader(), imageRect);
 }
@@ -870,6 +878,7 @@ void updateHud(AppResources& app, const pathtracer::platform::Window& window,
         app.overRangeFraction,
         app.overRangePeakMultiple,
         app.vsync,
+        app.denoiserConfig.enabled ? static_cast<int>(pathtracer::debug::AovId::Count) : pathtracer::debug::kAovCountWithoutDenoiser,
     };
     CameraEdits edits = cameraEditsOf(app);
     // Only the HUD reads it, so with the HUD hidden the fetch is skipped outright rather than computed and thrown away.
@@ -1012,6 +1021,10 @@ nlohmann::json benchConfig(const AppResources& app, const BenchCapture& bench) {
             {"max_samples", app.maxSamples},
             {"spp_per_pass", app.scene.baseSettings.samplesPerPixel},
             {"replicates", app.scene.baseSettings.replicates},
+            {"denoise_features", app.scene.baseSettings.denoiseFeatures},
+            {"denoiser_quality", pathtracer::debug::kDenoiseQualityNames[static_cast<int>(app.denoiserConfig.options.quality)]},
+            {"denoiser_prefilter_auxiliary", app.denoiserConfig.options.prefilterAuxiliary},
+            {"denoiser_num_threads", app.denoiserConfig.options.numThreads},
             {"max_bounces", app.scene.baseSettings.maxBounces},
             {"rr_start_bounce", app.scene.baseSettings.russianRouletteStartBounce},
             {"ao_max_distance", app.scene.baseSettings.aoMaxDistance},
@@ -1343,6 +1356,12 @@ bool validStartup(const Options& options, const std::optional<pathtracer::config
              options.benchAovs.empty() ? profileConfig->render.defaultAov : options.benchAovs.front())))) {
         // An unbounded accumulation never ends and a G-buffer AOV parks the driver, so neither is a benchmark workload.
         std::cerr << "main: -bench needs maxSamples > 0 and a path-traced first AOV\n";
+        return false;
+    }
+    if (!profileConfig->denoiser.enabled &&
+        std::any_of(options.benchAovs.begin(), options.benchAovs.end(),
+                    [](int aov) { return pathtracer::debug::aovNeedsDenoiser(static_cast<pathtracer::debug::AovId>(aov)); })) {
+        std::cerr << "main: -bench-aovs names a Denoising AOV, but profile.json disables the denoiser\n";
         return false;
     }
     return true;

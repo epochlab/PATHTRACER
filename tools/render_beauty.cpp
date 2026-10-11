@@ -159,6 +159,7 @@ bool appendTimingRecord(const Options& options, int argc, char** argv, int width
                    {"env_light", envLightEnabled},
                    {"spp_per_pass", settings.samplesPerPixel},
                    {"replicates", settings.replicates},
+                   {"denoise_features", settings.denoiseFeatures},
                    {"max_bounces", settings.maxBounces},
                    {"rr_start_bounce", settings.russianRouletteStartBounce},
                    {"ao_max_distance", settings.aoMaxDistance},
@@ -312,10 +313,10 @@ int main(int argc, char** argv) {
         options.envLight >= 0 ? std::optional<bool>(options.envLight != 0) : std::nullopt;
     const bool envLightEnabled = envLightOverride.value_or(renderer->defaultEnvLightEnabled());
     const std::string aovName = pathtracer::debug::kAovNames[static_cast<int>(options.aov)];
-    const bool isBeauty = options.aov == pathtracer::debug::AovId::Beauty;
-    // Alpha shares Beauty's samples and filter, so asking for it with Beauty costs one lane and changes no Beauty float.
+    const bool isPicture = pathtracer::debug::aovIsPicture(options.aov);
+    // Alpha shares Beauty's samples and filter, so asking for it with the picture costs one lane and changes no Beauty float.
     const std::vector<pathtracer::debug::AovId> requested =
-        isBeauty ? std::vector{options.aov, pathtracer::debug::AovId::Alpha} : std::vector{options.aov};
+        isPicture ? std::vector{options.aov, pathtracer::debug::AovId::Alpha} : std::vector{options.aov};
 
     // One accumulation parameterised by its randomization: the mean of `passes` single-sample passes, as PathTraceDriver does.
     const auto accumulate = [&](std::uint32_t scrambleSeed, int passes) {
@@ -523,7 +524,7 @@ int main(int argc, char** argv) {
     const std::size_t pixels = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
     std::vector<float> linearRgb(pixels * 3);
     // Beauty is radiance premultiplied by coverage; PNG stores straight alpha, so it is unassociated here, in linear, before the curve.
-    const pathtracer::gfx::HdrImage* alpha = isBeauty ? &renderer->lastImage(pathtracer::debug::AovId::Alpha) : nullptr;
+    const pathtracer::gfx::HdrImage* alpha = isPicture ? &renderer->lastImage(pathtracer::debug::AovId::Alpha) : nullptr;
     for (std::size_t texel = 0; texel < pixels; ++texel) {
         const float coverage = alpha != nullptr ? alpha->texels[texel] : 1.0F;
         const glm::vec3 rgb = coverage > 0.0F ? source.rgb(texel) / coverage : glm::vec3(0.0F);
@@ -532,7 +533,7 @@ int main(int argc, char** argv) {
         linearRgb[(texel * 3) + 2] = rgb.b;
     }
     std::vector<float> encoded(linearRgb.size());
-    pathtracer::gfx::encodeForDisplay(linearRgb, width, height, display.gain, isBeauty, display.offset, std::span<float>(encoded));
+    pathtracer::gfx::encodeForDisplay(linearRgb, width, height, display.gain, isPicture, display.offset, std::span<float>(encoded));
     pathtracer::gfx::HdrImage png = pathtracer::gfx::makeImage(width, height, alpha != nullptr ? 4 : 3);
     for (std::size_t texel = 0; texel < pixels; ++texel) {
         float* out = png.texels.data() + (texel * static_cast<std::size_t>(png.channels));
