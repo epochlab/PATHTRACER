@@ -18,6 +18,9 @@ public:
     // Direction -> equirect UV -> filtered lookup. The renderer's only Le: pdf() below is merely its importance.
     [[nodiscard]] glm::vec3 sampleDirection(const glm::vec3& direction, const glm::mat3& rotation = glm::mat3(1.0F)) const;
 
+    // The same lookup filtered over a footprint, dirFootprint's columns the direction's offsets along its two axes, mapped to st.
+    [[nodiscard]] glm::vec3 sampleDirection(const glm::vec3& direction, const glm::mat2x3& dirFootprint, const glm::mat3& rotation) const;
+
     struct EnvSample {
         glm::vec3 direction;
         float pdf;  // solid-angle pdf, > 0

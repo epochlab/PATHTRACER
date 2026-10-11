@@ -18,12 +18,16 @@ struct LineProximity {
 };
 [[nodiscard]] LineProximity nearLineSegmentPx(glm::vec2 p, glm::vec2 a, glm::vec2 b, float thicknessPx);
 
+// A primary hit's st footprint (Igehy 1999): dirFootprint's direction offsets moved onto the hit plane, then into uv.
+[[nodiscard]] pathtracer::gfx::TextureFootprint primaryHitFootprint(const ShadingTriangle& triangle, const Ray& ray, float t,
+                                                                    const glm::mat2x3& dirFootprint);
+
 // glTF core order: baseColorFactor * baseColor * COLOR_0 (commutative). vertexColour is white with no COLOR_0 attribute.
-[[nodiscard]] glm::vec3 resolveBaseColor(const Material& material, glm::vec2 uv, const glm::vec3& vertexColour,
-                                          const PathTraceSettings& settings);
+[[nodiscard]] glm::vec3 resolveBaseColor(const Material& material, glm::vec2 uv, const pathtracer::gfx::TextureFootprint& footprint,
+                                          const glm::vec3& vertexColour, const PathTraceSettings& settings);
 
 // heroChannel: the RGB channel a dispersive path committed to, setting the wavelength ior resolves at; nullopt keeps the d-line ior.
-[[nodiscard]] BsdfParams resolveBsdfParams(const Material& material, glm::vec2 uv,
+[[nodiscard]] BsdfParams resolveBsdfParams(const Material& material, glm::vec2 uv, const pathtracer::gfx::TextureFootprint& footprint,
                                             const glm::vec3& vertexColour,
                                             const PathTraceSettings& settings,
                                             std::optional<int> heroChannel);

@@ -124,7 +124,8 @@ struct TraceResult {
 // Which transport bucket a path belongs to: set at bounce 0's lobe, stickily overridden to Refraction by any transmission sample.
 enum class PathBucket { Diffuse, SpecularReflection, Refraction };
 
-TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
+// dirFootprint: the primary ray's direction offsets across its sample's stratum, filtering bounce 0's lookups; deeper ones point-sample.
+TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, const EmbreeAccel& accel,
                        const std::vector<ShadingTriangle>& shadingTriangles,
                        const std::vector<MeshInstance>& instances,
                        const std::vector<int>& instanceLightIndex, const LightSet& lights,
@@ -199,7 +200,8 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             if (bounce == 0 && !showSky) {
                 break;
             }
-            const glm::vec3 envRadiance = lights.environmentRadiance(ray.dir);
+            const glm::vec3 envRadiance =
+                bounce == 0 ? lights.environmentRadiance(ray.dir, dirFootprint) : lights.environmentRadiance(ray.dir);
             // Power heuristic (Veach 1997): full weight at bounce 0 and after a delta sample, neither having a density to balance.
             float misWeight = 1.0F;
             if (bounce > 0 && !lastSampleWasDelta) {
@@ -236,12 +238,15 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             instances[static_cast<std::size_t>(triangle.instanceIndex)].material;
         const PathTraceSettings& instanceSettings =
             perInstanceSettings[static_cast<std::size_t>(triangle.instanceIndex)];
+        // Secondary vertices lack propagated differentials (Igehy's BSDF transfer), so they read level 0 as a zero footprint does.
+        const pathtracer::gfx::TextureFootprint footprint =
+            bounce == 0 ? primaryHitFootprint(triangle, ray, hit->t, dirFootprint) : pathtracer::gfx::TextureFootprint{};
 
         // A constant surface emits its base colour two-sided and scatters nothing; absent from LightSet, so the hit takes MIS weight 1.
         if (instanceSettings.shadingModel == ShadingModel::Constant) {
             const ShadingVertex shading = interpolateShading(triangle, hit->u, hit->v);
             const glm::vec3 hitRadiance =
-                throughput * resolveBaseColor(material, shading.uv, shading.colour, instanceSettings);
+                throughput * resolveBaseColor(material, shading.uv, footprint, shading.colour, instanceSettings);
             radiance += hitRadiance;
             addToBucket(hitRadiance, /*isDirect=*/bounce == 1);
             break;
@@ -268,7 +273,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
         const ShadingVertex shading = interpolateShading(triangle, hit->u, hit->v);
         const ShadingFrame frame = buildShadingFrame(triangle, shading, material, instanceSettings);
         const BsdfParams params =
-            resolveBsdfParams(material, shading.uv, shading.colour, instanceSettings, heroChannel);
+            resolveBsdfParams(material, shading.uv, footprint, shading.colour, instanceSettings, heroChannel);
         const glm::vec3 woWorld = -ray.dir;
         // True flat plane normal, for light-leak rejection and ray-origin offsets: both need geometry, not the shading normal.
         const glm::vec3 geoNormal = geometricNormalOf(triangle);
@@ -458,6 +463,11 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
     const Camera::ViewBasis basis = camera.viewBasis(aspect);
     const bool wraps = wrapsHorizontally(basis.lens.projection);
     out.wrapsHorizontally = wraps;
+    // A sample's stratum, 1/sqrt(N) px (pbrt-v4's differential scale), so prefilter blur vanishes as N grows; unbounded N as Sampler's.
+    const float strataPerAxis = std::sqrt(static_cast<float>(std::max(sampleCount, sampleBase + settings.samplesPerPixel)));
+    // d(ndc) across that stratum: two NDC units span the image, and +Y flips because row 0 is the top.
+    const glm::mat2 ndcPerStratum(2.0F / (static_cast<float>(width) * strataPerAxis), 0.0F, 0.0F,
+                                  -2.0F / (static_cast<float>(height) * strataPerAxis));
     // Derived from the target, not fixed: the interactive scale renders a fraction of the frame, where a 96 px grid is only a few tiles.
     const int tileSize = pathTraceTileSize(width, height, threadPool.threadCount());
     const int tilesX = (width + tileSize - 1) / tileSize;
@@ -498,7 +508,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                     const float ndcX = (((static_cast<float>(pixelX) + jitter.x) / static_cast<float>(width)) * 2.0F) - 1.0F;
                     // HdrImage row 0 is the top (EXR/glTF convention); NDC +Y is up -- flip.
                     const float ndcY = 1.0F - ((filmY / static_cast<float>(height)) * 2.0F);
-                    const std::optional<Ray> primary = camera.primaryRay(basis, ndcX, ndcY);
+                    const std::optional<Camera::RayDifferential> primary = camera.primaryRayDifferential(basis, ndcX, ndcY);
                     // AO and Fresnel draw from their own stream: taking dimensions from `sampler` would shift every later dimension.
                     Sampler aoSampler(pixelX, y, sampleIndex, sampleCount, scrambleSeed ^ kAoSeedOffset);
                     const glm::vec2 aoSample = aoSampler.next2D();
@@ -506,8 +516,8 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                     const glm::vec2 fresnelSample = fresnelSampler.next2D();
                     // Nullopt is a fisheye sample outside the image circle: no ray exists, so every lane reads zero for it.
                     const TraceResult trace =
-                        primary ? tracePath(*primary, accel, shadingTriangles, instances, instanceLightIndex,
-                                            lights, showSky, settings, perInstanceSettings, sampler,
+                        primary ? tracePath(primary->ray, primary->dirPerNdc * ndcPerStratum, accel, shadingTriangles, instances,
+                                            instanceLightIndex, lights, showSky, settings, perInstanceSettings, sampler,
                                             aoSample, fresnelSample, tileRays)
                                 : TraceResult{};
                     const std::array<float, kSampleLanes> values{

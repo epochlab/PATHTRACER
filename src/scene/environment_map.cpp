@@ -113,6 +113,15 @@ glm::vec3 EnvironmentMap::sampleDirection(const glm::vec3& direction, const glm:
     return pathtracer::gfx::sampleTexture(*texture_, latLongUv(mapLocalOf(direction, rotation)));
 }
 
+glm::vec3 EnvironmentMap::sampleDirection(const glm::vec3& direction, const glm::mat2x3& dirFootprint, const glm::mat3& rotation) const {
+    const glm::vec3 local = mapLocalOf(direction, rotation);
+    // mapLocalOf is linear, so it carries the differential's columns as it carries the direction.
+    const glm::mat3x2 uvPerLocal = latLongUvJacobian(local);
+    const pathtracer::gfx::TextureFootprint footprint{uvPerLocal * mapLocalOf(dirFootprint[0], rotation),
+                                                      uvPerLocal * mapLocalOf(dirFootprint[1], rotation)};
+    return pathtracer::gfx::sampleTexture(*texture_, latLongUv(local), footprint);
+}
+
 EnvironmentMap::EnvSample EnvironmentMap::importanceSampleDirection(glm::vec2 u,
                                                                      const glm::mat3& rotation) const {
     const int width = width_;

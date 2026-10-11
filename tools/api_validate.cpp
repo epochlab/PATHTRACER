@@ -996,8 +996,9 @@ PT_CHECK(turning_the_world_with_the_camera_leaves_the_image, Slow, Exact) {
     const pathtracer::scene::Camera turned{turnMatrix * camera.position(), turnedRotation, camera.filmBack(),
                                            camera.focalLengthMm(), camera.nearClip(), camera.farClip(), camera.aperture(),
                                            camera.shutterSeconds(), camera.iso(), unturned.lens()};
+    // 4:3, not the map's 2:1: OIIO probes int(2a - 1) times along a footprint of st aspect a, so a = 2 would step on a few-ulp turn.
     constexpr int kWidth = 64;
-    constexpr int kHeight = 32;
+    constexpr int kHeight = 48;
     const auto render = [&](const pathtracer::scene::Camera& view, std::optional<glm::vec3> root, glm::vec3 env) {
         const pathtracer::api::HeadlessRenderer::Request request{.camera = view,
                                                                  .width = kWidth,

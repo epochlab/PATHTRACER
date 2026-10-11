@@ -74,6 +74,9 @@ public:
     // Radiance from the environment toward `direction`, 0 if excluded. The one Le in the renderer: NEE and the miss path share it.
     [[nodiscard]] glm::vec3 environmentRadiance(const glm::vec3& direction) const;
 
+    // The same Le filtered over a camera ray's footprint, dirFootprint's columns the direction's offsets along its two axes.
+    [[nodiscard]] glm::vec3 environmentRadiance(const glm::vec3& direction, const glm::mat2x3& dirFootprint) const;
+
 private:
     const EnvironmentMap* environment_;
     glm::mat3 envRotation_;  // map to world, built once per LightSet, i.e. once per pass, rather than per environment query
