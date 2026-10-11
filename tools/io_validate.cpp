@@ -1414,7 +1414,7 @@ PT_CHECK(gltf_generated_tangents_agree_with_authored_mikktspace, Fast, Exact) {
 
 }  // namespace
 
-// The denoiser block: each quality name maps, anything else and any missing key is refused, and a disabled denoiser takes its AOVs along.
+// The denoiser block: each quality name maps, anything else and any missing key is refused, and a disabled denoiser takes Denoised along.
 PT_CHECK(profile_config_denoiser, Fast, Exact) {
     struct Case {
         std::string name;
@@ -1448,10 +1448,7 @@ PT_CHECK(profile_config_denoiser, Fast, Exact) {
     cases.push_back({"enabled, Denoised first", with("enabled", true), kDenoised, true});
     cases.push_back({"prefilterAuxiliary false", with("prefilterAuxiliary", false), kBeauty, true});
     cases.push_back({"enabled as a string", with("enabled", "true"), kBeauty, false});
-    cases.push_back({"numThreads 1", with("numThreads", 1), kBeauty, true});
-    cases.push_back({"numThreads -1", with("numThreads", -1), kBeauty, false});
-    cases.push_back({"numThreads 2.5", with("numThreads", 2.5), kBeauty, false});
-    for (const char* key : {"enabled", "quality", "prefilterAuxiliary", "numThreads"}) {
+    for (const char* key : {"enabled", "quality", "prefilterAuxiliary"}) {
         cases.push_back({std::string(key) + " missing", with(key, nullptr), kBeauty, false});
     }
     cases.push_back({"block missing", nullptr, kBeauty, false});
@@ -1475,8 +1472,7 @@ PT_CHECK(profile_config_denoiser, Fast, Exact) {
         PT_EXPECT(ctx,
                   loaded.has_value() && loaded->denoiser.enabled == testCase.denoiser["enabled"].get<bool>() &&
                       pathtracer::debug::kDenoiseQualityNames[static_cast<int>(loaded->denoiser.options.quality)] == quality &&
-                      loaded->denoiser.options.prefilterAuxiliary == testCase.denoiser["prefilterAuxiliary"].get<bool>() &&
-                      loaded->denoiser.options.numThreads == testCase.denoiser["numThreads"].get<int>(),
+                      loaded->denoiser.options.prefilterAuxiliary == testCase.denoiser["prefilterAuxiliary"].get<bool>(),
                   "loadProfileConfig rejected or mis-mapped " + testCase.name);
     }
 }

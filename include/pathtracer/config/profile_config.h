@@ -62,7 +62,7 @@ struct PathTracerConfig {
 
 // profile.json's denoiser block: OIDN for the Denoised AOV, and the feature chain its albedo and normal come from.
 struct DenoiserConfig {
-    bool enabled;  // false skips the integrator's feature chain and withholds the three Denoising AOVs
+    bool enabled;  // false skips the integrator's feature chain and withholds the Denoised AOV
     pathtracer::debug::DenoiserOptions options;
 };
 

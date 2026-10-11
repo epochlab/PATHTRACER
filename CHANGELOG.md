@@ -9,16 +9,17 @@ A new **Denoised** AOV runs Intel Open Image Denoise 2.5 (RT filter, HDR, CPU de
 by albedo and normal images taken from Beauty's own samples. The G-buffer's single unjittered primary hit cannot guide
 it: it sees base colour only and stops at mirrors and glass. The integrator therefore carries a separate feature chain
 through delta lobes, and through lobes narrower than one pixel's solid angle, to the first rough vertex. There it
-records the one-sample directional albedo E[f cos / pdf] and the shading normal. Converged Beauty stays the validation
-target: every existing lane is bit-identical (42/42), and integrator cost is within noise (B/A 0.97-1.01). At 256x128
-and 16 spp the shipped setting removes 79-94% of the noise variance. A warm denoise takes 121-157 ms per pass on an M1,
-or 18-24 ms without prefiltering. Evidence is in `results/oidn_denoise`.
+records the one-sample directional albedo E[f cos / pdf] and the shading normal, as two internal lanes no AOV exposes.
+Converged Beauty stays the validation target: every existing lane is bit-identical (42/42), and integrator cost is
+within noise (B/A 1.00-1.03 enabled; disabled runs, which do no extra work, spread 0.95-1.05). The profile ships `fast`
+without prefiltering: at 256x128 and 16 spp it removes 66-90% of the noise variance at 8-15 ms per pass on an M1. `high`
+with prefiltering removes 79-94% at 122-139 ms. Evidence is in `results/oidn_denoise`.
 
-- feat: the Denoised, Denoise Albedo and Denoise Normal AOVs are appended as a Denoising block, so `defaultAOV` indices
-  hold.
+- feat: the Denoised AOV, appended last so `defaultAOV` indices hold.
   - Denoised is a Beauty filter.
-  - Its two features are path-traced lanes averaged with Beauty (`kSampleLanes` 25 -> 31). Headless adds them whenever
-    Denoised is requested.
+  - Its two features are path-traced lanes averaged with Beauty (`kSampleLanes` 25 -> 31), but not AOVs.
+    `kDenoiseFeatureLanes` joins them to the driver's fold; headless accumulates them whenever Denoised is requested.
+  - Headless now keys its accumulators by lane rather than by AOV, so a lane needs no AOV to be accumulated.
   - The new `aovIsPicture` (Beauty, Denoised) replaces the `== Beauty` display decisions: the user LUT, lens aberration,
     the probe and render_beauty's alpha.
 - feat: the feature chain in `tracePath` is kept apart from `throughput`.
@@ -39,14 +40,14 @@ or 18-24 ms without prefiltering. Evidence is in `results/oidn_denoise`.
   - Inputs are copied to scratch, so published lanes are never written.
   - Every OIDN error is thrown as `runtime_error("OIDN: ...")` and reaches the C ABI's `err`.
 - feat: the `profile.json` `denoiser` block, validated at load:
-  - `enabled`: off skips the feature chain entirely. Headless, `-bench-aovs` and `defaultAOV` then refuse the Denoising
-    AOVs, and the HUD list ends before them.
+  - `enabled`: off skips the feature chain entirely. Headless, `-bench-aovs` and `defaultAOV` then refuse Denoised, and
+    the HUD list ends before it.
   - `quality`: `high` | `balanced` | `fast`, OIDN's filter quality.
   - `prefilterAuxiliary`: OIDN's final-frame path, which cleans albedo and normal before `cleanAux`. `false` is its
-    one-filter interactive path, 6-8x faster at 256x128.
-  - `numThreads`: the CPU device's thread cap, 0 for OIDN's default. It has no measurable effect on Apple Silicon, where
-    OIDN's convolutions run through BNNS.
+    one-filter interactive path, 5-7x faster at 256x128.
   - Without prefiltering, OIDN runs `high` as `balanced`, bit for bit, as its 2.3.0 changelog documents.
+  - OIDN's `numThreads` was tried and left out: 1 to 8 threads measured the same on Apple Silicon, where OIDN runs its
+    convolutions through BNNS.
 - chore: OpenImageDenoise 2 is found by CMake and linked `PRIVATE`, and added to the README's brew line. Bench configs
   record `denoise_features` and, in the viewer, the denoiser settings.
 - test:
@@ -59,12 +60,12 @@ or 18-24 ms without prefiltering. Evidence is in `results/oidn_denoise`.
     - **Disabled:** the lanes stay 0 and Beauty is unchanged.
   - bsdf: with all mass on one technique, `lobePdf` equals `pdf` for a branchless lobe and bounds it where a branch
     splits it. All 12 continuous techniques are drawn.
-  - filter: every quality, prefilter and thread setting reduces error on a noisy ramp and leaves its inputs unwritten.
-    Misuse is `invalid_argument`. OIDN's own error surfaces with its message, and the denoiser recovers.
-  - api: the dispatch-totality check supplies the features and a Denoiser. A disabled profile refuses the Denoising AOVs
-    and renders the same Beauty.
-  - io: the `denoiser` block's names, types, ranges and missing keys, and `defaultAOV` against a disabled denoiser.
-  - driver: the two new lanes join the fold and accumulation checks (`kLanes` 11 -> 13). Python: 35 AOVs.
+  - filter: every quality and prefilter setting reduces error on a noisy ramp and leaves its inputs unwritten. Misuse is
+    `invalid_argument`. OIDN's own error surfaces with its message, and the denoiser recovers.
+  - api: the dispatch-totality check supplies the features and a Denoiser. A disabled profile refuses Denoised and
+    renders the same Beauty.
+  - io: the `denoiser` block's names, types and missing keys, and `defaultAOV` against a disabled denoiser.
+  - driver: the two feature lanes join the fold and accumulation checks (`kLanes` 11 -> 13). Python: 33 AOVs.
 
 ## Film filter importance sampling
 

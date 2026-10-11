@@ -90,7 +90,6 @@ Denoiser::Denoiser(const DenoiserOptions& options) : impl_(std::make_unique<Impl
     impl_->quality = oidnQuality(options.quality);
     impl_->prefilterAuxiliary = options.prefilterAuxiliary;
     impl_->device = oidn::newDevice(oidn::DeviceType::CPU);
-    impl_->device.set("numThreads", options.numThreads);
     impl_->device.commit();
     impl_->throwIfFailed();
 }

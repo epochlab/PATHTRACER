@@ -40,8 +40,7 @@
     },
     "denoiser": {
         "enabled": true,
-        "quality": "high",
-        "prefilterAuxiliary": true,
-        "numThreads": 0
+        "quality": "fast",
+        "prefilterAuxiliary": false
     }
 }

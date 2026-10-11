@@ -1024,7 +1024,6 @@ nlohmann::json benchConfig(const AppResources& app, const BenchCapture& bench) {
             {"denoise_features", app.scene.baseSettings.denoiseFeatures},
             {"denoiser_quality", pathtracer::debug::kDenoiseQualityNames[static_cast<int>(app.denoiserConfig.options.quality)]},
             {"denoiser_prefilter_auxiliary", app.denoiserConfig.options.prefilterAuxiliary},
-            {"denoiser_num_threads", app.denoiserConfig.options.numThreads},
             {"max_bounces", app.scene.baseSettings.maxBounces},
             {"rr_start_bounce", app.scene.baseSettings.russianRouletteStartBounce},
             {"ao_max_distance", app.scene.baseSettings.aoMaxDistance},
@@ -1358,10 +1357,9 @@ bool validStartup(const Options& options, const std::optional<pathtracer::config
         std::cerr << "main: -bench needs maxSamples > 0 and a path-traced first AOV\n";
         return false;
     }
-    if (!profileConfig->denoiser.enabled &&
-        std::any_of(options.benchAovs.begin(), options.benchAovs.end(),
-                    [](int aov) { return pathtracer::debug::aovNeedsDenoiser(static_cast<pathtracer::debug::AovId>(aov)); })) {
-        std::cerr << "main: -bench-aovs names a Denoising AOV, but profile.json disables the denoiser\n";
+    if (!profileConfig->denoiser.enabled && std::find(options.benchAovs.begin(), options.benchAovs.end(),
+                                                      static_cast<int>(pathtracer::debug::AovId::Denoised)) != options.benchAovs.end()) {
+        std::cerr << "main: -bench-aovs names denoised, but profile.json disables the denoiser\n";
         return false;
     }
     return true;

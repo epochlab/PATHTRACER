@@ -338,8 +338,6 @@ HdrImage evaluateFilterAov(AovId aov, const FilterInput& input, ThreadPool& thre
         case AovId::IndirectSpecular:
         case AovId::Refraction:
         case AovId::Shadow:
-        case AovId::DenoiseAlbedo:
-        case AovId::DenoiseNormal:
         case AovId::Count:
             break;
     }

@@ -745,7 +745,7 @@ PT_CHECK(aov_filter_dispatch_is_total, Fast, Exact) {
     for (std::size_t texel = 0; texel < static_cast<std::size_t>(kWidth) * kHeight; ++texel) {
         normal.texels[(texel * 3) + 2] = 1.0F;
     }
-    pathtracer::debug::Denoiser denoiser({pathtracer::debug::DenoiseQuality::High, true, 0});
+    pathtracer::debug::Denoiser denoiser({pathtracer::debug::DenoiseQuality::High, true});
     pathtracer::debug::FilterInput input{source};
     input.denoiseAlbedo = &albedo;
     input.denoiseNormal = &normal;
@@ -894,15 +894,15 @@ PT_CHECK(render_rejects_an_invalid_camera, Fast, Exact) {
     return root;
 }
 
-// Disabled, the denoiser's AOVs are refused by name, and Beauty is bit for bit what an enabled profile renders: the chain costs no float.
-PT_CHECK(disabled_denoiser_refuses_its_aovs_and_leaves_beauty, Fast, Exact) {
-    ctx.plan(4);
+// Disabled, Denoised is refused by name, and Beauty is bit for bit what an enabled profile renders: the chain costs no float.
+PT_CHECK(disabled_denoiser_refuses_denoised_and_leaves_beauty, Fast, Exact) {
+    ctx.plan(3);
     const std::filesystem::path offRoot = denoiserDisabledAssetRoot();
     std::string error;
     const auto enabled = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", error);
     const auto disabled = pathtracer::api::HeadlessRenderer::open(offRoot.string(), "scenes/cornell.json", error);
     if (!enabled || !disabled) {
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < 3; ++i) {
             PT_EXPECT(ctx, false, "scene load failed: " + error);
         }
         std::filesystem::remove_all(offRoot);
@@ -912,11 +912,8 @@ PT_CHECK(disabled_denoiser_refuses_its_aovs_and_leaves_beauty, Fast, Exact) {
         return pathtracer::api::HeadlessRenderer::Request{
             .camera = enabled->defaultCamera(), .width = 32, .height = 24, .samples = 4, .scrambleSeed = 5, .aovs = std::move(aovs)};
     };
-    for (const AovId aov : {AovId::Denoised, AovId::DenoiseAlbedo}) {
-        error.clear();
-        PT_EXPECT(ctx, !disabled->render(request({AovId::Beauty, aov}), error) && error.find("disables the denoiser") != std::string::npos,
-                  std::string(pathtracer::debug::kAovNames[static_cast<int>(aov)]) + " was not refused by a disabled denoiser: " + error);
-    }
+    PT_EXPECT(ctx, !disabled->render(request({AovId::Beauty, AovId::Denoised}), error) && error.find("disables the denoiser") != std::string::npos,
+              "denoised was not refused by a disabled denoiser: " + error);
     const bool rendered = enabled->render(request({AovId::Beauty}), error) && disabled->render(request({AovId::Beauty}), error);
     PT_EXPECT(ctx, rendered, "a Beauty render failed: " + error);
     PT_EXPECT(ctx, rendered && enabled->lastImage(AovId::Beauty).texels == disabled->lastImage(AovId::Beauty).texels,

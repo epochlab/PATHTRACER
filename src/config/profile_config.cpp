@@ -37,15 +37,8 @@ std::optional<DenoiserConfig> parseDenoiser(const nlohmann::json& denoiser, cons
         std::cerr << "loadProfileConfig: " << path << " has an unrecognised denoiser quality \"" << quality << "\", expected fast, balanced or high\n";
         return std::nullopt;
     }
-    // Integer-typed, as displayBitDepth: get<int>() would truncate 2.5. Zero is OIDN's own default; a negative count means nothing.
-    const nlohmann::json& numThreads = denoiser.at("numThreads");
-    if (!numThreads.is_number_integer() || numThreads.get<int>() < 0) {
-        std::cerr << "loadProfileConfig: " << path << ": denoiser numThreads is " << numThreads.dump() << ", expected an integer >= 0\n";
-        return std::nullopt;
-    }
     return DenoiserConfig{denoiser.at("enabled").get<bool>(),
-                          {static_cast<pathtracer::debug::DenoiseQuality>(found - names), denoiser.at("prefilterAuxiliary").get<bool>(),
-                           numThreads.get<int>()}};
+                          {static_cast<pathtracer::debug::DenoiseQuality>(found - names), denoiser.at("prefilterAuxiliary").get<bool>()}};
 }
 
 // Integer-typed first: get<int>() would silently truncate 16.5 to 16.
@@ -246,8 +239,8 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
             return std::nullopt;
         }
         // The viewer would open on an AOV no producer serves.
-        if (!denoiserConfig->enabled && pathtracer::debug::aovNeedsDenoiser(static_cast<pathtracer::debug::AovId>(renderConfig->defaultAov))) {
-            std::cerr << "loadProfileConfig: " << path << ": defaultAOV " << renderConfig->defaultAov << " needs the denoiser, which is disabled\n";
+        if (!denoiserConfig->enabled && renderConfig->defaultAov == static_cast<int>(pathtracer::debug::AovId::Denoised)) {
+            std::cerr << "loadProfileConfig: " << path << ": defaultAOV is denoised, but the denoiser is disabled\n";
             return std::nullopt;
         }
         return ProfileConfig{*cameraConfig, controlsConfig, *renderConfig, pathTracerConfig, *denoiserConfig};

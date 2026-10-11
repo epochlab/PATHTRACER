@@ -602,6 +602,9 @@ PathTraceResult makePathTraceResult(int width, int height, int replicates) {
             result.*lane = pathtracer::gfx::makeImage(width, height, pathtracer::debug::aovChannels(aov));
         }
     }
+    for (const pathtracer::debug::PathTracedLane lane : pathtracer::debug::kDenoiseFeatureLanes) {
+        result.*lane = pathtracer::gfx::makeImage(width, height, pathtracer::gfx::kRgbChannels);
+    }
     result.replicateLuminance.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) *
                                          static_cast<std::size_t>(replicates),
                                      0.0F);

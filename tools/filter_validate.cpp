@@ -636,8 +636,7 @@ PT_CHECK(wrapped_filters_commute_with_a_cyclic_column_shift, Fast, Exact) {
 PT_CHECK(denoised_reduces_error_and_leaves_its_inputs_unchanged, Fast, Exact) {
     using pathtracer::debug::DenoiseQuality;
     constexpr std::array<DenoiseQuality, 3> kQualities{DenoiseQuality::Fast, DenoiseQuality::Balanced, DenoiseQuality::High};
-    constexpr std::array<int, 2> kThreadCounts{0, 1};  // OIDN's default of one per core, and a single worker
-    ctx.plan(static_cast<int>(kQualities.size() * kThreadCounts.size()) * 2 * 4);
+    ctx.plan(static_cast<int>(kQualities.size()) * 2 * 4);
     ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
     constexpr int kWidth = 64;
     constexpr int kHeight = 48;
@@ -657,15 +656,12 @@ PT_CHECK(denoised_reduces_error_and_leaves_its_inputs_unchanged, Fast, Exact) {
     std::vector<pathtracer::debug::DenoiserOptions> settings;
     for (const DenoiseQuality quality : kQualities) {
         for (const bool prefilter : {true, false}) {
-            for (const int threads : kThreadCounts) {
-                settings.push_back({quality, prefilter, threads});
-            }
+            settings.push_back({quality, prefilter});
         }
     }
     for (const pathtracer::debug::DenoiserOptions& options : settings) {
         const std::string setting = std::string(pathtracer::debug::kDenoiseQualityNames[static_cast<int>(options.quality)]) +
-                                    (options.prefilterAuxiliary ? ", prefiltered, " : ", unprefiltered, ") +
-                                    std::to_string(options.numThreads) + " threads";
+                                    (options.prefilterAuxiliary ? ", prefiltered" : ", unprefiltered");
         pathtracer::debug::Denoiser denoiser(options);
         pathtracer::debug::FilterInput input{noisy};
         input.denoiseAlbedo = &albedo;
@@ -690,7 +686,7 @@ PT_CHECK(denoised_reports_misuse_and_oidn_errors, Fast, Exact) {
     const HdrImage beauty = rampImage(16, 8);
     const HdrImage albedo = constantImage(16, 8, glm::vec3(0.5F));
     const HdrImage normal = constantImage(16, 8, glm::vec3(0.0F, 0.0F, 1.0F));
-    pathtracer::debug::Denoiser denoiser({pathtracer::debug::DenoiseQuality::High, true, 0});
+    pathtracer::debug::Denoiser denoiser({pathtracer::debug::DenoiseQuality::High, true});
     const auto throwsInvalid = [](const auto& call) {
         try {
             static_cast<void>(call());

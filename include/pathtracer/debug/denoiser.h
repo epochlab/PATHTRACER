@@ -15,13 +15,12 @@ inline constexpr const char* kDenoiseQualityNames[] = {"fast", "balanced", "high
 struct DenoiserOptions {
     DenoiseQuality quality;
     bool prefilterAuxiliary;  // OIDN's final-frame path: true prefilters albedo and normal; false is its one-filter interactive path
-    int numThreads;           // the CPU device's worker threads, 0 for OIDN's default of one per logical core
 };
 
 // Intel Open Image Denoise's RT filter on a CPU device: HDR Beauty guided by albedo and normal, prefiltered or taken as they are.
 class Denoiser {
 public:
-    // Commits the CPU device with the options' thread count, or throws std::runtime_error carrying OIDN's own message.
+    // Commits the CPU device, or throws std::runtime_error carrying OIDN's own message.
     explicit Denoiser(const DenoiserOptions& options);
     ~Denoiser();
 
