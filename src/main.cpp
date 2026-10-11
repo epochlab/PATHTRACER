@@ -193,10 +193,8 @@ struct AppScene {
     std::vector<pathtracer::scene::QuadLight> quadLights;
     pathtracer::scene::EnvironmentMap environmentMap;
     pathtracer::scene::EmbreeAccel accel;  // path tracer scene intersection
-    // The profile's integrator limits and the material file's defaults, the base every instance override starts from.
+    // The profile's integrator limits; every instance's material lives on model.instances.
     pathtracer::scene::PathTraceSettings baseSettings;
-    // Per-instance material fields, parallel to model.instances, overridden by name. Renderer-only fields stay scene-wide.
-    std::vector<pathtracer::scene::PathTraceSettings> perInstanceSettings;
     // World-space AABB per instance, parallel to model.instances. Static geometry, so computed once and read for the Wireframe AOV.
     std::vector<pathtracer::scene::AabbBounds> instanceBounds;
     int totalTriangles;   // before the BVH build takes worldTriangles
@@ -340,8 +338,10 @@ std::optional<AppScene> loadAppScene(const pathtracer::config::SceneConfig& scen
     const auto loadStart = std::chrono::steady_clock::now();
     std::optional<pathtracer::scene::LoadedModel> model =
         pathtracer::scene::loadGltf(std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.model.gltfPath, sceneTransform);
-    // Scene-JSON textures bind before anything reads a material; bindSceneTextures logs the reason it fails.
-    if (model && !pathtracer::scene::bindSceneTextures(model->instances, sceneConfig.textures, ASSET_ROOT_DIR)) {
+    // Materials, then the scene's textures over them, before anything reads a material; each call logs the reason it fails.
+    if (model && (!pathtracer::scene::applySceneMaterials(model->instances, sceneConfig.materialPath, sceneConfig.materialOverrides,
+                                                          ASSET_ROOT_DIR) ||
+                  !pathtracer::scene::bindSceneTextures(model->instances, sceneConfig.textures, ASSET_ROOT_DIR))) {
         model.reset();
     }
     const double loadMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - loadStart).count();
@@ -349,10 +349,8 @@ std::optional<AppScene> loadAppScene(const pathtracer::config::SceneConfig& scen
     std::shared_ptr<const pathtracer::gfx::ImageTexture> environmentTexture = pathtracer::gfx::openTexture(
         std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.environment.hdriPath, pathtracer::gfx::kRgbChannels,
         pathtracer::gfx::ImageRole::Colour, pathtracer::gfx::TextureWrap::LatLong, sceneConfig.environment.colorSpace);
-    std::optional<pathtracer::config::MaterialConfig> materialConfig = pathtracer::config::loadMaterialConfig(
-        std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.materialPath);
-    if (!model || !environmentTexture || !materialConfig) {
-        std::cerr << "main: model load, environment map load, or material load failed, aborting startup\n";
+    if (!model || !environmentTexture) {
+        std::cerr << "main: model, material or environment map load failed, aborting startup\n";
         return std::nullopt;
     }
 
@@ -371,19 +369,13 @@ std::optional<AppScene> loadAppScene(const pathtracer::config::SceneConfig& scen
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - accelBuildStart).count();
 
     const pathtracer::scene::PathTraceSettings baseSettings =
-        pathtracer::scene::baseSettingsOf(profileConfig, *materialConfig, profileConfig.pathTracer.samplesPerPixel);
-    std::optional<std::vector<pathtracer::scene::PathTraceSettings>> perInstanceSettings =
-        pathtracer::scene::resolvePerInstanceSettings(baseSettings, model->instances, sceneConfig.materialOverrides, ASSET_ROOT_DIR);
-    if (!perInstanceSettings) {
-        std::cerr << "main: material override resolution failed, aborting startup\n";
-        return std::nullopt;
-    }
+        pathtracer::scene::baseSettingsOf(profileConfig, profileConfig.pathTracer.samplesPerPixel);
     // After appendQuadLights, so the light panels' own instances are bounded too.
     std::vector<pathtracer::scene::AabbBounds> instanceBounds =
         pathtracer::scene::computeInstanceBounds(model->shadingTriangles, static_cast<int>(model->instances.size()));
     return AppScene{std::move(*model), std::move(instanceLightIndex), std::move(quadLights),
                     pathtracer::scene::EnvironmentMap(std::move(environmentTexture)), std::move(*accel), baseSettings,
-                    std::move(*perInstanceSettings), std::move(instanceBounds), totalTriangles, loadMs, accelBuildMs};
+                    std::move(instanceBounds), totalTriangles, loadMs, accelBuildMs};
 }
 
 // Printed at the end of startup, not where each value becomes known: every number is real by now, and one block survives being piped.
@@ -791,7 +783,7 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const pathtracer::scene
     {
         const pathtracer::debug::ScopedCpuTimer gbufferTimer(app.stages.gbufferMs);
         pathtracer::scene::renderGBuffer(camera, previousCamera, app.scene.accel, app.scene.model.shadingTriangles,
-                                         app.scene.model.instances, app.scene.perInstanceSettings,
+                                         app.scene.model.instances, app.scene.baseSettings.lookaheadDistance,
                                          app.scene.instanceBounds, traceWidth, traceHeight, *app.gbufferThreadPool,
                                          *app.gbuffer);
     }
@@ -1392,7 +1384,7 @@ int runApp(const Options& options, const pathtracer::config::SceneConfig& sceneC
     // Constructed here, not in the initializer list: this local is where the scene objects reach their final address.
     app->pathTraceDriver = std::make_unique<pathtracer::scene::PathTraceDriver>(
         app->scene.accel, app->scene.model.shadingTriangles, app->scene.model.instances, app->scene.instanceLightIndex,
-        app->scene.environmentMap, app->scene.quadLights, app->scene.perInstanceSettings);
+        app->scene.environmentMap, app->scene.quadLights);
 
     wireCallbacks(window, *app);
     if (!options.benchLogPath.empty()) {

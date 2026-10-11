@@ -10,11 +10,12 @@
     "materialPath": "materials/principled.json",
     "textures": {
         "rkswd_LOD0_TIER2_000": {
-            "baseColorTexture": "geometry/broken_stump_rkswd_raw/broken_stump_rkswd_exr_raw_4k/Broken_Stump_rkswd_Raw_4K_BaseColor.exr",
-            "normalTexture": "geometry/broken_stump_rkswd_raw/broken_stump_rkswd_exr_raw_4k/Broken_Stump_rkswd_Raw_4K_Normal.exr",
-            "bumpTexture": "geometry/broken_stump_rkswd_raw/broken_stump_rkswd_exr_raw_4k/Broken_Stump_rkswd_Raw_4K_Bump.exr",
-            "roughnessTexture": "geometry/broken_stump_rkswd_raw/broken_stump_rkswd_exr_raw_4k/Broken_Stump_rkswd_Raw_4K_Roughness.exr",
-            "specularTexture": "geometry/broken_stump_rkswd_raw/broken_stump_rkswd_exr_raw_4k/Broken_Stump_rkswd_Raw_4K_Specular.exr"
+            "base_color": "geometry/broken_stump_rkswd_raw/broken_stump_rkswd_exr_raw_4k/Broken_Stump_rkswd_Raw_4K_BaseColor.exr",
+            "specular_roughness": "geometry/broken_stump_rkswd_raw/broken_stump_rkswd_exr_raw_4k/Broken_Stump_rkswd_Raw_4K_Roughness.exr",
+            "geometry_normal": {
+                "path": "geometry/broken_stump_rkswd_raw/broken_stump_rkswd_exr_raw_4k/Broken_Stump_rkswd_Raw_4K_Normal.exr",
+                "bump": {"path": "geometry/broken_stump_rkswd_raw/broken_stump_rkswd_exr_raw_4k/Broken_Stump_rkswd_Raw_4K_Bump.exr", "height": 0.005}
+            }
         }
     }
 }

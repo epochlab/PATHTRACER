@@ -42,8 +42,8 @@ constexpr int kMsReflectMuRes = 128;
 constexpr int kTransmitRoughnessRes = 32;
 constexpr int kTransmitMuRes = 64;
 constexpr int kEtaRes = 64;
-constexpr double kEtaMin = 1.0 / 2.5;  // exiting a 2.5-ior medium; the reciprocal end is entering one
-constexpr double kEtaMax = 2.5;
+constexpr double kEtaMin = 1.0 / 3.0;  // OpenPBR's normalised specular_ior range [1, 3], exiting; the reciprocal end is entering
+constexpr double kEtaMax = 3.0;
 
 // Gauss-Legendre nodes per transmit panel, in phi and each psi panel; verifyTransmit reports the residual against a doubled rule.
 constexpr int kTransmitNodes = 48;
@@ -58,10 +58,11 @@ double smithG2OverCosO(double cosO, double cosI, double alpha) {
     return 2.0 * cosI / ((cosI * smithRadical(cosO, alpha)) + (cosO * smithRadical(cosI, alpha)));
 }
 
-// --- Reflect side: exact-domain Gauss-Legendre, not Monte Carlo, whose horizon discontinuity caps any quadrature at first order.
+// Reflect side, exact-domain Gauss-Legendre: E = F0*a + b - k*c for F82's F0 + (1-F0)(1-x)^5 - k*x(1-x)^6, linear in (F0, k).
 struct Split {
     double a;
     double b;
+    double c;
 };
 
 // Gauss-Legendre nodes/weights on [0,1] by Newton on P_n through Bonnet's recurrence (Numerical Recipes 3rd ed. 4.6.1); weights sum to 1.
@@ -102,6 +103,7 @@ Split reflectAlbedo(double mu, double alpha, const GaussLegendre& phiRule, const
     const double sinTv = std::sqrt(std::max(0.0, 1.0 - (mu * mu)));
     double a = 0.0;
     double b = 0.0;
+    double c = 0.0;
     // phi is even about 0, so half the circle is integrated and doubled; the panels meet at pi/2, resolving the |cos phi| < mu layer.
     for (int panel = 0; panel < 2; ++panel) {
         const double phiBase = 0.5 * kPi * panel;
@@ -121,11 +123,12 @@ Split reflectAlbedo(double mu, double alpha, const GaussLegendre& phiRule, const
                 const double fc = std::pow(std::clamp(1.0 - woDotH, 0.0, 1.0), 5.0);
                 a += weight * (1.0 - fc);
                 b += weight * fc;
+                c += weight * woDotH * std::pow(std::clamp(1.0 - woDotH, 0.0, 1.0), 6.0);
             }
         }
     }
     // The 1/mu is inside smithG2OverCosO, which lets mu = 0 be a node; never 0/0, psiMax being unreachable on panel one and 0 on panel two.
-    return {a, b};
+    return {a, b, c};
 }
 
 // --- Transmit side: the reflect measure panelled at the interface's boundaries; a VNDF midpoint rule lumps the slope tail in, 3.6e-3.
@@ -236,8 +239,10 @@ void parallelRows(int rows, Row row) {
 struct AlbedoTable {
     std::vector<float> a;  // [roughnessIndex][muIndex], kAlbedoRoughnessRes * kAlbedoMuRes
     std::vector<float> b;
+    std::vector<float> c;
     std::vector<float> aavg;  // cosine-weighted means, 2*integral(.(mu)*mu dmu)
     std::vector<float> bavg;
+    std::vector<float> cavg;
     std::vector<float> r;  // [roughnessIndex][muIndex][etaIndex], kTransmitRoughnessRes * kTransmitMuRes * kEtaRes
     std::vector<float> t;
     std::vector<float> ravg;
@@ -272,8 +277,10 @@ void buildReflect(AlbedoTable& table, int phiNodes, int psiNodes, int muNodes) {
     const GaussLegendre muRule = gaussLegendre(muNodes);
     table.a.assign(static_cast<std::size_t>(kAlbedoRoughnessRes) * kAlbedoMuRes, 0.0F);
     table.b.assign(static_cast<std::size_t>(kAlbedoRoughnessRes) * kAlbedoMuRes, 0.0F);
+    table.c.assign(static_cast<std::size_t>(kAlbedoRoughnessRes) * kAlbedoMuRes, 0.0F);
     table.aavg.assign(kAlbedoRoughnessRes, 0.0F);
     table.bavg.assign(kAlbedoRoughnessRes, 0.0F);
+    table.cavg.assign(kAlbedoRoughnessRes, 0.0F);
     // One roughness row per worker, sharing no accumulator, so the result is identical to serial order: the artifact stays deterministic.
     parallelRows(kAlbedoRoughnessRes, [&](int ri) {
         const double alpha = gridAlpha(ri, kAlbedoRoughnessRes);
@@ -281,6 +288,7 @@ void buildReflect(AlbedoTable& table, int phiNodes, int psiNodes, int muNodes) {
             const Split split = reflectAlbedo(reflectMu(mi), alpha, phiRule, psiRule);
             table.a[static_cast<std::size_t>((ri * kAlbedoMuRes) + mi)] = static_cast<float>(split.a);
             table.b[static_cast<std::size_t>((ri * kAlbedoMuRes) + mi)] = static_cast<float>(split.b);
+            table.c[static_cast<std::size_t>((ri * kAlbedoMuRes) + mi)] = static_cast<float>(split.c);
         }
         // E(0, alpha) = 1 for every alpha, analytic at the axis' endpoint; a bake-time abort, since a miss means the quadrature is wrong.
         const double grazing = static_cast<double>(table.a[static_cast<std::size_t>(ri * kAlbedoMuRes)]) +
@@ -292,14 +300,17 @@ void buildReflect(AlbedoTable& table, int phiNodes, int psiNodes, int muNodes) {
         }
         double aMean = 0.0;
         double bMean = 0.0;
+        double cMean = 0.0;
         for (std::size_t k = 0; k < muRule.node.size(); ++k) {
             const double mu = muRule.node[k];
             const Split split = reflectAlbedo(mu, alpha, phiRule, psiRule);
             aMean += muRule.weight[k] * 2.0 * split.a * mu;
             bMean += muRule.weight[k] * 2.0 * split.b * mu;
+            cMean += muRule.weight[k] * 2.0 * split.c * mu;
         }
         table.aavg[static_cast<std::size_t>(ri)] = static_cast<float>(aMean);
         table.bavg[static_cast<std::size_t>(ri)] = static_cast<float>(bMean);
+        table.cavg[static_cast<std::size_t>(ri)] = static_cast<float>(cMean);
     });
 }
 
@@ -437,11 +448,13 @@ Residual verifyReflect(const AlbedoTable& table, int phiNodes, int psiNodes, int
     AlbedoTable reference;
     buildReflect(reference, phiNodes * 2, psiNodes * 2, muNodes * 2);
     Residual worst{0.0, "a", 0, 0};
-    const std::array<std::tuple<const char*, const std::vector<float>*, const std::vector<float>*>, 4>
+    const std::array<std::tuple<const char*, const std::vector<float>*, const std::vector<float>*>, 6>
         channels = {{{"a", &table.a, &reference.a},
                      {"b", &table.b, &reference.b},
+                     {"c", &table.c, &reference.c},
                      {"aavg", &table.aavg, &reference.aavg},
-                     {"bavg", &table.bavg, &reference.bavg}}};
+                     {"bavg", &table.bavg, &reference.bavg},
+                     {"cavg", &table.cavg, &reference.cavg}}};
     for (const auto& [name, shipped, exact] : channels) {
         Residual channelWorst{0.0, name, 0, 0};
         for (std::size_t i = 0; i < shipped->size(); ++i) {
@@ -495,15 +508,18 @@ double verifyTransmit(const AlbedoTable& table, int nodes) {
     return worst;
 }
 
-// %.9g is FLT_DECIMAL_DIG, round-tripping float32 exactly; it drops the point on a whole number, so "1" gets its F restored where needed.
+// %.9g is FLT_DECIMAL_DIG, round-tripping float32 exactly; it drops the point on a whole number, so "1" becomes "1.0F".
+std::string floatLiteral(float value) {
+    std::array<char, 32> buffer{};
+    std::snprintf(buffer.data(), buffer.size(), "%.9g", static_cast<double>(value));
+    const std::string literal(buffer.data());
+    return literal + (literal.find_first_of(".e") == std::string::npos ? ".0F" : "F");
+}
+
 void writeArray(std::ofstream& out, const char* name, const std::vector<float>& values) {
     out << "\nconstexpr std::array<float, " << values.size() << "> " << name << " = {{";
-    std::array<char, 32> buffer{};
     for (std::size_t i = 0; i < values.size(); ++i) {
-        std::snprintf(buffer.data(), buffer.size(), "%.9g", static_cast<double>(values[i]));
-        const std::string literal(buffer.data());
-        out << (i % 8 == 0 ? "\n    " : " ") << literal
-            << (literal.find_first_of(".e") == std::string::npos ? ".0F," : "F,");
+        out << (i % 8 == 0 ? "\n    " : " ") << floatLiteral(values[i]) << ",";
     }
     out << "\n}};\n";
 }
@@ -515,10 +531,8 @@ bool writeInc(const std::string& path, const AlbedoTable& table, double residual
         std::cerr << "albedo_table: cannot write " << path << "\n";
         return false;
     }
-    std::array<char, 32> etaMin{};
-    std::array<char, 32> etaMax{};
-    std::snprintf(etaMin.data(), etaMin.size(), "%.9g", kEtaMin);
-    std::snprintf(etaMax.data(), etaMax.size(), "%.9g", kEtaMax);
+    const std::string etaMin = floatLiteral(static_cast<float>(kEtaMin));
+    const std::string etaMax = floatLiteral(static_cast<float>(kEtaMax));
     out << "// Generated by tools/albedo_table.cpp -- do not edit. Regenerate with:\n"
            "//   ./build/albedo_table --out src/scene/albedo_table.inc\n"
            "// Kulla-Conty energy tables, indexed by perceptual roughness rather than alpha: E is far better\n"
@@ -529,7 +543,9 @@ bool writeInc(const std::string& path, const AlbedoTable& table, double residual
            "// 0 is mu = 0 itself, where E = 1 exactly for every alpha and the bake asserts that identity. The\n"
            "// two multiple-scattering shapes below stay uniform in mu, where their piecewise-linear inversion\n"
            "// has one step width.\n"
-           "// Reflect side (a, b, aavg, bavg) is exact-domain Gauss-Legendre, residual "
+           "// The reflect side splits E = F0*a + b - k*c for the F82-tint Fresnel F0 + (1-F0)(1-x)^5 - k*x(1-x)^6\n"
+           "// (OpenPBR's metal, Hoffman 2023): linear in (F0, k), so the three Fresnel-free integrals are exact.\n"
+           "// Reflect side (a, b, c and their means) is exact-domain Gauss-Legendre, residual "
         << residual << " against a doubled rule.\n"
            "// Transmit side (r, t, ravg, tavg) is Gauss-Legendre in the NDF measure at "
         << transmitNodes << " nodes per panel, residual " << transmitResidual << " against a doubled rule.\n"
@@ -546,12 +562,14 @@ bool writeInc(const std::string& path, const AlbedoTable& table, double residual
         << "constexpr int kTransmitRoughnessRes = " << kTransmitRoughnessRes << ";\n"
         << "constexpr int kTransmitMuRes = " << kTransmitMuRes << ";\n"
         << "constexpr int kEtaRes = " << kEtaRes << ";\n"
-        << "constexpr float kEtaMin = " << etaMin.data() << "F;\n"
-        << "constexpr float kEtaMax = " << etaMax.data() << "F;\n";
+        << "constexpr float kEtaMin = " << etaMin << ";\n"
+        << "constexpr float kEtaMax = " << etaMax << ";\n";
     writeArray(out, "kAlbedoA", table.a);
     writeArray(out, "kAlbedoB", table.b);
+    writeArray(out, "kAlbedoC", table.c);
     writeArray(out, "kAlbedoAvgA", table.aavg);
     writeArray(out, "kAlbedoAvgB", table.bavg);
+    writeArray(out, "kAlbedoAvgC", table.cavg);
     writeArray(out, "kEscapeReflect", table.r);
     writeArray(out, "kEscapeTransmit", table.t);
     writeArray(out, "kEscapeAvgReflect", table.ravg);

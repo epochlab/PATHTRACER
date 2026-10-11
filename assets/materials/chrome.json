@@ -1,9 +1,6 @@
 {
-    "diffuseColour": [0.549619973, 0.55602181, 0.554227054],
-    "edgeTint": [0.541698217, 0.569233477, 0.694220781],
-    "roughnessFactor": 0.05,
-    "roughnessMin": 0.045,
-    "roughnessMax": 1.0,
-    "metallicFactor": 1.0,
-    "bumpStrength": 0.0
+    "base_metalness": 1.0,
+    "base_color": [0.549619973, 0.55602181, 0.554227054],
+    "specular_color": [0.740725219, 0.748792648, 0.813905418],
+    "specular_roughness": 0.05
 }

@@ -45,9 +45,13 @@ struct Options {
     std::string benchLogPath;  // appends the run to this JSON Lines benchmark log (bench_log.h); empty = no log
 };
 
-// The neutral default material, varying only the two slots the G-buffer AOVs under test read.
+// OpenPBR defaults with a fractional metalness, varying only the two inputs the G-buffer AOVs under test read.
 Material makeMaterial(glm::vec3 baseColor, float roughness) {
-    return Material{.baseColor = baseColor, .roughness = roughness};
+    Material material;
+    material.baseColor = baseColor;
+    material.baseMetalness = 0.2F;
+    material.specularRoughness = roughness;
+    return material;
 }
 
 glm::vec4 tangentFor(const glm::vec3& normal) {
@@ -177,19 +181,7 @@ int main(int argc, char** argv) {
     instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.2F, 0.2F, 0.8F), 0.8F), glm::mat4(1.0F), ""});
     instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.8F, 0.8F, 0.2F), 1.0F), glm::mat4(1.0F), ""});
 
-    PathTraceSettings settings{};
-    settings.samplesPerPixel = 1;
-    settings.maxBounces = 0;
-    settings.russianRouletteStartBounce = 1;
-    settings.bumpStrength = 1.0F;
-    settings.roughnessMin = 0.045F;
-    settings.roughnessMax = 1.0F;
-    settings.diffuseColour = glm::vec3(1.0F);
-    settings.ior = 1.5F;
-    settings.transmissionFactor = 0.0F;
-    settings.metallicFactor = 0.2F;
-    settings.roughnessFactor = 1.0F;
-    const std::vector<PathTraceSettings> perInstanceSettings(instances.size(), settings);
+    const PathTraceSettings settings{.samplesPerPixel = 1, .maxBounces = 0, .russianRouletteStartBounce = 1};
     // Once outside the timed loop, as the app does at load: the measured cost is testing the boxes' edges, not deriving them.
     const std::vector<AabbBounds> instanceBounds =
         computeInstanceBounds(shadingTriangles, static_cast<int>(instances.size()));
@@ -209,7 +201,7 @@ int main(int argc, char** argv) {
     // One buffer for the whole run as the app owns it: renderGBuffer reuses it in place, so timed frames measure steady state.
     GBuffer gbuffer;
     // Discarded warm-up pass absorbing the once-only costs: spinning up and parking the pool's workers, and the buffer's only allocation.
-    renderGBuffer(camera, camera, *accel, shadingTriangles, instances, perInstanceSettings, instanceBounds, options->width,
+    renderGBuffer(camera, camera, *accel, shadingTriangles, instances, settings.lookaheadDistance, instanceBounds, options->width,
                   options->height, threadPool, gbuffer);
     if (gbuffer.depth.width != options->width) {
         std::cerr << "gbuffer_bench: warm-up produced a " << gbuffer.depth.width << "px-wide buffer\n";
@@ -220,7 +212,7 @@ int main(int argc, char** argv) {
     milliseconds.reserve(static_cast<std::size_t>(options->frames));
     for (int frame = 0; frame < options->frames; ++frame) {
         const auto start = std::chrono::steady_clock::now();
-        renderGBuffer(camera, camera, *accel, shadingTriangles, instances, perInstanceSettings, instanceBounds,
+        renderGBuffer(camera, camera, *accel, shadingTriangles, instances, settings.lookaheadDistance, instanceBounds,
                       options->width, options->height, threadPool, gbuffer);
         const auto end = std::chrono::steady_clock::now();
         milliseconds.push_back(std::chrono::duration<double, std::milli>(end - start).count());

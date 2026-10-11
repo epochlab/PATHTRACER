@@ -29,13 +29,13 @@ constexpr std::uint32_t kFresnelSeedOffset = 0x6A09E667U;
 // pbrt's ShadowEpsilon (PBR 6.8.6): a relative back-off on tMax, or a light's own front face occludes it. A no-op for the environment.
 constexpr float kShadowDistanceEpsilon = 1e-3F;
 
-// Beer-Lambert (Arnold/OpenPBR): sigma_a = -ln(color)/depth. The colour floor stays, since -log(0) would meet t = inf as 0*inf.
-glm::vec3 sigmaAFromTransmission(const glm::vec3& color, float depth) {
-    if (depth <= 0.0F) {
-        return glm::vec3(0.0F);
-    }
-    return -glm::log(glm::max(color, glm::vec3(1e-6F))) / depth;
-}
+// An interior in OpenPBR's form: transmittance reaches transmission_color at transmission_depth, T(t) = color^(t/depth).
+struct Medium {
+    glm::vec3 color;
+    float depth;
+    // Depth 0 is no medium (the colour tints the surface instead); pow is exact at colour 0 and t = inf, with no log of zero to guard.
+    [[nodiscard]] glm::vec3 transmittance(float t) const { return depth > 0.0F ? glm::pow(color, glm::vec3(t / depth)) : glm::vec3(1.0F); }
+};
 
 // Transmission needs a curvature-scaled offset, ~1e-3 on a 500-triangle sphere; raw edge length has no zero and blew up on a flat slab.
 float transmissionOffsetEpsilon(const ShadingTriangle& tri) {
@@ -130,7 +130,6 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
                        const std::vector<MeshInstance>& instances,
                        const std::vector<int>& instanceLightIndex, const LightSet& lights,
                        bool showSky, const PathTraceSettings& settings,
-                       const std::vector<PathTraceSettings>& perInstanceSettings,
                        Sampler& sampler, glm::vec2 aoSample, glm::vec2 fresnelSample,
                        pathtracer::debug::RayCounts& __restrict rays) {
     glm::vec3 radiance(0.0F);
@@ -138,8 +137,8 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
     Ray ray = primaryRay;
     int bounce = 0;
     std::optional<PathBucket> pathBucket;  // unset until bounce 0 successfully samples a lobe
-    // Single-level medium stack: nullopt = vacuum, set = the sigmaA the ray is inside. Enough for one glass object, not two overlapping.
-    std::optional<glm::vec3> mediumSigmaA;
+    // Single-level medium stack: nullopt = vacuum, set = the medium the ray is inside. Enough for one glass object, not two overlapping.
+    std::optional<Medium> medium;
     // The RGB channel this path committed to at a dispersive interface; unset means full RGB transport. See the selection block below.
     std::optional<int> heroChannel;
     glm::vec3 directDiffuseAccum(0.0F);
@@ -185,14 +184,9 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
             gAlpha = hit.has_value() || showSky ? 1.0F : 0.0F;
         }
 
-        // Beer-Lambert for the segment just travelled. A miss is unbounded, so it is written per channel: exp(-0 * inf) is NaN.
-        if (mediumSigmaA.has_value()) {
-            const glm::vec3& sigmaA = *mediumSigmaA;
-            throughput *= hit.has_value()
-                               ? glm::exp(-sigmaA * hit->t)
-                               : glm::vec3(sigmaA.x > 0.0F ? 0.0F : 1.0F,
-                                            sigmaA.y > 0.0F ? 0.0F : 1.0F,
-                                            sigmaA.z > 0.0F ? 0.0F : 1.0F);
+        // Beer-Lambert for the segment just travelled; a miss is unbounded, t = inf.
+        if (medium.has_value()) {
+            throughput *= medium->transmittance(hit.has_value() ? hit->t : std::numeric_limits<float>::infinity());
         }
 
         if (!hit.has_value()) {
@@ -236,20 +230,17 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
 
         const Material& material =
             instances[static_cast<std::size_t>(triangle.instanceIndex)].material;
-        const PathTraceSettings& instanceSettings =
-            perInstanceSettings[static_cast<std::size_t>(triangle.instanceIndex)];
         // Secondary vertices lack propagated differentials (Igehy's BSDF transfer), so they read level 0 as a zero footprint does.
         const pathtracer::gfx::TextureFootprint footprint =
             bounce == 0 ? primaryHitFootprint(triangle, ray, hit->t, dirFootprint) : pathtracer::gfx::TextureFootprint{};
+        const ShadingVertex shading = interpolateShading(triangle, hit->u, hit->v);
 
-        // A constant surface emits its base colour two-sided and scatters nothing; absent from LightSet, so the hit takes MIS weight 1.
-        if (instanceSettings.shadingModel == ShadingModel::Constant) {
-            const ShadingVertex shading = interpolateShading(triangle, hit->u, hit->v);
-            const glm::vec3 hitRadiance =
-                throughput * resolveBaseColor(material, shading.uv, footprint, shading.colour, instanceSettings);
+        // Surface emission, two-sided and absent from LightSet, so the hit takes MIS weight 1. Before the depth cap, as an emitter hit.
+        const glm::vec3 emitted = emittedRadiance(material, shading.uv, footprint);
+        if (emitted != glm::vec3(0.0F)) {
+            const glm::vec3 hitRadiance = throughput * emitted;
             radiance += hitRadiance;
             addToBucket(hitRadiance, /*isDirect=*/bounce == 1);
-            break;
         }
 
         // Depth cap. The extra iteration exists only so the final BSDF ray can collect its MIS-weighted miss or emitter hit.
@@ -257,9 +248,9 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
             break;
         }
 
+        const OpenPbrInputs<Constant> inputs = resolveInputs(material, shading.uv, footprint, shading.colour);
         // Commit to one RGB channel at the first dispersive interface; sum == 0 is reachable, rrMinProb keeps zero-throughput paths alive.
-        if (!heroChannel.has_value() && instanceSettings.abbe > 0.0F &&
-            instanceSettings.transmissionFactor > 0.0F) {
+        if (!heroChannel.has_value() && isDispersive(inputs)) {
             const float sum = throughput.x + throughput.y + throughput.z;
             if (sum > 0.0F) {
                 const float u = sampler.next1D() * sum;
@@ -270,10 +261,8 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
             }
         }
 
-        const ShadingVertex shading = interpolateShading(triangle, hit->u, hit->v);
-        const ShadingFrame frame = buildShadingFrame(triangle, shading, material, instanceSettings);
-        const BsdfParams params =
-            resolveBsdfParams(material, shading.uv, footprint, shading.colour, instanceSettings, heroChannel);
+        const ShadingFrame frame = buildShadingFrame(triangle, shading, material);
+        const BsdfParams params = bsdfParamsOf(inputs, heroChannel);
         const glm::vec3 woWorld = -ray.dir;
         // True flat plane normal, for light-leak rejection and ray-origin offsets: both need geometry, not the shading normal.
         const glm::vec3 geoNormal = geometricNormalOf(triangle);
@@ -306,6 +295,11 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
             }
         }
 
+        // A zero BSDF, emission alone, carries no light onward: the path ends here, its AO and Fresnel lanes already written.
+        if (!scatters(closure)) {
+            break;
+        }
+
         // A failed sample must not skip the NEE block: the two are independent estimators, sharing only this vertex's params and frame.
         const std::optional<BsdfSample> sample = sampleBsdf(closure, sampler);
 
@@ -322,11 +316,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
 
         // Medium toggle, co-located with the bucket since both key off a Transmission sample. Reflection and TIR leave it untouched.
         if (sample.has_value() && sample->type == LobeType::Transmission) {
-            mediumSigmaA = mediumSigmaA.has_value()
-                               ? std::nullopt
-                               : std::make_optional(sigmaAFromTransmission(
-                                     instanceSettings.transmissionColor,
-                                     instanceSettings.transmissionDepth));
+            medium = medium.has_value() ? std::nullopt : std::make_optional(Medium{inputs.transmissionColor, inputs.transmissionDepth});
         }
 
         // NEE: sample a light, evaluate the BSDF toward it, add it MIS-weighted if unoccluded. Fired whatever lobe `sample` drew.
@@ -336,7 +326,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, co
             const float shadingCos = glm::dot(lightSample->direction, frame[2]);
             // Both sides, not just wo's: on a transmissive surface a light behind the vertex reaches the eye through the transmission lobe.
             const bool nearSide = geoCos > 0.0F && shadingCos > 0.0F;
-            const bool farSide = geoCos < 0.0F && shadingCos < 0.0F && params.transmissionFactor > 0.0F;
+            const bool farSide = geoCos < 0.0F && shadingCos < 0.0F && params.transmissionWeight > 0.0F;
             if (nearSide || farSide) {
                 const glm::vec3 wiLocalLight = lightSample->direction * frame;
                 const float lightCos = std::abs(shadingCos);  // far-side samples carry a negative cosine
@@ -453,7 +443,6 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                        const std::vector<MeshInstance>& instances,
                        const std::vector<int>& instanceLightIndex, const LightSet& lights,
                        int width, int height, bool showSky, const PathTraceSettings& settings,
-                       const std::vector<PathTraceSettings>& perInstanceSettings,
                        std::uint32_t scrambleSeed, int sampleBase, int sampleCount,
                        const std::atomic<std::uint64_t>& generation,
                        std::uint64_t requestedGeneration, ThreadPool& threadPool,
@@ -517,7 +506,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                     // Nullopt is a fisheye sample outside the image circle: no ray exists, so every lane reads zero for it.
                     const TraceResult trace =
                         primary ? tracePath(primary->ray, primary->dirPerNdc * ndcPerStratum, accel, shadingTriangles, instances,
-                                            instanceLightIndex, lights, showSky, settings, perInstanceSettings, sampler,
+                                            instanceLightIndex, lights, showSky, settings, sampler,
                                             aoSample, fresnelSample, tileRays)
                                 : TraceResult{};
                     const std::array<float, kSampleLanes> values{

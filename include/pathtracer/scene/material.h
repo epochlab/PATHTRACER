@@ -6,26 +6,34 @@
 #include <glm/glm.hpp>
 
 #include "pathtracer/gfx/hdr_image.h"
+#include "pathtracer/scene/openpbr.h"
 
 namespace pathtracer::scene {
 
-// Standard: the metallic-roughness BSDF. Constant: emits its resolved base colour and scatters nothing, an unlit flat surface.
-enum class ShadingModel { Standard, Constant };
-
-// Shared and immutable: one open serves every slot, primitive and instance binding that file at that channel count and role.
+// Shared and immutable: one open serves every input, primitive and instance binding that file at that channel, count and role.
 using TextureHandle = std::shared_ptr<const pathtracer::gfx::ImageTexture>;
 
-// The constant an unbound slot holds, or the bound texture filtered per shading vertex. A float input decodes R, a vec3 one RGB.
+// The constant an unbound input holds, or the bound texture that replaces it, filtered per shading vertex.
 template <typename T>
 using MaterialInput = std::variant<T, TextureHandle>;
 
-// Metallic-roughness material extended with Specular and Bump; default-constructed, every slot is its neutral constant.
-struct Material {
-    MaterialInput<glm::vec3> baseColor = glm::vec3(1.0F);           // white: diffuseColour alone sets the albedo
-    MaterialInput<glm::vec3> normal = glm::vec3(0.5F, 0.5F, 1.0F);  // [0,1]-encoded as a normal map stores it: tangent-space +z
-    MaterialInput<float> bump = 0.0F;                               // a constant height field has zero gradient, so no tilt
-    MaterialInput<float> roughness = 1.0F;                          // roughnessFactor/min/max fully control the result
-    MaterialInput<glm::vec3> specular = glm::vec3(0.04F);           // dielectric f0, inert whenever metallicFactor=0
+// geometry_normal's sources: a tangent-space normal map, a height map at heightMetres world metres per unit, or both, bump last.
+struct NormalInput {
+    TextureHandle map;
+    TextureHandle height;
+    float heightMetres = 0.0F;
 };
+
+// One instance's OpenPBR surface: every input a constant or a texture, plus the shading normal's sources.
+struct Material : OpenPbrInputs<MaterialInput> {
+    NormalInput geometryNormal;
+};
+
+// A material file's constants as an unbound Material.
+[[nodiscard]] inline Material materialOf(const OpenPbrInputs<Constant>& constants) {
+    Material material;
+    forEachInput([](const InputSpec&, auto& input, const auto& value) { input = value; }, material, constants);
+    return material;
+}
 
 }  // namespace pathtracer::scene

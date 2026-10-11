@@ -1,6 +1,7 @@
 #include "pathtracer/scene/gbuffer_shading.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <type_traits>
 #include <variant>
@@ -9,25 +10,18 @@ namespace pathtracer::scene {
 
 namespace {
 
-// A constant input is its own value at every uv: only a bound texture is filtered, so an unbound slot costs one load.
+// A constant input is its own value at every uv, validated at load; a texel is clamped into the input's specification range.
 template <typename T>
-T evaluate(const MaterialInput<T>& input, glm::vec2 uv, const pathtracer::gfx::TextureFootprint& footprint) {
+T evaluate(const MaterialInput<T>& input, glm::vec2 uv, const pathtracer::gfx::TextureFootprint& footprint, InputRange range) {
     if (const T* constant = std::get_if<T>(&input)) {
         return *constant;
     }
     const glm::vec3 texel = pathtracer::gfx::sampleTexture(**std::get_if<TextureHandle>(&input), uv, footprint);
     if constexpr (std::is_same_v<T, float>) {
-        return texel.r;
+        return clampToRange(texel.r, range);
     } else {
-        return texel;
+        return {clampToRange(texel.r, range), clampToRange(texel.g, range), clampToRange(texel.b, range)};
     }
-}
-
-float resolveRoughness(const Material& material, glm::vec2 uv, const PathTraceSettings& settings) {
-    // Point-sampled: GGX is nonlinear in roughness, so a prefiltered value biases, where the pixel's samples integrate it unbiased.
-    const float sample = evaluate(material.roughness, uv, {});
-    // Floor (UE4/Frostbite convention) avoids a near-zero-roughness GGX singularity.
-    return std::clamp(sample * settings.roughnessFactor, settings.roughnessMin, settings.roughnessMax);
 }
 
 }  // namespace
@@ -57,11 +51,6 @@ pathtracer::gfx::TextureFootprint primaryHitFootprint(const ShadingTriangle& tri
     return {toUv(onPlane(dirFootprint[0])), toUv(onPlane(dirFootprint[1]))};
 }
 
-glm::vec3 resolveBaseColor(const Material& material, glm::vec2 uv, const pathtracer::gfx::TextureFootprint& footprint,
-                            const glm::vec3& vertexColour, const PathTraceSettings& settings) {
-    return evaluate(material.baseColor, uv, footprint) * settings.diffuseColour * vertexColour;
-}
-
 LineProximity nearLineSegmentPx(glm::vec2 p, glm::vec2 a, glm::vec2 b, float thicknessPx) {
     const glm::vec2 ab = b - a;
     const float abLenSq = glm::dot(ab, ab);
@@ -70,45 +59,79 @@ LineProximity nearLineSegmentPx(glm::vec2 p, glm::vec2 a, glm::vec2 b, float thi
     return LineProximity{glm::length(p - closest) < thicknessPx, t};
 }
 
-BsdfParams resolveBsdfParams(const Material& material, glm::vec2 uv, const pathtracer::gfx::TextureFootprint& footprint,
-                              const glm::vec3& vertexColour,
-                              const PathTraceSettings& settings,
-                              std::optional<int> heroChannel) {
-    const glm::vec3 baseColor = resolveBaseColor(material, uv, footprint, vertexColour, settings);
-    const float roughness = resolveRoughness(material, uv, settings);
-    // Footprint-filtered with base colour: radiance is linear in both, so a prefiltered lookup is exact in expectation.
-    const glm::vec3 specular = evaluate(material.specular, uv, footprint);
-    const glm::vec3 f0 = glm::mix(specular, baseColor, settings.metallicFactor);
-    // Dispersion enters here alone: every downstream ior consumer reads this one scalar, so the vertex stays spectrally consistent.
-    const float ior = heroChannel.has_value()
-                          ? cauchyIor(settings.ior, settings.abbe, kRgbWavelengthsNm[*heroChannel])
-                          : settings.ior;
-    // OpenPBR's two exclusive regimes: at transmissionDepth > 0 Beer-Lambert extinction carries it; at 0 it is the on-surface tint.
-    const glm::vec3 transmissionTint =
-        settings.transmissionDepth > 0.0F ? glm::vec3(1.0F) : settings.transmissionColor;
-    return BsdfParams{baseColor,          settings.metallicFactor, roughness,
-                       f0,                settings.edgeTint,       ior,
-                       settings.transmissionFactor, settings.diffuseRoughness,
-                       eonAlbedoInversion(baseColor, settings.diffuseRoughness), transmissionTint};
+OpenPbrInputs<Constant> resolveInputs(const Material& material, glm::vec2 uv, const pathtracer::gfx::TextureFootprint& footprint,
+                                      const glm::vec3& vertexColour) {
+    OpenPbrInputs<Constant> inputs;
+    // Footprint filtering is exact in expectation only where radiance is linear; a lobe-shaping input is point-sampled.
+    forEachInput(
+        [&](const InputSpec& spec, auto& value, const auto& input) {
+            if (spec.use == InputUse::Surface) {
+                value = evaluate(input, uv, spec.filtered ? footprint : pathtracer::gfx::TextureFootprint{}, spec.range);
+            }
+        },
+        inputs, material);
+    inputs.baseColor *= vertexColour;
+    return inputs;
 }
 
-ShadingFrame buildShadingFrame(const ShadingTriangle& triangle, const ShadingVertex& shading, const Material& material,
-                                const PathTraceSettings& settings) {
+bool isDispersive(const OpenPbrInputs<Constant>& inputs) {
+    return inputs.transmissionDispersionScale > 0.0F && inputs.transmissionWeight > 0.0F && inputs.baseMetalness < 1.0F;
+}
+
+float modulatedIor(const OpenPbrInputs<Constant>& inputs, std::optional<int> heroChannel) {
+    // Dispersion enters here alone: every downstream ior consumer reads this one scalar, so the vertex stays spectrally consistent.
+    const float abbe = inputs.transmissionDispersionAbbeNumber / inputs.transmissionDispersionScale;
+    const float dispersed = heroChannel.has_value() ? cauchyIor(inputs.specularIor, abbe, kRgbWavelengthsNm[*heroChannel]) : inputs.specularIor;
+    // OpenPBR's specular_weight: F0 = xi*F_s, capped at the largest float below 1 so the modulated ratio (1+eps)/(1-eps) stays finite.
+    const float reflectance = ((dispersed - 1.0F) / (dispersed + 1.0F)) * ((dispersed - 1.0F) / (dispersed + 1.0F));
+    const float epsilon =
+        std::copysign(std::sqrt(std::min(inputs.specularWeight * reflectance, std::nextafter(1.0F, 0.0F))), dispersed - 1.0F);
+    // At xi = 1 the modulation is the identity; taking the index as authored keeps it free of the ratio's rounding.
+    return inputs.specularWeight == 1.0F ? dispersed : (1.0F + epsilon) / (1.0F - epsilon);
+}
+
+BsdfParams bsdfParamsOf(const OpenPbrInputs<Constant>& inputs, std::optional<int> heroChannel) {
+    const glm::vec3 baseAlbedo = inputs.baseWeight * inputs.baseColor;
+    return BsdfParams{
+        .metalness = inputs.baseMetalness,
+        .transmissionWeight = inputs.transmissionWeight,
+        .roughness = inputs.specularRoughness,
+        .metalF0 = baseAlbedo,
+        .specularColor = inputs.specularColor,
+        .specularWeight = inputs.specularWeight,
+        .ior = modulatedIor(inputs, heroChannel),
+        .diffuseRoughness = inputs.baseDiffuseRoughness,
+        .diffuseRho = eonAlbedoInversion(baseAlbedo, inputs.baseDiffuseRoughness),
+        // OpenPBR's two exclusive regimes: at transmission_depth > 0 the interior medium carries the colour; at 0 it tints the surface.
+        .transmissionTint = inputs.transmissionDepth > 0.0F ? glm::vec3(1.0F) : inputs.transmissionColor,
+    };
+}
+
+glm::vec3 emittedRadiance(const Material& material, glm::vec2 uv, const pathtracer::gfx::TextureFootprint& footprint) {
+    // Most surfaces emit nothing: a zero luminance needs no colour lookup.
+    const float luminance = evaluate(material.emissionLuminance, uv, footprint, InputRange::NonNegative);
+    return luminance > 0.0F ? luminance * evaluate(material.emissionColor, uv, footprint, InputRange::NonNegative) : glm::vec3(0.0F);
+}
+
+ShadingFrame buildShadingFrame(const ShadingTriangle& triangle, const ShadingVertex& shading, const Material& material) {
     const glm::vec3 normal = glm::normalize(shading.normal);
     glm::vec3 tangent = glm::vec3(shading.tangent);
     tangent = glm::normalize(tangent - (glm::dot(tangent, normal) * normal));
     const glm::vec3 bitangent = glm::cross(normal, tangent) * shading.tangent.w;
 
-    // Point-sampled like the bump below: a filtered normal shortens and shades flatter (Toksvig 2005), +13% on the minified stump.
-    const glm::vec3 normalSample = evaluate(material.normal, shading.uv, {});
-    const glm::vec3 tangentSpaceNormal = glm::normalize((normalSample * 2.0F) - 1.0F);
-    const glm::vec3 mappedNormal = glm::normalize(ShadingFrame(tangent, bitangent, normal) * tangentSpaceNormal);
+    const NormalInput& geometryNormal = material.geometryNormal;
+    glm::vec3 mappedNormal = normal;
+    if (geometryNormal.map) {
+        // Point-sampled like the bump below: a filtered normal shortens and shades flatter (Toksvig 2005), +13% on the minified stump.
+        const glm::vec3 normalSample = pathtracer::gfx::sampleTexture(*geometryNormal.map, shading.uv);
+        mappedNormal = glm::normalize(ShadingFrame(tangent, bitangent, normal) * glm::normalize((normalSample * 2.0F) - 1.0F));
+    }
 
-    // Bump (Blinn 1978) as Mikkelsen's surface gradient: height h = bumpStrength*H in world units, n' = n - grad_s(h). Constant H: no tilt.
+    // Bump (Blinn 1978) as Mikkelsen's surface gradient: height h = heightMetres*H in world units, n' = n - grad_s(h).
     glm::vec3 bumpedNormal = mappedNormal;
-    if (const TextureHandle* bumpTexture = std::get_if<TextureHandle>(&material.bump)) {
+    if (geometryNormal.height) {
         // The lookup's own analytic dH/duv per unit uv: independent of texture resolution, and C1 across texel boundaries.
-        const glm::vec2 dhduv = settings.bumpStrength * pathtracer::gfx::sampleTextureGradient(**bumpTexture, shading.uv).dst;
+        const glm::vec2 dhduv = geometryNormal.heightMetres * pathtracer::gfx::sampleTextureGradient(*geometryNormal.height, shading.uv).dst;
         // Mikkelsen 2010, edges for screen derivatives: (dh1*R1 + dh2*R2)/det divides by dP/duv itself, so mirrored uvs keep their sign.
         const glm::vec3 edge1 = triangle.v1.position - triangle.v0.position;
         const glm::vec3 edge2 = triangle.v2.position - triangle.v0.position;

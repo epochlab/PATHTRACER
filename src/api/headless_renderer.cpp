@@ -27,7 +27,6 @@ using pathtracer::debug::AovSource;
 struct SceneInputs {
     pathtracer::config::ProfileConfig profile;
     pathtracer::config::SceneConfig scene;
-    pathtracer::config::MaterialConfig material;
     std::shared_ptr<const pathtracer::gfx::ImageTexture> environmentTexture;
 };
 
@@ -45,12 +44,6 @@ struct SceneInputs {
         error = "failed to load scene " + assetRoot + "/" + scenePath;
         return std::nullopt;
     }
-    std::optional<pathtracer::config::MaterialConfig> material =
-        pathtracer::config::loadMaterialConfig(assetRoot + "/" + scene->materialPath);
-    if (!material) {
-        error = "failed to load material " + assetRoot + "/" + scene->materialPath;
-        return std::nullopt;
-    }
     std::shared_ptr<const pathtracer::gfx::ImageTexture> environmentTexture =
         pathtracer::gfx::openTexture(assetRoot + "/" + scene->environment.hdriPath, pathtracer::gfx::kRgbChannels,
                                      pathtracer::gfx::ImageRole::Colour, pathtracer::gfx::TextureWrap::LatLong, scene->environment.colorSpace);
@@ -58,7 +51,7 @@ struct SceneInputs {
         error = "failed to load environment " + assetRoot + "/" + scene->environment.hdriPath;
         return std::nullopt;
     }
-    return SceneInputs{std::move(*profile), std::move(*scene), std::move(*material), std::move(environmentTexture)};
+    return SceneInputs{std::move(*profile), std::move(*scene), std::move(environmentTexture)};
 }
 
 // profile.json names a film-back preset, assets/config/sensor.json supplies its dimensions. Resolved as initializeApp does.
@@ -205,8 +198,10 @@ std::unique_ptr<HeadlessRenderer> HeadlessRenderer::open(const std::string& asse
     if (!geometry) {
         return nullptr;
     }
-    if (!pathtracer::scene::bindSceneTextures(geometry->model.instances, scene.textures, assetRoot)) {
-        error = "failed to bind scene textures";
+    // Materials before textures, which bind over the constants; each call logs the reason it fails.
+    if (!pathtracer::scene::applySceneMaterials(geometry->model.instances, scene.materialPath, scene.materialOverrides, assetRoot) ||
+        !pathtracer::scene::bindSceneTextures(geometry->model.instances, scene.textures, assetRoot)) {
+        error = "failed to bind scene materials";
         return nullptr;
     }
 
@@ -216,24 +211,15 @@ std::unique_ptr<HeadlessRenderer> HeadlessRenderer::open(const std::string& asse
     }
 
     // One sample per pass: convergence comes from accumulating passes, as the driver and render_beauty both drive the integrator.
-    const pathtracer::scene::PathTraceSettings baseSettings =
-        pathtracer::scene::baseSettingsOf(inputs->profile, inputs->material, /*samplesPerPixel=*/1);
-    std::optional<std::vector<pathtracer::scene::PathTraceSettings>> perInstanceSettings =
-        pathtracer::scene::resolvePerInstanceSettings(baseSettings, geometry->model.instances,
-                                                   scene.materialOverrides, assetRoot);
-    if (!perInstanceSettings) {
-        error = "failed to resolve per-instance material overrides";
-        return nullptr;
-    }
+    const pathtracer::scene::PathTraceSettings baseSettings = pathtracer::scene::baseSettingsOf(inputs->profile, /*samplesPerPixel=*/1);
 
     return std::unique_ptr<HeadlessRenderer>(new HeadlessRenderer(
-        assetRoot, std::move(inputs->profile), std::move(inputs->scene), std::move(*geometry), std::move(*perInstanceSettings),
+        assetRoot, std::move(inputs->profile), std::move(inputs->scene), std::move(*geometry),
         baseSettings, std::move(inputs->environmentTexture), *camera));
 }
 
 HeadlessRenderer::HeadlessRenderer(std::string assetRoot, pathtracer::config::ProfileConfig profile,
                                    pathtracer::config::SceneConfig scene, Geometry geometry,
-                                   std::vector<pathtracer::scene::PathTraceSettings> perInstanceSettings,
                                    pathtracer::scene::PathTraceSettings baseSettings,
                                    std::shared_ptr<const pathtracer::gfx::ImageTexture> environmentTexture,
                                    const pathtracer::scene::Camera& defaultCamera)
@@ -243,7 +229,6 @@ HeadlessRenderer::HeadlessRenderer(std::string assetRoot, pathtracer::config::Pr
       geometry_(std::move(geometry)),
       builtRootRotationDegrees_(scene_.model.rotation),
       builtLightRotationsDegrees_(rotationsOf(scene_.lights)),
-      perInstanceSettings_(std::move(perInstanceSettings)),
       baseSettings_(baseSettings),
       environmentMap_(std::move(environmentTexture)),
       defaultCamera_(defaultCamera) {}
@@ -383,7 +368,7 @@ void HeadlessRenderer::accumulatePathTraced(const Request& request) {
         // scrambleSeed fixed, sampleBase advancing: the pair that keeps accumulated samples stratified rather than N independent draws.
         pathtracer::scene::renderPathTraced(request.camera, geometry_.accel, geometry_.model.shadingTriangles,
                                          geometry_.model.instances, geometry_.instanceLightIndex, lights, request.width, request.height,
-                                         showSky, baseSettings_, perInstanceSettings_,
+                                         showSky, baseSettings_,
                                          request.scrambleSeed, /*sampleBase=*/pass,
                                          /*sampleCount=*/request.samples, generation,
                                          /*requestedGeneration=*/1U, threadPool_, stats, pathTraced_);
@@ -430,7 +415,7 @@ void HeadlessRenderer::accumulatePass(const Request& request, int pass,
 void HeadlessRenderer::renderGBufferLanes(const Request& request) {
     const auto gbufferStart = std::chrono::steady_clock::now();
     pathtracer::scene::renderGBuffer(request.camera, request.previousCamera.value_or(request.camera), geometry_.accel,
-                                     geometry_.model.shadingTriangles, geometry_.model.instances, perInstanceSettings_,
+                                     geometry_.model.shadingTriangles, geometry_.model.instances, baseSettings_.lookaheadDistance,
                                      geometry_.instanceBounds,
                                      request.width, request.height, threadPool_, gbuffer_);
     stats_.gbufferMilliseconds =

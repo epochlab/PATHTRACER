@@ -9,10 +9,10 @@
     },
     "materialPath": "materials/clay.json",
     "materialOverrides": {
-        "grid01": "materials/constant.json"
+        "grid01": "materials/emission.json"
     },
     "textures": {
-        "grid00": { "baseColorTexture": "textures/macbeth.exr" },
-        "grid01": { "baseColorTexture": "textures/macbeth.exr" }
+        "grid00": { "base_color": "textures/macbeth.exr" },
+        "grid01": { "emission_color": "textures/macbeth.exr" }
     }
 }

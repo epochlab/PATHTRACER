@@ -11,6 +11,7 @@
 #include "pathtracer/gfx/hdr_image.h"
 #include "pathtracer/scene/bsdf.h"
 #include "pathtracer/scene/environment_map.h"
+#include "pathtracer/scene/gbuffer_shading.h"
 #include "pathtracer/scene/material.h"
 #include "pathtracer/scene/sampler.h"
 
@@ -101,9 +102,17 @@ inline pathtracer::scene::EnvironmentMap makeUniformEnvironment() {
                            std::vector<float>(static_cast<std::size_t>(kWidth) * kHeight * pathtracer::gfx::kRgbChannels, 1.0F));
 }
 
-// The neutral default (white baseColor, flat normal, constant bump) with constant roughness and specular f0.
-inline pathtracer::scene::Material makeMaterial(float roughness, glm::vec3 f0) {
-    return pathtracer::scene::Material{.roughness = roughness, .specular = f0};
+// A dielectric over a white diffuse base at specular_roughness, every other input at its OpenPBR default.
+inline pathtracer::scene::Material makeMaterial(float specularRoughness) {
+    pathtracer::scene::Material material;
+    material.baseColor = glm::vec3(1.0F);
+    material.specularRoughness = specularRoughness;
+    return material;
+}
+
+// A validator authors OpenPBR inputs and shades them through the shading path's own resolution, as a hit does.
+inline pathtracer::scene::BsdfParams paramsOf(const pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant>& inputs) {
+    return pathtracer::scene::bsdfParamsOf(inputs, std::nullopt);
 }
 
 }  // namespace tools::fixtures

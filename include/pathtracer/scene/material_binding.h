@@ -14,15 +14,14 @@
 
 namespace pathtracer::scene {
 
-// Binds the scene's textures (SceneConfig::textures) into each named node's Material slots; false on a bad key, slot or file.
+// Each instance's constants: materialPath's file, or its node's materialOverrides file; false on a bad key or file.
+[[nodiscard]] bool applySceneMaterials(std::vector<MeshInstance>& instances, const std::string& materialPath,
+                                       const std::map<std::string, std::string>& materialOverrides, const std::string& assetRoot);
+
+// Binds SceneConfig::textures over each named node's inputs; false on a bad key, input or binding, or a non-finite texel.
 [[nodiscard]] bool bindSceneTextures(std::vector<MeshInstance>& instances,
                                      const std::map<std::string, std::map<std::string, pathtracer::config::TextureConfig>>& textures,
                                      const std::string& assetRoot);
-
-// One PathTraceSettings per instance from the scene's material overrides, parallel to `instances`. nullopt on a bad file or unknown key.
-[[nodiscard]] std::optional<std::vector<PathTraceSettings>> resolvePerInstanceSettings(
-    const PathTraceSettings& base, const std::vector<MeshInstance>& instances,
-    const std::map<std::string, std::string>& materialOverrides, const std::string& assetRoot);
 
 // Places each authored quad by sceneTransform * its own placement, as QuadLight corner + edges. sceneTransform must be rigid.
 [[nodiscard]] std::vector<QuadLight> buildQuadLights(
@@ -31,8 +30,7 @@ namespace pathtracer::scene {
 // scene.json's model placement: translate * rotationXyz, the order every caller places the scene in.
 [[nodiscard]] glm::mat4 rootTransformOf(const pathtracer::config::ModelConfig& model);
 
-// The profile's integrator limits and the scene material file's defaults; samplesPerPixel is the caller's, interactive or headless.
-[[nodiscard]] PathTraceSettings baseSettingsOf(const pathtracer::config::ProfileConfig& profile,
-                                               const pathtracer::config::MaterialConfig& material, int samplesPerPixel);
+// The profile's integrator limits; samplesPerPixel is the caller's, interactive or headless.
+[[nodiscard]] PathTraceSettings baseSettingsOf(const pathtracer::config::ProfileConfig& profile, int samplesPerPixel);
 
 }  // namespace pathtracer::scene

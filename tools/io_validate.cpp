@@ -14,6 +14,7 @@
 #include <optional>
 #include <random>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -317,23 +318,30 @@ PT_CHECK(scene_config_accepts_the_shipped_scenes, Fast, Exact) {
     PT_EXPECT(ctx, macbeth && macbeth->textures.size() == 2, "macbeth.json's textures did not parse to its two grids");
 }
 
-// A texture binding is a path string or {path, colorSpace}, and the environment may name its colour space: both reach SceneConfig.
-PT_CHECK(scene_config_reads_texture_colour_spaces, Fast, Exact) {
+// A binding is a path string or {path, colorSpace, channel, bump}, and the environment may name its colour space: all reach SceneConfig.
+PT_CHECK(scene_config_reads_texture_bindings, Fast, Exact) {
     const std::filesystem::path path = writeJson(
-        "engine_io_scene_colourspaces.json",
+        "engine_io_scene_bindings.json",
         "{\"model\":{\"gltfPath\":\"geometry/cornell/cornell_v001.gltf\",\"position\":[0,0,0],\"rotation\":[0,0,0]},"
         "\"environment\":{\"hdriPath\":\"textures/sky.exr\",\"colorSpace\":\"ACEScg\"},\"materialPath\":\"materials/clay.json\","
-        "\"textures\":{\"node\":{\"baseColorTexture\":{\"path\":\"albedo.exr\",\"colorSpace\":\"ACEScg\"},"
-        "\"normalTexture\":\"normal.exr\"}}}");
+        "\"textures\":{\"node\":{\"base_color\":{\"path\":\"albedo.exr\",\"colorSpace\":\"ACEScg\"},"
+        "\"specular_roughness\":{\"path\":\"orm.exr\",\"channel\":\"g\"},"
+        "\"geometry_normal\":{\"path\":\"normal.exr\",\"bump\":{\"path\":\"height.exr\",\"height\":0.005}},"
+        "\"base_metalness\":\"metal.exr\"}}}");
     const std::optional<pathtracer::config::SceneConfig> scene = pathtracer::config::loadSceneConfig(path.string());
     std::filesystem::remove(path);
-    ctx.plan(3);
+    ctx.plan(5);
     PT_EXPECT(ctx, scene && scene->environment.colorSpace == "ACEScg", "the environment's colorSpace did not reach SceneConfig");
     const auto slot = [&](const char* name) { return scene ? scene->textures.at("node").at(name) : pathtracer::config::TextureConfig{}; };
-    PT_EXPECT(ctx, slot("baseColorTexture").path == "albedo.exr" && slot("baseColorTexture").colorSpace == "ACEScg",
+    PT_EXPECT(ctx, slot("base_color").path == "albedo.exr" && slot("base_color").colorSpace == "ACEScg",
               "a {path, colorSpace} binding did not read both fields");
-    PT_EXPECT(ctx, slot("normalTexture").path == "normal.exr" && !slot("normalTexture").colorSpace,
-              "a path-string binding gained a colour space");
+    PT_EXPECT(ctx, slot("specular_roughness").path == "orm.exr" && slot("specular_roughness").channel == 1,
+              "a {path, channel} binding did not read channel g as 1");
+    const std::optional<pathtracer::config::BumpConfig> bump = slot("geometry_normal").bump;
+    PT_EXPECT(ctx, slot("geometry_normal").path == "normal.exr" && bump && bump->path == "height.exr" && bump->heightMetres == 0.005F,
+              "a geometry_normal binding lost its normal map or its bump");
+    PT_EXPECT(ctx, slot("base_metalness").path == "metal.exr" && !slot("base_metalness").colorSpace && slot("base_metalness").channel == 0,
+              "a path-string binding gained a colour space or a channel");
 }
 
 // The rejection half of the contract: each row is a malformation a real authoring mistake produces, and each must be reported.
@@ -386,10 +394,15 @@ PT_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
          scene(",\"textures\":{\"sphere01\":\"textures/macbeth.exr\"}")},
         // A misspelt override would load the file under its own tag, the very error the override exists to correct.
         {"a texture object with an unknown key", "engine_io_scene_texturekey.json",
-         scene(",\"textures\":{\"sphere01\":{\"baseColorTexture\":{\"path\":\"textures/macbeth.exr\",\"colourSpace\":\"ACEScg\"}}}")},
+         scene(",\"textures\":{\"sphere01\":{\"base_color\":{\"path\":\"textures/macbeth.exr\",\"colourSpace\":\"ACEScg\"}}}")},
+        // A channel names one of R, G, B: alpha is never read, and a typo must not fall back to R.
+        {"a texture channel outside r, g, b", "engine_io_scene_texturechannel.json",
+         scene(",\"textures\":{\"sphere01\":{\"specular_roughness\":{\"path\":\"orm.exr\",\"channel\":\"a\"}}}")},
+        {"a bump without its height", "engine_io_scene_bumpheight.json",
+         scene(",\"textures\":{\"sphere01\":{\"geometry_normal\":{\"bump\":{\"path\":\"height.exr\"}}}}")},
         // Retired keys, well-formed otherwise: an ignored textureOverrides would render the scene untextured with no diagnostic.
         {"the retired textureOverrides key", "engine_io_scene_textureoverrides.json",
-         scene(",\"textureOverrides\":{\"sphere01\":{\"baseColorTexture\":\"textures/macbeth.exr\"}}")},
+         scene(",\"textureOverrides\":{\"sphere01\":{\"base_color\":\"textures/macbeth.exr\"}}")},
         {"the retired model.texturePath key", "engine_io_scene_texturepath.json",
          "{\"model\":{\"gltfPath\":\"geometry/cornell/cornell_v001.gltf\",\"texturePath\":\"\","
          "\"position\":[0,0,0],\"rotation\":[0,0,0]},\"environment\":{\"hdriPath\":\"textures/republiqueHDR_2k.exr\"},"
@@ -423,7 +436,7 @@ PT_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
 
 // Anti-vacuity for the rejection rows below: every material the repo ships must still load once loadMaterialConfig validates.
 PT_CHECK(material_config_accepts_the_shipped_materials, Fast, Exact) {
-    const std::vector<const char*> shipped = {"chrome.json", "clay.json", "constant.json", "glass.json", "principled.json"};
+    const std::vector<const char*> shipped = {"chrome.json", "clay.json", "emission.json", "glass.json", "principled.json"};
     ctx.plan(static_cast<int>(shipped.size()));
     for (const char* name : shipped) {
         const std::filesystem::path path = std::filesystem::path(ASSET_ROOT_DIR) / "materials" / name;
@@ -442,39 +455,39 @@ PT_CHECK(material_config_rejects_malformed_input, Fast, Exact) {
     };
     // Mutations of one base that loads, so a row fails for the reason it names rather than vacuously on an earlier parse error.
     const auto material = [](const std::string& overrides) {
-        return std::string("{\"diffuseColour\":[1,1,1],\"roughnessFactor\":0.5,\"roughnessMin\":0.045,"
-                           "\"roughnessMax\":1.0,\"bumpStrength\":0.0") +
-               overrides + "}";
+        return std::string("{\"base_color\":[1,1,1],\"specular_roughness\":0.5") + overrides + "}";
     };
 
     const std::vector<Case> cases = {
-        // std::clamp(v, lo, hi) has undefined behaviour when lo > hi, and resolveRoughness clamps with exactly these two.
-        {"roughnessMin above roughnessMax", "engine_io_material_roughrange.json",
-         "{\"diffuseColour\":[1,1,1],\"roughnessFactor\":0.5,\"roughnessMin\":0.9,\"roughnessMax\":0.2,\"bumpStrength\":0.0}"},
+        // Closed key set: a pre-OpenPBR file would otherwise load every input at its default, silently.
+        {"the retired diffuseColour key", "engine_io_material_legacy.json", material(",\"diffuseColour\":[1,1,1]")},
+        {"the retired shadingModel key", "engine_io_material_shadingmodel.json", material(",\"shadingModel\":\"constant\"")},
         // eonUniformMixWeight raises r to the 0.1 power, which is NaN for r < 0, and the NaN reaches the pixel through sampleEon.
-        {"negative diffuseRoughness", "engine_io_material_negdiffrough.json", material(",\"diffuseRoughness\":-0.2")},
+        {"negative base_diffuse_roughness", "engine_io_material_negdiffrough.json", material(",\"base_diffuse_roughness\":-0.2")},
         // Outside [0,1] the EON quartic albedo fit is extrapolated, where 1 - E can go negative and the BRDF with it.
-        {"diffuseRoughness above 1", "engine_io_material_diffroughhigh.json", material(",\"diffuseRoughness\":1.5")},
-        // transmissionColor is a transmittance; above 1 sigma_a = -ln(colour)/depth is negative and Beer-Lambert amplifies without bound.
-        {"transmissionColor above 1", "engine_io_material_transcolour.json",
-         material(",\"transmissionColor\":[1.4,1.0,1.0],\"transmissionDepth\":0.4")},
-        // Lobe selection probabilities are mixed by these; outside [0,1] glm::mix extrapolates and the prefix-sum partition goes negative.
-        {"metallicFactor above 1", "engine_io_material_metallic.json", material(",\"metallicFactor\":1.5")},
-        {"negative transmissionFactor", "engine_io_material_negtrans.json", material(",\"transmissionFactor\":-0.5")},
-        // dielectricF0 divides by ior + 1, and every dielectric lobe by the etaI/etaT ratio.
-        {"non-positive ior", "engine_io_material_zeroior.json", material(",\"ior\":0.0")},
+        {"base_diffuse_roughness above 1", "engine_io_material_diffroughhigh.json", material(",\"base_diffuse_roughness\":1.5")},
+        // A transmittance above 1 amplifies along every path through the medium without bound.
+        {"transmission_color above 1", "engine_io_material_transcolour.json",
+         material(",\"transmission_color\":[1.4,1.0,1.0],\"transmission_depth\":0.4")},
+        // Mix weights: outside [0,1] the bases mix with a negative weight and a lobe's selection mass goes negative.
+        {"base_metalness above 1", "engine_io_material_metallic.json", material(",\"base_metalness\":1.5")},
+        {"negative transmission_weight", "engine_io_material_negtrans.json", material(",\"transmission_weight\":-0.5")},
+        {"specular_roughness above 1", "engine_io_material_rough.json", material(",\"specular_roughness\":1.5")},
+        // The Fresnel reflectance divides by ior + 1, and every dielectric lobe by the index ratio.
+        {"non-positive specular_ior", "engine_io_material_zeroior.json", material(",\"specular_ior\":0.0")},
+        {"negative specular_weight", "engine_io_material_negweight.json", material(",\"specular_weight\":-0.5")},
         // The EON albedo inversion leaves rho unbounded above an albedo of 1, where its multiple-scatter denominator can reach zero.
-        {"diffuseColour above 1", "engine_io_material_colour.json",
-         "{\"diffuseColour\":[1,2,1],\"roughnessFactor\":0.5,\"roughnessMin\":0.045,\"roughnessMax\":1.0,\"bumpStrength\":0.0}"},
-        {"negative transmissionDepth", "engine_io_material_negdepth.json", material(",\"transmissionDepth\":-1.0")},
-        // A misspelt model must not load as the standard BSDF, silently shading what the author meant to be unlit.
-        {"unknown shadingModel", "engine_io_material_unknownmodel.json", material(",\"shadingModel\":\"unlit\"")},
-        // A constant surface scatters nothing, so a BSDF key in its file is dead input the author believes is live.
-        {"BSDF key on a constant material", "engine_io_material_constantbsdf.json",
-         "{\"shadingModel\":\"constant\",\"roughnessFactor\":0.5}"},
-        // The constant path bypasses the standard parse, so its one live field must still pass the same reflectance bound.
-        {"constant diffuseColour above 1", "engine_io_material_constantcolour.json",
-         "{\"shadingModel\":\"constant\",\"diffuseColour\":[1,2,1]}"},
+        {"base_color above 1", "engine_io_material_colour.json", material(",\"base_color\":[1,2,1]")},
+        {"negative transmission_depth", "engine_io_material_negdepth.json", material(",\"transmission_depth\":-1.0")},
+        // V_d = abbe / scale: a zero Abbe number is no glass, and dispersion would divide by it.
+        {"zero transmission_dispersion_abbe_number", "engine_io_material_zeroabbe.json",
+         material(",\"transmission_dispersion_abbe_number\":0.0")},
+        {"transmission_scatter_anisotropy below -1", "engine_io_material_anisotropy.json",
+         material(",\"transmission_scatter_anisotropy\":-1.5")},
+        {"negative emission_luminance", "engine_io_material_negemission.json", material(",\"emission_luminance\":-1.0")},
+        // In-volume scattering needs transport the renderer lacks: a non-zero switch must fail, not render as if zero.
+        {"non-zero subsurface_weight", "engine_io_material_subsurface.json", material(",\"subsurface_weight\":0.5")},
+        {"non-zero transmission_scatter", "engine_io_material_scatter.json", material(",\"transmission_scatter\":[0.1,0,0]")},
     };
 
     const std::filesystem::path basePath = writeJson("engine_io_material_base.json", material(""));
@@ -994,26 +1007,39 @@ PT_CHECK(json_float_reads_refuse_float_overflow, Fast, Exact) {
         {"environment", {{"hdriPath", "textures/republiqueHDR_2k.exr"}}},
         {"materialPath", "materials/clay.json"},
         {"lights", {light}}};
-    // Every optional key present, so a pointer into it overwrites a number rather than creating a malformed sibling.
-    const nlohmann::json material = {{"diffuseColour", {1, 1, 1}}, {"roughnessFactor", 0.5},  {"roughnessMin", 0.045},
-                                     {"roughnessMax", 1.0},        {"bumpStrength", 0.0},     {"ior", 1.5},
-                                     {"abbe", 0.0},                {"transmissionFactor", 0.0}, {"metallicFactor", 0.0},
-                                     {"diffuseRoughness", 0.0},    {"transmissionColor", {1, 1, 1}},
-                                     {"transmissionDepth", 0.0},   {"edgeTint", {1, 1, 1}}};
+    // Every OpenPBR input present at its default, so a pointer into it overwrites a number rather than creating a malformed sibling.
+    const pathtracer::config::MaterialConfig kDefaultMaterial;
+    nlohmann::json material = nlohmann::json::object();
+    std::vector<std::string> materialFields;
+    int colourInputs = 0;  // each colour input overflows a different channel in turn, so all three are reached
+    pathtracer::scene::forEachInput(
+        [&](const pathtracer::scene::InputSpec& spec, const auto& value) {
+            const std::string key(spec.name);
+            if constexpr (std::is_same_v<std::decay_t<decltype(value)>, float>) {
+                material[key] = value;
+                materialFields.push_back("/" + key);
+            } else {
+                material[key] = {value.x, value.y, value.z};
+                materialFields.push_back("/" + key + "/" + std::to_string(colourInputs++ % 3));
+            }
+        },
+        kDefaultMaterial);
+    const nlohmann::json texturedScene = {
+        {"model", {{"gltfPath", "geometry/cornell/cornell_v001.gltf"}, {"position", {0, 0, 0}}, {"rotation", {0, 0, 0}}}},
+        {"environment", {{"hdriPath", "textures/republiqueHDR_2k.exr"}}},
+        {"materialPath", "materials/clay.json"},
+        {"textures", {{"node", {{"geometry_normal", {{"bump", {{"path", "height.exr"}, {"height", 0.005}}}}}}}}}};
     std::ifstream shippedProfile(std::filesystem::path(ASSET_ROOT_DIR) / "config" / "profile.json");
     const std::vector<Loader> loaders = {
         {"loadSceneConfig", scene,
          [](const std::string& path) { return pathtracer::config::loadSceneConfig(path).has_value(); },
          {"/model/position/0", "/model/rotation/1", "/lights/0/position/2", "/lights/0/rotation/0", "/lights/0/size/1",
           "/lights/0/color/0", "/lights/0/intensity"}},
+        {"loadSceneConfig bump", texturedScene,
+         [](const std::string& path) { return pathtracer::config::loadSceneConfig(path).has_value(); },
+         {"/textures/node/geometry_normal/bump/height"}},
         {"loadMaterialConfig", material,
-         [](const std::string& path) { return pathtracer::config::loadMaterialConfig(path).has_value(); },
-         {"/diffuseColour/0", "/roughnessFactor", "/roughnessMin", "/roughnessMax", "/bumpStrength", "/ior", "/abbe",
-          "/transmissionFactor", "/metallicFactor", "/diffuseRoughness", "/transmissionColor/1", "/transmissionDepth",
-          "/edgeTint/2"}},
-        {"loadMaterialConfig constant", {{"shadingModel", "constant"}, {"diffuseColour", {1, 1, 1}}},
-         [](const std::string& path) { return pathtracer::config::loadMaterialConfig(path).has_value(); },
-         {"/diffuseColour/2"}},
+         [](const std::string& path) { return pathtracer::config::loadMaterialConfig(path).has_value(); }, {}},
         {"loadProfileConfig", nlohmann::json::parse(shippedProfile),
          [](const std::string& path) { return pathtracer::config::loadProfileConfig(path).has_value(); },
          {"/camera/position/0", "/camera/rotation/0", "/camera/rotation/2", "/camera/focalLengthMm", "/camera/nearClip",
@@ -1025,12 +1051,20 @@ PT_CHECK(json_float_reads_refuse_float_overflow, Fast, Exact) {
          {"/0/widthMm", "/0/heightMm"}},
     };
 
+    std::vector<Loader> allLoaders = loaders;
+    for (Loader& loader : allLoaders) {
+        if (loader.floatFields.empty()) {
+            for (const std::string& field : materialFields) {
+                loader.floatFields.push_back(field.c_str());
+            }
+        }
+    }
     int planned = 0;
-    for (const Loader& loader : loaders) {
+    for (const Loader& loader : allLoaders) {
         planned += 1 + (2 * static_cast<int>(loader.floatFields.size()));
     }
     ctx.plan(planned + 3);
-    for (const Loader& loader : loaders) {
+    for (const Loader& loader : allLoaders) {
         // Anti-vacuity: each row below differs from this base in one number only.
         const std::filesystem::path basePath = writeJson("engine_io_float_base.json", loader.base.dump());
         PT_EXPECT(ctx, loader.loads(basePath.string()), std::string(loader.name) + " rejected its unmutated base");

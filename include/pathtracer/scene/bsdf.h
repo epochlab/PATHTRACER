@@ -9,23 +9,20 @@
 
 namespace pathtracer::scene {
 
-// Resolved shading parameters at a hit point (textures already sampled by the caller).
+// OpenPBR's base substrate at a hit, resolved from its inputs: metal and dielectric bases mixed by metalness (Surface v1.1.1).
 struct BsdfParams {
-    // OpenPBR base_color, the normal-incidence reflection colour under uniform light; resolveBsdfParams derives f0 and diffuseRho from it.
-    glm::vec3 baseColor;
-    float metallic;
-    float roughness;  // perceptual; alpha = roughness^2, floored to avoid a delta lobe
-    // Specular reflectance at normal incidence; also Gulbrandsen reflectivity r, clamped to [1e-4, 0.9999] at use.
-    glm::vec3 f0;
-    // Gulbrandsen 2014 edgetint g: 1 = white edge (Schlick's value), 0 = max dip. Inverts with f0 to a complex IOR. Inert at metallic=0.
-    glm::vec3 edgeTint;
-    float ior;  // dielectric IOR, non-metal lobes only
-    float transmissionFactor;  // KHR_materials_transmission, 0 = opaque
-    // EON rough-diffuse r in [0,1] (Portsmouth, Kutz, Hill 2025, JCGT 14(1)); 0 = Lambertian. Not `roughness`, which drives specular.
+    float metalness;            // base_metalness: the metal and dielectric bases mix linearly, so metal is weighted once
+    float transmissionWeight;   // transmission_weight: the dielectric base's translucent share, the rest glossy-diffuse
+    float roughness;            // specular_roughness, every microfacet lobe's; alpha = roughness^2, floored to avoid a delta lobe
+    glm::vec3 metalF0;          // base_weight * base_color, the metal's normal-incidence reflectance
+    // specular_color: the metal's F82 tint, and the dielectric's reflection tint for light arriving from above.
+    glm::vec3 specularColor;
+    float specularWeight;       // specular_weight, scaling the metal's Fresnel; for the dielectric it is already in ior
+    float ior;                  // the dielectric's index ratio over the ambient medium, specular_weight-modulated and dispersed
+    // EON rough-diffuse r in [0,1] (Portsmouth, Kutz, Hill 2025, JCGT 14(1)); 0 = Lambertian. base_diffuse_roughness.
     float diffuseRoughness;
-    // EON single-scattering albedo rho, the diffuse lobe's input, not the authored colour.
-    glm::vec3 diffuseRho;
-    // The transmission lobe's only tint (OpenPBR/Arnold): carried by Beer-Lambert at transmissionDepth > 0, applied per crossing at 0.
+    glm::vec3 diffuseRho;       // EON single-scattering albedo whose observed albedo is base_weight * base_color
+    // transmission_color on the surface when transmission_depth is 0; white when the interior medium carries it instead.
     glm::vec3 transmissionTint;
 };
 
@@ -52,10 +49,15 @@ struct BsdfEval {
     [[nodiscard]] glm::vec3 total() const { return diffuse + specular + transmission; }
 };
 
-// Bilinear (roughness, eta) weights over four tabulated rows of the escape-deficit shape, with the reciprocal of their blended total.
-struct MsTransmitRow {
+// Bilinear (roughness, eta) weights over four tabulated escape rows, a mu lookup away from any directional value at that vertex.
+struct EscapeRow {
     std::array<int, 4> base;
     std::array<float, 4> weight;
+};
+
+// An escape row over the escape-deficit shape, with the reciprocal of its blended total.
+struct MsTransmitRow {
+    EscapeRow row;
     float scale;
 };
 
@@ -63,32 +65,31 @@ struct MsTransmitRow {
 struct LobeProbabilities {
     float specular;
     float diffuse;
-    float msReflect;    // multiple-scattering reflection, drawn from kMsReflectDensity over the near hemisphere
+    float msReflect;    // opaque multiple-scattering reflection, drawn from kMsReflectDensity over the near hemisphere
     float msReflectTransmissive;  // a transmissive interface's reflected multiple scattering, drawn from reflectShape
     float transmit;     // delta refraction mass, 0 for a rough interface, whose refraction is the specular strategy's VNDF branch
     float msTransmit;   // multiple-scattering transmission, drawn from kMsTransmitDensity over the far hemisphere
     float etaI;
     float etaT;
-    float diffuseKd;              // evaluateDiffuseLobe's wo-side energy factor, 0 on the exiting side
-    float transmitPhysicalValue;  // transmission's true (1-F)*t energy fraction -- see below
-    // Energy-compensation state, hoisted so the wo-side table lookups happen once per evaluation, not per lobe call.
-    float albedoWo;         // E(mu_o, roughness), Fresnel-free
-    float albedoAvg;        // Eavg(roughness)
-    float coatF0;           // dielectric f0 implied by ior, for the diffuse coupling
-    // The coat's own cosine-mean Fresnel, separate from the metallic-blended fresnelAvg below, which is wrong for the coat.
-    float coatFresnelAvg;
-    glm::vec3 fresnelAvg;
-    // Kulla-Conty tint per channel, a pure function of fresnelAvg and albedoAvg, so the reflection lobe reads it per evaluation.
-    glm::vec3 multiScatterFms;
+    float dielectricWeight;      // 1 - metalness
+    glm::vec3 dielectricTint;    // specular_color for reflection from above, white from below
+    float metalWeight;           // metalness * specular_weight, scaling the metal's F82 Fresnel
+    glm::vec3 metalF0;
+    glm::vec3 metalK;            // F82's correction weight per channel, fit so F(1/7) = specular_color * Schlick(1/7)
+    float albedoWo;              // E(mu_o, roughness), Fresnel-free single scattering
+    float msReflectScaleWo;      // (1 - E(mu_o)) / (pi * (1 - Eavg)), the wo half of the Kulla-Conty lobe
+    // Opaque multiple scattering per unit (1 - E(mu_o))(1 - E(mu_i)): the metal and glossy-diffuse Kulla-Conty tints, weighted.
+    glm::vec3 msReflectTint;
+    // The dielectric interface's escape row at the forward eta, its glossy-diffuse Kulla-Conty tint, and the diffuse coupling at wo.
+    EscapeRow dielectricRow;
+    float glossyFms;
+    glm::vec3 diffuseCouplingWo;  // glossy-diffuse weight * (1 - E_spec(mu_o)) / (1 - mean E_spec), Kelemen's reciprocal form
     // EON's CLTC/uniform mixing weight at wo: a function of wo.z and diffuseRoughness alone, so its pow() is not a per-call cost.
     float eonUniformMix;
     // EON's clipped-LTC fit at wo: coefficients (a,b,c,d), the transposed LTC basis and its normalisation, none depending on wi.
     glm::vec4 eonLtcM;
     glm::mat3 eonLtcBasisT;
     float eonLtcS;
-    // Complex IOR inverted from (f0, edgeTint) once per evaluation. Index-matched (1, 0) at metallic==0, where no consumer reads them.
-    glm::vec3 conductorN;
-    glm::vec3 conductorK;
     // Multiple-scattering state for a transmissive interface: a facet reflects or refracts, so the escape is Fresnel-weighted.
     float escapeWo;         // R_ss(mu_o) + T_ss(mu_o), the Fresnel-weighted escaping fraction
     // Escape-deficit shape at the reciprocal eta (etaT/etaI); scale 0 where no transmitted multiple scattering exists.
@@ -96,8 +97,9 @@ struct LobeProbabilities {
     MsTransmitRow reflectShape;   // the same at the forward eta (etaI/etaT), for the reflected share whose wi stays in wo's medium
     float transmitShare;    // of the multiple-scattered energy, the fraction leaving refracted
     float etaSq;            // (etaI/etaT)^2, the radiance compression the transmit lobe must carry
-    // effectiveTransmission*(1-metallic): how much transmission happens. Scales single-scatter and multiple-scattering transmit alike.
+    // (1 - metalness) * the translucent share (1 on the exiting side): how much transmission happens.
     float transmitWeight;
+    float transmitPhysicalValue;  // the delta branch's (1-F(mu_o)) * transmitWeight energy
     // Refraction's value per unit (1-F) in the VNDF strategy's reflect/refract split; 0 where that strategy only reflects.
     float facetTransmit;
 };
@@ -111,6 +113,12 @@ struct BsdfClosure {
     LobeProbabilities lobes;
 };
 
+// A vertex whose every strategy is massless has a zero BSDF: it can only emit, so neither NEE nor a continuation carries light from it.
+[[nodiscard]] inline bool scatters(const BsdfClosure& closure) {
+    const LobeProbabilities& lobes = closure.lobes;
+    return lobes.specular + lobes.diffuse + lobes.msReflect + lobes.msReflectTransmissive + lobes.transmit + lobes.msTransmit > 0.0F;
+}
+
 // Builds the closure. Consumes no sampler dimensions, so where it is called relative to a draw does not move the sample stream.
 [[nodiscard]] BsdfClosure makeBsdfClosure(const BsdfParams& params, const glm::vec3& woLocal);
 
@@ -118,7 +126,7 @@ struct BsdfClosure {
 [[nodiscard]] BsdfEval evaluateBsdfSplit(const BsdfClosure& closure, const glm::vec3& wiLocal);
 [[nodiscard]] std::optional<BsdfSample> sampleBsdf(const BsdfClosure& closure, Sampler& sampler);
 
-// Macro-surface Fresnel at cosTheta = dot(n, wo), dielectric and conductor mixed by metallic. Exists so the Fresnel AOV shows the curve.
+// Macro-surface Fresnel at cosTheta = dot(n, wo), entering: metal F82 and tinted dielectric mixed by metalness. For the Fresnel AOV.
 [[nodiscard]] glm::vec3 fresnelAtViewAngle(const BsdfParams& params, float cosTheta);
 
 // VNDF half-vector (Heitz 2018) through fresnelAtViewAngle at dot(wo, wh), per Walter 2007. One sample of E[F]: THE CALLER MUST AVERAGE.
@@ -127,13 +135,13 @@ struct BsdfClosure {
 // Cosine-weighted hemisphere direction about +z, pdf = cos(theta)/pi. The AO lane relies on the pdf cancelling the cosine (Miller 1994).
 [[nodiscard]] glm::vec3 sampleCosineHemisphere(glm::vec2 u);
 
-// Cosine-weighted average Fresnel, 2*int_0^1 F(mu)*mu dmu, the Kulla-Conty tint.
-[[nodiscard]] glm::vec3 conductorFresnelAvg(const glm::vec3& n, const glm::vec3& k);
+// Cosine-weighted average Fresnel, 2*int_0^1 F(mu)*mu dmu, the Kulla-Conty tint input. The metal's is closed-form.
+[[nodiscard]] glm::vec3 metalFresnelAvg(const glm::vec3& f0, const glm::vec3& tint);
 [[nodiscard]] float dielectricFresnelAvg(float ior);
 
-// Schlick-split directional albedo E(mu, roughness) = a+b and its mean Eavg.
-[[nodiscard]] glm::vec2 directionalAlbedoSplit(float mu, float roughness);
-[[nodiscard]] glm::vec2 averageAlbedoSplit(float roughness);
+// F82-split directional albedo E = F0*a + b - k*c, as (a, b, c), and its cosine-weighted mean.
+[[nodiscard]] glm::vec3 directionalAlbedoSplit(float mu, float roughness);
+[[nodiscard]] glm::vec3 averageAlbedoSplit(float roughness);
 
 // The grid those two index. mu is uniform in sqrt(mu), so never assume k/(res-1).
 [[nodiscard]] glm::ivec2 albedoGridRes();
@@ -146,7 +154,7 @@ struct BsdfClosure {
 // Representative wavelength per RGB channel (Adobe's OpenPBR reference); three discrete bands, so dispersion shows RGB banding.
 inline constexpr glm::vec3 kRgbWavelengthsNm(620.0F, 540.0F, 450.0F);
 
-// Cauchy n(lambda) from an authored (ior at d line, Abbe V_d), per KHR_materials_dispersion.
+// Cauchy n(lambda) from (n_d, V_d) per OpenPBR's dispersion; V_d = transmission_dispersion_abbe_number / transmission_dispersion_scale.
 [[nodiscard]] float cauchyIor(float iorD, float abbe, float lambdaNm);
 
 // Value and pdf of the continuous lobes at wiLocal, split by transport type; one call, so GGX, Fresnel and albedo are computed once.

@@ -61,7 +61,6 @@ struct TestScene {
     std::vector<MeshInstance> instances;
     std::vector<int> instanceLightIndex;
     std::vector<QuadLight> quadLights;
-    std::vector<PathTraceSettings> perInstanceSettings;
 };
 
 // Corners wound counter-clockwise about `normal`, split along the 0-2 diagonal; the tangent is the first edge, so it lies in the plane.
@@ -92,14 +91,6 @@ PathTraceSettings makeSettings() {
     settings.samplesPerPixel = 1;  // one sample per pass: the progressive configuration the driver exists for
     settings.maxBounces = 1;
     settings.russianRouletteStartBounce = 8;
-    settings.bumpStrength = 0.0F;
-    settings.roughnessMin = 0.0F;
-    settings.roughnessMax = 1.0F;
-    settings.diffuseColour = glm::vec3(1.0F);
-    settings.ior = 1.5F;
-    settings.transmissionFactor = 0.0F;
-    settings.metallicFactor = 0.0F;
-    settings.roughnessFactor = 1.0F;
     return settings;
 }
 
@@ -127,19 +118,17 @@ std::unique_ptr<DriverFixture> makeFixture() {
               glm::vec3(kWallX, kQuadExtent, kWallTopZ), glm::vec3(kWallX, kQuadExtent, kFloorZ)},
              glm::vec3(-1.0F, 0.0F, 0.0F), 1);
     for (int i = 0; i < 2; ++i) {
-        scene.instances.push_back(
-            MeshInstance{tools::fixtures::makeMaterial(1.0F, glm::vec3(0.04F)), glm::mat4(1.0F), ""});
+        scene.instances.push_back(MeshInstance{tools::fixtures::makeMaterial(1.0F), glm::mat4(1.0F), ""});
     }
+    scene.instances[1].material.transmissionWeight = 1.0F;
     scene.instanceLightIndex.assign(scene.instances.size(), -1);
-    scene.perInstanceSettings.assign(scene.instances.size(), makeSettings());
-    scene.perInstanceSettings[1].transmissionFactor = 1.0F;
     fixture->accel = EmbreeAccel::build(fixture->scene.worldTriangles);
     if (!fixture->accel.has_value()) {
         return fixture;
     }
     fixture->driver.emplace(*fixture->accel, fixture->scene.shadingTriangles, fixture->scene.instances,
                              fixture->scene.instanceLightIndex, fixture->environment,
-                             fixture->scene.quadLights, fixture->scene.perInstanceSettings);
+                             fixture->scene.quadLights);
     return fixture;
 }
 
@@ -232,8 +221,7 @@ OracleMean oracleBatchMean(DriverFixture& fixture, const Camera& camera, int pas
         stats.reset();
         pathtracer::scene::renderPathTraced(camera, *fixture.accel, fixture.scene.shadingTriangles,
                                          fixture.scene.instances, fixture.scene.instanceLightIndex, lights,
-                                         kImageSize, kImageSize, /*showSky=*/true, makeSettings(),
-                                         fixture.scene.perInstanceSettings, scrambleSeed, /*sampleBase=*/p,
+                                         kImageSize, kImageSize, /*showSky=*/true, makeSettings(), scrambleSeed, /*sampleBase=*/p,
                                          /*sampleCount=*/passes, generation, scrambleSeed, fixture.pool, stats,
                                          pass);
         const double k = p + 1;
@@ -788,8 +776,8 @@ PT_CHECK(render_is_invariant_to_tile_size, Slow, Exact) {
         stats.reset();
         pathtracer::scene::renderPathTraced(camera, *fixture->accel, fixture->scene.shadingTriangles,
                                          fixture->scene.instances, fixture->scene.instanceLightIndex, lights,
-                                         kTiledImageSize, kTiledImageSize, /*showSky=*/true, makeSettings(),
-                                         fixture->scene.perInstanceSettings, /*scrambleSeed=*/1U, /*sampleBase=*/0,
+                                         kTiledImageSize, kTiledImageSize, /*showSky=*/true, makeSettings(), /*scrambleSeed=*/1U,
+                                         /*sampleBase=*/0,
                                          /*sampleCount=*/1, generation, 1U, pool, stats, out);
         return out.beauty.texels;
     };
@@ -824,8 +812,7 @@ PT_CHECK(render_is_invariant_to_thread_count, Slow, Exact) {
         stats.reset();
         pathtracer::scene::renderPathTraced(camera, *fixture->accel, fixture->scene.shadingTriangles,
                                          fixture->scene.instances, fixture->scene.instanceLightIndex, lights,
-                                         kImageSize, kImageSize, /*showSky=*/true, makeSettings(),
-                                         fixture->scene.perInstanceSettings, /*scrambleSeed=*/1U, /*sampleBase=*/0,
+                                         kImageSize, kImageSize, /*showSky=*/true, makeSettings(), /*scrambleSeed=*/1U, /*sampleBase=*/0,
                                          /*sampleCount=*/1, generation, 1U, pool, stats, out);
         return out.beauty.texels;
     };
@@ -890,8 +877,7 @@ PT_CHECK(running_m2_matches_batch_variance, Slow, Exact) {
         stats.reset();
         pathtracer::scene::renderPathTraced(camera, *fixture->accel, fixture->scene.shadingTriangles,
                                          fixture->scene.instances, fixture->scene.instanceLightIndex, lights,
-                                         kImageSize, kImageSize, /*showSky=*/true, makeSettings(),
-                                         fixture->scene.perInstanceSettings, scrambleSeed, /*sampleBase=*/p,
+                                         kImageSize, kImageSize, /*showSky=*/true, makeSettings(), scrambleSeed, /*sampleBase=*/p,
                                          /*sampleCount=*/kPasses, oracleGeneration, scrambleSeed, fixture->pool,
                                          stats, pass);
         const double k = p + 1;

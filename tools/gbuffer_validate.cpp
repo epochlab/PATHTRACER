@@ -51,9 +51,13 @@ constexpr float kLineThicknessPx = 1.0F;
 constexpr int kEdgeSamples = 1024;
 constexpr Camera::FilmBack kFilmBack{36.0F, 24.0F};
 
-// The neutral default material, varying only the two slots the G-buffer AOVs under test read.
+// OpenPBR defaults with a fractional metalness, varying only the two inputs the G-buffer AOVs under test read.
 Material makeMaterial(glm::vec3 baseColor, float roughness) {
-    return Material{.baseColor = baseColor, .roughness = roughness};
+    Material material;
+    material.baseColor = baseColor;
+    material.baseMetalness = 0.2F;
+    material.specularRoughness = roughness;
+    return material;
 }
 
 glm::vec4 tangentFor(const glm::vec3& normal) {
@@ -120,14 +124,6 @@ PathTraceSettings makeTestSettings() {
     settings.russianRouletteStartBounce = 1;
     // Derived from the scene's depth span, not profile.json: the horizon must fall inside it or one remap branch carries no pixels.
     settings.lookaheadDistance = 0.5F * (kSceneNearZ + kSceneFarZ);
-    settings.bumpStrength = 1.0F;
-    settings.roughnessMin = 0.045F;
-    settings.roughnessMax = 1.0F;
-    settings.diffuseColour = glm::vec3(1.0F);
-    settings.ior = 1.5F;
-    settings.transmissionFactor = 0.0F;
-    settings.metallicFactor = 0.2F;
-    settings.roughnessFactor = 1.0F;
     return settings;
 }
 
@@ -136,13 +132,13 @@ struct Fixture {
     std::vector<ShadingTriangle> shadingTriangles;
     std::optional<EmbreeAccel> accel;
     std::vector<MeshInstance> instances;
-    std::vector<PathTraceSettings> perInstanceSettings;
+    PathTraceSettings settings = makeTestSettings();
     std::vector<AabbBounds> instanceBounds;
     ThreadPool threadPool;
 
     [[nodiscard]] GBuffer render(const Camera& camera, const Camera& previous) {
         GBuffer gbuffer;
-        renderGBuffer(camera, previous, *accel, shadingTriangles, instances, perInstanceSettings, instanceBounds, kWidth, kHeight,
+        renderGBuffer(camera, previous, *accel, shadingTriangles, instances, settings.lookaheadDistance, instanceBounds, kWidth, kHeight,
                       threadPool, gbuffer);
         return gbuffer;
     }
@@ -159,7 +155,6 @@ std::unique_ptr<Fixture> makeFixture(std::vector<ShadingTriangle> triangles, int
         fixture->instances.push_back(
             MeshInstance{makeMaterial(colours[slot], 0.2F + (0.25F * static_cast<float>(slot))), glm::mat4(1.0F), ""});
     }
-    fixture->perInstanceSettings.assign(fixture->instances.size(), makeTestSettings());
     fixture->instanceBounds = computeInstanceBounds(fixture->shadingTriangles, instanceCount);
     return fixture;
 }
@@ -233,19 +228,18 @@ bool matchesOracle(const GBuffer& g, int x, int y, const Ray& ray, const glm::ma
     const ShadingTriangle& triangle = fixture.shadingTriangles[static_cast<std::size_t>(hit.triangleIndex)];
     const auto instance = static_cast<std::size_t>(triangle.instanceIndex);
     const Material& material = fixture.instances[instance].material;
-    const PathTraceSettings& settings = fixture.perInstanceSettings[instance];
     const ShadingVertex shading = interpolateShading(triangle, hit.u, hit.v);
     const pathtracer::gfx::TextureFootprint footprint = primaryHitFootprint(triangle, ray, hit.t, dirPerPixel);
-    const ShadingFrame frame = buildShadingFrame(triangle, shading, material, settings);
-    const BsdfParams params = resolveBsdfParams(material, shading.uv, footprint, shading.colour, settings, std::nullopt);
+    const ShadingFrame frame = buildShadingFrame(triangle, shading, material);
+    const OpenPbrInputs<Constant> inputs = resolveInputs(material, shading.uv, footprint, shading.colour);
     return texelAt(g.depth, x, y).x == hit.t &&
-           texelAt(g.lookahead, x, y).x == std::clamp(1.0F - (hit.t / settings.lookaheadDistance), 0.0F, 1.0F) &&
+           texelAt(g.lookahead, x, y).x == std::clamp(1.0F - (hit.t / fixture.settings.lookaheadDistance), 0.0F, 1.0F) &&
            texelAt(g.worldPos, x, y) == shading.position && glm::vec2(texelAt(g.uv, x, y)) == glm::fract(shading.uv) &&
            texelAt(g.normal, x, y) == frame[2] && texelAt(g.geomNormal, x, y) == glm::normalize(shading.normal) &&
-           texelAt(g.albedo, x, y) == params.baseColor && texelAt(g.metallic, x, y).x == params.metallic &&
-           texelAt(g.roughness, x, y).x == params.roughness && texelAt(g.tangent, x, y) == frame[0] &&
+           texelAt(g.albedo, x, y) == inputs.baseWeight * inputs.baseColor && texelAt(g.metallic, x, y).x == inputs.baseMetalness &&
+           texelAt(g.roughness, x, y).x == inputs.specularRoughness && texelAt(g.tangent, x, y) == frame[0] &&
            texelAt(g.objectId, x, y) == falseColorForId(triangle.instanceIndex) &&
-           texelAt(g.iorAov, x, y).x == settings.ior && glm::vec2(texelAt(g.motionVector, x, y)) == glm::vec2(0.0F);
+           texelAt(g.iorAov, x, y).x == modulatedIor(inputs, std::nullopt) && glm::vec2(texelAt(g.motionVector, x, y)) == glm::vec2(0.0F);
 }
 
 // worldPos reprojected through Camera::project lands on its own pixel centre, within the hit's rounding over the incidence it is seen at.
@@ -832,91 +826,104 @@ PT_CHECK(wireframe_ignores_offscreen_edges, Fast, Exact) {
     PT_EXPECT(ctx, wirePixels == 0, "edges far outside the view were drawn as wireframe");
 }
 
-bool sameBsdfParams(const BsdfParams& a, const BsdfParams& b) {
-    return a.baseColor == b.baseColor && a.metallic == b.metallic && a.roughness == b.roughness && a.f0 == b.f0 &&
-           a.edgeTint == b.edgeTint && a.ior == b.ior && a.transmissionFactor == b.transmissionFactor &&
-           a.diffuseRoughness == b.diffuseRoughness && a.diffuseRho == b.diffuseRho && a.transmissionTint == b.transmissionTint;
+// Every input equal, compared bitwise: the two resolutions must agree exactly, not within a tolerance.
+bool sameInputs(const OpenPbrInputs<Constant>& a, const OpenPbrInputs<Constant>& b) {
+    bool same = true;
+    forEachInput([&](const InputSpec&, const auto& x, const auto& y) { same = same && x == y; }, a, b);
+    return same;
 }
 
-// A 1x1 texture reads its texel to two nested lerps' rounding, 6u, and shades bit-identically to the constant it reads, any uv.
+// A value inside the input's specification range, so the lookup's clamp is the identity and the two paths must agree exactly.
+float sampleInRange(InputRange range, std::mt19937& rng) {
+    std::uniform_real_distribution<float> unit(0.0F, 1.0F);
+    switch (range) {
+        case InputRange::Unit:
+            return unit(rng);
+        case InputRange::NonNegative:
+            return 4.0F * unit(rng);
+        case InputRange::Positive:
+            return 0.5F + (2.5F * unit(rng));
+        case InputRange::Signed:
+            return (2.0F * unit(rng)) - 1.0F;
+    }
+    return 0.0F;
+}
+
+// Every OpenPBR input bound to a 1x1 texture reads its texel to two nested lerps' rounding, 6u, and resolves as the constant it read.
 PT_CHECK(constant_inputs_match_unit_textures, Fast, Exact) {
     constexpr int kCases = 256;
     std::mt19937 rng(static_cast<std::mt19937::result_type>(ctx.seed()));
     std::uniform_real_distribution<float> unit(0.0F, 1.0F);
     std::uniform_real_distribution<float> wrappedUv(-4.0F, 4.0F);
-    const auto randomVec3 = [&] { return glm::vec3(unit(rng), unit(rng), unit(rng)); };
     const auto unitTexture = [](const float* value, int channels) {
         return tools::fixtures::makeTexture(1, 1, channels, std::vector<float>(value, value + channels));
     };
+    // Bilinear of equal texels is two nested lerps (1 - x)a + xa of 3u each: within 6u = 3 FLT_EPSILON of the texel.
+    const auto within = [](glm::vec3 lookup, glm::vec3 texel) {
+        return glm::all(glm::lessThanEqual(glm::abs(lookup - texel), 3.0F * std::numeric_limits<float>::epsilon() * glm::abs(texel)));
+    };
     ctx.plan(3);
-    int paramMismatches = 0;
+    int inputMismatches = 0;
     int frameMismatches = 0;
     int bumpMismatches = 0;
     for (int i = 0; i < kCases; ++i) {
-        const glm::vec3 baseColor = randomVec3();
-        const glm::vec3 encodedNormal = randomVec3();
-        const float height = unit(rng);
-        const float roughness = unit(rng);
-        const glm::vec3 specular = randomVec3();
-        const Material constant{.baseColor = baseColor, .normal = encodedNormal, .bump = height, .roughness = roughness,
-                                .specular = specular};
-        // Bump stays constant here so the frames compare exactly; the bound bump texture is the third material's alone.
-        const Material textured{.baseColor = unitTexture(&baseColor.x, pathtracer::gfx::kRgbChannels),
-                                .normal = unitTexture(&encodedNormal.x, pathtracer::gfx::kRgbChannels),
-                                .bump = height,
-                                .roughness = unitTexture(&roughness, pathtracer::gfx::kScalarChannels),
-                                .specular = unitTexture(&specular.x, pathtracer::gfx::kRgbChannels)};
-        Material bumped = constant;
-        bumped.bump = unitTexture(&height, pathtracer::gfx::kScalarChannels);
+        const glm::vec2 uv(wrappedUv(rng), wrappedUv(rng));
+        Material textured;
+        Material asRead;
+        bool lookupsHold = true;
+        forEachInput(
+            [&](const InputSpec& spec, auto& texture, auto& read) {
+                using T = std::decay_t<decltype(read)>;
+                if constexpr (std::is_same_v<T, MaterialInput<float>>) {
+                    const float value = sampleInRange(spec.range, rng);
+                    texture = unitTexture(&value, pathtracer::gfx::kScalarChannels);
+                    const float lookup = pathtracer::gfx::sampleTexture(**std::get_if<TextureHandle>(&texture), uv).r;
+                    lookupsHold = lookupsHold && within(glm::vec3(lookup), glm::vec3(value));
+                    read = lookup;
+                } else {
+                    const glm::vec3 value(sampleInRange(spec.range, rng), sampleInRange(spec.range, rng), sampleInRange(spec.range, rng));
+                    texture = unitTexture(&value.x, pathtracer::gfx::kRgbChannels);
+                    const glm::vec3 lookup = pathtracer::gfx::sampleTexture(**std::get_if<TextureHandle>(&texture), uv);
+                    lookupsHold = lookupsHold && within(lookup, value);
+                    read = lookup;
+                }
+            },
+            textured, asRead);
+        const glm::vec3 vertexColour(unit(rng), unit(rng), unit(rng));
+        // Shading consumes a lookup exactly as a constant of the value it read: the texture path adds nothing past the filter.
+        inputMismatches += lookupsHold && sameInputs(resolveInputs(asRead, uv, {}, vertexColour), resolveInputs(textured, uv, {}, vertexColour)) ? 0 : 1;
 
-        PathTraceSettings settings = makeTestSettings();
-        settings.bumpStrength = unit(rng);
-        settings.diffuseColour = randomVec3();
-        settings.roughnessFactor = unit(rng);
-        settings.metallicFactor = unit(rng);
-        settings.transmissionFactor = unit(rng);
-        settings.diffuseRoughness = unit(rng);
-        settings.ior = 1.0F + unit(rng);
-        const glm::vec3 normal = glm::normalize(randomVec3() - glm::vec3(0.5F));
+        // A 1x1 normal map of the flat encoding (1/2, 1/2, 1) builds the unmapped frame to the lookup's and normalisation's rounding.
+        const glm::vec3 normal = glm::normalize(glm::vec3(unit(rng), unit(rng), unit(rng)) - glm::vec3(0.5F));
         glm::vec4 tangent = tangentFor(normal);
         tangent.w = unit(rng) < 0.5F ? -1.0F : 1.0F;
-        const ShadingVertex vertex{glm::vec3(0.0F), normal, glm::vec2(wrappedUv(rng), wrappedUv(rng)), tangent, randomVec3()};
+        const ShadingVertex vertex{glm::vec3(0.0F), normal, uv, tangent, vertexColour};
         // Unit edges along the tangent frame, uv advancing one unit along each: a well-conditioned dP/duv for the bump gradient.
         ShadingTriangle triangle{vertex, vertex, vertex, 0};
         triangle.v1.position = glm::vec3(tangent);
         triangle.v1.uv += glm::vec2(1.0F, 0.0F);
         triangle.v2.position = glm::cross(normal, glm::vec3(tangent)) * tangent.w;
         triangle.v2.uv += glm::vec2(0.0F, 1.0F);
-
-        // Bilinear of equal texels is two nested lerps (1 - x)a + xa of 3u each: within 6u = 3 FLT_EPSILON of the texel.
-        const auto read = [&](const MaterialInput<glm::vec3>& input) {
-            return pathtracer::gfx::sampleTexture(**std::get_if<TextureHandle>(&input), vertex.uv);
-        };
-        const auto within = [](glm::vec3 lookup, glm::vec3 texel) {
-            return glm::all(glm::lessThanEqual(glm::abs(lookup - texel), 3.0F * std::numeric_limits<float>::epsilon() * glm::abs(texel)));
-        };
-        const float roughnessRead = pathtracer::gfx::sampleTexture(**std::get_if<TextureHandle>(&textured.roughness), vertex.uv).r;
-        const bool lookupsHold = within(read(textured.baseColor), baseColor) && within(read(textured.normal), encodedNormal) &&
-                                 within(read(textured.specular), specular) && within(glm::vec3(roughnessRead), glm::vec3(roughness));
-        // Shading consumes a lookup exactly as a constant of the value it read: the texture path adds nothing past the filter.
-        const Material asRead{.baseColor = read(textured.baseColor), .normal = read(textured.normal), .bump = height,
-                              .roughness = roughnessRead, .specular = read(textured.specular)};
-        const BsdfParams readParams = resolveBsdfParams(asRead, vertex.uv, {}, vertex.colour, settings, std::nullopt);
-        const BsdfParams texturedParams = resolveBsdfParams(textured, vertex.uv, {}, vertex.colour, settings, std::nullopt);
-        paramMismatches += lookupsHold && sameBsdfParams(readParams, texturedParams) ? 0 : 1;
-        frameMismatches += buildShadingFrame(triangle, vertex, asRead, settings) == buildShadingFrame(triangle, vertex, textured, settings) ? 0 : 1;
+        constexpr glm::vec3 kFlatEncoding(0.5F, 0.5F, 1.0F);
+        Material mapped;
+        mapped.geometryNormal.map = unitTexture(&kFlatEncoding.x, pathtracer::gfx::kRgbChannels);
+        const ShadingFrame flat = buildShadingFrame(triangle, vertex, Material{});
+        const ShadingFrame viaMap = buildShadingFrame(triangle, vertex, mapped);
+        frameMismatches += glm::all(glm::lessThanEqual(glm::abs(viaMap[2] - flat[2]), glm::vec3(8.0F * std::numeric_limits<float>::epsilon()))) ? 0 : 1;
         // A constant's B-spline slope is a sum of derivative weights, exactly 0, with sum |w'| <= 1: rounding leaves at most 6u|h|.
-        const glm::vec2 slope = pathtracer::gfx::sampleTextureGradient(**std::get_if<TextureHandle>(&bumped.bump), vertex.uv).dst;
+        const float height = unit(rng);
+        const TextureHandle bump = unitTexture(&height, pathtracer::gfx::kScalarChannels);
+        const glm::vec2 slope = pathtracer::gfx::sampleTextureGradient(*bump, uv).dst;
         bumpMismatches += glm::all(glm::lessThanEqual(glm::abs(slope), glm::vec2(3.0F * std::numeric_limits<float>::epsilon() * height))) ? 0 : 1;
     }
-    std::cout << "gbuffer_validate: constant vs 1x1 texture over " << kCases << " cases -- " << paramMismatches << " BsdfParams, "
+    std::cout << "gbuffer_validate: constant vs 1x1 texture over " << kCases << " cases -- " << inputMismatches << " inputs, "
               << frameMismatches << " frame, " << bumpMismatches << " bump mismatches\n";
-    PT_EXPECT(ctx, paramMismatches == 0, "a 1x1 texture read past 6u of its texel, or resolved BsdfParams unlike the constant it read");
-    PT_EXPECT(ctx, frameMismatches == 0, "a 1x1 normal texture built a different shading frame from the constant it read");
+    PT_EXPECT(ctx, inputMismatches == 0, "a 1x1 texture read past 6u of its texel, or resolved inputs unlike the constants it read");
+    PT_EXPECT(ctx, frameMismatches == 0, "a flat-encoded 1x1 normal map tilted the shading normal past rounding");
     PT_EXPECT(ctx, bumpMismatches == 0, "a constant bump texture's slope exceeds the rounding of its exactly-zero derivative weights");
 }
 
-// H = a*u + b*v is linear, so bilinear taps reproduce it and the true surface gradient of h = bumpStrength*H is a 3x3 solve per triangle.
+// H = a*u + b*v is linear, so bilinear taps reproduce it and the true surface gradient of h = heightMetres*H is a 3x3 solve per triangle.
 PT_CHECK(bump_gradient_is_world_height, Fast, Exact) {
     constexpr int kCases = 256;
     constexpr glm::vec2 kSlopeUv(0.6F, -0.8F);
@@ -941,8 +948,9 @@ PT_CHECK(bump_gradient_is_world_height, Fast, Exact) {
                     glm::dot(kSlopeUv, (glm::vec2(x, y) + 0.5F) / glm::vec2(resolution));
             }
         }
-        const Material material{
-            .bump = tools::fixtures::makeTexture(resolution.x, resolution.y, pathtracer::gfx::kScalarChannels, std::move(heights))};
+        Material material;
+        material.geometryNormal.height =
+            tools::fixtures::makeTexture(resolution.x, resolution.y, pathtracer::gfx::kScalarChannels, std::move(heights));
         const glm::dvec2 texel = 1.0 / glm::dvec2(resolution);
         for (int i = 0; i < kCases; ++i) {
             const glm::vec3 normal = glm::normalize(glm::vec3(signedUnit(rng), signedUnit(rng), signedUnit(rng)));
@@ -969,9 +977,8 @@ PT_CHECK(bump_gradient_is_world_height, Fast, Exact) {
                 u = 1.0F - u;
                 v = 1.0F - v;
             }
-            PathTraceSettings settings = makeTestSettings();
-            settings.bumpStrength = scale * signedUnit(rng);
-            const glm::vec3 bumped = buildShadingFrame(triangle, interpolateShading(triangle, u, v), material, settings)[2];
+            material.geometryNormal.heightMetres = scale * signedUnit(rng);
+            const glm::vec3 bumped = buildShadingFrame(triangle, interpolateShading(triangle, u, v), material)[2];
 
             // Rows e1, e2, n: grad . e_k = dh_k with grad . n = 0, an independent route to the in-plane gradient.
             const glm::dvec3 e1 = glm::dvec3(triangle.v1.position) - glm::dvec3(triangle.v0.position);
@@ -983,7 +990,7 @@ PT_CHECK(bump_gradient_is_world_height, Fast, Exact) {
             const auto worldGradient = [&](glm::dvec2 slopeUv) {
                 return solve * glm::dvec3(glm::dot(slopeUv, duv1), glm::dot(slopeUv, duv2), 0.0);
             };
-            const double strength = settings.bumpStrength;
+            const double strength = material.geometryNormal.heightMetres;
             const glm::dvec3 gradient = worldGradient(strength * glm::dvec2(kSlopeUv));
             const glm::dvec3 expected = glm::normalize(n - gradient);
             mirrored += ((duv1.x * duv2.y) - (duv1.y * duv2.x)) < 0.0 ? 1 : 0;
@@ -1001,7 +1008,7 @@ PT_CHECK(bump_gradient_is_world_height, Fast, Exact) {
     const int total = kCases * static_cast<int>(kResolutions.size());
     std::cout << "gbuffer_validate: bump surface gradient over " << total << " cases (" << mirrored << " mirrored uv) -- " << failures
               << " outside the forward-error bound, worst " << worstRatio << " of it\n";
-    PT_EXPECT(ctx, failures == 0, "a bumped normal left the closed-form surface gradient of h = bumpStrength*H");
+    PT_EXPECT(ctx, failures == 0, "a bumped normal left the closed-form surface gradient of h = heightMetres*H");
     PT_EXPECT(ctx, mirrored > 0 && mirrored < total, "the draw did not cover both uv orientations");
 }
 

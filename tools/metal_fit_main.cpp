@@ -1,4 +1,4 @@
-// Prints the reflectivity/edgeTint a material JSON should carry for a measured conductor, at max_digits10 so pasting round-trips exactly.
+// Prints the base_color/specular_color a metal's material JSON carries for a measured conductor, at max_digits10 so pasting round-trips.
 
 #include <cstdio>
 #include <iostream>
@@ -33,18 +33,19 @@ int main(int argc, char** argv) {
     if (!table) {
         return 1;
     }
-    const auto fit = tools::metal_fit::fitGulbrandsen(*table, Interpolation::Wavelength);
-    const auto energyFit = tools::metal_fit::fitGulbrandsen(*table, Interpolation::PhotonEnergy);
+    const auto fit = tools::metal_fit::fitF82(*table, Interpolation::Wavelength);
+    const auto energyFit = tools::metal_fit::fitF82(*table, Interpolation::PhotonEnergy);
     if (!fit || !energyFit) {
         return 1;
     }
     std::printf("metal_fit: %s (%zu rows) -> CIE 1931 2-degree observer, D65, linear Rec.709\n", argv[2],
                 table->size());
-    printFloatTriple("diffuseColour", fit->reflectivity);
-    printFloatTriple("edgeTint", fit->edgeTint);
-    printTriple("hemispherical average (fitted exactly)", fit->averageTarget);
+    printFloatTriple("base_color", fit->baseColor);
+    printFloatTriple("specular_color", fit->specularColor);
+    printTriple("hemispherical average (measured)", fit->averageTarget);
+    printTriple("|F82 average - measured|", fit->averageResidual);
     printTriple("max |R_fit(mu) - R_cie(mu)|", fit->angularResidual);
-    printTriple("reflectivity delta, linear in photon energy", energyFit->reflectivity - fit->reflectivity);
-    printTriple("edgeTint delta, linear in photon energy", energyFit->edgeTint - fit->edgeTint);
+    printTriple("base_color delta, linear in photon energy", energyFit->baseColor - fit->baseColor);
+    printTriple("specular_color delta, linear in photon energy", energyFit->specularColor - fit->specularColor);
     return 0;
 }

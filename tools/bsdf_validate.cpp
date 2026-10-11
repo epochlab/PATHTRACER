@@ -29,14 +29,15 @@
 namespace {
 
 using pathtracer::scene::BsdfParams;
+using pathtracer::scene::Constant;
+using pathtracer::scene::OpenPbrInputs;
 using tools::stats::simpson;
 
 using tools::fixtures::kPi;
 using tools::fixtures::sampleUniformHemisphere;
 using tools::reference::cosineAverageFresnel;
-using tools::reference::referenceConductorFresnel;
-using tools::reference::referenceConductorFresnelAt;
-using tools::reference::referenceConductorIor;
+using tools::reference::kMuBar;
+using tools::reference::referenceF82;
 
 // Each check keeps its own `ok` accumulator and per-row diagnostics carrying parameters, measurement and reference, reporting one verdict.
 void finish(tools::check::Context& ctx, bool ok, const char* what) {
@@ -44,24 +45,35 @@ void finish(tools::check::Context& ctx, bool ok, const char* what) {
     PT_EXPECT(ctx, ok, what);
 }
 
-// edgeTint defaults to white, the no-dip edge Schlick always produced, so every pre-existing case is a strict subset of the swept coverage.
-BsdfParams makeParams(float roughness, float metallic, float transmissionFactor,
-                       float diffuseRoughness = 0.0F, glm::vec3 edgeTint = glm::vec3(1.0F)) {
-    const glm::vec3 baseColor(1.0F);  // worst case: full white albedo
-    const glm::vec3 f0 = glm::mix(glm::vec3(0.04F), baseColor, metallic);
-    return BsdfParams{baseColor,          metallic, roughness,          f0, edgeTint,
-                       /*ior=*/1.5F, transmissionFactor, diffuseRoughness,
-                       pathtracer::scene::eonAlbedoInversion(baseColor, diffuseRoughness),
-                       /*transmissionTint=*/glm::vec3(1.0F)};
+// OpenPBR inputs over a white base, worst case for albedo, edited by the caller and resolved as a hit resolves them.
+template <typename Edit>
+BsdfParams paramsWith(Edit edit) {
+    OpenPbrInputs<Constant> inputs;
+    inputs.baseColor = glm::vec3(1.0F);
+    edit(inputs);
+    return tools::fixtures::paramsOf(inputs);
 }
 
-// A coloured dark conductor (f0=0.5): white f0 clamps specularProb to 0.95, leaving only 5% diffuse mass to hide a diffuse-pdf error under.
-BsdfParams makeColoredMetalParams(float roughness, glm::vec3 edgeTint = glm::vec3(1.0F)) {
-    const glm::vec3 baseColor(1.0F);
-    return BsdfParams{baseColor,    1.0F, roughness, glm::vec3(0.5F), edgeTint,
-                       /*ior=*/1.5F, /*transmissionFactor=*/0.0F, /*diffuseRoughness=*/0.0F,
-                       pathtracer::scene::eonAlbedoInversion(baseColor, 0.0F),
-                       /*transmissionTint=*/glm::vec3(1.0F)};
+// specular_color defaults to white, F82's no-dip Schlick edge, so a tinted metal is a strict extension of the swept coverage.
+BsdfParams makeParams(float roughness, float metallic, float transmission, float diffuseRoughness = 0.0F,
+                      glm::vec3 specularColor = glm::vec3(1.0F)) {
+    return paramsWith([&](OpenPbrInputs<Constant>& inputs) {
+        inputs.specularRoughness = roughness;
+        inputs.baseMetalness = metallic;
+        inputs.transmissionWeight = transmission;
+        inputs.baseDiffuseRoughness = diffuseRoughness;
+        inputs.specularColor = specularColor;
+    });
+}
+
+// A coloured dark metal (base_color 0.5): F0 below 1, so its Kulla-Conty lobe and F82 correction both carry weight.
+BsdfParams makeColoredMetalParams(float roughness, glm::vec3 specularColor = glm::vec3(1.0F)) {
+    return paramsWith([&](OpenPbrInputs<Constant>& inputs) {
+        inputs.baseColor = glm::vec3(0.5F);
+        inputs.baseMetalness = 1.0F;
+        inputs.specularRoughness = roughness;
+        inputs.specularColor = specularColor;
+    });
 }
 
 // Uniform-solid-angle hemisphere samples (z=u1, r=sqrt(1-u1^2)) integrate pdfBsdf, MIS-combined with sampleBsdf's density (Veach 1997 9.2).
@@ -220,11 +232,11 @@ PT_CHECK(strategy_coverage, Fast, Exact) {
     for (float roughness : roughnesses) {
         for (float ior : iors) {
             for (float transmission : transmissions) {
-                const BsdfParams params{glm::vec3(1.0F), 0.0F, roughness,
-                                         glm::vec3(0.04F), glm::vec3(1.0F), ior,
-                                         transmission, /*diffuseRoughness=*/0.0F,
-                                         pathtracer::scene::eonAlbedoInversion(glm::vec3(1.0F), 0.0F),
-                                         /*transmissionTint=*/glm::vec3(1.0F)};
+                const BsdfParams params = paramsWith([&](OpenPbrInputs<Constant>& inputs) {
+                    inputs.specularRoughness = roughness;
+                    inputs.specularIor = ior;
+                    inputs.transmissionWeight = transmission;
+                });
                 for (float ndotV : ndotVs) {
                     const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
                     for (int mi = 0; mi < 2 * kMuNodes; ++mi) {
@@ -300,7 +312,7 @@ PT_CHECK(furnace_energy_bound, Slow, Statistical) {
         }
     }
 
-    // Coloured conductor (f0=0.5): a white f0's clamped 95% specular probability leaves too little diffuse mass for this tolerance.
+    // Coloured metal (base_color 0.5): below a white F0's perfect mirror, where the furnace has energy to lose or gain.
     for (float roughness : roughnesses) {
         for (float ndotV : ndotVs) {
             ++seed;
@@ -350,7 +362,7 @@ PT_CHECK(white_furnace_two_sided, Slow, Statistical) {
     bool ok = true;
     std::uint32_t seed = 9000;
     std::cout << "bsdf_validate: white furnace energy (1.0 = perfectly energy-conserving)\n";
-    std::cout << "  roughness  ndotV  conductor  dielectric\n";
+    std::cout << "  roughness  ndotV  metal      dielectric\n";
     for (const WhiteFurnaceCase& entry : cases) {
         ++seed;
         const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (entry.ndotV * entry.ndotV))), 0.0F,
@@ -364,7 +376,7 @@ PT_CHECK(white_furnace_two_sided, Slow, Statistical) {
                   << (entry.offGrid ? "   (off-grid)" : "") << '\n';
 
         const std::array<std::pair<const char*, glm::vec3>, 2> measured = {
-            {{"conductor", conductor}, {"dielectric", dielectric}}};
+            {{"metal", conductor}, {"dielectric", dielectric}}};
         for (const auto& [label, value] : measured) {
             if (!withinBand(value, 1.0F, kTolerance)) {
                 std::cerr << "bsdf_validate: FAILED white-" << label
@@ -393,7 +405,7 @@ PT_CHECK(eon_diffuse_furnace, Slow, Statistical) {
     std::cout << "  metallic  diffuseRoughness  ndotV  Lo\n";
     for (std::size_t m = 0; m < metallics.size(); ++m) {
         const float metallic = metallics[m];
-        // Per-ndotV reading at diffuseRoughness 0, the reference the conductor rows must reproduce bit for bit.
+        // Per-ndotV reading at diffuseRoughness 0, the reference the metal rows must reproduce bit for bit.
         std::array<glm::vec3, 3> baseline{};
         for (float diffuseRoughness : diffuseRoughnesses) {
             for (std::size_t v = 0; v < ndotVs.size(); ++v) {
@@ -415,10 +427,10 @@ PT_CHECK(eon_diffuse_furnace, Slow, Statistical) {
                 if (diffuseRoughness == 0.0F) {
                     baseline[v] = lo;
                 } else if (metallic == 1.0F && lo != baseline[v]) {
-                    std::cerr << "bsdf_validate: FAILED conductor diffuseRoughness invariance at ndotV="
+                    std::cerr << "bsdf_validate: FAILED metal diffuseRoughness invariance at ndotV="
                               << ndotV << " diffuseRoughness=" << diffuseRoughness << " Lo="
                               << minChannel(lo) << " vs " << minChannel(baseline[v])
-                              << " (a conductor has no diffuse lobe; diffuseRoughness must reach nothing)\n";
+                              << " (a metal has no diffuse lobe; diffuseRoughness must reach nothing)\n";
                     ok = false;
                 }
             }
@@ -438,14 +450,14 @@ glm::vec3 referenceEonAlbedo(const glm::vec3& rho, float r) {
     return (rho * eFon) + (rhoMs * (1.0F - eFon));
 }
 
-// A bare EON diffuse surface; ior=1 zeroes dielectric Fresnel, so the coat contributes nothing and roughness/f0 are swept to show it inert.
-BsdfParams makeDiffuseParams(const glm::vec3& baseColor, float diffuseRoughness,
-                              float roughness = 0.5F, float ior = 1.0F) {
-    return BsdfParams{baseColor,          /*metallic=*/0.0F,          roughness,
-                       glm::vec3(0.0F),    /*edgeTint=*/glm::vec3(1.0F), ior,
-                       /*transmissionFactor=*/0.0F, diffuseRoughness,
-                       pathtracer::scene::eonAlbedoInversion(baseColor, diffuseRoughness),
-                       /*transmissionTint=*/glm::vec3(1.0F)};
+// A bare EON diffuse surface; ior=1 zeroes dielectric Fresnel, so the glossy layer is absent and roughness is swept to show it inert.
+BsdfParams makeDiffuseParams(const glm::vec3& baseColor, float diffuseRoughness, float roughness = 0.5F, float ior = 1.0F) {
+    return paramsWith([&](OpenPbrInputs<Constant>& inputs) {
+        inputs.baseColor = baseColor;
+        inputs.baseDiffuseRoughness = diffuseRoughness;
+        inputs.specularRoughness = roughness;
+        inputs.specularIor = ior;
+    });
 }
 
 struct AlbedoEstimate {
@@ -555,9 +567,9 @@ glm::vec3 referenceEon(const glm::vec3& rho, float r, const glm::vec3& wi, const
     return result;
 }
 
-// The instrument for coatAlbedo's fresnelAvg argument: ior=1 is the only point resolvable without the albedo table, exact from x*1.0F == x.
-PT_CHECK(index_matched_coat, Fast, Exact) {
-    // Exact from the collapse above; the second is a float32-vs-double residual, worst 2.03e-7. The Karis revert breaks it by 7.8e-4.
+// At ior 1 the glossy layer is optically absent: its escape row is all zero, so the coupling is exactly 1 and the diffuse is EON alone.
+PT_CHECK(index_matched_glossy_layer, Fast, Exact) {
+    // Exact from the collapse above; the second is a float32-vs-double residual, worst 2.03e-7.
     constexpr float kInvarianceTolerance = 0.0F;
     constexpr float kValueTolerance = 1e-6F;
     // 0.0 is the reference row every other is compared against; 0.3661 and 0.92 sit deliberately off the table's grid.
@@ -573,7 +585,7 @@ PT_CHECK(index_matched_coat, Fast, Exact) {
     int rowsChecked = 0;
     float worstOverall = 0.0F;
     float worstValueErr = 0.0F;
-    std::cout << "bsdf_validate: index-matched coat, diffuse channel vs specular roughness (ior 1)\n";
+    std::cout << "bsdf_validate: index-matched glossy layer, diffuse channel vs specular roughness (ior 1)\n";
     std::cout << "  baseColor              diffuseRoughness  worst |delta|  at roughness/mu_o/mu_i\n";
     for (const glm::vec3& albedo : albedos) {
         for (float diffuseRoughness : diffuseRoughnesses) {
@@ -599,7 +611,7 @@ PT_CHECK(index_matched_coat, Fast, Exact) {
                     const float valueErr = maxChannel(glm::abs(reference - analytic)) / scale;
                     worstValueErr = std::max(worstValueErr, valueErr);
                     if (!(valueErr <= kValueTolerance)) {
-                        std::cerr << "bsdf_validate: FAILED index-matched coat (value) at baseColor=["
+                        std::cerr << "bsdf_validate: FAILED index-matched glossy layer (value) at baseColor=["
                                    << albedo.x << ", " << albedo.y << ", " << albedo.z
                                    << "] diffuseRoughness=" << diffuseRoughness << " mu_o=" << muO
                                    << " mu_i=" << muI << " diffuse=[" << reference.x << ", "
@@ -623,7 +635,7 @@ PT_CHECK(index_matched_coat, Fast, Exact) {
                             worstMuI = muI;
                         }
                         if (!(delta <= kInvarianceTolerance)) {
-                            std::cerr << "bsdf_validate: FAILED index-matched coat at baseColor=["
+                            std::cerr << "bsdf_validate: FAILED index-matched glossy layer at baseColor=["
                                        << albedo.x << ", " << albedo.y << ", " << albedo.z
                                        << "] diffuseRoughness=" << diffuseRoughness
                                        << " roughness=" << roughnesses[i] << " mu_o=" << muO
@@ -631,7 +643,7 @@ PT_CHECK(index_matched_coat, Fast, Exact) {
                                        << value.y << ", " << value.z << "] vs roughness 0 ["
                                        << reference.x << ", " << reference.y << ", " << reference.z
                                        << "] relative delta=" << delta
-                                       << " (expected exactly 0: at ior 1 the coat is optically absent, so its roughness cannot reach the diffuse channel)\n";
+                                       << " (expected exactly 0: at ior 1 the glossy layer is absent, so its roughness cannot reach the diffuse channel)\n";
                             ok = false;
                         }
                     }
@@ -647,10 +659,10 @@ PT_CHECK(index_matched_coat, Fast, Exact) {
                << ", worst value error " << worstValueErr << '\n';
     // Anti-vacuity: a sweep that asserted nothing would print zeros too.
     if (rowsChecked == 0) {
-        std::cerr << "bsdf_validate: FAILED index-matched coat -- no rows asserted\n";
+        std::cerr << "bsdf_validate: FAILED index-matched glossy layer -- no rows asserted\n";
         ok = false;
     }
-    finish(ctx, ok, "index_matched_coat failed; see the rows above");
+    finish(ctx, ok, "index_matched_glossy_layer failed; see the rows above");
     return;
 }
 
@@ -677,7 +689,7 @@ glm::vec3 transmissiveEnergyLo(const BsdfParams& params, const glm::vec3& wo, in
 // Two-sided energy balance, 1.0 in the energy domain: catches compensation over the wrong hemisphere and a double-counted escape budget.
 PT_CHECK(transmissive_energy_balance, Slow, Statistical) {
     constexpr int kSampleCount = 200000;
-    // Same tolerance as the opaque white furnace; the residual is model error, measured worst 0.0036 at transmissionFactor 0.5 entering.
+    // Same tolerance as the opaque white furnace; the residual is model error, measured worst 0.0036 at transmission_weight 0.5 entering.
     constexpr float kTolerance = 0.02F;
     const std::array<float, 4> roughnesses = {0.05F, 0.4F, 0.7F, 1.0F};
     const std::array<float, 4> ndotVs = {1.0F, 0.6F, -0.9F, -0.4F};  // entering, entering, exiting, TIR
@@ -728,7 +740,7 @@ PT_CHECK(transmissive_slab_walk, Slow, Statistical) {
         char label[64];
         std::snprintf(label, sizeof(label), "slab walk r=%g", static_cast<double>(roughness));
         const std::uint64_t rowSeed = ctx.subSeed(label);
-        const BsdfParams params = makeParams(roughness, /*metallic=*/0.0F, /*transmissionFactor=*/1.0F);
+        const BsdfParams params = makeParams(roughness, /*metallic=*/0.0F, /*transmission=*/1.0F);
         std::array<tools::fixtures::SlabWalk, tools::stats::kReplicates> replicates{};
         std::atomic<int> next{0};
         std::vector<std::thread> workers;
@@ -762,13 +774,14 @@ PT_CHECK(transmissive_slab_walk, Slow, Statistical) {
     }
 }
 
-// A white non-absorbing transmissive dielectric with explicit baseColor and transmissionTint, the one configuration this suite never had.
-BsdfParams makeTransmissiveTintParams(float roughness, const glm::vec3& baseColor,
-                                       const glm::vec3& transmissionTint) {
-    return BsdfParams{baseColor,          /*metallic=*/0.0F,            roughness,
-                       glm::vec3(0.04F),   /*edgeTint=*/glm::vec3(1.0F), /*ior=*/1.5F,
-                       /*transmissionFactor=*/1.0F, /*diffuseRoughness=*/0.0F,
-                       pathtracer::scene::eonAlbedoInversion(baseColor, 0.0F), transmissionTint};
+// A non-absorbing transmissive dielectric with explicit base_color and transmission_color, at depth 0 so the colour tints the surface.
+BsdfParams makeTransmissiveTintParams(float roughness, const glm::vec3& baseColor, const glm::vec3& transmissionColor) {
+    return paramsWith([&](OpenPbrInputs<Constant>& inputs) {
+        inputs.baseColor = baseColor;
+        inputs.specularRoughness = roughness;
+        inputs.transmissionWeight = 1.0F;
+        inputs.transmissionColor = transmissionColor;
+    });
 }
 
 // Snell refraction of wo about +z, transcribed independently of bsdf.cpp, so a sign or eta error in either shows as a disagreement.
@@ -889,9 +902,10 @@ double referenceDielectricFresnel(double cosTheta, double ior) {
     return 0.5 * ((rs * rs) + (rp * rp));
 }
 
-// F_avg attenuates every repeated Kulla-Conty bounce and no furnace resolves an error in it; the conductor tolerance is the fit's 4.0e-4.
+// F_avg attenuates every repeated Kulla-Conty bounce and no furnace resolves an error in it; the metal's is closed-form, so float-tight.
 PT_CHECK(average_fresnel, Fast, Exact) {
-    constexpr double kConductorTolerance = 5e-4;
+    // F0 + (1-F0)/21 - k/126 against the double quadrature: three float operations on terms below 2, a few ulps of 1.
+    constexpr double kMetalTolerance = 2e-6;
     // The working band, everything any material authors: measured worst 5.5e-5 at ior 1.0575 over a 0.0025-step scan of [1.05, 3.0].
     constexpr double kDielectricTolerance = 1e-4;
     // The near-index-match band, stated separately rather than absorbed above, which it would loosen 8x over a region no material occupies.
@@ -899,37 +913,33 @@ PT_CHECK(average_fresnel, Fast, Exact) {
     constexpr double kNearIndexMatchIor = 1.05;
     const std::array<double, 12> reflectivities = {1e-4, 0.01, 0.1,  0.25, 0.4,  0.48,
                                                     0.555, 0.7, 0.85, 0.95, 0.99, 1.0};
-    const std::array<double, 8> edgeTints = {0.0, 0.1, 0.25, 0.5, 0.6, 0.75, 0.9, 1.0};
+    const std::array<double, 8> tints = {0.0, 0.1, 0.25, 0.5, 0.6, 0.75, 0.9, 1.0};
     // Both regimes, and the two iors that ship (glass.json 1.5168, clay.json 1.55); ior=1 reflects nothing at all.
     const std::array<double, 14> iors = {1.0,  1.005, 1.02, 1.05,   1.1,  1.2, 1.33, 1.5,
                                           1.5168, 1.55,  1.8,  2.0, 2.5, 3.0};
 
     bool ok = true;
     std::cout << "bsdf_validate: average Fresnel vs quadrature (F_avg = 2*int F(mu)*mu dmu)\n";
-    std::cout << "  conductor: worst |rule - truth| over edgeTint, per reflectivity\n";
+    std::cout << "  metal: worst |metalFresnelAvg - truth| over specular_color, per F0\n";
     for (double reflectivity : reflectivities) {
         double worst = 0.0;
         double worstTint = 0.0;
-        for (double edgeTint : edgeTints) {
-            const std::complex<double> eta = referenceConductorIor(reflectivity, edgeTint);
-            const double truth = cosineAverageFresnel(
-                [&](double mu) { return referenceConductorFresnelAt(eta, mu); });
-            const glm::vec3 rule = pathtracer::scene::conductorFresnelAvg(
-                glm::vec3(static_cast<float>(eta.real())), glm::vec3(static_cast<float>(eta.imag())));
+        for (double tint : tints) {
+            const double truth = cosineAverageFresnel([&](double mu) { return referenceF82(reflectivity, tint, mu); });
+            const glm::vec3 rule = pathtracer::scene::metalFresnelAvg(glm::vec3(static_cast<float>(reflectivity)),
+                                                                      glm::vec3(static_cast<float>(tint)));
             const double error = std::abs(static_cast<double>(rule.x) - truth);
             if (error > worst) {
                 worst = error;
-                worstTint = edgeTint;
+                worstTint = tint;
             }
-            if (!(error <= kConductorTolerance)) {
-                std::cerr << "bsdf_validate: FAILED conductor F_avg at r=" << reflectivity
-                          << " edgeTint=" << edgeTint << " rule=" << rule.x << " vs quadrature " << truth
-                          << " (error " << error << ", tolerance " << kConductorTolerance << ")\n";
+            if (!(error <= kMetalTolerance)) {
+                std::cerr << "bsdf_validate: FAILED metal F_avg at F0=" << reflectivity << " specular_color=" << tint << " rule=" << rule.x
+                          << " vs quadrature " << truth << " (error " << error << ", tolerance " << kMetalTolerance << ")\n";
                 ok = false;
             }
         }
-        std::cout << "    r " << reflectivity << "   worst " << worst << " at edgeTint " << worstTint
-                  << '\n';
+        std::cout << "    F0 " << reflectivity << "   worst " << worst << " at specular_color " << worstTint << '\n';
     }
 
     std::cout << "  dielectric: |dielectricFresnelAvg - truth| per ior\n";
@@ -1017,8 +1027,8 @@ double alphaAt(double roughness) {
     return std::max(roughness * roughness, kMinAlpha);
 }
 
-// Schlick-split directional albedo: .x is the a channel, .y the b, so Ess(f0) = f0*a + b and a + b = E.
-glm::dvec2 referenceDirectionalAlbedo(double mu, double alpha) {
+// F82-split directional albedo (a, b, c): E(F0, k) = F0*a + b - k*c, and a + b = E.
+glm::dvec3 referenceDirectionalAlbedo(double mu, double alpha) {
     constexpr int kPanels = 48;     // phi, even for Simpson; doubling it moves no worst by over 1%, far inside the tolerances
     constexpr int kPsiNodes = 192;  // psi, twice the generator's, so the control row compares two rules and not one
     const double sinTv = std::sqrt(std::max(0.0, 1.0 - (mu * mu)));
@@ -1034,16 +1044,16 @@ glm::dvec2 referenceDirectionalAlbedo(double mu, double alpha) {
             const double weight = (woDotH / std::cos(thetaH)) *
                                    referenceSmithG2OverCosO(mu, wiZ, alpha) * std::sin(psi) * std::cos(psi);
             const double fc = std::pow(std::clamp(1.0 - woDotH, 0.0, 1.0), 5.0);
-            return glm::dvec2(weight * (1.0 - fc), weight * fc);
+            return glm::dvec3(weight * (1.0 - fc), weight * fc, weight * woDotH * std::pow(std::clamp(1.0 - woDotH, 0.0, 1.0), 6.0));
         });
     };
-    const glm::dvec2 half = simpson(0.0, 0.5 * kPiDouble, kPanels, azimuth) +
+    const glm::dvec3 half = simpson(0.0, 0.5 * kPiDouble, kPanels, azimuth) +
                              simpson(0.5 * kPiDouble, kPiDouble, kPanels, azimuth);
     return (2.0 / kPiDouble) * half;
 }
 
 // Cosine-weighted mean, 2*int_0^1 E(mu)*mu dmu; the mu=0 endpoint contributes exactly 0, the mu weight killing a bounded E.
-glm::dvec2 referenceAverageAlbedo(double alpha) {
+glm::dvec3 referenceAverageAlbedo(double alpha) {
     constexpr int kPanels = 64;
     return 2.0 * simpson(0.0, 1.0, kPanels,
                           [&](double mu) { return referenceDirectionalAlbedo(mu, alpha) * mu; });
@@ -1063,13 +1073,12 @@ void recordWorst(InterpolationError& error, double delta, double roughness, doub
     }
 }
 
-// Worst over both Schlick channels of the shipped lookup against the reference, at one (mu, roughness).
+// Worst over the three F82 channels of the shipped lookup against the reference, at one (mu, roughness).
 double directionalAlbedoError(double mu, double roughness) {
-    const glm::vec2 shipped = pathtracer::scene::directionalAlbedoSplit(static_cast<float>(mu),
-                                                                     static_cast<float>(roughness));
-    const glm::dvec2 exact = referenceDirectionalAlbedo(mu, alphaAt(roughness));
-    return std::max(std::abs(static_cast<double>(shipped.x) - exact.x),
-                     std::abs(static_cast<double>(shipped.y) - exact.y));
+    const glm::dvec3 shipped(pathtracer::scene::directionalAlbedoSplit(static_cast<float>(mu), static_cast<float>(roughness)));
+    const glm::dvec3 exact = referenceDirectionalAlbedo(mu, alphaAt(roughness));
+    const glm::dvec3 error = glm::abs(shipped - exact);
+    return std::max({error.x, error.y, error.z});
 }
 
     // Evenly spread node indices over [first, last]: the "held on exact nodes" coordinate, where that axis adds no interpolation error.
@@ -1162,14 +1171,13 @@ PT_CHECK(albedo_table_interpolation, Slow, Exact) {
         firstCellRows[static_cast<std::size_t>(ri)] = row;
     });
 
-    // Eavg's own 1-D lerp, reaching coatAlbedoAvg and its 1/(1-coatAlbedoAvg) denominator: a different route in, so its own number.
+    // Eavg's own 1-D lerp, reaching every Kulla-Conty tint: a different route in, so its own number.
     std::vector<InterpolationError> averageRows(static_cast<std::size_t>(res.x - 1));
     parallelRows(res.x - 1, ctx.threads(), [&](int ri) {
         const double roughness = pathtracer::scene::albedoGridRoughness(static_cast<float>(ri) + 0.5F);
-        const glm::vec2 shipped = pathtracer::scene::averageAlbedoSplit(static_cast<float>(roughness));
-        const glm::dvec2 exact = referenceAverageAlbedo(alphaAt(roughness));
-        const double delta = std::max(std::abs(static_cast<double>(shipped.x) - exact.x),
-                                       std::abs(static_cast<double>(shipped.y) - exact.y));
+        const glm::dvec3 shipped(pathtracer::scene::averageAlbedoSplit(static_cast<float>(roughness)));
+        const glm::dvec3 error = glm::abs(shipped - referenceAverageAlbedo(alphaAt(roughness)));
+        const double delta = std::max({error.x, error.y, error.z});
         averageRows[static_cast<std::size_t>(ri)] = {delta, roughness, -1.0};
     });
 
@@ -1190,7 +1198,7 @@ PT_CHECK(albedo_table_interpolation, Slow, Exact) {
     }};
 
     bool ok = true;
-    std::cout << "bsdf_validate: albedo table interpolation error vs independent quadrature, worst Schlick channel\n";
+    std::cout << "bsdf_validate: albedo table interpolation error vs independent quadrature, worst F82 channel\n";
     std::cout << "  measurement                                 worst        at roughness   mu\n";
     for (const auto& [name, worst, tolerance] : measurements) {
         std::cout << "  " << name << "   " << worst.worst << "   " << worst.roughness << "   "
@@ -1207,196 +1215,83 @@ PT_CHECK(albedo_table_interpolation, Slow, Exact) {
     return;
 }
 
-// bsdf.cpp's coatAlbedo in double, with fresnelAvg left free: the whole point is to recover the value the call sites pass.
-double referenceCoatAlbedo(const glm::dvec2& split, double albedoAvg, double f0, double fresnelRatio,
-                            double fresnelAvg) {
-    const double tint = (fresnelAvg * fresnelAvg * albedoAvg) /
-                         std::max(1.0 - (fresnelAvg * (1.0 - albedoAvg)), 1e-4);
-    return (((f0 * split.x) + split.y) * fresnelRatio) + (tint * (1.0 - (split.x + split.y)));
-}
-
-// The albedo-table reference is this check's whole cost, a 96x96 and a 64-panel Simpson per row, so both hoist out of every fixed loop.
-struct CoatAlbedos {
-    glm::dvec2 splitAvg;
-    std::array<glm::dvec2, 3> split;   // parallel to the check's cosines
-};
-
-CoatAlbedos coatAlbedos(double roughness, const std::array<double, 3>& cosines) {
-    const double alpha = alphaAt(roughness);
-    return {referenceAverageAlbedo(alpha),
-             {referenceDirectionalAlbedo(cosines[0], alpha),
-              referenceDirectionalAlbedo(cosines[1], alpha),
-              referenceDirectionalAlbedo(cosines[2], alpha)}};
-}
-
-// Everything the coupling model needs that does not depend on the free fresnelAvg, so the bisection below re-runs no quadrature.
-struct CoatGeometry {
-    glm::dvec2 splitWo;
-    glm::dvec2 splitWi;
-    glm::dvec2 splitAvg;
-    double f0;
-    double karisAvg;   // schlickFresnelAvg(coatF0), the Schlick basis the table is built on and the rescale divides by
-    double ratioWo;
-    double ratioWi;
-};
-
-CoatGeometry coatGeometry(double ior, const CoatAlbedos& albedos, int indexO, int indexI, double muO,
-                           double muI) {
-    const double r = (ior - 1.0) / (ior + 1.0);
-    const double f0 = r * r;
-    const auto schlick = [&](double mu) {
-        return f0 + ((1.0 - f0) * std::pow(std::clamp(1.0 - mu, 0.0, 1.0), 5.0));
+// Exact-Fresnel dielectric reflection albedo R(mu) in double, the escape table's reflect channel on the reflect side's measure.
+double referenceDielectricReflectAlbedo(double mu, double alpha, double ior) {
+    constexpr int kPanels = 48;
+    constexpr int kPsiNodes = 192;
+    const double sinTv = std::sqrt(std::max(0.0, 1.0 - (mu * mu)));
+    const auto azimuth = [&](double phi) {
+        const double horizontal = sinTv * std::cos(phi);
+        const double radius = std::sqrt((horizontal * horizontal) + (mu * mu));
+        const double delta = std::atan2(horizontal, mu);
+        const double psiMax = std::atan(std::tan(0.5 * (delta + (0.5 * kPiDouble))) / alpha);
+        return gaussLegendre<kPsiNodes>(0.0, psiMax, [&](double psi) {
+            const double thetaH = std::atan(alpha * std::tan(psi));
+            const double woDotH = radius * std::cos(thetaH - delta);
+            const double wiZ = radius * std::cos((2.0 * thetaH) - delta);
+            return (woDotH / std::cos(thetaH)) * referenceSmithG2OverCosO(mu, wiZ, alpha) * std::sin(psi) * std::cos(psi) *
+                   referenceDielectricFresnel(woDotH, ior);
+        });
     };
-    return {albedos.split[indexO],
-             albedos.split[indexI],
-             albedos.splitAvg,
-             f0,
-             f0 + ((1.0 - f0) / 21.0),
-             referenceDielectricFresnel(muO, ior) / std::max(schlick(muO), 1e-6),
-             referenceDielectricFresnel(muI, ior) / std::max(schlick(muI), 1e-6)};
+    return (2.0 / kPiDouble) * (simpson(0.0, 0.5 * kPiDouble, kPanels, azimuth) + simpson(0.5 * kPiDouble, kPiDouble, kPanels, azimuth));
 }
 
-// The diffuse channel's full coupling, (1 - coat(wo))/(1 - coatAvg) * (1 - coat(wi)), as a function of the fresnelAvg its call sites pass.
-double referenceCoupling(const CoatGeometry& geometry, double fresnelAvg) {
-    const double albedoAvg = geometry.splitAvg.x + geometry.splitAvg.y;
-    const double coatAvg = referenceCoatAlbedo(geometry.splitAvg, albedoAvg, geometry.f0,
-                                                fresnelAvg / std::max(geometry.karisAvg, 1e-6),
-                                                fresnelAvg);
-    const double wo = 1.0 - referenceCoatAlbedo(geometry.splitWo, albedoAvg, geometry.f0,
-                                                 geometry.ratioWo, fresnelAvg);
-    const double wi = 1.0 - referenceCoatAlbedo(geometry.splitWi, albedoAvg, geometry.f0,
-                                                 geometry.ratioWi, fresnelAvg);
-    return (wo / std::max(1.0 - coatAvg, 1e-4)) * wi;
+// The glossy layer's Kelemen coupling in double: E_s(mu) = R(mu) + F_ms (1 - E(mu)), C = (1 - E_s(mu_o))(1 - E_s(mu_i)) / (1 - mean E_s).
+double referenceGlossyCoupling(double ior, double alpha, double muO, double muI) {
+    constexpr int kMeanPanels = 64;
+    const double fresnelAvg = cosineAverageFresnel([&](double mu) { return referenceDielectricFresnel(mu, ior); });
+    const glm::dvec3 averageSplit = referenceAverageAlbedo(alpha);
+    const double albedoAvg = averageSplit.x + averageSplit.y;
+    const double fms = (fresnelAvg * fresnelAvg * albedoAvg) / (1.0 - (fresnelAvg * (1.0 - albedoAvg)));
+    const auto glossy = [&](double mu) {
+        const glm::dvec3 split = referenceDirectionalAlbedo(mu, alpha);
+        return referenceDielectricReflectAlbedo(mu, alpha, ior) + (fms * (1.0 - (split.x + split.y)));
+    };
+    const double mean = 2.0 * simpson(0.0, 1.0, kMeanPanels, [&](double mu) { return glossy(mu) * mu; });
+    return (1.0 - glossy(muO)) * (1.0 - glossy(muI)) / (1.0 - mean);
 }
 
-// The instrument for coatAlbedo's fresnelAvg value, recovered by inverting the coupling, not as diffuse(ior)/diffuse(1), which cancels it.
-PT_CHECK(coat_fresnel_average, Slow, Exact) {
-    // Measured worst 3.5e-5 at ior 1.33, so ~1.7x headroom. Spent by the albedo table and this inversion, not by the reference (~1e-13).
-    constexpr double kTolerance = 6e-5;
-    // Residual of the recovered root, not an accuracy claim: it catches a coupling the model cannot reproduce at any fresnelAvg.
-    constexpr double kResidualTolerance = 1e-6;
-    const std::array<double, 9> iors = {1.1, 1.33, 1.5, 1.5168, 1.55, 1.8, 2.0, 2.5, 3.0};
-    // Roughness 0 is excluded, 1-E being ~0 so F_avg is unobservable; nothing is grid-aligned, so the rows exercise interpolation too.
+// The glossy-diffuse layering, read as diffuse/EON at a pair: it must match the double-precision Kelemen coupling of the exact layer.
+PT_CHECK(glossy_diffuse_coupling, Slow, Exact) {
+    // The escape table's trilinear read over (roughness, mu, eta) at 32 x 64 x 64 dominates; the reference is exact to ~1e-9.
+    constexpr double kTolerance = 2e-3;
+    const std::array<double, 4> iors = {1.33, 1.5, 2.0, 2.5};
     const std::array<double, 4> roughnesses = {0.25, 0.5, 0.75, 1.0};
     const std::array<double, 3> cosines = {0.4, 0.7, 1.0};
     const glm::vec3 albedo(0.8F, 0.3F, 0.1F);
     constexpr float kDiffuseRoughness = 0.5F;
 
-    // Hoisted out of the ior loop too: the albedo reference is ior-independent, so the sweep costs four evaluations, not four per ior.
-    std::array<CoatAlbedos, roughnesses.size()> albedosByRoughness{};
-    for (size_t r = 0; r < roughnesses.size(); ++r) {
-        albedosByRoughness[r] = coatAlbedos(roughnesses[r], cosines);
-    }
-
-    bool ok = true;
-    int rowsChecked = 0;
-    std::cout << "bsdf_validate: coat F_avg recovered from the diffuse coupling vs exact quadrature\n";
-    std::cout << "  ior      truth      worst recovered   |err|      dC/dF    at roughness/mu_o/mu_i\n";
-    for (double ior : iors) {
-        const double truth =
-            cosineAverageFresnel([&](double mu) { return referenceDielectricFresnel(mu, ior); });
-        double worstError = 0.0;
-        double worstRecovered = 0.0;
-        double worstRoughness = 0.0;
-        double worstMuO = 0.0;
-        double worstMuI = 0.0;
-        double worstSlope = 0.0;
-        for (size_t r = 0; r < roughnesses.size(); ++r) {
-            const double roughness = roughnesses[r];
-            for (size_t o = 0; o < cosines.size(); ++o) {
-                const double muO = cosines[o];
-                for (size_t i = 0; i < cosines.size(); ++i) {
-                    const double muI = cosines[i];
+    std::vector<double> worstByIor(iors.size(), 0.0);
+    parallelRows(static_cast<int>(iors.size()), ctx.threads(), [&](int k) {
+        const double ior = iors[static_cast<std::size_t>(k)];
+        for (double roughness : roughnesses) {
+            const BsdfParams params = makeDiffuseParams(albedo, kDiffuseRoughness, static_cast<float>(roughness), static_cast<float>(ior));
+            for (double muO : cosines) {
+                for (double muI : cosines) {
                     const float sinO = std::sqrt(std::max(0.0F, 1.0F - static_cast<float>(muO * muO)));
                     const float sinI = std::sqrt(std::max(0.0F, 1.0F - static_cast<float>(muI * muI)));
                     const glm::vec3 wo(sinO, 0.0F, static_cast<float>(muO));
-                    const glm::vec3 wi(sinI * std::cos(1.1F), sinI * std::sin(1.1F),
-                                        static_cast<float>(muI));
-                    const BsdfParams coated = makeDiffuseParams(albedo, kDiffuseRoughness,
-                                                                 static_cast<float>(roughness),
-                                                                 static_cast<float>(ior));
-                    const glm::vec3 diffuse = pathtracer::scene::evaluateBsdfSplit(coated, wo, wi).diffuse;
-                    const glm::vec3 bare = referenceEon(
-                        pathtracer::scene::eonAlbedoInversion(albedo, kDiffuseRoughness),
-                        kDiffuseRoughness, wi, wo);
-                    const double measured =
-                        static_cast<double>(maxChannel(diffuse)) / maxChannel(bare);
-
-                    // referenceCoupling is unimodal in fresnelAvg: ternary search finds the extremum, bisection runs the monotone side.
-                    const CoatGeometry geometry = coatGeometry(ior, albedosByRoughness[r],
-                                                                static_cast<int>(o),
-                                                                static_cast<int>(i), muO, muI);
-                    // Wide enough to contain every candidate a revert could install.
-                    constexpr double kBracketCeiling = 0.6;
-                    double peakLow = 0.0;
-                    double peakHigh = kBracketCeiling;
-                    for (int step = 0; step < 60; ++step) {
-                        const double third = (peakHigh - peakLow) / 3.0;
-                        const double lowerThird = peakLow + third;
-                        const double upperThird = peakHigh - third;
-                        if (referenceCoupling(geometry, lowerThird) <
-                            referenceCoupling(geometry, upperThird)) {
-                            peakLow = lowerThird;   // the peak is right of lowerThird
-                        } else {
-                            peakHigh = upperThird;
-                        }
-                    }
-                    const double peak = 0.5 * (peakLow + peakHigh);
-                    double low = 0.0;
-                    double high = peak;
-                    for (int step = 0; step < 60; ++step) {
-                        const double middle = 0.5 * (low + high);
-                        (referenceCoupling(geometry, middle) < measured ? low : high) = middle;
-                    }
-                    const double recovered = 0.5 * (low + high);
-                    const double residual = std::abs(referenceCoupling(geometry, recovered) - measured);
-                    const double error = std::abs(recovered - truth);
-                    // Central difference, wide enough to clear the bisection's resolution, narrow enough for local linearity.
-                    constexpr double kSlopeStep = 1e-4;
-                    const double slope = (referenceCoupling(geometry, recovered + kSlopeStep) -
-                                           referenceCoupling(geometry, recovered - kSlopeStep)) /
-                                          (2.0 * kSlopeStep);
-                    ++rowsChecked;
-                    if (error > worstError) {
-                        worstError = error;
-                        worstRecovered = recovered;
-                        worstRoughness = roughness;
-                        worstMuO = muO;
-                        worstMuI = muI;
-                        worstSlope = slope;
-                    }
-                    if (!(residual <= kResidualTolerance)) {
-                        std::cerr << "bsdf_validate: FAILED coat F_avg inversion at ior=" << ior
-                                   << " roughness=" << roughness << " mu_o=" << muO << " mu_i=" << muI
-                                   << " -- measured coupling " << measured
-                                   << " is not reproduced at any fresnelAvg on the model's monotone branch [0, "
-                                   << peak << "] (closest " << recovered << ", residual " << residual
-                                   << "). The coat's form, not its F_avg, has changed.\n";
-                        ok = false;
-                    }
-                    if (!(error <= kTolerance)) {
-                        std::cerr << "bsdf_validate: FAILED coat F_avg at ior=" << ior
-                                   << " roughness=" << roughness << " mu_o=" << muO << " mu_i=" << muI
-                                   << " -- coatAlbedo used fresnelAvg=" << recovered
-                                   << ", exact cosine-weighted Fresnel is " << truth << " (error "
-                                   << error << ", tolerance " << kTolerance << ")\n";
-                        ok = false;
-                    }
+                    const glm::vec3 wi(sinI * std::cos(1.1F), sinI * std::sin(1.1F), static_cast<float>(muI));
+                    const glm::vec3 diffuse = pathtracer::scene::evaluateBsdfSplit(params, wo, wi).diffuse;
+                    const glm::vec3 bare = referenceEon(params.diffuseRho, kDiffuseRoughness, wi, wo);
+                    const double measured = static_cast<double>(maxChannel(diffuse)) / maxChannel(bare);
+                    const double expected = referenceGlossyCoupling(ior, alphaAt(roughness), muO, muI);
+                    worstByIor[static_cast<std::size_t>(k)] = std::max(worstByIor[static_cast<std::size_t>(k)], std::abs(measured - expected));
                 }
             }
         }
-        std::cout << "    " << ior << "   " << truth << "   " << worstRecovered << "   " << worstError
-                   << "   " << worstSlope << "   " << worstRoughness << " / " << worstMuO << " / "
-                   << worstMuI << '\n';
+    });
+    bool ok = true;
+    std::cout << "bsdf_validate: glossy-diffuse coupling vs the exact layer's Kelemen form, worst |measured - reference| per ior\n";
+    for (std::size_t k = 0; k < iors.size(); ++k) {
+        std::cout << "    ior " << iors[k] << "   " << worstByIor[k] << '\n';
+        if (!(worstByIor[k] <= kTolerance)) {
+            std::cerr << "bsdf_validate: FAILED glossy-diffuse coupling at ior=" << iors[k] << " worst " << worstByIor[k]
+                      << " (tolerance " << kTolerance << ")\n";
+            ok = false;
+        }
     }
-    // Anti-vacuity, checkIndexMatchedCoat's device: a sweep that asserted nothing would print clean too.
-    if (rowsChecked == 0) {
-        std::cerr << "bsdf_validate: FAILED coat F_avg -- no rows asserted\n";
-        ok = false;
-    }
-    std::cout << "  " << rowsChecked << " rows inverted\n";
-    finish(ctx, ok, "coat_fresnel_average failed; see the rows above");
-    return;
+    finish(ctx, ok, "glossy_diffuse_coupling failed; see the rows above");
 }
 
 // Cauchy dispersion against its contract: (ior, abbe) means n_d with V_d = (n_d-1)/(n_F-n_C), so those identities are the specification.
@@ -1471,14 +1366,14 @@ PT_CHECK(cauchy_dispersion, Fast, Exact) {
         }
     }
 
-    // abbe = 0 is the off switch every non-dispersive material relies on, and must be exact: any drift changes every existing render.
-    std::cout << "  abbe 0 returns the authored ior unchanged at every wavelength\n";
+    // V_d infinite, dispersion scale 0, is the off switch every non-dispersive material relies on: B = 0, so the ior returns bit-exact.
+    std::cout << "  infinite V_d returns the authored ior unchanged at every wavelength\n";
     for (const Glass& glass : glasses) {
         for (float lambda : {kLambdaFNm, pathtracer::scene::kRgbWavelengthsNm.z, kLambdaDNm,
                              pathtracer::scene::kRgbWavelengthsNm.x, kLambdaCNm}) {
-            const float n = pathtracer::scene::cauchyIor(glass.iorD, 0.0F, lambda);
+            const float n = pathtracer::scene::cauchyIor(glass.iorD, std::numeric_limits<float>::infinity(), lambda);
             if (n != glass.iorD) {
-                std::cerr << "bsdf_validate: FAILED abbe=0 no-op at ior " << glass.iorD << " lambda "
+                std::cerr << "bsdf_validate: FAILED infinite-V_d no-op at ior " << glass.iorD << " lambda "
                           << lambda << " -- returned " << n
                           << ", expected the authored ior bit-for-bit.\n";
                 ok = false;
@@ -1489,159 +1384,177 @@ PT_CHECK(cauchy_dispersion, Fast, Exact) {
     return;
 }
 
-// Conductor Fresnel via the public API: at metallic=1 f(g) = K*F_g + M, so 0.05 pins the ratio identity and 0.6 pins edgeTint monotonicity.
-PT_CHECK(conductor_fresnel, Fast, Exact) {
-    // The ratio is a quotient of differences of float BSDF values, so it carries the cancellation of both.
-    constexpr float kRatioTolerance = 2e-3F;
-    // Normal incidence is an exact identity, not a fit: R(theta=0) == r for every g (paper sec. 2.3.1).
-    constexpr float kNormalIncidenceTolerance = 1e-5F;
-    // Roughness where the (1-E) deficit leaves M under tolerance: the identity holds to 1e-5 at 0.05 and breaks by 1.5e-2 at 0.6.
-    constexpr float kMsNegligibleRoughness = 0.1F;
-    // The property Schlick structurally cannot have: at grazing a black edge tint must sit well below a white one, where Schlick forces 1.
-    constexpr float kMinGrazingSeparation = 0.05F;
-    // 1e-3 sits an order below the smallest span carrying signal (0.0183 at r=0.95 cos=0.6) and three above float32 precision.
-    constexpr float kMinConditionedSpan = 1e-3F;
-    // 1.0 is makeParams' white case at metallic=1; it drives n to ~5e-5, where the cancellation in fresnelConductor's `a` was caught.
+// Metal F82 via the public API at the mirrored pair, smooth enough that multiple scattering is negligible: f = K * F82, so ratios are F's.
+PT_CHECK(metal_fresnel, Fast, Exact) {
+    // A quotient of float BSDF values against a double reference: relative, a few float roundings of the lobe and the ratio.
+    constexpr double kRelativeTolerance = 2e-5;
+    constexpr float kSmoothRoughness = 0.05F;
+    // The property Schlick structurally cannot have: at grazing a black specular_color must sit well below a white one.
+    constexpr double kMinGrazingSeparation = 0.05;
     const std::array<float, 4> reflectivities = {0.1F, 0.5F, 0.95F, 1.0F};
-    const std::array<float, 5> edgeTints = {0.0F, 0.25F, 0.5F, 0.75F, 1.0F};
-    const std::array<float, 2> roughnesses = {0.05F, 0.6F};
-    const std::array<float, 3> cosines = {0.6F, 0.35F, 0.15F};
+    const std::array<float, 5> tints = {0.0F, 0.25F, 0.5F, 0.75F, 1.0F};
+    const std::array<float, 4> cosines = {1.0F, 0.6F, static_cast<float>(kMuBar), 0.05F};
+    const std::array<float, 3> weights = {0.5F, 1.0F, 1.5F};
 
     bool ok = true;
-    int ratiosChecked = 0;
-    int monotonicRowsChecked = 0;
-    std::cout << "bsdf_validate: conductor Fresnel, edgeTint 0.00 -> 1.00 (Gulbrandsen 2014)\n";
-    std::cout << "  r     cos    F(g=0)   F(g=1)   grazing separation\n";
+    int rowsChecked = 0;
+    std::cout << "bsdf_validate: metal F82-tint Fresnel against the specification's formula\n";
     for (float reflectivity : reflectivities) {
-        const auto params = [&](float roughness, glm::vec3 edgeTint) {
-            return BsdfParams{glm::vec3(1.0F),          1.0F, roughness, glm::vec3(reflectivity),
-                               edgeTint,                 /*ior=*/1.5F,
-                               /*transmissionFactor=*/0.0F, /*diffuseRoughness=*/0.0F,
-                               pathtracer::scene::eonAlbedoInversion(glm::vec3(1.0F), 0.0F),
-                               /*transmissionTint=*/glm::vec3(1.0F)};
-        };
-        // R(theta=0) == r, independent of edgeTint: wo == wi == +z puts woDotNh at exactly 1.
-        const glm::vec3 normalIncidence(0.0F, 0.0F, 1.0F);
-        for (float roughness : roughnesses) {
-            std::array<float, 5> atNormal{};
-            for (std::size_t i = 0; i < edgeTints.size(); ++i) {
-                atNormal[i] = maxChannel(pathtracer::scene::evaluateBsdf(
-                    params(roughness, glm::vec3(edgeTints[i])), normalIncidence, normalIncidence));
-            }
-            const float atWhite = atNormal.back();
-            if (roughness <= kMsNegligibleRoughness) {
-                for (std::size_t i = 0; i < edgeTints.size(); ++i) {
-                    if (!(std::abs(atNormal[i] - atWhite) <= kNormalIncidenceTolerance * atWhite)) {
-                        std::cerr
-                            << "bsdf_validate: FAILED conductor Fresnel normal-incidence identity at r="
-                            << reflectivity << " roughness=" << roughness
-                            << " edgeTint=" << edgeTints[i] << " f=" << atNormal[i] << " vs " << atWhite
-                            << "; R(theta=0) must equal r for every edgeTint\n";
+        for (float tint : tints) {
+            for (float weight : weights) {
+                const BsdfParams params = paramsWith([&](OpenPbrInputs<Constant>& inputs) {
+                    inputs.baseColor = glm::vec3(reflectivity);
+                    inputs.baseMetalness = 1.0F;
+                    inputs.specularRoughness = kSmoothRoughness;
+                    inputs.specularColor = glm::vec3(tint);
+                    inputs.specularWeight = weight;
+                });
+                for (float cosine : cosines) {
+                    // fresnelAtViewAngle is the macro Fresnel the lobe evaluates at its own facet: the curve itself, not a BSDF reading.
+                    const double measured = pathtracer::scene::fresnelAtViewAngle(params, cosine).x;
+                    const double expected = weight * referenceF82(reflectivity, tint, cosine);
+                    ++rowsChecked;
+                    // Floored at 1e-2 of a unit reflectance: where F82 is 0 by definition, float rounding leaves a few 1e-8 either side.
+                    if (!(std::abs(measured - expected) <= kRelativeTolerance * std::max(std::abs(expected), 1e-2))) {
+                        std::cerr << "bsdf_validate: FAILED metal F82 at F0=" << reflectivity << " specular_color=" << tint
+                                  << " specular_weight=" << weight << " cos=" << cosine << " measured " << measured << " vs " << expected << '\n';
                         ok = false;
                     }
                 }
-                continue;
-            }
-            // Same conditioning guard as below: at r=1 every edge tint gives one mirror, so the span is noise (6e-6, vs 1.5e-2 at r=0.1).
-            if ((atWhite - atNormal.front()) / atWhite < kMinConditionedSpan) {
-                continue;
-            }
-            ++monotonicRowsChecked;
-            // Strict, no epsilon: the guard above conditions the whole g=0->1 span, so this compares two conditioned readings.
-            for (std::size_t i = 1; i < edgeTints.size(); ++i) {
-                if (!(atNormal[i] > atNormal[i - 1])) {
-                    std::cerr << "bsdf_validate: FAILED conductor F_avg edgeTint dependence at r="
-                              << reflectivity << " roughness=" << roughness << " edgeTint "
-                              << edgeTints[i - 1] << " -> " << edgeTints[i] << " gave " << atNormal[i - 1]
-                              << " -> " << atNormal[i]
-                              << "; the multiple-scattering lobe must brighten monotonically with edge "
-                                 "tint, which a Schlick F_avg cannot do at any f0\n";
+                // F(1) = specular_weight * F0 and F(1/7) = specular_weight * tint * Schlick(1/7): the two points the tint is defined by.
+                const double schlickAtMuBar = reflectivity + ((1.0 - reflectivity) * std::pow(1.0 - kMuBar, 5.0));
+                const double atMuBar = pathtracer::scene::fresnelAtViewAngle(params, static_cast<float>(kMuBar)).x;
+                if (!(std::abs(atMuBar - (weight * tint * schlickAtMuBar)) <= kRelativeTolerance * std::max(weight * schlickAtMuBar, 1e-2))) {
+                    std::cerr << "bsdf_validate: FAILED F82 definition at F0=" << reflectivity << " specular_color=" << tint
+                              << ": F(1/7) " << atMuBar << " is not specular_color * Schlick(1/7)\n";
                     ok = false;
                 }
             }
         }
-
-        for (float cosine : cosines) {
-            const float sine = std::sqrt(std::max(0.0F, 1.0F - (cosine * cosine)));
-            const glm::vec3 wo(sine, 0.0F, cosine);
-            const glm::vec3 wi(-sine, 0.0F, cosine);
-            const double referenceWhite = referenceConductorFresnel(reflectivity, 1.0, cosine);
-            const double referenceBlack = referenceConductorFresnel(reflectivity, 0.0, cosine);
-            for (float roughness : roughnesses) {
-                const float atWhite =
-                    maxChannel(pathtracer::scene::evaluateBsdf(params(roughness, glm::vec3(1.0F)), wo, wi));
-                const float atBlack =
-                    maxChannel(pathtracer::scene::evaluateBsdf(params(roughness, glm::vec3(0.0F)), wo, wi));
-                const float span = atBlack - atWhite;
-                // The assertion that edgeTint reaches the lobe at all: a dropped edgeTint leaves span exactly zero. Holds at every r.
-                if (!(std::abs(span) > 0.0F)) {
-                    std::cerr << "bsdf_validate: FAILED conductor Fresnel -- edgeTint 0 and 1 gave the "
-                                 "identical value "
-                              << atWhite << " at r=" << reflectivity << " roughness=" << roughness
-                              << " cos=" << cosine << ", so edgeTint reaches nothing\n";
-                    ok = false;
-                    continue;
-                }
-                // The ratio identity needs M to cancel across edgeTint, true where the MS deficit is negligible; rough rows assert above.
-                if (roughness > kMsNegligibleRoughness) {
-                    continue;
-                }
-                // The quotient below divides one span by another, so it carries signal only where the denominator clears noise.
-                if (std::abs(span) / atWhite < kMinConditionedSpan) {
-                    continue;
-                }
-                for (float edgeTint : edgeTints) {
-                    ++ratiosChecked;
-                    const float measured = maxChannel(
-                        pathtracer::scene::evaluateBsdf(params(roughness, glm::vec3(edgeTint)), wo, wi));
-                    const double expected =
-                        (referenceConductorFresnel(reflectivity, edgeTint, cosine) - referenceWhite) /
-                        (referenceBlack - referenceWhite);
-                    const double ratio = static_cast<double>(measured - atWhite) / span;
-                    if (!(std::abs(ratio - expected) <= kRatioTolerance)) {
-                        std::cerr << "bsdf_validate: FAILED conductor Fresnel curve at r=" << reflectivity
-                                  << " roughness=" << roughness << " cos=" << cosine
-                                  << " edgeTint=" << edgeTint << " normalised " << ratio << " vs reference "
-                                  << expected << '\n';
-                        ok = false;
-                    }
-                }
-            }
-            // Reported as reflectance, as the reference gives it; the assertion is on measured BSDF values, so shipped code is tested.
-            const float atWhite =
-                maxChannel(pathtracer::scene::evaluateBsdf(params(0.05F, glm::vec3(1.0F)), wo, wi));
-            const float atBlack =
-                maxChannel(pathtracer::scene::evaluateBsdf(params(0.05F, glm::vec3(0.0F)), wo, wi));
-            const float separation = (atWhite - atBlack) / atWhite;
-            std::cout << "  " << reflectivity << "   " << cosine << "   " << referenceBlack << "   "
-                      << referenceWhite << "   " << separation << '\n';
-            // Not asserted at r=1: a perfect mirror reflects everything at every angle (3.4e-4 separation), so there is no dip to require.
-            if (cosine == cosines.back() && reflectivity < 1.0F &&
-                !(separation >= kMinGrazingSeparation)) {
-                std::cerr << "bsdf_validate: FAILED conductor Fresnel grazing dip at r=" << reflectivity
-                          << " cos=" << cosine << " separation=" << separation << " (expected >= "
-                          << kMinGrazingSeparation
-                          << "); a black edge tint must fall well below a white one at grazing, which is "
-                             "the behaviour Schlick cannot express at any f0\n";
+        // The dip Schlick cannot express: below a perfect mirror a black tint reflects less at grazing than a white one.
+        if (reflectivity < 1.0F) {
+            const auto atGrazing = [&](float tint) {
+                return pathtracer::scene::fresnelAtViewAngle(makeColoredMetalParams(kSmoothRoughness, glm::vec3(tint)), static_cast<float>(kMuBar)).x;
+            };
+            const double separation = (atGrazing(1.0F) - atGrazing(0.0F)) / atGrazing(1.0F);
+            if (!(separation >= kMinGrazingSeparation)) {
+                std::cerr << "bsdf_validate: FAILED F82 grazing dip at F0 0.5: separation " << separation << '\n';
                 ok = false;
             }
         }
     }
-    if (ratiosChecked == 0) {
-        std::cerr << "bsdf_validate: FAILED conductor Fresnel -- every row was skipped as too "
-                     "ill-conditioned for the normalised ratio, so the reflectance curve was never "
-                     "compared against the reference\n";
-        ok = false;
+    std::cout << "  " << rowsChecked << " points against the formula\n";
+    finish(ctx, ok, "metal_fresnel failed; see the rows above");
+}
+
+// base_metalness mixes two complete bases, so every lobe value is exactly linear in it: metal is weighted once, not twice.
+PT_CHECK(fractional_metal_is_linear, Fast, Exact) {
+    constexpr float kRelativeTolerance = 1e-5F;
+    const std::array<float, 3> roughnesses = {0.1F, 0.4F, 0.9F};
+    const std::array<float, 3> metalnesses = {0.25F, 0.5F, 0.75F};
+    const std::array<float, 2> transmissions = {0.0F, 0.6F};
+    const std::array<float, 4> cosines = {1.0F, 0.7F, 0.4F, 0.15F};
+    const glm::vec3 baseColor(0.9F, 0.6F, 0.3F);
+    const glm::vec3 tint(0.8F, 0.7F, 0.95F);
+
+    bool ok = true;
+    int rowsChecked = 0;
+    for (float roughness : roughnesses) {
+        for (float transmission : transmissions) {
+            const auto at = [&](float metalness) {
+                return paramsWith([&](OpenPbrInputs<Constant>& inputs) {
+                    inputs.baseColor = baseColor;
+                    inputs.specularColor = tint;
+                    inputs.specularRoughness = roughness;
+                    inputs.transmissionWeight = transmission;
+                    inputs.baseMetalness = metalness;
+                });
+            };
+            const BsdfParams dielectric = at(0.0F);
+            const BsdfParams metal = at(1.0F);
+            for (float metalness : metalnesses) {
+                const BsdfParams mixed = at(metalness);
+                for (float muA : cosines) {
+                    for (float muB : cosines) {
+                        const float sinA = std::sqrt(std::max(0.0F, 1.0F - (muA * muA)));
+                        const float sinB = std::sqrt(std::max(0.0F, 1.0F - (muB * muB)));
+                        const glm::vec3 wo(sinA, 0.0F, muA);
+                        const glm::vec3 wi(sinB * std::cos(1.1F), sinB * std::sin(1.1F), muB);
+                        const glm::vec3 expected = ((1.0F - metalness) * pathtracer::scene::evaluateBsdf(dielectric, wo, wi)) +
+                                                   (metalness * pathtracer::scene::evaluateBsdf(metal, wo, wi));
+                        const glm::vec3 measured = pathtracer::scene::evaluateBsdf(mixed, wo, wi);
+                        ++rowsChecked;
+                        if (!(maxChannel(glm::abs(measured - expected)) <= kRelativeTolerance * std::max(maxChannel(expected), 1e-4F))) {
+                            std::cerr << "bsdf_validate: FAILED fractional metal linearity at roughness=" << roughness
+                                      << " transmission=" << transmission << " metalness=" << metalness << " muO=" << muA << " muI=" << muB
+                                      << " f=" << measured.x << " vs mix " << expected.x << '\n';
+                            ok = false;
+                        }
+                    }
+                }
+            }
+        }
     }
-    if (monotonicRowsChecked == 0) {
-        std::cerr << "bsdf_validate: FAILED conductor Fresnel -- every rough row was skipped as too "
-                     "ill-conditioned, so F_avg's edgeTint dependence was never asserted\n";
-        ok = false;
+    std::cout << "bsdf_validate: fractional metal, " << rowsChecked << " pairs exactly linear in base_metalness\n";
+    finish(ctx, ok, "fractional_metal_is_linear failed; see the rows above");
+}
+
+// specular_weight scales the dielectric's normal-incidence reflectance, F0 = xi * F_s, through the modulated ior OpenPBR specifies.
+PT_CHECK(specular_weight_modulates_f0, Fast, Exact) {
+    constexpr double kRelativeTolerance = 4e-6;
+    const std::array<float, 4> iors = {1.33F, 1.5F, 2.0F, 2.5F};
+    bool ok = true;
+    for (float ior : iors) {
+        const double reflectance = std::pow((ior - 1.0) / (ior + 1.0), 2.0);
+        for (double weight : {0.0, 0.25, 0.5, 1.0, 1.5, 0.5 / reflectance}) {
+            const BsdfParams params = paramsWith([&](OpenPbrInputs<Constant>& inputs) {
+                inputs.specularIor = ior;
+                inputs.specularWeight = static_cast<float>(weight);
+            });
+            const double measured = pathtracer::scene::fresnelAtViewAngle(params, 1.0F).x;
+            const double expected = std::min(weight * reflectance, 1.0);
+            if (!(std::abs(measured - expected) <= kRelativeTolerance * std::max(expected, 1e-6))) {
+                std::cerr << "bsdf_validate: FAILED specular_weight at ior=" << ior << " weight=" << weight << " F(1) " << measured
+                          << " vs xi*F_s " << expected << '\n';
+                ok = false;
+            }
+        }
     }
-    std::cout << "  conductor Fresnel curve: " << ratiosChecked << " points vs reference, "
-              << monotonicRowsChecked << " rough rows monotone in edgeTint\n";
-    finish(ctx, ok, "conductor_fresnel failed; see the rows above");
-    return;
+    finish(ctx, ok, "specular_weight_modulates_f0 failed; see the rows above");
+}
+
+// specular_color tints the dielectric's reflection from above, OpenPBR's non-physical highlight tint; transmission stays untinted.
+PT_CHECK(specular_color_tints_reflection_only, Fast, Exact) {
+    constexpr float kRelativeTolerance = 1e-6F;
+    const glm::vec3 tint(0.9F, 0.5F, 0.2F);
+    bool ok = true;
+    for (float roughness : {0.2F, 0.6F}) {
+        const auto make = [&](glm::vec3 colour) {
+            return paramsWith([&](OpenPbrInputs<Constant>& inputs) {
+                inputs.specularRoughness = roughness;
+                inputs.transmissionWeight = 1.0F;
+                inputs.specularColor = colour;
+            });
+        };
+        const BsdfParams white = make(glm::vec3(1.0F));
+        const BsdfParams tinted = make(tint);
+        const glm::vec3 wo(0.6F, 0.0F, 0.8F);
+        const glm::vec3 reflected(-0.6F, 0.0F, 0.8F);
+        const glm::vec3 refracted = glm::refract(-wo, glm::vec3(0.0F, 0.0F, 1.0F), 1.0F / 1.5F);
+        const glm::vec3 specularWhite = pathtracer::scene::evaluateBsdfSplit(white, wo, reflected).specular;
+        const glm::vec3 specularTinted = pathtracer::scene::evaluateBsdfSplit(tinted, wo, reflected).specular;
+        const glm::vec3 transmitWhite = pathtracer::scene::evaluateBsdfSplit(white, wo, refracted).transmission;
+        const glm::vec3 transmitTinted = pathtracer::scene::evaluateBsdfSplit(tinted, wo, refracted).transmission;
+        if (!(maxChannel(glm::abs(specularTinted - (tint * specularWhite))) <= kRelativeTolerance * maxChannel(specularWhite))) {
+            std::cerr << "bsdf_validate: FAILED specular_color does not scale the reflection at roughness " << roughness << '\n';
+            ok = false;
+        }
+        if (transmitTinted != transmitWhite || !(maxChannel(transmitWhite) > 0.0F)) {
+            std::cerr << "bsdf_validate: FAILED specular_color reached the transmission at roughness " << roughness << '\n';
+            ok = false;
+        }
+    }
+    finish(ctx, ok, "specular_color_tints_reflection_only failed; see the rows above");
 }
 
 // The specular lobe's closed form at the mirrored pair in double: nh is exactly +z, so D = 1/(pi*alpha^2) exactly and G2 uses one cosine.
@@ -1674,17 +1587,10 @@ PT_CHECK(dielectric_fresnel, Fast, Exact) {
         for (float roughness : roughnesses) {
             const double alpha =
                 std::max(static_cast<double>(roughness) * roughness, static_cast<double>(kMinAlpha));
-            const glm::vec3 baseColor(1.0F);
-            const BsdfParams params{baseColor,
-                                     /*metallic=*/0.0F,
-                                     roughness,
-                                     /*f0=*/glm::vec3(0.04F),
-                                     /*edgeTint=*/glm::vec3(1.0F),
-                                     static_cast<float>(ior),
-                                     /*transmissionFactor=*/0.0F,
-                                     /*diffuseRoughness=*/0.0F,
-                                     pathtracer::scene::eonAlbedoInversion(baseColor, 0.0F),
-                                     /*transmissionTint=*/glm::vec3(1.0F)};
+            const BsdfParams params = paramsWith([&](OpenPbrInputs<Constant>& inputs) {
+                inputs.specularRoughness = roughness;
+                inputs.specularIor = static_cast<float>(ior);
+            });
             double worstError = 0.0;
             double previous = -1.0;
             double atGrazing = 0.0;
@@ -1727,17 +1633,10 @@ PT_CHECK(dielectric_fresnel, Fast, Exact) {
                                                       2.44e-4F, 1.7263349e-4F, 1e-4F, 1e-5F};
     int indexMatchedRows = 0;
     for (float roughness : roughnesses) {
-        const glm::vec3 baseColor(1.0F);
-        const BsdfParams params{baseColor,
-                                 /*metallic=*/0.0F,
-                                 roughness,
-                                 /*f0=*/glm::vec3(0.04F),
-                                 /*edgeTint=*/glm::vec3(1.0F),
-                                 /*ior=*/1.0F,
-                                 /*transmissionFactor=*/0.0F,
-                                 /*diffuseRoughness=*/0.0F,
-                                 pathtracer::scene::eonAlbedoInversion(baseColor, 0.0F),
-                                 /*transmissionTint=*/glm::vec3(1.0F)};
+        const BsdfParams params = paramsWith([&](OpenPbrInputs<Constant>& inputs) {
+            inputs.specularRoughness = roughness;
+            inputs.specularIor = 1.0F;
+        });
         for (float cosine : indexMatchedCosines) {
             const float sine = std::sqrt(std::max(0.0F, 1.0F - (cosine * cosine)));
             const glm::vec3 wo(sine, 0.0F, cosine);
@@ -1819,11 +1718,11 @@ PT_CHECK(transmission_reciprocity, Fast, Exact) {
     for (float roughness : roughnesses) {
         const float alpha = roughness * roughness;
         for (float ior : iors) {
-            const BsdfParams params{glm::vec3(1.0F), 0.0F, roughness,
-                                     glm::vec3(0.04F), glm::vec3(1.0F), ior,
-                                     /*transmissionFactor=*/1.0F, /*diffuseRoughness=*/0.0F,
-                                     pathtracer::scene::eonAlbedoInversion(glm::vec3(1.0F), 0.0F),
-                                     /*transmissionTint=*/glm::vec3(1.0F)};
+            const BsdfParams params = paramsWith([&](OpenPbrInputs<Constant>& inputs) {
+                inputs.specularRoughness = roughness;
+                inputs.specularIor = ior;
+                inputs.transmissionWeight = 1.0F;
+            });
             for (float mu : cosines) {
                 const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (mu * mu))), 0.0F, mu);
                 const glm::vec3 refracted =
@@ -1933,12 +1832,8 @@ PT_CHECK(index_matched_transmission, Fast, Exact) {
     for (float cosine : cosines) {
         const float sine = std::sqrt(std::max(0.0F, 1.0F - (cosine * cosine)));
         const glm::vec3 wo(sine, 0.0F, cosine);
-        const BsdfParams params = makeTransmissiveTintParams(kSmoothRoughness, glm::vec3(1.0F), tint);
-        const BsdfParams smoothParams{params.baseColor,  params.metallic,
-                                       params.roughness,  params.f0,
-                                       params.edgeTint,   /*ior=*/1.0F,
-                                       params.transmissionFactor, params.diffuseRoughness,
-                                       params.diffuseRho, params.transmissionTint};
+        BsdfParams smoothParams = makeTransmissiveTintParams(kSmoothRoughness, glm::vec3(1.0F), tint);
+        smoothParams.ior = 1.0F;
         pathtracer::scene::Sampler sampler(0, 0, 0, 1, 9100U);
         const std::optional<pathtracer::scene::BsdfSample> smooth =
             pathtracer::scene::sampleBsdf(smoothParams, wo, sampler);
@@ -1969,11 +1864,8 @@ PT_CHECK(index_matched_transmission, Fast, Exact) {
         }
 
         // The rough draws must select that same delta branch and carry that same throughput; every draw is asserted, not merely counted.
-        const BsdfParams roughParams{smoothParams.baseColor,  smoothParams.metallic,
-                                      kRoughRoughness,         smoothParams.f0,
-                                      smoothParams.edgeTint,   /*ior=*/1.0F,
-                                      smoothParams.transmissionFactor, smoothParams.diffuseRoughness,
-                                      smoothParams.diffuseRho, smoothParams.transmissionTint};
+        BsdfParams roughParams = smoothParams;
+        roughParams.roughness = kRoughRoughness;
         int rejected = 0;
         int transmitted = 0;
         int notDelta = 0;
@@ -2097,7 +1989,7 @@ double criticalCosine(double iorDense) {
 
     // Inside the TIR cone there is no transmitted direction at all, so a draw reporting one is energy arriving where Snell cannot reach.
 PT_CHECK(critical_angle_onset, Fast, Exact) {
-    // Spans the shipped range: glass.json 1.5, clay.json's coat 1.55, with 1.33/2.4 bracketing it so the cone width varies by over 2x.
+    // Spans the shipped range: glass.json 1.5, clay.json 1.55, with 1.33/2.4 bracketing it so the cone width varies by over 2x.
     const std::array<double, 5> iors = {1.33, 1.5, 1.5168, 1.55, 2.4};
     // Offsets in cos straddling the critical cosine; the two smallest are below 2^-12, where the old 1 - cos^2 form lost the distinction.
     const std::array<double, 6> offsets = {1e-5, 2.44e-4, 1e-3, 1e-2, 0.1, 0.3};
@@ -2178,12 +2070,8 @@ PT_CHECK(tir_predicate_agreement, Fast, Exact) {
                 const float sine = std::sqrt(std::max(0.0F, 1.0F - (muF * muF)));
                 const glm::vec3 wo(sine, 0.0F, -muF);
                 // ior from the row, not makeParams' fixed 1.5: the critical angle above derives from this same value.
-                const BsdfParams base = makeParams(kSmoothRoughness, 0.0F, 1.0F);
-                const BsdfParams params{base.baseColor,          base.metallic,
-                                         base.roughness,          base.f0,
-                                         base.edgeTint,           static_cast<float>(ior),
-                                         base.transmissionFactor, base.diffuseRoughness,
-                                         base.diffuseRho,         base.transmissionTint};
+                BsdfParams params = makeParams(kSmoothRoughness, 0.0F, 1.0F);
+                params.ior = static_cast<float>(ior);
 
                 int transmitted = 0;
                 for (int i = 0; i < kDraws; ++i) {
@@ -2389,14 +2277,14 @@ PT_CHECK(microfacet_fresnel, Slow, Statistical) {
                   static_cast<double>(roughMean.x), static_cast<double>(roughMacro.x));
     PT_EXPECT(ctx, roughMean.x < roughMacro.x, flatDetail);
 
-    // A coloured conductor, the reason the lane carries RGB: Gulbrandsen 2014's edgeTint inverts per channel, so the mean is chromatic.
+    // A coloured metal, the reason the lane carries RGB: F82's specular_color tints per channel, so the mean is chromatic.
     const BsdfParams tinted = makeColoredMetalParams(0.2F, glm::vec3(0.9F, 0.6F, 0.3F));
     const glm::vec3 tintedMean = expectation(tinted, kGrazing);
     const float spread = std::max({tintedMean.x, tintedMean.y, tintedMean.z}) -
                           std::min({tintedMean.x, tintedMean.y, tintedMean.z});
     char chromaDetail[192];
     std::snprintf(chromaDetail, sizeof(chromaDetail),
-                  "edge-tinted conductor spans %.4f across RGB (%.4f, %.4f, %.4f); a greyscale lane would report one",
+                  "F82-tinted metal spans %.4f across RGB (%.4f, %.4f, %.4f); a greyscale lane would report one",
                   static_cast<double>(spread), static_cast<double>(tintedMean.x),
                   static_cast<double>(tintedMean.y), static_cast<double>(tintedMean.z));
     PT_EXPECT(ctx, spread > 1e-3F, chromaDetail);
