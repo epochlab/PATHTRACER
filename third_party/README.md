@@ -13,6 +13,7 @@ tree means hand-tracking upstream, which a submodule pin does for free. That is 
 | nlohmann/json | 3.11.3 | https://github.com/nlohmann/json | `nlohmann/json.hpp`, single header | MIT |
 | Dear ImGui | v1.92.9 (`01380c5`) | https://github.com/ocornut/imgui | submodule, `shallow = true` | MIT |
 | MikkTSpace | 1.0 (`3e895b4`) | https://github.com/mmikk/MikkTSpace | submodule, `shallow = true` | zlib |
+| ltc-sheen | `9262411` | https://github.com/tizian/ltc-sheen | `ltc-sheen/ltc_table_sheen_volume.cpp`, one data file, unmodified | Apache-2.0 |
 
 Versions are read from the sources themselves: `cgltf.h`'s banner comment, `json.hpp`'s
 `NLOHMANN_JSON_VERSION_*` macros, the imgui submodule's tag, and `mikktspace.h`'s `Version:` line plus the pinned commit. Update a single-header library by replacing
@@ -24,4 +25,7 @@ backends); the rest of the submodule tree is unused.
 Build-system dependencies resolved externally, not vendored: Embree 4, OpenEXR, Imath, OpenColorIO, OpenImageIO 3,
 GLFW 3.5, GLEW, glm, OpenGL, zlib.
 
-Licence texts for the four vendored libraries are in `NOTICE`.
+ltc-sheen supplies the 32x32 LTC coefficient table of Zeltner, Burley and Chiang 2022 (`fitting/python/data/`), the fit to
+the volumetric SGGX sheen OpenPBR's fuzz specifies; `src/scene/fuzz.cpp` compiles it as published through a two-name shim.
+
+Licence texts for the vendored libraries are in `NOTICE`; ltc-sheen's Apache-2.0 text is `ltc-sheen/LICENSE`.

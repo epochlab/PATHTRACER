@@ -95,8 +95,18 @@ struct DiffuseSlab {
     float ltcS;          // the clipped LTC's normalisation
 };
 
+// OpenPBR's fuzz slab at one wo: the volumetric SGGX sheen's LTC fit (Zeltner, Burley, Chiang 2022), in the fuzz frame.
+struct FuzzSlab {
+    glm::vec3 color;     // fuzz_color, tinting the fuzz's own reflection alone
+    float aInv;          // the LTC's inverse-matrix coefficients at (fuzz_roughness, mu_o)
+    float bInv;
+    float albedo;        // E_fuzz(mu_o), the sheen's directional albedo
+    glm::mat3 basisT;    // to the LTC frame, wo's azimuth on +x
+};
+
 // One slab's sampling strategy; the closure's selection masses are indexed by it, so the order is the sample stream's contract.
 enum class Technique : std::uint8_t {
+    Fuzz,                    // the sheen LTC, sampled exactly
     CoatSingle,              // the coat's VNDF reflection in its own frame, or its mirror when smooth
     CoatMulti,               // the coat's reflected multiple scattering
     MetalSingle,             // VNDF reflection, or the mirror when smooth
@@ -114,7 +124,13 @@ inline constexpr std::size_t kTechniqueCount = static_cast<std::size_t>(Techniqu
 struct BsdfClosure {
     glm::vec3 wo;  // woLocal mirrored into the +z hemisphere, which every slab assumes
     float sign;    // the mirror that produced wo; wiLocal crosses it on the way in and the sampled wi on the way out
-    bool exiting;  // wo inside a transmissive base: only its interface faces the ray, and only transmission crosses the coat
+    bool exiting;  // wo inside a transmissive base: only its interface faces the ray, and only transmission crosses coat and fuzz
+    // OpenPBR's fuzz over the coated base: fuzz_weight, its slab in its own frame, and 1 - F E_fuzz(wo), what passes beneath it.
+    float fuzzWeight = 0.0F;
+    glm::mat3 toFuzz;
+    FuzzSlab fuzz;             // built where fuzzWeight > 0 and wo is outside
+    float fuzzRoughness;
+    float belowFuzz;
     // OpenPBR's coat: coat_weight of the surface, a dielectric slab in the frame toCoat takes the mirrored base frame to.
     float coatWeight = 0.0F;
     glm::mat3 toCoat;
@@ -176,6 +192,9 @@ struct BsdfClosure {
 
 // The dielectric's index ratio: heroChannel disperses specular_ior, specular_weight modulates it (OpenPBR's epsilon, eta').
 [[nodiscard]] float modulatedIor(const OpenPbrInputs<Constant>& inputs, std::optional<int> heroChannel);
+
+// E_fuzz(mu) at fuzz_roughness, the sheen's directional albedo: what the fuzz reflects and so withholds from the layers beneath.
+[[nodiscard]] float fuzzAlbedo(float roughness, float mu);
 
 // The coat's one-pass transmittance at coat cosine mu: coat_color^(1/(2 mu_t)), mu_t refracted into the coat (OpenPBR).
 [[nodiscard]] glm::vec3 coatTransmittance(const glm::vec3& coatColor, float coatIor, float mu);

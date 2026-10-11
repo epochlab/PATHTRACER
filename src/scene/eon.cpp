@@ -61,14 +61,6 @@ glm::vec4 eonLtcCoeffs(float mu, float r) {
     return {a, b, c, d};
 }
 
-// Orthonormal frame aligning wLocal's azimuth to the x-axis, to move into and out of the space the LTC fit is expressed in.
-glm::mat3 orthonormalBasisLtc(const glm::vec3& wLocal) {
-    const float lenSq = (wLocal.x * wLocal.x) + (wLocal.y * wLocal.y);
-    const glm::vec3 x = lenSq > 0.0F ? glm::vec3(wLocal.x, wLocal.y, 0.0F) * (1.0F / std::sqrt(lenSq)) : glm::vec3(1.0F, 0.0F, 0.0F);
-    const glm::vec3 y(-x.y, x.x, 0.0F);
-    return glm::mat3(x, y, glm::vec3(0.0F, 0.0F, 1.0F));
-}
-
 // Clipped-LTC sample (paper Sec. 4, Listing 3): cosine sampling of the hemisphere clipped to the lobe, so no sample lands below.
 glm::vec3 cltcSample(const glm::vec4& m, const glm::mat3& basisT, float s, glm::vec2 u) {
     const float radius = std::sqrt(u.x);
@@ -99,6 +91,12 @@ float eonUniformMixWeight(float mu, float r) {
 
 }  // namespace
 
+glm::mat3 toAzimuthFrame(const glm::vec3& w) {
+    const float lenSq = (w.x * w.x) + (w.y * w.y);
+    const glm::vec3 x = lenSq > 0.0F ? glm::vec3(w.x, w.y, 0.0F) * (1.0F / std::sqrt(lenSq)) : glm::vec3(1.0F, 0.0F, 0.0F);
+    return glm::transpose(glm::mat3(x, glm::vec3(-x.y, x.x, 0.0F), glm::vec3(0.0F, 0.0F, 1.0F)));
+}
+
 // Paper Appendix A: rho for a desired observed albedo, by the stable root not eq. 30.
 glm::vec3 eonAlbedoInversion(const glm::vec3& albedo, float r) {
     const float eFonNormal = 1.0F / (1.0F + (kConstant1Fon * r));
@@ -114,7 +112,7 @@ DiffuseSlab makeDiffuseSlab(const glm::vec3& rho, float r, const glm::vec3& wo) 
             r,
             eonUniformMixWeight(wo.z, r),
             m,
-            glm::transpose(orthonormalBasisLtc(wo)),
+            toAzimuthFrame(wo),
             0.5F * (1.0F + (1.0F / std::sqrt((m.w * m.w) + 1.0F)))};
 }
 

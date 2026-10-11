@@ -85,16 +85,26 @@ glm::vec3 emittedRadiance(const Material& material, const ShadingTriangle& trian
     if (!(luminance > 0.0F)) {
         return glm::vec3(0.0F);
     }
-    const glm::vec3 emitted = luminance * evaluate(material.emissionColor, shading.uv, footprint, InputRange::NonNegative);
-    // OpenPBR's coat over the emitter: lerp(1, T_coat, C), one pass along wo through the coat; its inputs point-sampled as at a vertex.
+    glm::vec3 emitted = luminance * evaluate(material.emissionColor, shading.uv, footprint, InputRange::NonNegative);
+    // OpenPBR's layers over the emitter, their inputs as a vertex reads them: the coat's lerp(1, T_coat, C), one pass along wo.
     const float coatWeight = evaluate(material.coatWeight, shading.uv, {}, InputRange::Unit);
-    if (!(coatWeight > 0.0F)) {
-        return emitted;
+    const auto normalOf = [&](const NormalInput& input) { return buildShadingFrame(triangle, shading, input)[2]; };
+    const glm::vec3 coatNormal = coatWeight > 0.0F ? normalOf(material.geometryCoatNormal) : glm::vec3(0.0F);
+    if (coatWeight > 0.0F) {
+        const glm::vec3 transmittance = coatTransmittance(evaluate(material.coatColor, shading.uv, {}, InputRange::Unit),
+                                                          evaluate(material.coatIor, shading.uv, {}, InputRange::Positive),
+                                                          std::abs(glm::dot(coatNormal, wo)));
+        emitted *= glm::vec3(1.0F - coatWeight) + (coatWeight * transmittance);
     }
-    const float mu = std::abs(glm::dot(buildShadingFrame(triangle, shading, material.geometryCoatNormal)[2], wo));
-    const glm::vec3 transmittance = coatTransmittance(evaluate(material.coatColor, shading.uv, {}, InputRange::Unit),
-                                                      evaluate(material.coatIor, shading.uv, {}, InputRange::Positive), mu);
-    return emitted * (glm::vec3(1.0F - coatWeight) + (coatWeight * transmittance));
+    // The fuzz withholds what it reflects, 1 - F E_fuzz, its normal lerp(base, coat, C) as at a vertex: emission is "further reduced".
+    const float fuzzWeight = evaluate(material.fuzzWeight, shading.uv, footprint, InputRange::Unit);
+    if (fuzzWeight > 0.0F) {
+        const glm::vec3 baseNormal = normalOf(material.geometryNormal);
+        const glm::vec3 fuzzNormal = coatWeight > 0.0F ? glm::normalize(baseNormal + (coatWeight * (coatNormal - baseNormal))) : baseNormal;
+        const float roughness = evaluate(material.fuzzRoughness, shading.uv, {}, InputRange::Unit);
+        emitted *= 1.0F - (fuzzWeight * fuzzAlbedo(roughness, std::abs(glm::dot(fuzzNormal, wo))));
+    }
+    return emitted;
 }
 
 ShadingFrame buildShadingFrame(const ShadingTriangle& triangle, const ShadingVertex& shading, const NormalInput& geometryNormal) {

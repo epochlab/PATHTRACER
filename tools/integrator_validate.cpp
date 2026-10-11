@@ -722,7 +722,7 @@ PT_CHECK(emission_returns_luminance_times_colour, Fast, Exact) {
     const float tolerance = static_cast<float>(kTexelSamples + 16) * std::numeric_limits<float>::epsilon() *
                             std::max({expected.x, expected.y, expected.z});
 
-    ctx.plan(4);
+    ctx.plan(5);
     // A clear coat absorbs nothing, so it leaves emission bit for bit; a tinted one can only take light away, never add it.
     TestScene clear = scene;
     clear.instances[0].material.coatWeight = 1.0F;
@@ -735,6 +735,13 @@ PT_CHECK(emission_returns_luminance_times_colour, Fast, Exact) {
     PT_EXPECT(ctx, throughClear == open, "a clear coat changed the emission beneath it");
     PT_EXPECT(ctx, glm::all(glm::lessThan(throughTint, open)) && glm::all(glm::greaterThan(throughTint, 0.5F * open)),
               "a half-weight tinted coat must dim emission, by at most its weight: (1-C) + C*T with 0 < T < 1");
+    // The fuzz withholds what it reflects, 1 - F E_fuzz, untinted: a white fuzz dims emission evenly and never to black.
+    TestScene fuzzy = scene;
+    fuzzy.instances[0].material.fuzzWeight = 1.0F;
+    const glm::vec3 throughFuzz = regionMean(renderPass(fuzzy, black, base, *accel, pool, true).beauty, 2, 6, 6, 10);
+    PT_EXPECT(ctx, glm::all(glm::lessThan(throughFuzz, open)) && glm::all(glm::greaterThan(throughFuzz, glm::vec3(0.0F))) &&
+                       std::abs((throughFuzz.x / open.x) - (throughFuzz.z / open.z)) <= 1e-6F,
+              "a white fuzz must dim emission by one untinted factor, 1 - F E_fuzz");
     for (const auto& [name, env] : {std::pair{"black", &black}, std::pair{"uniform L0=1", &uniform}}) {
         const glm::vec3 mean =
             regionMean(renderPass(scene, *env, base, *accel, pool, true).beauty, 2, 6, 6, 10);

@@ -60,6 +60,9 @@ struct OpenPbrInputs {
     In<float> coatRoughness = 0.0F;
     In<float> coatIor = 1.6F;
     In<float> coatDarkening = 1.0F;
+    In<float> fuzzWeight = 0.0F;
+    In<glm::vec3> fuzzColor = glm::vec3(1.0F);
+    In<float> fuzzRoughness = 0.5F;
     In<float> emissionLuminance = 0.0F;
     In<glm::vec3> emissionColor = glm::vec3(1.0F);
 };
@@ -95,6 +98,9 @@ void forEachInput(Visit&& visit, Inputs&... inputs) {
     visit(InputSpec{"coat_roughness", Unit, kData, false}, inputs.coatRoughness...);
     visit(InputSpec{"coat_ior", Positive, kData, false}, inputs.coatIor...);
     visit(InputSpec{"coat_darkening", Unit, kData, false}, inputs.coatDarkening...);
+    visit(InputSpec{"fuzz_weight", Unit, kData, true}, inputs.fuzzWeight...);
+    visit(InputSpec{"fuzz_color", Unit, kColour, true}, inputs.fuzzColor...);
+    visit(InputSpec{"fuzz_roughness", Unit, kData, false}, inputs.fuzzRoughness...);
     visit(InputSpec{"emission_luminance", NonNegative, kData, true, InputUse::Emission}, inputs.emissionLuminance...);
     visit(InputSpec{"emission_color", NonNegative, kColour, true, InputUse::Emission}, inputs.emissionColor...);
 }

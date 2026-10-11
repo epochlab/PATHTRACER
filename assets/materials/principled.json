@@ -24,6 +24,9 @@
     "coat_roughness": 0.0,
     "coat_ior": 1.6,
     "coat_darkening": 1.0,
+    "fuzz_weight": 0.0,
+    "fuzz_color": [1.0, 1.0, 1.0],
+    "fuzz_roughness": 0.5,
     "emission_luminance": 0.0,
     "emission_color": [1.0, 1.0, 1.0]
 }
