@@ -27,6 +27,8 @@ constexpr float kRayEpsilon = 1e-4F;
 constexpr std::uint32_t kAoSeedOffset = 0x9E3779B9U;
 // The same for the Fresnel AOV's stream: frac(sqrt 2)*2^32, kAoSeedOffset's sibling. Distinct, non-zero and odd is the whole requirement.
 constexpr std::uint32_t kFresnelSeedOffset = 0x6A09E667U;
+// And for volume tracking, whose draw count varies per path: frac(sqrt 3)*2^32, so no BSDF dimension shifts with it.
+constexpr std::uint32_t kVolumeSeedOffset = 0xBB67AE85U;
 
 // pbrt's ShadowEpsilon (PBR 6.8.6): a relative back-off on tMax, or a light's own front face occludes it. A no-op for the environment.
 constexpr float kShadowDistanceEpsilon = 1e-3F;
@@ -61,8 +63,8 @@ constexpr double kBlackmanHarrisA2 = 0.14128;
 constexpr double kBlackmanHarrisA3 = 0.01168;
 // Knots of the half-filter CDF over |x| in [0, kFilterRadius]: exact at each knot, linear between, so 63 bins of 0.024 px each.
 constexpr int kFilterCdfKnots = 64;
-// Per-pixel lanes: beauty.rgb, termination bounce, shadow, five transport buckets, AO, Fresnel, alpha, denoise albedo and normal.
-constexpr int kSampleLanes = 31;
+// Per-pixel lanes: beauty.rgb, bounce, shadow, five surface buckets, AO, Fresnel, alpha, denoise albedo, normal, two volume buckets.
+constexpr int kSampleLanes = 37;
 
 // CDF of |x| / kFilterRadius from the window's closed-form integral: the window spans t in [0, 1] centred at 0.5, so |x| = 0 maps there.
 std::array<float, kFilterCdfKnots> buildFilterCdf() {
@@ -165,7 +167,7 @@ struct TraceResult {
     float ao;  // 1.0 = unoccluded, 0.0 = occluded within aoMaxDistance -- inverted relative to shadow above
     // One VNDF draw's Fresnel at the primary hit; 0 where there is no BSDF vertex at bounce 0.
     glm::vec3 fresnel{0.0F};
-    float alpha = 0.0F;  // 1 where the primary ray hits, or misses into a shown sky; 0 with no ray at all
+    float alpha = 0.0F;  // PathTraceResult::alpha's per-sample estimate; 0 with no ray at all
 
     // Transport-component breakdown -- see PathTraceResult's doc comment for the bucketing rule.
     glm::vec3 directDiffuse{0.0F};
@@ -173,6 +175,8 @@ struct TraceResult {
     glm::vec3 directSpecular{0.0F};
     glm::vec3 indirectSpecular{0.0F};
     glm::vec3 refraction{0.0F};
+    glm::vec3 directVolume{0.0F};
+    glm::vec3 indirectVolume{0.0F};
 
     // OIDN's auxiliary features at the path's first rough vertex: its one-sample directional albedo and its shading normal.
     glm::vec3 denoiseAlbedo{0.0F};
@@ -180,7 +184,7 @@ struct TraceResult {
 };
 
 // Which transport bucket a path belongs to: set at bounce 0's lobe, stickily overridden to Refraction by any transmission sample.
-enum class PathBucket { Diffuse, SpecularReflection, Refraction };
+enum class PathBucket { Diffuse, SpecularReflection, Refraction, Volume };
 
 // What a ray may cross without scattering: an instance whose opacity may fall below 1, or a thin wall that may transmit undeviated.
 struct PassThroughScene {
@@ -189,6 +193,7 @@ struct PassThroughScene {
     const std::vector<MeshInstance>& instances;
     const std::vector<std::uint8_t>& mayPassThrough;  // per instance
     bool any;  // no instance may: every shadow ray is a plain occlusion query
+    const VolumeSet& volumes;
 };
 
 template <typename T>
@@ -216,11 +221,21 @@ NormalMappedBsdf closureAt(const Material& material, const ShadingTriangle& tria
                                 coatFrame[2] * frame, coatFrame[0] * frame);
 }
 
-// The share of light a shadow ray carries to its end: (1 - alpha) + alpha * passThrough at each crossable surface, 0 at any other.
-glm::vec3 transmittanceAlong(Ray ray, const PassThroughScene& scene, std::optional<int> hero, std::uint64_t& shadowRays) {
-    if (!scene.any) {
-        return glm::vec3(scene.accel.occluded(ray) ? 0.0F : 1.0F);
+// The VDB media's transmittance over the whole shadow ray, by ratio tracking, once its surfaces have let it through.
+glm::vec3 volumeTransmittance(const Ray& ray, const PassThroughScene& scene, Sampler& volumeSampler) {
+    if (scene.volumes.empty()) {
+        return glm::vec3(1.0F);
     }
+    return scene.volumes.transmittance(ray, ray.tMin, ray.tMax, volumeSampler);
+}
+
+// The share of light a shadow ray carries to its end: (1 - alpha) + alpha * passThrough at each crossable surface, 0 at any other.
+glm::vec3 transmittanceAlong(Ray ray, const PassThroughScene& scene, std::optional<int> hero, std::uint64_t& shadowRays,
+                             Sampler& volumeSampler) {
+    if (!scene.any) {
+        return scene.accel.occluded(ray) ? glm::vec3(0.0F) : volumeTransmittance(ray, scene, volumeSampler);
+    }
+    const Ray whole = ray;
     glm::vec3 transmittance(1.0F);
     // Closest hit first, so each surface is met in order along the same ray: exact for presence and for an undeviated sheet.
     while (const std::optional<Hit> hit = scene.accel.intersect(ray)) {
@@ -245,7 +260,7 @@ glm::vec3 transmittanceAlong(Ray ray, const PassThroughScene& scene, std::option
         ray.tMin = std::nextafter(hit->t, std::numeric_limits<float>::infinity());
         ++shadowRays;
     }
-    return transmittance;
+    return transmittance * volumeTransmittance(whole, scene, volumeSampler);
 }
 
 // Obscurance through cutouts, Sum T_i alpha_i rho(t_i) + T_end; closest-hit, as rho needs the distance (under 1.3% of frame time).
@@ -277,7 +292,7 @@ float obscuranceAlong(Ray ray, const PassThroughScene& scene, float maxDistance)
 TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, float pixelSolidAngle, const PassThroughScene& scene,
                        const std::vector<int>& instanceLightIndex, const LightSet& lights,
                        bool showSky, const PathTraceSettings& settings,
-                       Sampler& sampler, glm::vec2 aoSample, glm::vec2 fresnelSample,
+                       Sampler& sampler, Sampler& volumeSampler, glm::vec2 aoSample, glm::vec2 fresnelSample,
                        pathtracer::debug::RayCounts& __restrict rays) {
     const EmbreeAccel& accel = scene.accel;
     glm::vec3 radiance(0.0F);
@@ -301,6 +316,8 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
     glm::vec3 directSpecularAccum(0.0F);
     glm::vec3 indirectSpecularAccum(0.0F);
     glm::vec3 refractionAccum(0.0F);
+    glm::vec3 directVolumeAccum(0.0F);
+    glm::vec3 indirectVolumeAccum(0.0F);
     // Routes a contribution into the path's bucket; a no-op when unset, that background radiance being deliberately unbucketed.
     const auto addToBucket = [&](const glm::vec3& contribution, bool isDirect) {
         if (!pathBucket.has_value()) {
@@ -315,6 +332,9 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
                 break;
             case PathBucket::SpecularReflection:
                 (isDirect ? directSpecularAccum : indirectSpecularAccum) += contribution;
+                break;
+            case PathBucket::Volume:
+                (isDirect ? directVolumeAccum : indirectVolumeAccum) += contribution;
                 break;
         }
     };
@@ -343,18 +363,107 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
         featureNormal = featureSurvival * normal;
         featurePending = false;
     };
+    // Russian roulette from its start bounce: false ends the path, else throughput and the feature survival carry 1/continuation.
+    const auto survivesRoulette = [&] {
+        if (bounce < settings.russianRouletteStartBounce) {
+            return true;
+        }
+        const float continueProb =
+            std::clamp(std::max({throughput.x, throughput.y, throughput.z}), settings.rrMinProb, settings.rrMaxProb);
+        if (sampler.next1D() >= continueProb) {
+            return false;
+        }
+        throughput /= continueProb;
+        if (featurePending) {
+            featureSurvival /= continueProb;
+        }
+        return true;
+    };
 
     // bounce 0 always traces: maxBounces counts secondary bounces, so maxBounces==0 is direct lighting with no continuation rays.
     for (; bounce <= settings.maxBounces + 1; ++bounce) {
         (bounce == 0 ? rays.primary : rays.bounce) += 1;
         const std::optional<Hit> hit = accel.intersect(ray);
+
+        // Free flight through the VDB media over the segment just travelled, which a miss runs to the ray's own bound (a far clip).
+        std::optional<FreeFlight> flight;
+        if (!scene.volumes.empty()) {
+            flight = scene.volumes.sampleFreeFlight(ray, segmentStart, hit.has_value() ? hit->t : ray.tMax, throughput, volumeSampler);
+            throughput *= flight->weight;
+            if (featurePending) {
+                featureWeight *= flight->weight;
+            }
+        }
+        const bool scattered = flight.has_value() && flight->event == FreeFlightEvent::Scattered;
+        const bool absorbed = flight.has_value() && flight->event == FreeFlightEvent::Absorbed;
         if (bounce == 0) {
-            gAlpha = hit.has_value() || showSky ? 1.0F : 0.0F;
+            // E[1 - mean(w) 1{escape}] = 1 - mean(T): unbiased, though one sample may read below 0 where spectral weights exceed 1.
+            gAlpha = hit.has_value() || showSky || scattered || absorbed ? 1.0F : 1.0F - channelMean(throughput);
         }
 
-        // Beer-Lambert for the segment just travelled; a miss is unbounded, t = inf.
+        // Beer-Lambert for the segment just travelled, to the scattering if one ended it; a miss is unbounded, t = inf.
         if (medium.has_value()) {
-            throughput *= medium->transmittance(hit.has_value() ? hit->t - segmentStart : std::numeric_limits<float>::infinity());
+            throughput *= medium->transmittance(scattered ? flight->t - segmentStart
+                                                : hit.has_value() ? hit->t - segmentStart
+                                                                  : std::numeric_limits<float>::infinity());
+        }
+
+        // Absorbed carries nothing onward, emission being out of scope: the feature chain closes on a zero albedo and no normal.
+        if (absorbed) {
+            if (featurePending) {
+                recordFeatures(glm::vec3(0.0F), glm::vec3(0.0F));
+            }
+            break;
+        }
+
+        if (scattered) {
+            // The depth cap's extra iteration only collects the final ray's miss or emitter hit, which this scattering stops short of.
+            if (bounce > settings.maxBounces) {
+                break;
+            }
+            const glm::vec3 position = ray.origin + (flight->t * ray.dir);
+            const glm::vec3 dir = glm::normalize(ray.dir);
+            if (bounce == 0) {
+                pathBucket = PathBucket::Volume;
+                gShadow = 1.0F;  // as at a surface: shadowed unless the NEE ray below gets through
+            }
+            // The phase function integrates to 1, so the albedo estimate is the tracking weight already carried; no surface, no normal.
+            if (featurePending) {
+                recordFeatures(featureWeight, glm::vec3(0.0F));
+            }
+            // NEE from the scattering point, against the phase-sampled continuation by the power heuristic on directional pdfs.
+            if (const std::optional<LightSample> lightSample = lights.sample(position, sampler)) {
+                const float phase = henyeyGreenstein(glm::dot(dir, lightSample->direction), flight->g);
+                const Ray shadowRay{position, lightSample->direction, 0.0F, lightSample->distance * (1.0F - kShadowDistanceEpsilon)};
+                ++rays.shadow;
+                const glm::vec3 visibility = transmittanceAlong(shadowRay, scene, heroChannel, rays.shadow, volumeSampler);
+                if (visibility != glm::vec3(0.0F)) {
+                    if (bounce == 0) {
+                        gShadow = 1.0F - channelMean(visibility);
+                    }
+                    const float lightPdf2 = lightSample->pdf * lightSample->pdf;
+                    const float misWeightLight = lightPdf2 / (lightPdf2 + (phase * phase));
+                    const glm::vec3 neeContribution =
+                        visibility * throughput * lightSample->radiance * (phase * misWeightLight / lightSample->pdf);
+                    radiance += neeContribution;
+                    if (bounce == 0) {
+                        directVolumeAccum += neeContribution;
+                    } else {
+                        addToBucket(neeContribution, /*isDirect=*/false);
+                    }
+                }
+            }
+            // The phase sample weighs f/pdf = 1; its pdf is what this ray's miss or emitter hit is MIS-weighted against.
+            const glm::vec3 wi = sampleHenyeyGreenstein(dir, flight->g, sampler.next2D());
+            lastBsdfPdf = henyeyGreenstein(glm::dot(dir, wi), flight->g);
+            lastSampleWasDelta = false;
+            lastShadingPosition = position;
+            if (!survivesRoulette()) {
+                break;
+            }
+            ray = Ray{position, wi, 0.0F, std::numeric_limits<float>::max()};
+            segmentStart = 0.0F;
+            continue;
         }
 
         if (!hit.has_value()) {
@@ -539,7 +648,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
                     const Ray shadowRay{shadowOrigin, finiteLight ? toLight / shadowDistance : toLight,
                                          shadowEpsilon, shadowDistance * (1.0F - kShadowDistanceEpsilon)};
                     ++rays.shadow;
-                    const glm::vec3 visibility = transmittanceAlong(shadowRay, scene, heroChannel, rays.shadow);
+                    const glm::vec3 visibility = transmittanceAlong(shadowRay, scene, heroChannel, rays.shadow, volumeSampler);
                     if (visibility != glm::vec3(0.0F)) {
                         if (bounce == 0) {
                             gShadow = 1.0F - channelMean(visibility);
@@ -606,17 +715,8 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
 
         throughput *= weight;
 
-        if (bounce >= settings.russianRouletteStartBounce) {
-            const float continueProb = std::clamp(
-                std::max({throughput.x, throughput.y, throughput.z}), settings.rrMinProb,
-                settings.rrMaxProb);
-            if (sampler.next1D() >= continueProb) {
-                break;
-            }
-            throughput /= continueProb;
-            if (featurePending) {
-                featureSurvival /= continueProb;
-            }
+        if (!survivesRoulette()) {
+            break;
         }
 
         if (sample->passThrough) {
@@ -638,8 +738,8 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
 
     return {radiance,           bounce,               gShadow,              gAo,
             gFresnel,           gAlpha,               directDiffuseAccum,   indirectDiffuseAccum,
-            directSpecularAccum, indirectSpecularAccum, refractionAccum,    featureAlbedo,
-            featureNormal};
+            directSpecularAccum, indirectSpecularAccum, refractionAccum,    directVolumeAccum,
+            indirectVolumeAccum, featureAlbedo,         featureNormal};
 }
 
 }  // namespace
@@ -665,7 +765,7 @@ PathTraceResult makePathTraceResult(int width, int height, int replicates) {
 void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                        const std::vector<ShadingTriangle>& shadingTriangles,
                        const std::vector<MeshInstance>& instances,
-                       const std::vector<int>& instanceLightIndex, const LightSet& lights,
+                       const std::vector<int>& instanceLightIndex, const LightSet& lights, const VolumeSet& volumes,
                        int width, int height, bool showSky, const PathTraceSettings& settings,
                        std::uint32_t scrambleSeed, int sampleBase, int sampleCount,
                        const std::atomic<std::uint64_t>& generation,
@@ -697,7 +797,8 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
     const int tilesY = (height + tileSize - 1) / tileSize;
     const std::vector<std::uint8_t> mayPassThrough = passThroughInstances(instances);
     const PassThroughScene scene{accel, shadingTriangles, instances, mayPassThrough,
-                                 std::any_of(mayPassThrough.begin(), mayPassThrough.end(), [](std::uint8_t may) { return may != 0; })};
+                                 std::any_of(mayPassThrough.begin(), mayPassThrough.end(), [](std::uint8_t may) { return may != 0; }),
+                                 volumes};
 
     // One worker owns one tile: filter importance sampling keeps each sample in its own pixel's estimate, so tiles share no work.
     const auto renderTile = [&](int tileIndex) {
@@ -729,6 +830,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                     const glm::vec2 aoSample = aoSampler.next2D();
                     Sampler fresnelSampler(x, y, sampleIndex, replicateCount, seed ^ kFresnelSeedOffset, lattice);
                     const glm::vec2 fresnelSample = fresnelSampler.next2D();
+                    Sampler volumeSampler(x, y, sampleIndex, replicateCount, seed ^ kVolumeSeedOffset, lattice);
                     // The pixel's footprint on the unit sphere, read only by the feature chain and only where a ray exists.
                     const auto pixelSolidAngle = [&] {
                         const glm::mat2x3 dirPerPixel = primary->dirPerNdc * ndcPerPixel;
@@ -738,7 +840,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                     const TraceResult trace =
                         primary ? tracePath(primary->ray, primary->dirPerNdc * ndcPerStratum,
                                             settings.denoiseFeatures ? pixelSolidAngle() : 0.0F, scene, instanceLightIndex, lights,
-                                            showSky, settings, sampler, aoSample, fresnelSample, tileRays)
+                                            showSky, settings, sampler, volumeSampler, aoSample, fresnelSample, tileRays)
                                 : TraceResult{};
                     const std::array<float, kSampleLanes> values{
                         trace.radiance.x,          trace.radiance.y,
@@ -756,7 +858,10 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                         trace.alpha,               trace.denoiseAlbedo.x,
                         trace.denoiseAlbedo.y,     trace.denoiseAlbedo.z,
                         trace.denoiseNormal.x,     trace.denoiseNormal.y,
-                        trace.denoiseNormal.z};
+                        trace.denoiseNormal.z,     trace.directVolume.x,
+                        trace.directVolume.y,      trace.directVolume.z,
+                        trace.indirectVolume.x,    trace.indirectVolume.y,
+                        trace.indirectVolume.z};
                     for (int lane = 0; lane < kSampleLanes; ++lane) {
                         sum[lane] += values[lane];
                     }
@@ -775,6 +880,8 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                 writeTexel(out.alpha, x, y, sum[24] / samples);
                 writeTexel(out.denoiseAlbedo, x, y, glm::vec3(sum[25], sum[26], sum[27]) / samples);
                 writeTexel(out.denoiseNormal, x, y, glm::vec3(sum[28], sum[29], sum[30]) / samples);
+                writeTexel(out.directVolume, x, y, glm::vec3(sum[31], sum[32], sum[33]) / samples);
+                writeTexel(out.indirectVolume, x, y, glm::vec3(sum[34], sum[35], sum[36]) / samples);
             }
         }
 

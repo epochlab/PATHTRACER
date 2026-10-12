@@ -197,12 +197,13 @@ struct AppScene {
     std::vector<pathtracer::scene::QuadLight> quadLights;
     pathtracer::scene::EnvironmentMap environmentMap;
     pathtracer::scene::EmbreeAccel accel;  // path tracer scene intersection
+    pathtracer::scene::VolumeSet volumes;  // VDB media in world space, traced alongside accel's surfaces
     // The profile's integrator limits; every instance's material lives on model.instances.
     pathtracer::scene::PathTraceSettings baseSettings;
     // World-space AABB per instance, parallel to model.instances. Static geometry, so computed once and read for the Wireframe AOV.
     std::vector<pathtracer::scene::AabbBounds> instanceBounds;
     int totalTriangles;   // before the BVH build takes worldTriangles
-    double loadMs;        // glTF load and texture bind, for the spec block
+    double loadMs;        // glTF, texture and volume load, for the spec block
     double accelBuildMs;  // Embree build, for the spec block
 };
 
@@ -348,21 +349,30 @@ std::optional<AppScene> loadAppScene(const pathtracer::config::SceneConfig& scen
                                      const pathtracer::config::ProfileConfig& profileConfig) {
     const glm::mat4 sceneTransform = pathtracer::scene::rootTransformOf(sceneConfig.model);
     const auto loadStart = std::chrono::steady_clock::now();
+    // No glTF is an empty model: the scene's lights are then its only triangles.
     std::optional<pathtracer::scene::LoadedModel> model =
-        pathtracer::scene::loadGltf(std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.model.gltfPath, sceneTransform);
+        sceneConfig.model.gltfPath
+            ? pathtracer::scene::loadGltf(std::string(ASSET_ROOT_DIR) + "/" + *sceneConfig.model.gltfPath, sceneTransform)
+            : pathtracer::scene::LoadedModel{};
     // Materials, then the scene's textures over them, before anything reads a material; each call logs the reason it fails.
-    if (model && (!pathtracer::scene::applySceneMaterials(model->instances, sceneConfig.materialPath, sceneConfig.materialOverrides,
-                                                          ASSET_ROOT_DIR) ||
-                  !pathtracer::scene::bindSceneTextures(model->instances, sceneConfig.textures, ASSET_ROOT_DIR))) {
+    if (model && sceneConfig.materialPath &&
+        (!pathtracer::scene::applySceneMaterials(model->instances, *sceneConfig.materialPath, sceneConfig.materialOverrides,
+                                                 ASSET_ROOT_DIR) ||
+         !pathtracer::scene::bindSceneTextures(model->instances, sceneConfig.textures, ASSET_ROOT_DIR))) {
         model.reset();
     }
+    std::string volumeError;
+    std::optional<pathtracer::scene::VolumeSet> volumes = pathtracer::scene::VolumeSet::load(sceneConfig.volumes, ASSET_ROOT_DIR, volumeError);
     const double loadMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - loadStart).count();
     // A CPU texture the path tracer samples through the texture cache, never uploaded: the display shows only the traced image.
     std::shared_ptr<const pathtracer::gfx::ImageTexture> environmentTexture = pathtracer::gfx::openTexture(
         std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.environment.hdriPath, pathtracer::gfx::kRgbChannels,
         pathtracer::gfx::ImageRole::Colour, pathtracer::gfx::TextureWrap::LatLong, sceneConfig.environment.colorSpace);
-    if (!model || !environmentTexture) {
-        std::cerr << "main: model, material or environment map load failed, aborting startup\n";
+    if (!volumes) {
+        std::cerr << "main: " << volumeError << '\n';
+    }
+    if (!model || !environmentTexture || !volumes) {
+        std::cerr << "main: model, material, volume or environment map load failed, aborting startup\n";
         return std::nullopt;
     }
 
@@ -386,7 +396,7 @@ std::optional<AppScene> loadAppScene(const pathtracer::config::SceneConfig& scen
     std::vector<pathtracer::scene::AabbBounds> instanceBounds =
         pathtracer::scene::computeInstanceBounds(model->shadingTriangles, static_cast<int>(model->instances.size()));
     return AppScene{std::move(*model), std::move(instanceLightIndex), std::move(quadLights),
-                    pathtracer::scene::EnvironmentMap(std::move(environmentTexture)), std::move(*accel), baseSettings,
+                    pathtracer::scene::EnvironmentMap(std::move(environmentTexture)), std::move(*accel), std::move(*volumes), baseSettings,
                     std::move(instanceBounds), totalTriangles, loadMs, accelBuildMs};
 }
 
@@ -1455,7 +1465,7 @@ int runApp(const Options& options, const pathtracer::config::SceneConfig& sceneC
     // Constructed here, not in the initializer list: this local is where the scene objects reach their final address.
     app->pathTraceDriver = std::make_unique<pathtracer::scene::PathTraceDriver>(
         app->scene.accel, app->scene.model.shadingTriangles, app->scene.model.instances, app->scene.instanceLightIndex,
-        app->scene.environmentMap, app->scene.quadLights);
+        app->scene.environmentMap, app->scene.quadLights, app->scene.volumes);
 
     wireCallbacks(window, *app);
     if (!options.benchLogPath.empty()) {
@@ -1493,6 +1503,9 @@ int main(int argc, char** argv) {
     }
     if (profileConfig && options->maxSamples) {
         profileConfig->pathTracer.maxSamples = *options->maxSamples;
+    }
+    if (profileConfig && sceneConfig) {
+        pathtracer::config::applySceneCamera(*sceneConfig, *profileConfig);
     }
     const int exitCode = validStartup(*options, sceneConfig, profileConfig)
                              ? runApp(*options, *sceneConfig, *profileConfig, argc, argv)

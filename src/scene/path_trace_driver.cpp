@@ -122,13 +122,15 @@ PathTraceDriver::PathTraceDriver(const EmbreeAccel& accel,
                                   const std::vector<MeshInstance>& instances,
                                   const std::vector<int>& instanceLightIndex,
                                   const EnvironmentMap& environmentMap,
-                                  const std::vector<QuadLight>& quadLights)
+                                  const std::vector<QuadLight>& quadLights,
+                                  const VolumeSet& volumes)
     : accel_(accel),
       shadingTriangles_(shadingTriangles),
       instances_(instances),
       instanceLightIndex_(instanceLightIndex),
       environmentMap_(environmentMap),
       quadLights_(quadLights),
+      volumes_(volumes),
       thread_([this](std::stop_token stopToken) { driverLoop(std::move(stopToken)); }) {}
 
 PathTraceDriver::~PathTraceDriver() = default;  // jthread requests stop + joins automatically
@@ -222,7 +224,7 @@ double PathTraceDriver::tracePass(const Request& request, int sampleBase, std::u
                           quadLights_);
     const auto traceStart = std::chrono::steady_clock::now();
     renderPathTraced(request.camera, accel_, shadingTriangles_, instances_,
-                     instanceLightIndex_, lights, request.width, request.height,
+                     instanceLightIndex_, lights, volumes_, request.width, request.height,
                      request.showSky, request.settings,
                      // The generation is the scramble seed: fixed per accumulation, changing exactly when the image restarts.
                      static_cast<std::uint32_t>(generation), sampleBase, request.maxSamples * request.settings.samplesPerPixel,

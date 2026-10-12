@@ -18,6 +18,7 @@
 #include "pathtracer/scene/light.h"
 #include "pathtracer/scene/material.h"
 #include "pathtracer/scene/thread_pool.h"
+#include "pathtracer/scene/volume.h"
 
 namespace pathtracer::scene {
 
@@ -85,17 +86,20 @@ struct PathTraceResult {
     // Bounce-0 shadow: 1.0 on a surface unless the one NEE shadow ray was unoccluded, 0.0 on background; stays 1.0 with no NEE sample.
     pathtracer::gfx::HdrImage shadow;
 
-    // These five plus the background sum to beauty per channel, bucketed by the bounce-0 lobe; transmission sticks to refraction.
+    // These seven plus the background sum to beauty per channel, bucketed by the bounce-0 lobe; transmission sticks to refraction.
     pathtracer::gfx::HdrImage directDiffuse;
     pathtracer::gfx::HdrImage indirectDiffuse;
     pathtracer::gfx::HdrImage directSpecular;
     pathtracer::gfx::HdrImage indirectSpecular;
     pathtracer::gfx::HdrImage refraction;
+    // Paths whose bounce-0 vertex is a scattering in a volume, rather than a surface lobe.
+    pathtracer::gfx::HdrImage directVolume;
+    pathtracer::gfx::HdrImage indirectVolume;
 
     // E[F(wo.wh)] at the primary hit, wh ~ D_vis(wo), one VNDF draw per sample (bsdf.h). 0 where bounce 0 has no BSDF vertex.
     pathtracer::gfx::HdrImage fresnel;
 
-    // Filtered primary opacity: a sample is opaque on any hit, or on a miss when showSky shows the environment behind it.
+    // Filtered primary opacity: opaque on a hit, a shown sky or a real collision; a primary escape through media is 1 - its mean weight.
     pathtracer::gfx::HdrImage alpha;
 
     // OIDN's auxiliary features from Beauty's own samples, past deltas and sub-pixel lobes: directional albedo and world shading normal.
@@ -114,7 +118,7 @@ struct PathTraceResult {
     int samples = 0;  // passes averaged in, stamped with generation so image and count publish as one snapshot
 };
 
-// The 11 AOV lanes at their aovChannels counts, the 2 RGB denoise features and the replicate means, zeroed: renderPathTraced's `out`.
+// The 13 AOV lanes at their aovChannels counts, the 2 RGB denoise features and the replicate means, zeroed: renderPathTraced's `out`.
 [[nodiscard]] PathTraceResult makePathTraceResult(int width, int height, int replicates);
 
 // Whether a primary ray that misses returns environment radiance when nothing overrides it; viewer, driver and headless share it.
@@ -124,7 +128,7 @@ inline constexpr bool kDefaultShowSky = false;
 void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                        const std::vector<ShadingTriangle>& shadingTriangles,
                        const std::vector<MeshInstance>& instances,
-                       const std::vector<int>& instanceLightIndex, const LightSet& lights,
+                       const std::vector<int>& instanceLightIndex, const LightSet& lights, const VolumeSet& volumes,
                        int width, int height, bool showSky, const PathTraceSettings& settings,
                        std::uint32_t scrambleSeed, int sampleBase, int sampleCount,
                        const std::atomic<std::uint64_t>& generation,

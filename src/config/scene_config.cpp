@@ -9,6 +9,7 @@
 #include <limits>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -128,6 +129,38 @@ std::optional<std::vector<QuadLightConfig>> parseQuadLights(const nlohmann::json
     return lights;
 }
 
+// Parses and validates the optional "volumes" array, each entry a grid, its world placement and its volume material.
+std::optional<std::vector<VolumeConfig>> parseVolumes(const nlohmann::json& j, const std::string& path) {
+    std::vector<VolumeConfig> volumes;
+    const auto it = j.find("volumes");
+    if (it == j.end()) {
+        return volumes;
+    }
+    for (const nlohmann::json& volume : *it) {
+        if (!onlyKnownKeys(volume, {"vdbPath", "grid", "position", "rotation", "scale", "materialPath"}, path, "volume")) {
+            return std::nullopt;
+        }
+        VolumeConfig config{
+            volume.at("vdbPath").get<std::string>(),
+            volume.at("grid").get<std::string>(),
+            volume.at("position").get<glm::vec3>(),
+            volume.at("rotation").get<glm::vec3>(),
+            1.0F,
+            volume.at("materialPath").get<std::string>(),
+        };
+        if (const auto scale = volume.find("scale"); scale != volume.end()) {
+            config.scale = toFloat(*scale);
+        }
+        // A zero or negative scale has no inverse placement; NaN fails the comparison too.
+        if (!(config.scale > 0.0F) || !std::isfinite(config.scale)) {
+            std::cerr << "loadSceneConfig: " << path << ": volumes[" << volumes.size() << "] scale must be finite and positive\n";
+            return std::nullopt;
+        }
+        volumes.push_back(std::move(config));
+    }
+    return volumes;
+}
+
 // One input's constant: in its specification range per channel, and a bulk material's volumetric switch at its zero default.
 template <typename T>
 bool validInput(const pathtracer::scene::InputSpec& spec, const T& value, const T& fallback, bool thinWalled, const std::string& path) {
@@ -158,12 +191,22 @@ std::optional<SceneConfig> loadSceneConfig(const std::string& path) {
         nlohmann::json j;
         file >> j;
 
-        const nlohmann::json& model = j.at("model");
         const nlohmann::json& environment = j.at("environment");
-        if (!onlyKnownKeys(j, {"model", "environment", "materialPath", "materialOverrides", "textures", "lights"}, path,
-                           "top-level") ||
-            !onlyKnownKeys(model, {"gltfPath", "position", "rotation"}, path, "model") ||
+        if (!onlyKnownKeys(j, {"model", "environment", "materialPath", "materialOverrides", "textures", "lights", "volumes", "camera"},
+                           path, "top-level") ||
             !onlyKnownKeys(environment, {"hdriPath", "lightEnabled", "colorSpace"}, path, "environment")) {
+            return std::nullopt;
+        }
+        // No model is a scene of lights and volumes alone; the surface keys all name the model's nodes, so they come with it.
+        ModelConfig model{std::nullopt, glm::vec3(0.0F), glm::vec3(0.0F)};
+        if (const auto it = j.find("model"); it != j.end()) {
+            if (!onlyKnownKeys(*it, {"gltfPath", "position", "rotation"}, path, "model")) {
+                return std::nullopt;
+            }
+            model = ModelConfig{it->at("gltfPath").get<std::string>(), it->at("position").get<glm::vec3>(),
+                                it->at("rotation").get<glm::vec3>()};
+        } else if (j.contains("materialPath") || j.contains("materialOverrides") || j.contains("textures")) {
+            std::cerr << "loadSceneConfig: " << path << ": materialPath, materialOverrides and textures need a model\n";
             return std::nullopt;
         }
 
@@ -173,29 +216,45 @@ std::optional<SceneConfig> loadSceneConfig(const std::string& path) {
         }
         std::optional<std::map<std::string, std::map<std::string, TextureConfig>>> textures = parseTextures(j, path);
         std::optional<std::vector<QuadLightConfig>> lights = parseQuadLights(j, path);
-        if (!textures || !lights) {
+        std::optional<std::vector<VolumeConfig>> volumes = parseVolumes(j, path);
+        if (!textures || !lights || !volumes) {
             return std::nullopt;
         }
 
+        std::optional<SceneCameraConfig> camera;
+        if (const auto it = j.find("camera"); it != j.end()) {
+            if (!onlyKnownKeys(*it, {"position", "rotation", "farClip"}, path, "camera")) {
+                return std::nullopt;
+            }
+            camera = SceneCameraConfig{it->at("position").get<glm::vec3>(), it->at("rotation").get<glm::vec3>(), toFloat(it->at("farClip"))};
+        }
+
+        const bool hasModel = model.gltfPath.has_value();
         return SceneConfig{
-            ModelConfig{
-                model.at("gltfPath").get<std::string>(),
-                model.at("position").get<glm::vec3>(),
-                model.at("rotation").get<glm::vec3>(),
-            },
+            std::move(model),
             EnvironmentConfig{
                 environment.at("hdriPath").get<std::string>(),
                 environment.value("lightEnabled", true),
                 optionalString(environment, "colorSpace"),
             },
-            j.at("materialPath").get<std::string>(),
+            hasModel ? std::optional(j.at("materialPath").get<std::string>()) : std::nullopt,
             std::move(materialOverrides),
             std::move(*textures),
             std::move(*lights),
+            std::move(*volumes),
+            camera,
         };
     } catch (const nlohmann::json::exception& e) {
         std::cerr << "loadSceneConfig: " << path << ": " << e.what() << '\n';
         return std::nullopt;
+    }
+}
+
+void applySceneCamera(const SceneConfig& scene, ProfileConfig& profile) {
+    if (scene.camera) {
+        profile.camera.position = scene.camera->position;
+        profile.camera.rotation = scene.camera->rotation;
+        profile.camera.farClip = scene.camera->farClip;
     }
 }
 
@@ -209,14 +268,21 @@ std::optional<VolumeMaterialConfig> loadVolumeMaterialConfig(const std::string& 
     try {
         nlohmann::json j;
         file >> j;
-        if (!onlyKnownKeys(j, {"absorption", "scattering", "anisotropy"}, path, "volume material")) {
+        if (!onlyKnownKeys(j, {"absorption", "scattering", "anisotropy", "density"}, path, "volume material")) {
             return std::nullopt;
         }
-        const VolumeMaterialConfig material{
+        VolumeMaterialConfig material{
             j.at("absorption").get<glm::vec3>(),
             j.at("scattering").get<glm::vec3>(),
             toFloat(j.at("anisotropy")),
         };
+        if (const auto it = j.find("density"); it != j.end()) {
+            material.density = toFloat(*it);
+        }
+        if (!(material.density >= 0.0F) || !std::isfinite(material.density)) {
+            std::cerr << "loadVolumeMaterialConfig: " << path << ": density must be finite and non-negative\n";
+            return std::nullopt;
+        }
         // A negative coefficient is no medium; NaN fails both comparisons, and so does an infinite one, which tracking cannot bound.
         const auto validCoefficient = [](const glm::vec3& c) {
             const glm::vec3 infinity(std::numeric_limits<float>::infinity());

@@ -7,13 +7,14 @@
 
 #include <glm/glm.hpp>
 
+#include "pathtracer/config/profile_config.h"
 #include "pathtracer/scene/material.h"
 
 namespace pathtracer::config {
 
-// What geometry to load and where to place it. gltfPath is relative to ASSET_ROOT_DIR, as every asset path is.
+// What geometry to load and where to place it: the root pose lights and requests turn even when no glTF is named.
 struct ModelConfig {
-    std::string gltfPath;
+    std::optional<std::string> gltfPath;  // relative to ASSET_ROOT_DIR, as every asset path is; nullopt when the scene has no model
     glm::vec3 position;         // model root, composed on top of the glTF's own node transforms
     glm::vec3 rotation;  // degrees; the root rotation is Rz*Ry*Rx, so X applies first
 };
@@ -55,6 +56,14 @@ struct VolumeMaterialConfig {
     glm::vec3 absorption;
     glm::vec3 scattering;
     float anisotropy;  // Henyey-Greenstein g in (-1, 1), positive forward
+    float density = 1.0F;  // multiplies the grid's values: thickness without changing colour or albedo. Optional, default 1
+};
+
+// A scene's own camera pose and far clip over profile.json's, where the shared default cannot frame it; lens and film stay the profile's.
+struct SceneCameraConfig {
+    glm::vec3 position;
+    glm::vec3 rotation;  // degrees; Rz*Ry*Rx as every rotation key, so X applies first
+    float farClip;
 };
 
 // A VDB density grid as a heterogeneous medium in world space, not under the model root: sigma(x) = density(x) * coefficient.
@@ -72,20 +81,27 @@ using MaterialConfig = pathtracer::scene::OpenPbrInputs<pathtracer::scene::Const
 
 // The asset to load and how to shade and light it: what is specific to this scene, as against ProfileConfig's session-wide defaults.
 struct SceneConfig {
-    ModelConfig model;
+    ModelConfig model;  // optional in the file: absent is no glTF at the identity pose
     EnvironmentConfig environment;
-    // Relative to ASSET_ROOT_DIR, a material JSON (materials/clay.json), matching ModelConfig::gltfPath.
-    std::string materialPath;
+    // Relative to ASSET_ROOT_DIR, a material JSON (materials/clay.json), matching ModelConfig::gltfPath; required exactly with a model.
+    std::optional<std::string> materialPath;
     // glTF node name -> material JSON path, overriding materialPath for that instance. Optional; absent means every instance uses it.
     std::map<std::string, std::string> materialOverrides;
     // glTF node name -> {OpenPBR input name -> texture}, a path string or a TextureConfig object; the only texture source. Optional.
     std::map<std::string, std::map<std::string, TextureConfig>> textures;
     // Rectangular area lights, in the glTF's own vertex space (ModelConfig position/rotation applies too). Optional; absent means none.
     std::vector<QuadLightConfig> lights;
+    // VDB media in world space. Optional; absent means none.
+    std::vector<VolumeConfig> volumes;
+    // Optional; absent keeps profile.json's camera.
+    std::optional<SceneCameraConfig> camera;
 };
 
 // Reads and parses path; nullopt and a stderr log if missing, unreadable or unparseable. User input: failure is surfaced, not asserted.
 [[nodiscard]] std::optional<SceneConfig> loadSceneConfig(const std::string& path);
+
+// Puts scene.camera, where the scene names one, over profile.camera: the one place a scene overrides the session's camera.
+void applySceneCamera(const SceneConfig& scene, ProfileConfig& profile);
 
 // Reads and parses a standalone material file (e.g. assets/materials/clay.json). Same failure contract as loadSceneConfig.
 [[nodiscard]] std::optional<MaterialConfig> loadMaterialConfig(const std::string& path);

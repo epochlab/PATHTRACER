@@ -101,6 +101,7 @@ struct DriverFixture {
     TestScene scene;
     std::optional<EmbreeAccel> accel;
     EnvironmentMap environment = tools::fixtures::makeUniformEnvironment();
+    pathtracer::scene::VolumeSet volumes;  // none: these checks are of the driver, not of media
     std::optional<PathTraceDriver> driver;
     pathtracer::scene::ThreadPool pool;
 
@@ -130,7 +131,7 @@ std::unique_ptr<DriverFixture> makeFixture() {
     }
     fixture->driver.emplace(*fixture->accel, fixture->scene.shadingTriangles, fixture->scene.instances,
                              fixture->scene.instanceLightIndex, fixture->environment,
-                             fixture->scene.quadLights);
+                             fixture->scene.quadLights, fixture->volumes);
     return fixture;
 }
 
@@ -225,7 +226,7 @@ OracleMean oracleBatchMean(DriverFixture& fixture, const Camera& camera, int pas
     for (int p = 0; p < passes; ++p) {
         stats.reset();
         pathtracer::scene::renderPathTraced(camera, *fixture.accel, fixture.scene.shadingTriangles,
-                                         fixture.scene.instances, fixture.scene.instanceLightIndex, lights,
+                                         fixture.scene.instances, fixture.scene.instanceLightIndex, lights, pathtracer::scene::VolumeSet{},
                                          kImageSize, kImageSize, /*showSky=*/false, settings, scrambleSeed, /*sampleBase=*/p,
                                          /*sampleCount=*/passes, generation, scrambleSeed, fixture.pool, stats,
                                          pass);
@@ -778,7 +779,7 @@ PT_CHECK(render_is_invariant_to_tile_size, Slow, Exact) {
         PathTraceResult out = pathtracer::scene::makePathTraceResult(kTiledImageSize, kTiledImageSize, makeSettings().replicates);
         stats.reset();
         pathtracer::scene::renderPathTraced(camera, *fixture->accel, fixture->scene.shadingTriangles,
-                                         fixture->scene.instances, fixture->scene.instanceLightIndex, lights,
+                                         fixture->scene.instances, fixture->scene.instanceLightIndex, lights, pathtracer::scene::VolumeSet{},
                                          kTiledImageSize, kTiledImageSize, /*showSky=*/true, makeSettings(), /*scrambleSeed=*/1U,
                                          /*sampleBase=*/0,
                                          /*sampleCount=*/1, generation, 1U, pool, stats, out);
@@ -814,7 +815,7 @@ PT_CHECK(render_is_invariant_to_thread_count, Slow, Exact) {
         PathTraceResult out = pathtracer::scene::makePathTraceResult(kImageSize, kImageSize, makeSettings().replicates);
         stats.reset();
         pathtracer::scene::renderPathTraced(camera, *fixture->accel, fixture->scene.shadingTriangles,
-                                         fixture->scene.instances, fixture->scene.instanceLightIndex, lights,
+                                         fixture->scene.instances, fixture->scene.instanceLightIndex, lights, pathtracer::scene::VolumeSet{},
                                          kImageSize, kImageSize, /*showSky=*/true, makeSettings(), /*scrambleSeed=*/1U, /*sampleBase=*/0,
                                          /*sampleCount=*/1, generation, 1U, pool, stats, out);
         return out.beauty.texels;
@@ -877,7 +878,7 @@ PT_CHECK(replicate_means_match_batch_means, Slow, Exact) {
     for (int p = 0; p < kPasses; ++p) {
         stats.reset();
         pathtracer::scene::renderPathTraced(camera, *fixture->accel, fixture->scene.shadingTriangles,
-                                         fixture->scene.instances, fixture->scene.instanceLightIndex, lights,
+                                         fixture->scene.instances, fixture->scene.instanceLightIndex, lights, pathtracer::scene::VolumeSet{},
                                          kImageSize, kImageSize, /*showSky=*/false, makeSettings(), scrambleSeed, /*sampleBase=*/p,
                                          /*sampleCount=*/kPasses, oracleGeneration, scrambleSeed, fixture->pool,
                                          stats, pass);
