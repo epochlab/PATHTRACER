@@ -1,0 +1,31 @@
+{
+    "environment": {
+        "hdriPath": "textures/republiqueHDR_2k.exr"
+    },
+    "lights": [
+        {
+            "type": "quad",
+            "position": [0.0, 300.0, 0.0],
+            "rotation": [-90.0, 0.0, 0.0],
+            "size": [420.0, 540.0],
+            "color": [1.0, 0.9615, 0.8846],
+            "intensity": 2.6,
+            "twoSided": false
+        }
+    ],
+    "volumes": [
+        {
+            "vdbPath": "geometry/wdas_cloud/wdas_cloud_quarter.vdb",
+            "grid": "density",
+            "position": [12.9487, -45.1888, 28.6662],
+            "rotation": [0.0, 0.0, 0.0],
+            "scale": 1.0,
+            "materialPath": "materials/volume.json"
+        }
+    ],
+    "camera": {
+        "position": [0.0, 0.0, 2200.0],
+        "rotation": [0.0, 0.0, 0.0],
+        "farClip": 4000.0
+    }
+}

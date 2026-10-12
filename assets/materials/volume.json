@@ -1,0 +1,6 @@
+{
+    "absorption": [0.0, 0.0, 0.0],
+    "scattering": [1.0, 1.0, 1.0],
+    "anisotropy": 0.877,
+    "density": 4.0
+}
