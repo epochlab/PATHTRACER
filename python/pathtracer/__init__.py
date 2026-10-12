@@ -349,8 +349,8 @@ class Renderer:
         ``env_rotation`` turns the environment map, background and lighting alike; zero is the map unrotated.
 
         ``light_temperatures`` replaces each light's colour, one kelvin per light in scene order, with the Planckian
-        radiator's linear Rec.709 colour at unit luminance, so ``intensity`` keeps its meaning. Below 1900 K the colour
-        leaves Rec.709 (blue turns negative) and is refused rather than clamped. ``None`` keeps the authored colours.
+        radiator's linear ACEScg colour at unit luminance, so ``intensity`` keeps its meaning. A colour outside the scene
+        gamut (blue turns negative) is refused rather than clamped. ``None`` keeps the authored colours.
         Only the lights' radiance changes, so it never rebuilds the BVH. The environment keeps its measured colour.
 
         Returns arrays of shape ``(height, width, channels)``, float32, row 0 at the top.

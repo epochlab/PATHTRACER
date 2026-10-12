@@ -106,7 +106,7 @@ struct PathTraceResult {
     pathtracer::gfx::HdrImage denoiseAlbedo;
     pathtracer::gfx::HdrImage denoiseNormal;
 
-    // Running mean of each replicate's per-pass Rec.709 luminance, `replicates` floats per texel, pixel-major: the SNR's error estimate.
+    // Running mean of each replicate's per-pass scene luminance, `replicates` floats per texel, pixel-major: the SNR's error estimate.
     std::vector<float> replicateLuminance;
     int replicates = 1;
 

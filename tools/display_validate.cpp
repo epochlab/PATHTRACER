@@ -11,6 +11,8 @@
 #include <string>
 #include <vector>
 
+#include <glm/glm.hpp>
+
 #include "check.h"
 #include "pathtracer/debug/frame_stats.h"
 #include "pathtracer/debug/power_spectrum.h"
@@ -70,22 +72,29 @@ PT_CHECK(ocio_transform_is_monotone, Slow, Exact) {
     PT_EXPECT(ctx, inversions == 0, detail);
 }
 
-// The transform must act per channel and identically on each: a matrix where a curve was intended leaves grey neutral but tints the rest.
-PT_CHECK(ocio_transform_is_channel_independent, Fast, Exact) {
+// The view is the scene gamut's matrix to the display primaries, then a per-channel curve: crosstalk is the matrix's, the curve's neutral.
+PT_CHECK(ocio_transform_is_the_gamut_matrix_then_the_curve, Fast, Exact) {
     ctx.plan(3);
-    std::vector<float> rgb{0.25F, 0.5F, 0.75F};
+    // The scene space's own basis in the display primaries, read from the config (linear Rec.709 into the scene space, inverted).
+    glm::mat3 rec709ToScene;
+    for (int c = 0; c < 3; ++c) {
+        std::array<float, 3> unit{};
+        unit[static_cast<std::size_t>(c)] = 1.0F;
+        pathtracer::gfx::convertToSceneSpace(unit, pathtracer::gfx::kOcioLinearRec709);
+        rec709ToScene[c] = glm::vec3(unit[0], unit[1], unit[2]);
+    }
+    const glm::vec3 scene(0.3F, 0.5F, 0.2F);
+    const glm::vec3 display = glm::inverse(rec709ToScene) * scene;
+    std::vector<float> rgb{scene.r, scene.g, scene.b};
     pathtracer::gfx::applyOcioDisplayTransform(rgb, 1, 1);
-    const float r = transformScalar(0.25F);
-    const float g = transformScalar(0.5F);
-    const float b = transformScalar(0.75F);
-    constexpr float kTolerance = 1e-6F;
+    constexpr float kTolerance = 1e-5F;
     char detail[192];
-    std::snprintf(detail, sizeof(detail), "packed (%.6g, %.6g, %.6g) vs per-channel (%.6g, %.6g, %.6g)",
-                  static_cast<double>(rgb[0]), static_cast<double>(rgb[1]), static_cast<double>(rgb[2]),
-                  static_cast<double>(r), static_cast<double>(g), static_cast<double>(b));
-    PT_EXPECT(ctx, std::fabs(rgb[0] - r) <= kTolerance, detail);
-    PT_EXPECT(ctx, std::fabs(rgb[1] - g) <= kTolerance, detail);
-    PT_EXPECT(ctx, std::fabs(rgb[2] - b) <= kTolerance, detail);
+    for (int c = 0; c < 3; ++c) {
+        const float expected = transformScalar(display[c]);
+        std::snprintf(detail, sizeof(detail), "channel %d is %.6g, the curve of the matrix output is %.6g", c, static_cast<double>(rgb[c]),
+                      static_cast<double>(expected));
+        PT_EXPECT(ctx, std::fabs(rgb[static_cast<std::size_t>(c)] - expected) <= kTolerance, detail);
+    }
 }
 
 // Exercises the packed-image path at a real stride: a wrong stride or channel order transforms right values in wrong places.
@@ -101,12 +110,15 @@ PT_CHECK(ocio_transform_handles_a_real_image, Slow, Exact) {
     pathtracer::gfx::applyOcioDisplayTransform(image, kWidth, kHeight);
 
     std::size_t mismatched = 0;
-    for (std::size_t i = 0; i < image.size(); ++i) {
-        const float expected = transformScalar(original[i]);
-        mismatched += std::fabs(image[i] - expected) > 1e-6F ? 1 : 0;
+    for (std::size_t texel = 0; texel < image.size(); texel += 3) {
+        std::vector<float> expected(original.begin() + static_cast<std::ptrdiff_t>(texel), original.begin() + static_cast<std::ptrdiff_t>(texel) + 3);
+        pathtracer::gfx::applyOcioDisplayTransform(expected, 1, 1);
+        for (std::size_t lane = 0; lane < 3; ++lane) {
+            mismatched += std::fabs(image[texel + lane] - expected[lane]) > 1e-6F ? 1 : 0;
+        }
     }
     char detail[192];
-    std::snprintf(detail, sizeof(detail), "%zu of %zu texel channels disagree with a per-scalar transform of the same value",
+    std::snprintf(detail, sizeof(detail), "%zu of %zu texel channels disagree with a one-texel transform of the same triple",
                   mismatched, image.size());
     PT_EXPECT(ctx, mismatched == 0, detail);
 }

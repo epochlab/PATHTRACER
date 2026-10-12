@@ -134,7 +134,7 @@ private:
 // Running mean m_n = m_{n-1} + (x_n - m_{n-1}) * invN over count floats; `mean` may alias either input. HeadlessRenderer shares it.
 void foldRunningMean(const float* previousMean, const float* drawn, float* mean, std::size_t count, float invN);
 
-// Folds drawn Beauty's Rec.709 luminance into one replicate's running mean, carrying the rest; means may alias previousMeans.
+// Folds drawn Beauty's scene luminance into one replicate's running mean, carrying the rest; means may alias previousMeans.
 void foldReplicateLuminance(const float* previousMeans, const float* drawn, std::size_t channels, float* means, std::size_t pixels,
                             int replicates, int replicate, float invCount);
 

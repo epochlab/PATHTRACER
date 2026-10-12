@@ -5,7 +5,7 @@
 
 #include <glm/glm.hpp>
 
-// CIE 1931 colorimetry: spectral reflectance to linear Rec.709 (OCIO's scene space), per CIE 015:2018.
+// CIE 1931 colorimetry: spectral reflectance to linear ACEScg (AP1, OCIO's scene space), per CIE 015:2018.
 namespace pathtracer::scene::cie {
 
 // The observer's full tabulated range at its native 1 nm interval, CIE 015:2018's recommended summation interval.
@@ -25,13 +25,19 @@ struct TableRow {
 };
 [[nodiscard]] TableRow tableRow(int index);
 
-// XYZ to linear Rec.709 from the BT.709 primaries and tabulated D65 white (SMPTE RP 177), so the perfect reflector maps to (1, 1, 1).
-[[nodiscard]] const glm::dmat3& xyzToRec709();
+// XYZ to linear AP1: Bradford-adapts the tabulated D65 white onto the ACES white (TB-2014-004), so the perfect reflector maps to (1, 1, 1).
+[[nodiscard]] const glm::dmat3& xyzToScene();
 
-// Linear Rec.709 of a reflectance under D65 (Rec.709's white), via CIE 015:2018 tristimulus integration.
-[[nodiscard]] glm::dvec3 reflectanceToRec709(const Spectrum& reflectance);
+// The luminance (Y of the D65-lit stimulus) of a scene RGB triple as a dot product: the Y row of xyzToScene's inverse, summing to 1.
+[[nodiscard]] const glm::vec3& sceneLuminanceWeights();
 
-// Linear Rec.709 of a Planckian radiator at unit luminance (Y = 1); nullopt unless kelvin is finite, positive and inside the gamut.
-[[nodiscard]] std::optional<glm::dvec3> blackbodyToRec709(double kelvin);
+// OpenEXR-order xy (R, G, B, white) of the scene space's own primaries and white, for tagging written files.
+[[nodiscard]] std::array<float, 8> sceneChromaticities();
+
+// Scene RGB of a reflectance under D65, via CIE 015:2018 tristimulus integration.
+[[nodiscard]] glm::dvec3 reflectanceToScene(const Spectrum& reflectance);
+
+// Scene RGB of a Planckian radiator at unit luminance (Y = 1); nullopt unless kelvin is finite, positive and inside the gamut.
+[[nodiscard]] std::optional<glm::dvec3> blackbodyToScene(double kelvin);
 
 }  // namespace pathtracer::scene::cie

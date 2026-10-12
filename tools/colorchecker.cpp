@@ -157,7 +157,7 @@ std::optional<std::vector<Patch>> loadColorChecker(const std::string& path) {
             }
         }
         const cie::Spectrum spectrum = resampleSprague(wavelengths.front(), wavelengths[1] - wavelengths[0], values);
-        patches.push_back(Patch{fields.front(), cie::reflectanceToRec709(spectrum)});
+        patches.push_back(Patch{fields.front(), cie::reflectanceToScene(spectrum)});
     }
     if (patches.size() != static_cast<std::size_t>(kPatchCount)) {
         std::cerr << "loadColorChecker: " << path << ": " << patches.size() << " patches, expected " << kPatchCount << '\n';

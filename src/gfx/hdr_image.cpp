@@ -22,6 +22,7 @@
 
 #include "pathtracer/gfx/ocio_cpu_transform.h"
 #include "pathtracer/gfx/scalar_type.h"
+#include "pathtracer/scene/cie.h"
 
 namespace pathtracer::gfx {
 
@@ -264,7 +265,7 @@ bool writeExr(const std::string& path, const HdrImage& image, ImageRole role, Pi
     if (role == ImageRole::Colour) {
         // Both, so a reader that knows only one of OIIO's colour tag or OpenEXR's chromaticities reads the same primaries.
         spec.attribute("oiio:ColorSpace", kOcioSceneColorSpace);
-        const std::array<float, 8> chromaticities = chromaticitiesOf(kOcioSceneColorSpace);
+        const std::array<float, 8> chromaticities = scene::cie::sceneChromaticities();
         spec.attribute("chromaticities", OIIO::TypeDesc(OIIO::TypeDesc::FLOAT, chromaticities.size()), chromaticities.data());
     } else {
         spec.attribute("oiio:ColorSpace", colorConfig().getColorSpaceNameByRole("data"));

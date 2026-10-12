@@ -124,6 +124,11 @@ void encodeForDisplay(std::span<const float> rgb, int width, int height, const g
     }
 }
 
+void convertToSceneSpace(std::span<float> rgb, const char* colorSpace) {
+    const OCIO::PackedImageDesc desc(rgb.data(), static_cast<long>(rgb.size() / 3), 1, OCIO::CHANNEL_ORDERING_RGB);
+    pinnedConfig()->getProcessor(colorSpace, kOcioSceneColorSpace)->getDefaultCPUProcessor()->apply(desc);
+}
+
 std::array<float, 8> chromaticitiesOf(const char* colorSpace) {
     // Unit RGB vectors are the primaries and (1, 1, 1) the white: a transfer function fixes 0 and 1, so encoded spaces hold too.
     const OCIO::ConstCPUProcessorRcPtr toXyz =

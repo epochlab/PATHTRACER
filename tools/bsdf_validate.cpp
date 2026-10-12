@@ -2724,7 +2724,7 @@ glm::dvec3 referenceFilm(double cosTheta, double filmIor, double thicknessNm, co
     using complex = std::complex<double>;
     const double sin2 = 1.0 - (cosTheta * cosTheta);
     const complex cosFilm = std::sqrt(complex(1.0 - (sin2 / (filmIor * filmIor))));
-    glm::dvec3 rec709(0.0);
+    glm::dvec3 scene(0.0);
     for (int c = 0; c < 3; ++c) {
         const complex n3 = substrate[static_cast<std::size_t>(c)];
         const complex cos3 = std::sqrt(1.0 - (sin2 / (n3 * n3)));
@@ -2740,9 +2740,9 @@ glm::dvec3 referenceFilm(double cosTheta, double filmIor, double thicknessNm, co
             const complex rp = (r12p + (r23p * phase)) / (1.0 + (r12p * r23p * phase));
             reflectance[static_cast<std::size_t>(i)] = 0.5 * (std::norm(rs) + std::norm(rp));
         }
-        rec709[c] = pathtracer::scene::cie::reflectanceToRec709(reflectance)[c];
+        scene[c] = pathtracer::scene::cie::reflectanceToScene(reflectance)[c];
     }
-    return rec709;
+    return scene;
 }
 
 // The film's reflectance against the exact spectral reference: the converged series and the tabulated transforms against every order.

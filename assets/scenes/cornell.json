@@ -9,7 +9,7 @@
     },
     "materialPath": "materials/clay.json",
     "materialOverrides": {
-        "sphere01": "materials/chrome.json",
+        "sphere01": "materials/gold.json",
         "sphere02": "materials/glass.json"
     },
     "lights": [

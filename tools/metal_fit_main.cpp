@@ -38,10 +38,14 @@ int main(int argc, char** argv) {
     if (!fit || !energyFit) {
         return 1;
     }
-    std::printf("metal_fit: %s (%zu rows) -> CIE 1931 2-degree observer, D65, linear Rec.709\n", argv[2],
+    std::printf("metal_fit: %s (%zu rows) -> CIE 1931 2-degree observer, D65, scene space (ACEScg)\n", argv[2],
                 table->size());
     printFloatTriple("base_color", fit->baseColor);
     printFloatTriple("specular_color", fit->specularColor);
+    const glm::bvec3 capped = fit->specularCapped;
+    if (glm::any(capped)) {
+        std::printf("  specular_color capped at 1 on channels:%s%s%s\n", capped.x ? " R" : "", capped.y ? " G" : "", capped.z ? " B" : "");
+    }
     printTriple("hemispherical average (measured)", fit->averageTarget);
     printTriple("|F82 average - measured|", fit->averageResidual);
     printTriple("max |R_fit(mu) - R_cie(mu)|", fit->angularResidual);

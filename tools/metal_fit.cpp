@@ -1,12 +1,12 @@
 #include "metal_fit.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <complex>
 #include <cstdio>
 #include <fstream>
 #include <iostream>
-#include <utility>
 
 #include "conductor_reference.h"
 #include "pathtracer/scene/cie.h"
@@ -50,7 +50,7 @@ glm::dvec3 projectSpectrum(const std::vector<std::complex<double>>& eta, Reflect
     for (int i = 0; i < cie::kSampleCount; ++i) {
         spectrum[i] = reflectance(eta[i]);
     }
-    return cie::reflectanceToRec709(spectrum);
+    return cie::reflectanceToScene(spectrum);
 }
 
 }  // namespace
@@ -110,13 +110,13 @@ std::optional<Fit> fitF82(const std::vector<NkSample>& table, Interpolation inte
     });
     for (int c = 0; c < 3; ++c) {
         const double f0 = fit.baseColor[c];
-        fit.specularColor[c] = fit.atMuBar[c] / (f0 + ((1.0 - f0) * std::pow(1.0 - kMuBar, 5.0)));
-        for (const auto& [name, value] : {std::pair{"base_color", f0}, std::pair{"specular_color", fit.specularColor[c]}}) {
-            if (!(value >= 0.0 && value <= 1.0)) {
-                std::cerr << "fitF82: channel " << c << " " << name << " " << value << " is outside OpenPBR's [0, 1]\n";
-                return std::nullopt;
-            }
+        const double tint = fit.atMuBar[c] / (f0 + ((1.0 - f0) * std::pow(1.0 - kMuBar, 5.0)));
+        if (!(f0 >= 0.0 && f0 <= 1.0) || !(tint >= 0.0)) {
+            std::cerr << "fitF82: channel " << c << " base_color " << f0 << " or specular_color " << tint << " is outside OpenPBR's [0, 1]\n";
+            return std::nullopt;
         }
+        fit.specularCapped[c] = tint > 1.0;
+        fit.specularColor[c] = std::min(tint, 1.0);
         const double mean = cosineAverageFresnel([&](double mu) { return referenceF82(f0, fit.specularColor[c], mu); });
         fit.averageResidual[c] = std::abs(mean - fit.averageTarget[c]);
     }

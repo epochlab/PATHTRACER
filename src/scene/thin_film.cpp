@@ -19,21 +19,21 @@ constexpr double kOpdStepNm = 2.0;
 constexpr int kOpdSamples = 20001;
 constexpr float kOpdLimitNm = static_cast<float>(kOpdStepNm * (kOpdSamples - 1));
 
-// Rec.709 of the spectrum cos(2 pi o / lambda + phi) under D65 is cos(phi) C(o) - sin(phi) S(o): its exact cosine and sine transforms.
+// Scene RGB of the spectrum cos(2 pi o / lambda + phi) under D65 is cos(phi) C(o) - sin(phi) S(o): its exact cosine and sine transforms.
 struct Sensitivity {
     std::vector<glm::vec3> cosine;
     std::vector<glm::vec3> sine;
     float bound;  // the largest |cos(phi) C - sin(phi) S| = sqrt(C^2 + S^2) over the table, the series' tail bound per unit amplitude
 };
 
-// Built once, on first use, from the CIE 015:2018 tables, normalised so a flat unit spectrum is Rec.709 (1, 1, 1) at o = 0.
+// Built once, on first use, from the CIE 015:2018 tables, normalised so a flat unit spectrum is scene (1, 1, 1) at o = 0.
 const Sensitivity& sensitivity() {
     static const Sensitivity table = [] {
         double whiteY = 0.0;
         std::array<glm::dvec3, cie::kSampleCount> weight{};
         for (int i = 0; i < cie::kSampleCount; ++i) {
             const cie::TableRow row = cie::tableRow(i);
-            weight[static_cast<std::size_t>(i)] = cie::xyzToRec709() * (row.colourMatching * row.d65);
+            weight[static_cast<std::size_t>(i)] = cie::xyzToScene() * (row.colourMatching * row.d65);
             whiteY += row.colourMatching.y * row.d65;
         }
         Sensitivity built{std::vector<glm::vec3>(kOpdSamples), std::vector<glm::vec3>(kOpdSamples), 0.0F};
@@ -55,7 +55,7 @@ const Sensitivity& sensitivity() {
     return table;
 }
 
-// The interference term's Rec.709 at path difference opd (nm) and phase shift per channel; zero past the table, the film incoherent.
+// The interference term's scene RGB at path difference opd (nm) and phase shift per channel; zero past the table, the film incoherent.
 glm::vec3 interference(float opd, const glm::vec3& shift) {
     const float index = opd / static_cast<float>(kOpdStepNm);
     if (!(opd < kOpdLimitNm)) {
@@ -128,7 +128,7 @@ glm::vec3 airy(float r12, float t121, const glm::vec3& r23, float opd, const glm
     return reflectance;
 }
 
-// Each polarisation's Airy reflectance in Rec.709, unclamped: a fringe may lie outside the primaries' gamut.
+// Each polarisation's Airy reflectance in scene space, unclamped: a fringe may lie outside the primaries' gamut.
 PolarisedReflectance airyReflectance(const ThinFilm& film, float cosTheta, float outerIor, const glm::vec3& substrateIor,
                                      const glm::vec3& substrateKappa) {
     // Snell into the film; past its critical angle no light enters it, and the outer interface reflects all.
@@ -163,7 +163,7 @@ PolarisedReflectance airyReflectance(const ThinFilm& film, float cosTheta, float
 
 }  // namespace
 
-// Each wavelength reflects within [0, 1]; a fringe more saturated than Rec.709's primaries is clipped to the RGB the renderer carries.
+// Each wavelength reflects within [0, 1]; a fringe more saturated than the scene primaries is clipped to the RGB the renderer carries.
 glm::vec3 filmReflectance(const ThinFilm& film, float cosTheta, float outerIor, const glm::vec3& substrateIor,
                           const glm::vec3& substrateKappa) {
     const PolarisedReflectance r = airyReflectance(film, cosTheta, outerIor, substrateIor, substrateKappa);

@@ -2,7 +2,7 @@
 
 #include <glm/glm.hpp>
 
-// OpenPBR's thin film: Belcour & Barla 2017's Airy reflectance, its spectrum integrated exactly against CIE 1931 x D65 in Rec.709.
+// OpenPBR's thin film: Belcour & Barla 2017's Airy reflectance, its spectrum integrated exactly against CIE 1931 x D65 in the scene space.
 namespace pathtracer::scene {
 
 // A film of thin_film_thickness (nm) and thin_film_ior between an outer medium and a substrate.
@@ -11,7 +11,7 @@ struct ThinFilm {
     float ior;
 };
 
-// Reflectance through the film at outer cosine cosTheta onto a substrate of complex index (eta, kappa) per channel, in linear Rec.709.
+// Reflectance through the film at outer cosine cosTheta onto a substrate of complex index (eta, kappa) per channel, in linear scene space.
 [[nodiscard]] glm::vec3 filmReflectance(const ThinFilm& film, float cosTheta, float outerIor, const glm::vec3& substrateIor,
                                         const glm::vec3& substrateKappa);
 

@@ -3,6 +3,28 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## ACEScg scene space
+
+The renderer now works in ACEScg (AP1 primaries, ACES white) instead of linear Rec.709, so measured gold fits OpenPBR's unit-range `base_color`.
+- **Why:** gold's CIE-projected F0 red is 1.038 in Rec.709, outside `[0, 1]`, so `metal_fit` rejected it and a clamp would change hue.
+  In AP1 it is (0.9007, 0.7452, 0.4183). Only the green F82 tint, 1.00076, still exceeds 1: `metal_fit` caps it at 1 and the residual is
+  reported (at most 6.6e-4 in reflectance at 82 degrees); `specular_color` keeps OpenPBR's range.
+- **Space:** `kOcioSceneColorSpace` is `ACEScg`, so file input, EXR tags, the texture cache and the display view follow it through OCIO.
+  `cie::xyzToScene()` is RP 177 on AP1 and the ACES white with a Bradford adaptation of the tabulated D65 onto it (ACES TB-2014-004), so
+  the perfect reflector stays (1, 1, 1). The pinned config's ACEScg to XYZ matrix agrees to 5e-4, the bound of its nominal D65 and float.
+- **Luminance:** one `cie::sceneLuminanceWeights()`, the Y row of the inverse, replaces `kRec709LuminanceWeights` and three literal
+  copies (environment sampling, the error spectrum, `--assert-converged`). Sobel now differences before summing, so a constant field is
+  exactly zero whatever its value.
+- **Inputs:** glTF `COLOR_0` is linear Rec.709 and converts through OCIO at load. Authored `color`, `emission_color` and material constants are
+  scene-space values. EXRs are written with AP1 chromaticities. Colour textures and the HDRI already converted by their tag.
+- **Assets:** `gold.json` from Johnson and Christy 1972 gold, now on cornell's first sphere; `chrome.json` refit in the new space.
+  Blackbody lights stay in gamut down to about 600 K.
+- **Measured:** on the ColorChecker against spectral ground truth, RGB rendering's mean CIEDE2000 falls from 4.05 to 1.81 at 2856 K, from
+  1.79 to 0.88 at 4000 K and from 0.42 to 0.29 at 6504 K; the worst patch at 2856 K from 12.6 to 4.3. The neutral row's worst rises from
+  0.42 to 0.77 at 2856 K, the adaptation's own cost. No resolved render cost. `ctest` 367/367 (was 365).
+
+Evidence is in `results/out_of_gamut_metals`.
+
 ## Kelvin light temperature
 
 A quad light can now be authored by colour temperature: its colour is the Planckian radiator's, at unit luminance.

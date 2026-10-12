@@ -29,6 +29,9 @@ void encodeForDisplay(std::span<const float> rgb, int width, int height, const g
 void encodeForDisplay(std::span<const float> rgb, int width, int height, const glm::vec3& gain, bool applyDisplayTransform,
                       const glm::vec3& displayOffset, std::span<float> out);
 
+// In place, RGB triples (no alpha): colours in a linear config colour space into the scene space. Builds its processor per call.
+void convertToSceneSpace(std::span<float> rgb, const char* colorSpace);
+
 // OpenEXR-order xy (R, G, B, white) of a config colour space via its CIE XYZ D65 interchange: exact for a D65-white space.
 [[nodiscard]] std::array<float, 8> chromaticitiesOf(const char* colorSpace);
 

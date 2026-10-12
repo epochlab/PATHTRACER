@@ -24,6 +24,7 @@
 #include "stats.h"
 #include "pathtracer/debug/aov_filters.h"
 #include "pathtracer/scene/camera.h"
+#include "pathtracer/scene/cie.h"
 #include "pathtracer/scene/embree_accel.h"
 #include "pathtracer/scene/environment_map.h"
 #include "pathtracer/scene/light.h"
@@ -863,7 +864,7 @@ PT_CHECK(replicate_means_match_batch_means, Slow, Exact) {
     const int replicates = makeSettings().replicates;
     const auto stride = static_cast<std::size_t>(replicates);
     const auto pixels = static_cast<std::size_t>(kImageSize) * kImageSize;
-    const glm::dvec3 weights(pathtracer::debug::kRec709LuminanceWeights);
+    const glm::dvec3 weights = glm::dvec3(pathtracer::scene::cie::sceneLuminanceWeights());
 
     // The same passes the driver ran, synchronously: per replicate slot the exact luminance sum and the float recurrence's error bound.
     const pathtracer::scene::LightSet lights(&fixture->environment, glm::vec3(0.0F), 1.0F, fixture->scene.quadLights);

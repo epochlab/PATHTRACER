@@ -90,7 +90,7 @@ std::optional<std::map<std::string, std::map<std::string, TextureConfig>>> parse
     return textures;
 }
 
-// Exactly one of an authored Rec.709 color or a Planckian temperature in kelvin, resolved at unit luminance so intensity means the same.
+// Exactly one of an authored scene-space color or a Planckian temperature in kelvin, at unit luminance so intensity means the same.
 std::optional<glm::vec3> lightColor(const nlohmann::json& light, const std::string& path, std::size_t index) {
     const auto color = light.find("color");
     const auto temperature = light.find("temperature");
@@ -102,10 +102,10 @@ std::optional<glm::vec3> lightColor(const nlohmann::json& light, const std::stri
         return color->get<glm::vec3>();
     }
     const double kelvin = temperature->get<double>();
-    const std::optional<glm::dvec3> rgb = pathtracer::scene::cie::blackbodyToRec709(kelvin);
+    const std::optional<glm::dvec3> rgb = pathtracer::scene::cie::blackbodyToScene(kelvin);
     if (!rgb) {
         std::cerr << "loadSceneConfig: " << path << ": lights[" << index << "] temperature " << kelvin
-                  << " K is not positive or lies outside Rec.709\n";
+                  << " K is not positive or lies outside the scene gamut\n";
         return std::nullopt;
     }
     return glm::vec3(*rgb);
