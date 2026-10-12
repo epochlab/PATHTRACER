@@ -23,6 +23,13 @@ cmake --build build
 ./build/pathtracer [-scene path/to/scene.json] [-stats] [-bench log.jsonl] [-bench-aovs beauty,normal,...] [-size WxH] [-max-samples N]
 ```
 
+## Test
+
+```
+cmake -B build -DPython3_EXECUTABLE=/path/to/python   # with pytest, numpy, OpenEXR and Imath, so api.python is registered
+ctest --test-dir build -j4
+```
+
 ## Controls
 
 | Input | Action |
@@ -93,5 +100,4 @@ frame["depth"]    # (64, 128, 1) float32, camera-space Z
 | AOV | Contrast sensitivity | Blocked on photometric calibration: the model needs luminance in cd/m². Use Barten 1999 (physical parameters), not Mannos-Sakrison or Daly (fitted coefficients, no luminance dependence). Weight octave-band contrast on the shared scale space (Mantiuk et al. 2006; HDR-VDP-2), not an FFT multiply, which needs padding decisions and ignores luminance. Contrast is Peli 1990, `c_k = B_k / L_<k`, exposure-invariant, over Michelson or a log difference. Luminance only. | high | blocked |
 | AOV | Spherical harmonics AOV | No SH infrastructure exists. Needs a use-case write-up before it can be sized. | high | decision |
 | API | Display optics | Bloom and chromatic aberration run only in the viewer’s display shaders, so Python and `render_beauty` output carry neither. Each needs a CPU form applied to scene-linear Beauty before exposure, as the viewer applies it: the equal-weight Gaussian pyramid (Jimenez 2014), energy-conserving, and the radial per-channel offset. Exposed as `render` arguments that leave the output bit-identical at 0, with a GPU parity check. Bloom stays refused on the hexagonal lattice. | medium | ready |
-| API | Python tests in ctest | The pytest suite runs outside ctest, so the Python binding is not gated with the rest of the checks. The C ABI itself is covered by `c_abi_validate`, which links only the shared library. | low | ready |
 | API | Packaging | The Python package finds the library only in the source tree, so a non-editable install needs `PATHTRACER_LIB`. The library is not bundled and there is no Windows candidate. | medium | decision |
