@@ -266,9 +266,12 @@ PT_CHECK(render_rejects_invalid_requests_without_writing, Slow, Exact) {
     // Static, so a captureless mutation can point the request at them; cornell has one light, so one triple is the full array.
     static const std::array<float, 3> kNanRotation{0.0F, std::numeric_limits<float>::quiet_NaN(), 0.0F};
     static const std::array<float, 3> kInfRotation{std::numeric_limits<float>::infinity(), 0.0F, 0.0F};
+    // The locus leaves BT.709 below 1900 K, so 1000 K has negative blue, which no clamp may hide.
+    static const std::array<float, 1> kZeroKelvin{0.0F};
+    static const std::array<float, 1> kOutOfGamutKelvin{1000.0F};
     // Sobel at depth's one channel, so the request's buffers fit it: refused for its square stencil before any is written.
     static const std::array<int, 2> kSobelAovs{pt_aov_id("beauty"), pt_aov_id("sobel")};
-    const std::array<Case, 14> cases{{
+    const std::array<Case, 16> cases{{
         {"aov_count 0", "no AOVs", [](PtRenderRequest& r, std::vector<float*>&) { r.aov_count = 0; }},
         {"null aovs", "no AOVs", [](PtRenderRequest& r, std::vector<float*>&) { r.aovs = nullptr; }},
         {"show_sky 2", "show_sky", [](PtRenderRequest& r, std::vector<float*>&) { r.show_sky = 2; }},
@@ -289,6 +292,10 @@ PT_CHECK(render_rejects_invalid_requests_without_writing, Slow, Exact) {
          [](PtRenderRequest& r, std::vector<float*>&) { r.root_rotation_degrees = kNanRotation.data(); }},
         {"infinite light rotation", "light rotation",
          [](PtRenderRequest& r, std::vector<float*>&) { r.light_rotation_degrees = kInfRotation.data(); }},
+        {"zero light temperature", "light temperature",
+         [](PtRenderRequest& r, std::vector<float*>&) { r.light_temperature_kelvin = kZeroKelvin.data(); }},
+        {"out-of-gamut light temperature", "outside Rec.709",
+         [](PtRenderRequest& r, std::vector<float*>&) { r.light_temperature_kelvin = kOutOfGamutKelvin.data(); }},
         {"NaN environment rotation", "environment rotation",
          [](PtRenderRequest& r, std::vector<float*>&) { r.env_rotation_degrees[1] = std::numeric_limits<float>::quiet_NaN(); }},
     }};
@@ -369,6 +376,36 @@ PT_CHECK(pose_defaults_round_trip_through_the_abi, Slow, Exact) {
     PT_EXPECT(ctx, render(root.data(), lightRotations.storage.data(), 0.0F) == authored,
               "the authored pose passed explicitly differs from NULL");
     PT_EXPECT(ctx, render(nullptr, nullptr, 180.0F) != authored, "an environment turned half a turn changed nothing");
+}
+
+// An override is per request: a kelvin render recolours the light, and the next NULL request renders the authored colour bit for bit.
+PT_CHECK(light_temperature_is_per_request, Slow, Exact) {
+    ctx.plan(3);
+    const OpenRenderer renderer;
+    if (renderer.handle == nullptr) {
+        for (int i = 0; i < 3; ++i) {
+            PT_EXPECT(ctx, false, "scene load failed: " + renderer.error);
+        }
+        return;
+    }
+    const std::vector<int> beauty{beautyId()};
+    const auto render = [&](const float* kelvin) {
+        std::vector<GuardedBuffer> outputs = makeOutputs(beauty);
+        const std::vector<float*> pointers = pointersTo(outputs);
+        PtRenderRequest request = makeRequest(renderer.handle, beauty, 1);
+        request.light_temperature_kelvin = kelvin;
+        const GuardedBuffer& written = outputs.front();
+        return pt_render(renderer.handle, &request, pointers.data(), nullptr, 0) == PT_OK
+                   ? std::vector<float>(written.storage.begin(), written.storage.begin() + static_cast<std::ptrdiff_t>(written.extent))
+                   : std::vector<float>{};
+    };
+    // cornell's one light is authored by colour, so any temperature differs from it.
+    constexpr std::array<float, 1> kTungsten{2856.0F};
+    const std::vector<float> authored = render(nullptr);
+    const std::vector<float> tungsten = render(kTungsten.data());
+    PT_EXPECT(ctx, !authored.empty() && !tungsten.empty(), "a render failed");
+    PT_EXPECT(ctx, tungsten != authored, "a 2856 K override changed nothing");
+    PT_EXPECT(ctx, render(nullptr) == authored, "NULL after an override did not restore the authored render");
 }
 
 // The seed is the sampler's scramble: the same request reproduces bit for bit, and another seed draws another estimate.

@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <string>
 
@@ -76,6 +77,40 @@ PT_CHECK(rec709_matrix_reproduces_primaries_and_white, Fast, Exact) {
     const double greyError = maxAbs(cie::reflectanceToRec709(flat) - glm::dvec3(kMidGrey));
     std::snprintf(detail, sizeof(detail), "flat %.2f reflectance maps %.3e away from neutral", kMidGrey, greyError);
     PT_EXPECT(ctx, greyError <= kDoubleRoundoff, detail);
+}
+
+// CIE A is Planck at c2/T = 1.435e-2/2848 (CIE 015:2018); the summation interval moves its 5th decimal, so 4 are asserted.
+PT_CHECK(blackbody_reproduces_illuminant_a, Fast, Exact) {
+    ctx.plan(1);
+    constexpr double kKelvin = 2848.0 * 1.4388e-2 / 1.435e-2;
+    constexpr glm::dvec2 kPublished(0.44757, 0.40745);
+    const std::optional<glm::dvec3> rgb = cie::blackbodyToRec709(kKelvin);
+    const glm::dvec2 xy = rgb ? chromaticity(glm::inverse(cie::xyzToRec709()) * *rgb) : glm::dvec2(0.0);
+    const double error = std::max(std::abs(xy.x - kPublished.x), std::abs(xy.y - kPublished.y));
+    char detail[160];
+    std::snprintf(detail, sizeof(detail), "Planck at CIE A's exponent gives xy (%.6f, %.6f), %.3e from (0.44757, 0.40745)", xy.x, xy.y,
+                  error);
+    PT_EXPECT(ctx, error <= 5e-5, detail);
+}
+
+// Unit luminance makes intensity mean the same for a temperature as for color [1, 1, 1]; outside the gamut or domain is refused.
+PT_CHECK(blackbody_has_unit_luminance_and_refuses_outside_rec709, Fast, Exact) {
+    constexpr std::array<double, 6> kInGamut{2000.0, 2856.0, 4000.0, 6504.0, 10000.0, 1e6};
+    constexpr std::array<double, 5> kRefused{0.0, -2856.0, 1000.0, std::numeric_limits<double>::infinity(),
+                                             std::numeric_limits<double>::quiet_NaN()};
+    ctx.plan(static_cast<int>(kInGamut.size() + kRefused.size()));
+    const glm::dmat3 rgbToXyz = glm::inverse(cie::xyzToRec709());
+    char detail[160];
+    for (const double kelvin : kInGamut) {
+        const std::optional<glm::dvec3> rgb = cie::blackbodyToRec709(kelvin);
+        const double luminanceError = rgb ? std::abs((rgbToXyz * *rgb).y - 1.0) : 1.0;
+        std::snprintf(detail, sizeof(detail), "%g K: %s, luminance off 1 by %.3e", kelvin, rgb ? "resolved" : "refused", luminanceError);
+        PT_EXPECT(ctx, rgb && luminanceError <= kDoubleRoundoff, detail);
+    }
+    for (const double kelvin : kRefused) {
+        std::snprintf(detail, sizeof(detail), "%g K resolved to a colour; it is outside the domain or Rec.709", kelvin);
+        PT_EXPECT(ctx, !cie::blackbodyToRec709(kelvin), detail);
+    }
 }
 
 // chrome.json must be metal_fit's exact output; shading it must meet CIE-projected measured chromium at mu = 1 and mu-bar = 1/7.

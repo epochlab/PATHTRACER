@@ -13,6 +13,7 @@
 #include "pathtracer/debug/aov_filters.h"
 #include "pathtracer/debug/aov_routing.h"
 #include "pathtracer/debug/render_stats.h"
+#include "pathtracer/scene/cie.h"
 #include "pathtracer/scene/material_binding.h"
 #include "pathtracer/scene/path_trace_driver.h"
 
@@ -103,6 +104,28 @@ struct SceneInputs {
     return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
 }
 
+// Each light's colour for this request: its kelvin override resolved on the Planckian locus, else the authored colour.
+[[nodiscard]] std::optional<std::vector<glm::vec3>> lightColours(const HeadlessRenderer::Request& request,
+                                                                 const std::vector<pathtracer::config::QuadLightConfig>& lights,
+                                                                 std::string& error) {
+    std::vector<glm::vec3> colours;
+    colours.reserve(lights.size());
+    for (std::size_t i = 0; i < lights.size(); ++i) {
+        if (!request.lightTemperaturesKelvin.has_value()) {
+            colours.push_back(lights[i].color);
+            continue;
+        }
+        const float kelvin = (*request.lightTemperaturesKelvin)[i];
+        const std::optional<glm::dvec3> rgb = pathtracer::scene::cie::blackbodyToRec709(kelvin);
+        if (!rgb) {
+            error = "light temperature " + std::to_string(kelvin) + " K is not positive or lies outside Rec.709";
+            return std::nullopt;
+        }
+        colours.emplace_back(*rgb);
+    }
+    return colours;
+}
+
 // Rejects a request no producer can serve, before any buffer is touched; error names the first fault.
 [[nodiscard]] bool validRequest(const HeadlessRenderer::Request& request, std::size_t lightCount, bool denoiserEnabled, std::string& error) {
     if (request.width <= 0 || request.height <= 0) {
@@ -151,6 +174,11 @@ struct SceneInputs {
             error = "a light rotation is not finite";
             return false;
         }
+    }
+    if (request.lightTemperaturesKelvin.has_value() && request.lightTemperaturesKelvin->size() != lightCount) {
+        error = "light temperatures number " + std::to_string(request.lightTemperaturesKelvin->size()) + ", the scene has " +
+                std::to_string(lightCount) + " lights";
+        return false;
     }
     if (!isFinite(request.envRotationDegrees)) {
         error = "environment rotation is not finite";
@@ -346,8 +374,16 @@ bool HeadlessRenderer::render(const Request& request, std::span<float* const> ou
 }
 
 bool HeadlessRenderer::render(const Request& request, std::string& error) {
-    if (!validRequest(request, scene_.lights.size(), profile_.denoiser.enabled, error) || !applyPose(request, error)) {
+    if (!validRequest(request, scene_.lights.size(), profile_.denoiser.enabled, error)) {
         return false;
+    }
+    const std::optional<std::vector<glm::vec3>> colours = lightColours(request, scene_.lights, error);
+    if (!colours || !applyPose(request, error)) {
+        return false;
+    }
+    // Radiance is all a light's colour reaches and selection is uniform, so a new colour rewrites it here and never the BVH.
+    for (std::size_t i = 0; i < colours->size(); ++i) {
+        geometry_.quadLights[i].radiance = (*colours)[i] * scene_.lights[i].intensity;
     }
     const bool wantsFilter = requestsSource(request.aovs, AovSource::BeautyFilter);
     resizeBuffers(request.width, request.height);

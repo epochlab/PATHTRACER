@@ -15,6 +15,7 @@
 #include <nlohmann/json.hpp>
 
 #include "json_glm.h"
+#include "pathtracer/scene/cie.h"
 
 namespace pathtracer::config {
 
@@ -89,6 +90,27 @@ std::optional<std::map<std::string, std::map<std::string, TextureConfig>>> parse
     return textures;
 }
 
+// Exactly one of an authored Rec.709 color or a Planckian temperature in kelvin, resolved at unit luminance so intensity means the same.
+std::optional<glm::vec3> lightColor(const nlohmann::json& light, const std::string& path, std::size_t index) {
+    const auto color = light.find("color");
+    const auto temperature = light.find("temperature");
+    if ((color == light.end()) == (temperature == light.end())) {
+        std::cerr << "loadSceneConfig: " << path << ": lights[" << index << "] needs exactly one of color or temperature\n";
+        return std::nullopt;
+    }
+    if (color != light.end()) {
+        return color->get<glm::vec3>();
+    }
+    const double kelvin = temperature->get<double>();
+    const std::optional<glm::dvec3> rgb = pathtracer::scene::cie::blackbodyToRec709(kelvin);
+    if (!rgb) {
+        std::cerr << "loadSceneConfig: " << path << ": lights[" << index << "] temperature " << kelvin
+                  << " K is not positive or lies outside Rec.709\n";
+        return std::nullopt;
+    }
+    return glm::vec3(*rgb);
+}
+
 // Parses and validates the optional "lights" array. Separate so each stays one screen, and every check is an authoring boundary.
 std::optional<std::vector<QuadLightConfig>> parseQuadLights(const nlohmann::json& j, const std::string& path) {
     std::vector<QuadLightConfig> lights;
@@ -103,14 +125,19 @@ std::optional<std::vector<QuadLightConfig>> parseQuadLights(const nlohmann::json
             std::cerr << "loadSceneConfig: " << path << ": lights[" << index << "] has unknown type '" << type << "', only 'quad' exists\n";
             return std::nullopt;
         }
-        if (!onlyKnownKeys(light, {"type", "position", "rotation", "size", "color", "intensity", "twoSided"}, path, "light")) {
+        if (!onlyKnownKeys(light, {"type", "position", "rotation", "size", "color", "temperature", "intensity", "twoSided"}, path,
+                           "light")) {
+            return std::nullopt;
+        }
+        const std::optional<glm::vec3> color = lightColor(light, path, index);
+        if (!color) {
             return std::nullopt;
         }
         const QuadLightConfig quad{
             light.at("position").get<glm::vec3>(),
             light.at("rotation").get<glm::vec3>(),
             light.at("size").get<glm::vec2>(),
-            light.at("color").get<glm::vec3>(),
+            *color,
             toFloat(light.at("intensity")),
             light.value("twoSided", false),
         };
