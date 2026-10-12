@@ -3,6 +3,21 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Python binding in ctest
+
+The pytest suite now runs as the ctest entry `api.python` (labels `api;fast;exact`), so the binding is gated with every
+other check.
+- **Artifacts:** `PATHTRACER_LIB` and a new `PATHTRACER_RENDER_BEAUTY` point the suite at this build's
+  `libpathtracer_c` and `render_beauty`, wherever the build directory is. The Python-vs-CLI Beauty parity test reads
+  the CLI path from the environment and falls back to `build/render_beauty`.
+- **Registration:** the entry is added only when the configured interpreter imports pytest, numpy, OpenEXR and Imath;
+  without OpenEXR the parity test would skip and the gate would pass empty. Otherwise configure prints why it is
+  missing. Configure with `-DPython3_EXECUTABLE` set to the `host-dev` env.
+- **Bytecode:** five committed `__pycache__/*.pyc` files, already gitignored, are untracked; a ctest run rewrote one.
+- **Measured:** 65 passed, 0 skipped, 2.3 s. `ctest` 361/361 (was 360).
+
+Evidence is in `results/python_ctest`.
+
 ## OpenVDB volumes
 
 VDB density grids render as heterogeneous participating media, with absorption and multiple scattering, through OpenVDB 13

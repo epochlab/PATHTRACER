@@ -10,6 +10,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import math
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -358,7 +359,7 @@ def test_beauty_matches_render_beauty_cli(renderer: Renderer, tmp_path: Path) ->
     openexr = pytest.importorskip("OpenEXR", reason="reading the reference EXR needs the OpenEXR module")
     imath = pytest.importorskip("Imath")
 
-    binary = REPO_ROOT / "build" / "render_beauty"
+    binary = Path(os.environ.get("PATHTRACER_RENDER_BEAUTY", REPO_ROOT / "build" / "render_beauty"))
     if not binary.exists():
         pytest.skip("render_beauty is not built")
 

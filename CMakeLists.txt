@@ -422,6 +422,21 @@ if(Python3_Interpreter_FOUND)
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/test_comment_lint.py
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     set_tests_properties(style.comment_lint_selftest PROPERTIES LABELS "style;fast;exact" TIMEOUT 120)
+
+    # Every module the binding suite imports, OpenEXR included: without it the CLI parity test skips and the gate passes empty.
+    execute_process(COMMAND ${Python3_EXECUTABLE} -c "import pytest, numpy, OpenEXR, Imath"
+                    RESULT_VARIABLE PATHTRACER_PYTEST_MISSING OUTPUT_QUIET ERROR_QUIET)
+    if(PATHTRACER_PYTEST_MISSING)
+        message(STATUS "api.python not registered: ${Python3_EXECUTABLE} lacks pytest, numpy, OpenEXR or Imath")
+    else()
+        # The library and CLI under test are this build's, wherever it lives, not the source tree's default build/.
+        add_test(NAME api.python
+                 COMMAND ${Python3_EXECUTABLE} -m pytest -q -rs python/tests
+                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+        set_tests_properties(api.python PROPERTIES LABELS "api;fast;exact" TIMEOUT 300
+                             PROCESSORS ${PATHTRACER_TEST_THREADS}
+                             ENVIRONMENT "PATHTRACER_LIB=$<TARGET_FILE:pathtracer_c>;PATHTRACER_RENDER_BEAUTY=$<TARGET_FILE:render_beauty>")
+    endif()
 endif()
 
 # Migrated to tools/check.h: one ctest entry per check, discovered from the binary itself.
