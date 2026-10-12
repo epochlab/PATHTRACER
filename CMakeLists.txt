@@ -24,6 +24,12 @@ find_package(embree 4 CONFIG REQUIRED)
 find_package(OpenImageDenoise 2 CONFIG REQUIRED)
 # bench_log's floatCrc32 only. Not a new dependency: OpenImageIO already links zlib, so naming it makes the direct use explicit.
 find_package(ZLIB REQUIRED)
+# OpenVDB installs a Find module beside its library, not a package config; finding libopenvdb first rules out Houdini's _sesi build.
+find_library(OPENVDB_LIBRARY_FILE openvdb REQUIRED)
+get_filename_component(OPENVDB_LIBRARY_DIR ${OPENVDB_LIBRARY_FILE} DIRECTORY)
+list(APPEND CMAKE_MODULE_PATH ${OPENVDB_LIBRARY_DIR}/cmake/OpenVDB)
+# Last of the packages: that directory also holds Find modules for OpenEXR and TBB, which must not shadow the configs found above.
+find_package(OpenVDB 13 REQUIRED COMPONENTS openvdb nanovdb)
 
 # Static-analysis gate on every build: -Wall -Wextra -Werror, clang-tidy per compile (non-fatal), cppcheck as its own target.
 find_program(CLANG_TIDY_EXE NAMES clang-tidy)
@@ -169,6 +175,7 @@ add_library(pathtracer_core STATIC
     src/scene/shading_scene.cpp
     src/scene/thin_film.cpp
     src/scene/thread_pool.cpp
+    src/scene/volume.cpp
     src/api/headless_renderer.cpp
     $<TARGET_OBJECTS:pathtracer_cie>
     $<TARGET_OBJECTS:vendored_cgltf>
@@ -183,6 +190,10 @@ target_compile_definitions(pathtracer_core PUBLIC GLM_ENABLE_EXPERIMENTAL)
 pathtracer_target_defaults(pathtracer_core NATIVE IPO TIDY)
 target_link_libraries(pathtracer_core PUBLIC glm::glm embree OpenColorIO::OpenColorIO OpenImageIO::OpenImageIO ZLIB::ZLIB)
 target_link_libraries(pathtracer_core PRIVATE OpenImageDenoise)
+# VDB density grids, read with OpenVDB and traced as NanoVDB; private like OIDN, behind volume.h's opaque VolumeSet.
+target_link_libraries(pathtracer_core PRIVATE OpenVDB::openvdb OpenVDB::nanovdb)
+# Enables NanoVDB's OpenVDB source-grid adaptor, which createNanoGrid needs to convert an openvdb::FloatGrid.
+target_compile_definitions(pathtracer_core PRIVATE NANOVDB_USE_OPENVDB)
 
 # The C ABI a foreign runtime binds to via ctypes. Shared, not static: it is dlopen'd, not linked.
 add_library(pathtracer_c SHARED src/api/pathtracer_c.cpp)
@@ -281,7 +292,7 @@ target_link_libraries(check_selftest PRIVATE glm::glm)
 # Every validator links pathtracer_core and pathtracer_check; what each asserts is documented at the top of its own tools/*.cpp.
 foreach(validator embree_validate bsdf_validate sampler_validate nee_validate gbuffer_validate
                   integrator_validate driver_validate io_validate display_validate filter_validate
-                  camera_validate)
+                  camera_validate volume_validate)
     add_executable(${validator} tools/${validator}.cpp $<TARGET_OBJECTS:pathtracer_check>)
     target_include_directories(${validator} PRIVATE tools)
     pathtracer_target_defaults(${validator} NATIVE IPO)
@@ -294,6 +305,9 @@ target_compile_definitions(io_validate PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DI
 # camera_validate drives the viewer's orbit controller too; its fly input reads a Window, so that TU and GLFW link without a window.
 target_sources(camera_validate PRIVATE src/scene/debug_camera_controller.cpp src/platform/window.cpp)
 target_link_libraries(camera_validate PRIVATE glfw)
+# volume_validate writes its grids as .vdb files with OpenVDB, so they reach the renderer through the one loading path a scene uses.
+target_include_directories(volume_validate PRIVATE src/scene)
+target_link_libraries(volume_validate PRIVATE OpenVDB::openvdb)
 
 # Adobe's openpbr-bsdf as a numerical oracle: its headers reach this validator alone, never pathtracer_core; src/scene for the slab API.
 add_executable(openpbr_reference_validate tools/openpbr_reference_validate.cpp $<TARGET_OBJECTS:pathtracer_check>)
@@ -426,5 +440,6 @@ pathtracer_discover_checks(api_validate)
 pathtracer_discover_checks(c_abi_validate)
 pathtracer_discover_checks(filter_validate)
 pathtracer_discover_checks(camera_validate)
+pathtracer_discover_checks(volume_validate)
 pathtracer_discover_checks(openpbr_reference_validate)
 

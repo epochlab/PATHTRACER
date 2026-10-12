@@ -24,7 +24,11 @@ Only six of imgui's sources are compiled (`imgui{,_draw,_tables,_widgets}.cpp` p
 backends); the rest of the submodule tree is unused.
 
 Build-system dependencies resolved externally, not vendored: Embree 4, OpenEXR, Imath, OpenColorIO, OpenImageIO 3,
-GLFW 3.5, GLEW, glm, OpenGL, zlib.
+Open Image Denoise 2, OpenVDB 13 with NanoVDB, GLFW 3.5, GLEW, glm, OpenGL, zlib.
+
+OpenVDB reads `.vdb` density grids, and its NanoVDB headers hold them for tracing. OpenVDB installs a `FindOpenVDB.cmake`
+module beside its library rather than a package config, so `CMakeLists.txt` finds `libopenvdb` first and loads the module
+from there. That also keeps out an OpenVDB bundled with another application, such as Houdini's `libopenvdb_sesi`.
 
 ltc-sheen supplies the 32x32 LTC coefficient table of Zeltner, Burley and Chiang 2022 (`fitting/python/data/`), the fit to
 the volumetric SGGX sheen OpenPBR's fuzz specifies; `src/scene/fuzz.cpp` compiles it as published through a two-name shim.

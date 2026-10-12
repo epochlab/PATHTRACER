@@ -6,6 +6,7 @@
 #include <fstream>
 #include <initializer_list>
 #include <iostream>
+#include <limits>
 #include <string_view>
 #include <type_traits>
 #include <vector>
@@ -194,6 +195,45 @@ std::optional<SceneConfig> loadSceneConfig(const std::string& path) {
         };
     } catch (const nlohmann::json::exception& e) {
         std::cerr << "loadSceneConfig: " << path << ": " << e.what() << '\n';
+        return std::nullopt;
+    }
+}
+
+std::optional<VolumeMaterialConfig> loadVolumeMaterialConfig(const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        std::cerr << "loadVolumeMaterialConfig: could not read " << path << '\n';
+        return std::nullopt;
+    }
+
+    try {
+        nlohmann::json j;
+        file >> j;
+        if (!onlyKnownKeys(j, {"absorption", "scattering", "anisotropy"}, path, "volume material")) {
+            return std::nullopt;
+        }
+        const VolumeMaterialConfig material{
+            j.at("absorption").get<glm::vec3>(),
+            j.at("scattering").get<glm::vec3>(),
+            toFloat(j.at("anisotropy")),
+        };
+        // A negative coefficient is no medium; NaN fails both comparisons, and so does an infinite one, which tracking cannot bound.
+        const auto validCoefficient = [](const glm::vec3& c) {
+            const glm::vec3 infinity(std::numeric_limits<float>::infinity());
+            return glm::all(glm::greaterThanEqual(c, glm::vec3(0.0F))) && glm::all(glm::lessThan(c, infinity));
+        };
+        if (!validCoefficient(material.absorption) || !validCoefficient(material.scattering)) {
+            std::cerr << "loadVolumeMaterialConfig: " << path << ": absorption and scattering must be finite and non-negative\n";
+            return std::nullopt;
+        }
+        // |g| = 1 is a delta lobe Henyey-Greenstein cannot normalise.
+        if (!(std::abs(material.anisotropy) < 1.0F)) {
+            std::cerr << "loadVolumeMaterialConfig: " << path << ": anisotropy must lie in (-1, 1)\n";
+            return std::nullopt;
+        }
+        return material;
+    } catch (const nlohmann::json::exception& e) {
+        std::cerr << "loadVolumeMaterialConfig: " << path << ": " << e.what() << '\n';
         return std::nullopt;
     }
 }
