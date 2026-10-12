@@ -719,7 +719,7 @@ void ensurePathTraceDisplayTexture(AppResources& app, const DisplayedAovSource& 
     // Every display decision that has to read the texels, made once here rather than per frame; the exposure stays in presentFrame.
     app.pathTraceDisplay = pathtracer::debug::aovDisplay(
         static_cast<pathtracer::debug::AovId>(app.aov), image,
-        {samples, app.scene.baseSettings.maxBounces});
+        {samples, app.scene.baseSettings.maxBounces, app.gbuffer->depthMax});
     // A nonlinear pre-map cannot ride the shader's two vec3 uniforms, so where one applies the texture carries its output instead.
     const pathtracer::gfx::HdrImage& shown =
         app.pathTraceDisplay.mapped.texels.empty() ? image : app.pathTraceDisplay.mapped;

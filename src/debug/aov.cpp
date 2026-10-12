@@ -345,15 +345,10 @@ AovDisplay aovDisplay(AovId aov, const pathtracer::gfx::HdrImage& image, const A
         return display;
     }
     switch (aov) {
-        // Raw metres quantize to white and farClip is a ray bound, not a depth span, so Depth ranges to the depth actually present.
-        case AovId::Depth: {
-            float maxDepth = 0.0F;
-            for (const float depth : image.texels) {
-                maxDepth = std::max(maxDepth, depth);
-            }
-            display.affine.gain = glm::vec3(std::pow(2.0F, -std::log2(std::max(maxDepth, 1e-4F))));
+        // Raw metres quantize to white and farClip is not a depth span, so the depth present is white; an all-miss frame keeps unity.
+        case AovId::Depth:
+            display.affine.gain = glm::vec3(context.depthMax > 0.0F ? 1.0F / context.depthMax : 1.0F);
             return display;
-        }
         // A variance is undefined below two passes, where snrAov is uniformly zero and the log window has no positive ceiling.
         case AovId::SNR:
             if (context.samples >= 2) {

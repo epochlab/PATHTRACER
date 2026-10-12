@@ -389,23 +389,29 @@ PT_CHECK(bounce_count_display_matches_the_turbo_colormap, Fast, Exact) {
 
 // Raw metres quantize to white and farClip is a ray bound rather than a depth span, so Depth's gain comes from the depth present.
 PT_CHECK(depth_display_ranges_to_its_own_maximum, Fast, Exact) {
-    // Powers of two, so 2^-log2(max) is exact and the product with the maximum must be exactly 1 rather than within a rounding.
+    // Powers of two, so 1/max is exact and the product with the maximum must be exactly 1 rather than within a rounding.
     const std::vector<float> maxima{0.25F, 1.0F, 64.0F};
-    ctx.plan(static_cast<int>(maxima.size()));
+    ctx.plan(static_cast<int>(maxima.size()) + 1);
     for (const float maximum : maxima) {
         const pathtracer::debug::AovDisplay display =
-            pathtracer::debug::aovDisplay(AovId::Depth, frame(1, {maximum * 0.5F, maximum}), {0, 0});
+            pathtracer::debug::aovDisplay(AovId::Depth, frame(1, {maximum * 0.5F, maximum}), {0, 0, maximum});
         const float white = (maximum * display.affine.gain[0]) + display.affine.offset[0];
         PT_EXPECT(ctx, white == 1.0F,
                       "the farthest depth " + std::to_string(maximum) + " displayed " + std::to_string(white) + ", not white");
     }
+    // An all-miss frame publishes 0: no span to fit, and its zeros read black under any gain, so the map stays the identity.
+    const pathtracer::debug::AovDisplay empty = pathtracer::debug::aovDisplay(AovId::Depth, frame(1, {0.0F, 0.0F}), {0, 0, 0.0F});
+    PT_EXPECT(ctx, empty.affine.gain == glm::vec3(1.0F), "an all-miss Depth frame took gain " + std::to_string(empty.affine.gain[0]));
 }
+
+// aovFrame's largest texel, the depth maximum a G-buffer pass would publish for it.
+constexpr float kAovFrameMax = 16.0F;
 
 // Three texels at the AOV's channel count, each spread over two decades and positive, so any ranging arm departs from identity.
 [[nodiscard]] HdrImage aovFrame(AovId aov) {
     const int channels = pathtracer::debug::aovChannels(aov);
     std::vector<float> texels;
-    for (const float value : {0.5F, 4.0F, 16.0F}) {
+    for (const float value : {0.5F, 4.0F, kAovFrameMax}) {
         texels.insert(texels.end(), static_cast<std::size_t>(channels), value);
     }
     return frame(channels, texels);
@@ -416,7 +422,7 @@ PT_CHECK(an_auto_ranged_aov_never_also_takes_the_exposure, Fast, Exact) {
     ctx.plan(kAovCount);
     for (int i = 0; i < kAovCount; ++i) {
         const auto aov = static_cast<AovId>(i);
-        const pathtracer::debug::AovDisplay display = pathtracer::debug::aovDisplay(aov, aovFrame(aov), {1024, 8});
+        const pathtracer::debug::AovDisplay display = pathtracer::debug::aovDisplay(aov, aovFrame(aov), {1024, 8, kAovFrameMax});
         // Whatever aovDisplay decided from the values -- a pre-map or any map but unity gain at zero offset -- is a range already taken.
         const bool ranged = !display.mapped.texels.empty() || display.affine.gain != glm::vec3(1.0F) ||
                             display.affine.offset != glm::vec3(0.0F);
@@ -431,7 +437,7 @@ PT_CHECK(display_premap_applies_to_exactly_two_aovs, Fast, Exact) {
     for (int i = 0; i < kAovCount; ++i) {
         const auto aov = static_cast<AovId>(i);
         const bool premapped = aov == AovId::SNR || aov == AovId::BounceCount;
-        PT_EXPECT(ctx, pathtracer::debug::aovDisplay(aov, aovFrame(aov), {1024, 8}).mapped.texels.empty() != premapped,
+        PT_EXPECT(ctx, pathtracer::debug::aovDisplay(aov, aovFrame(aov), {1024, 8, kAovFrameMax}).mapped.texels.empty() != premapped,
                       std::string(pathtracer::debug::kAovNames[i]) +
                           (premapped ? " lost its pre-map" : " gained a pre-map it does not need"));
     }

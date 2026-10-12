@@ -116,10 +116,11 @@ struct BipolarDisplay {
 // Auto-ranged per channel of `image`, because channels of one AOV can be different quantities in incomparable units.
 [[nodiscard]] BipolarDisplay bipolarDisplay(const pathtracer::gfx::HdrImage& image);
 
-// What the display needs that an AOV's own texels do not carry: the pass count anchoring SNR's log window, the path-depth ceiling.
+// What the display needs beyond the texels: SNR's pass count, the path-depth ceiling, and Depth's maximum the G-buffer pass reduced.
 struct AovDisplayContext {
     int samples = 0;
     int maxBounces = 0;
+    float depthMax = 0.0F;
 };
 
 // Every display decision that has to read the values: a nonlinear pre-map where one applies, and the affine map for everything else.
