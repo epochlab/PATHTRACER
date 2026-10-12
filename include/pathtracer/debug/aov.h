@@ -47,6 +47,8 @@ enum class AovId : int {
     DirectSpecular,
     IndirectSpecular,
     Refraction,
+    DirectVolume,
+    IndirectVolume,
     Shadow,
     // OIDN's estimate of Beauty, guided by albedo and normal lanes averaged over Beauty's own samples (kDenoiseFeatureLanes).
     Denoised,
@@ -59,7 +61,7 @@ inline constexpr const char* kAovNames[] = {
     "gabor", "dog", "worldPos", "uv", "motionVector", "colourOpponent",
     "normal", "geomNormal", "albedo", "metallic", "roughness", "tangent", "objectID", "ao",
     "fresnel", "ior", "bounceCount", "snr",
-    "directDiffuse", "indirectDiffuse", "directSpecular", "indirectSpecular", "refraction", "shadow",
+    "directDiffuse", "indirectDiffuse", "directSpecular", "indirectSpecular", "refraction", "directVolume", "indirectVolume", "shadow",
     "denoised",
 };
 static_assert(sizeof(kAovNames) / sizeof(kAovNames[0]) == static_cast<int>(AovId::Count),
@@ -71,13 +73,14 @@ inline constexpr const char* kAovLabels[] = {
     "Gabor", "DoG", "World Pos", "UV", "Motion Vector", "Colour Opponent",
     "Normal", "Geom Normal", "Albedo", "Metallic", "Roughness", "Tangent", "Object ID", "AO",
     "Fresnel", "IOR", "Bounce Count", "SNR",
-    "Direct Diffuse", "Indirect Diffuse", "Direct Specular", "Indirect Specular", "Refraction", "Shadow",
+    "Direct Diffuse", "Indirect Diffuse", "Direct Specular", "Indirect Specular", "Refraction", "Direct Volume", "Indirect Volume",
+    "Shadow",
     "Denoised",
 };
 static_assert(sizeof(kAovLabels) / sizeof(kAovLabels[0]) == static_cast<int>(AovId::Count),
               "kAovLabels must stay index-parallel with AovId");
 
-// Which of the three producers computes each AOV: 11 accumulated path-traced lanes, 14 G-buffer lanes, 8 filters over Beauty.
+// Which of the three producers computes each AOV: 13 accumulated path-traced lanes, 14 G-buffer lanes, 8 filters over Beauty.
 enum class AovSource { PathTraced, GBuffer, BeautyFilter };
 
 [[nodiscard]] AovSource aovSource(AovId aov);

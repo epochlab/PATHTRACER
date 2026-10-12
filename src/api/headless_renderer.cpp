@@ -45,6 +45,7 @@ struct SceneInputs {
         error = "failed to load scene " + assetRoot + "/" + scenePath;
         return std::nullopt;
     }
+    pathtracer::config::applySceneCamera(*scene, *profile);
     std::shared_ptr<const pathtracer::gfx::ImageTexture> environmentTexture =
         pathtracer::gfx::openTexture(assetRoot + "/" + scene->environment.hdriPath, pathtracer::gfx::kRgbChannels,
                                      pathtracer::gfx::ImageRole::Colour, pathtracer::gfx::TextureWrap::LatLong, scene->environment.colorSpace);
@@ -189,9 +190,11 @@ std::optional<HeadlessRenderer::Geometry> HeadlessRenderer::buildGeometry(
     const std::string& assetRoot, const pathtracer::config::ModelConfig& model,
     const std::vector<pathtracer::config::QuadLightConfig>& lights, std::string& error) {
     const glm::mat4 rootTransform = pathtracer::scene::rootTransformOf(model);
-    std::optional<pathtracer::scene::LoadedModel> loaded = pathtracer::scene::loadGltf(assetRoot + "/" + model.gltfPath, rootTransform);
+    // No glTF is an empty model: the lights below are then the only triangles.
+    std::optional<pathtracer::scene::LoadedModel> loaded =
+        model.gltfPath ? pathtracer::scene::loadGltf(assetRoot + "/" + *model.gltfPath, rootTransform) : pathtracer::scene::LoadedModel{};
     if (!loaded) {
-        error = "failed to load glTF " + assetRoot + "/" + model.gltfPath;
+        error = "failed to load glTF " + assetRoot + "/" + *model.gltfPath;
         return std::nullopt;
     }
     std::vector<int> instanceLightIndex(loaded->instances.size(), -1);
@@ -221,10 +224,16 @@ std::unique_ptr<HeadlessRenderer> HeadlessRenderer::open(const std::string& asse
     if (!geometry) {
         return nullptr;
     }
-    // Materials before textures, which bind over the constants; each call logs the reason it fails.
-    if (!pathtracer::scene::applySceneMaterials(geometry->model.instances, scene.materialPath, scene.materialOverrides, assetRoot) ||
-        !pathtracer::scene::bindSceneTextures(geometry->model.instances, scene.textures, assetRoot)) {
+    // Materials before textures, which bind over the constants; each call logs the reason it fails. Without a model there are none.
+    if (scene.materialPath &&
+        (!pathtracer::scene::applySceneMaterials(geometry->model.instances, *scene.materialPath, scene.materialOverrides, assetRoot) ||
+         !pathtracer::scene::bindSceneTextures(geometry->model.instances, scene.textures, assetRoot))) {
         error = "failed to bind scene materials";
+        return nullptr;
+    }
+    // World-space media, independent of the pose a request may change, so loaded once here rather than in buildGeometry.
+    std::optional<pathtracer::scene::VolumeSet> volumes = pathtracer::scene::VolumeSet::load(scene.volumes, assetRoot, error);
+    if (!volumes) {
         return nullptr;
     }
 
@@ -237,12 +246,12 @@ std::unique_ptr<HeadlessRenderer> HeadlessRenderer::open(const std::string& asse
     const pathtracer::scene::PathTraceSettings baseSettings = pathtracer::scene::baseSettingsOf(inputs->profile, /*samplesPerPixel=*/1);
 
     return std::unique_ptr<HeadlessRenderer>(new HeadlessRenderer(
-        assetRoot, std::move(inputs->profile), std::move(inputs->scene), std::move(*geometry),
+        assetRoot, std::move(inputs->profile), std::move(inputs->scene), std::move(*geometry), std::move(*volumes),
         baseSettings, std::move(inputs->environmentTexture), *camera));
 }
 
 HeadlessRenderer::HeadlessRenderer(std::string assetRoot, pathtracer::config::ProfileConfig profile,
-                                   pathtracer::config::SceneConfig scene, Geometry geometry,
+                                   pathtracer::config::SceneConfig scene, Geometry geometry, pathtracer::scene::VolumeSet volumes,
                                    pathtracer::scene::PathTraceSettings baseSettings,
                                    std::shared_ptr<const pathtracer::gfx::ImageTexture> environmentTexture,
                                    const pathtracer::scene::Camera& defaultCamera)
@@ -250,6 +259,7 @@ HeadlessRenderer::HeadlessRenderer(std::string assetRoot, pathtracer::config::Pr
       profile_(std::move(profile)),
       scene_(std::move(scene)),
       geometry_(std::move(geometry)),
+      volumes_(std::move(volumes)),
       builtRootRotationDegrees_(scene_.model.rotation),
       builtLightRotationsDegrees_(rotationsOf(scene_.lights)),
       baseSettings_(baseSettings),
@@ -394,7 +404,8 @@ void HeadlessRenderer::accumulatePathTraced(const Request& request) {
         const auto passStart = std::chrono::steady_clock::now();
         // scrambleSeed fixed, sampleBase advancing: the pair that keeps accumulated samples stratified rather than N independent draws.
         pathtracer::scene::renderPathTraced(request.camera, geometry_.accel, geometry_.model.shadingTriangles,
-                                         geometry_.model.instances, geometry_.instanceLightIndex, lights, request.width, request.height,
+                                         geometry_.model.instances, geometry_.instanceLightIndex, lights, volumes_, request.width,
+                                         request.height,
                                          showSky, baseSettings_,
                                          request.scrambleSeed, /*sampleBase=*/pass,
                                          /*sampleCount=*/request.samples, generation,

@@ -370,6 +370,34 @@ PT_CHECK(scene_config_reads_texture_bindings, Fast, Exact) {
               "a path-string binding gained a colour space or a channel");
 }
 
+// Lights and volumes alone make a scene, and its camera block replaces only profile.json's pose and far clip.
+PT_CHECK(scene_config_reads_volumes_and_camera_without_a_model, Fast, Exact) {
+    const std::filesystem::path path = writeJson(
+        "engine_io_scene_volumes.json",
+        "{\"environment\":{\"hdriPath\":\"textures/sky.exr\"},"
+        "\"volumes\":[{\"vdbPath\":\"cloud.vdb\",\"grid\":\"density\",\"position\":[1,2,3],\"rotation\":[0,90,0],\"scale\":0.5,"
+        "\"materialPath\":\"materials/volume.json\"}],"
+        "\"camera\":{\"position\":[0,0,2200],\"rotation\":[0,10,0],\"farClip\":4000}}");
+    const std::optional<pathtracer::config::SceneConfig> scene = pathtracer::config::loadSceneConfig(path.string());
+    std::filesystem::remove(path);
+    std::optional<pathtracer::config::ProfileConfig> profile =
+        pathtracer::config::loadProfileConfig((std::filesystem::path(ASSET_ROOT_DIR) / "config" / "profile.json").string());
+    const pathtracer::config::CameraConfig authored = profile ? profile->camera : pathtracer::config::CameraConfig{};
+    if (scene && profile) {
+        pathtracer::config::applySceneCamera(*scene, *profile);
+    }
+    ctx.plan(4);
+    PT_EXPECT(ctx, scene && !scene->model.gltfPath && !scene->materialPath, "a scene without a model gained a glTF or a material");
+    PT_EXPECT(ctx, scene && scene->volumes.size() == 1 && scene->volumes[0].scale == 0.5F && scene->volumes[0].grid == "density" &&
+                       scene->volumes[0].position == glm::vec3(1.0F, 2.0F, 3.0F),
+              "the volume entry did not parse");
+    PT_EXPECT(ctx, profile && profile->camera.position == glm::vec3(0.0F, 0.0F, 2200.0F) &&
+                       profile->camera.rotation == glm::vec3(0.0F, 10.0F, 0.0F) && profile->camera.farClip == 4000.0F,
+              "the scene camera's pose or far clip did not reach the profile");
+    PT_EXPECT(ctx, profile && profile->camera.focalLengthMm == authored.focalLengthMm && profile->camera.nearClip == authored.nearClip,
+              "the scene camera changed the profile's lens");
+}
+
 // The rejection half of the contract: each row is a malformation a real authoring mistake produces, and each must be reported.
 PT_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
     struct Case {
@@ -394,8 +422,17 @@ PT_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
         {"not JSON at all", "engine_io_scene_notjson.json", "{ this is not json"},
         {"empty file", "engine_io_scene_empty.json", ""},
         {"JSON array where an object is required", "engine_io_scene_array.json", "[1, 2, 3]"},
-        {"missing the model section entirely", "engine_io_scene_nomodel.json",
+        // Every surface key names the model's nodes, so a materialPath with no model has nothing to shade.
+        {"a materialPath without a model", "engine_io_scene_nomodel.json",
          "{\"environment\":{\"hdriPath\":\"x.exr\"},\"materialPath\":\"materials/clay.json\"}"},
+        // A zero scale has no inverse placement; a misspelt key would load as its default, silently.
+        {"a volume with a zero scale", "engine_io_scene_volumescale.json",
+         scene(",\"volumes\":[{\"vdbPath\":\"a.vdb\",\"grid\":\"density\",\"position\":[0,0,0],\"rotation\":[0,0,0],"
+               "\"scale\":0,\"materialPath\":\"materials/volume.json\"}]")},
+        {"a volume with an unknown key", "engine_io_scene_volumekey.json",
+         scene(",\"volumes\":[{\"vdbPath\":\"a.vdb\",\"gird\":\"density\",\"position\":[0,0,0],\"rotation\":[0,0,0],"
+               "\"materialPath\":\"materials/volume.json\"}]")},
+        {"a camera without its far clip", "engine_io_scene_camera.json", scene(",\"camera\":{\"position\":[0,0,9],\"rotation\":[0,0,0]}")},
         // Negative radiance is not a scene, and would propagate as negative energy through every estimator.
         {"negative light intensity", "engine_io_scene_negintensity.json",
          scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"

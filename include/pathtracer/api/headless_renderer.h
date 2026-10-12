@@ -24,6 +24,7 @@
 #include "pathtracer/scene/gbuffer.h"
 #include "pathtracer/scene/shading_scene.h"
 #include "pathtracer/scene/thread_pool.h"
+#include "pathtracer/scene/volume.h"
 
 namespace pathtracer::api {
 
@@ -107,7 +108,7 @@ private:
     };
 
     HeadlessRenderer(std::string assetRoot, pathtracer::config::ProfileConfig profile, pathtracer::config::SceneConfig scene,
-                     Geometry geometry,
+                     Geometry geometry, pathtracer::scene::VolumeSet volumes,
                      pathtracer::scene::PathTraceSettings baseSettings,
                      std::shared_ptr<const pathtracer::gfx::ImageTexture> environmentTexture,
                      const pathtracer::scene::Camera& defaultCamera);
@@ -138,6 +139,7 @@ private:
     pathtracer::config::ProfileConfig profile_;
     pathtracer::config::SceneConfig scene_;
     Geometry geometry_;
+    pathtracer::scene::VolumeSet volumes_;  // world space, so a pose change leaves it as loaded
     // The rotations geometry_ is built for, compared per request so an unchanged pose costs nothing.
     glm::vec3 builtRootRotationDegrees_;
     std::vector<glm::vec3> builtLightRotationsDegrees_;

@@ -21,6 +21,7 @@
 #include "pathtracer/scene/light.h"
 #include "pathtracer/scene/path_tracer.h"
 #include "pathtracer/scene/thread_pool.h"
+#include "pathtracer/scene/volume.h"
 
 namespace pathtracer::scene {
 
@@ -44,7 +45,7 @@ public:
     PathTraceDriver(const EmbreeAccel& accel, const std::vector<ShadingTriangle>& shadingTriangles,
                      const std::vector<MeshInstance>& instances,
                      const std::vector<int>& instanceLightIndex,
-                     const EnvironmentMap& environmentMap, const std::vector<QuadLight>& quadLights);
+                     const EnvironmentMap& environmentMap, const std::vector<QuadLight>& quadLights, const VolumeSet& volumes);
     ~PathTraceDriver();
 
     PathTraceDriver(const PathTraceDriver&) = delete;
@@ -86,6 +87,7 @@ private:
     const std::vector<int>& instanceLightIndex_;
     const EnvironmentMap& environmentMap_;
     const std::vector<QuadLight>& quadLights_;
+    const VolumeSet& volumes_;
 
     std::mutex requestMutex_;
     // Camera has no default constructor, so this cannot be a plain Request. nullopt until the first requestTrace().

@@ -14,7 +14,7 @@ namespace pathtracer::debug {
 
 AovSource aovSource(AovId aov) {
     switch (aov) {
-        // Accumulated by renderPathTraced into PathTraceResult's 11 AOV lanes.
+        // Accumulated by renderPathTraced into PathTraceResult's 13 AOV lanes.
         case AovId::Beauty:
         case AovId::Alpha:
         case AovId::BounceCount:
@@ -25,6 +25,8 @@ AovSource aovSource(AovId aov) {
         case AovId::DirectSpecular:
         case AovId::IndirectSpecular:
         case AovId::Refraction:
+        case AovId::DirectVolume:
+        case AovId::IndirectVolume:
         case AovId::Fresnel:
             return AovSource::PathTraced;
 
@@ -101,6 +103,8 @@ int aovChannels(AovId aov) {
         case AovId::DirectSpecular:
         case AovId::IndirectSpecular:
         case AovId::Refraction:
+        case AovId::DirectVolume:
+        case AovId::IndirectVolume:
         case AovId::Denoised:
         case AovId::Count:
             return 3;
@@ -118,6 +122,8 @@ bool aovCarriesRadiance(AovId aov) {
         case AovId::DirectSpecular:
         case AovId::IndirectSpecular:
         case AovId::Refraction:
+        case AovId::DirectVolume:
+        case AovId::IndirectVolume:
         case AovId::Luminance:
         case AovId::Sobel:
         case AovId::Gabor:
@@ -166,6 +172,8 @@ bool aovIsColour(AovId aov) {
         case AovId::DirectSpecular:
         case AovId::IndirectSpecular:
         case AovId::Refraction:
+        case AovId::DirectVolume:
+        case AovId::IndirectVolume:
         case AovId::Albedo:
         case AovId::Fresnel:
         case AovId::Denoised:
@@ -239,6 +247,8 @@ bool aovIsBipolar(AovId aov) {
         case AovId::DirectSpecular:
         case AovId::IndirectSpecular:
         case AovId::Refraction:
+        case AovId::DirectVolume:
+        case AovId::IndirectVolume:
         case AovId::Shadow:
         case AovId::Denoised:
         case AovId::Count:
@@ -379,6 +389,8 @@ PathTracedLane pathTracedLane(AovId aov) {
         case AovId::DirectSpecular:   return &Result::directSpecular;
         case AovId::IndirectSpecular: return &Result::indirectSpecular;
         case AovId::Refraction:       return &Result::refraction;
+        case AovId::DirectVolume:     return &Result::directVolume;
+        case AovId::IndirectVolume:   return &Result::indirectVolume;
         case AovId::Fresnel:          return &Result::fresnel;
         case AovId::Alpha:            return &Result::alpha;
         default:                      return nullptr;
@@ -477,6 +489,8 @@ bool aovSupportsLattice(AovId aov, pathtracer::gfx::PixelLattice lattice) {
         case AovId::DirectSpecular:
         case AovId::IndirectSpecular:
         case AovId::Refraction:
+        case AovId::DirectVolume:
+        case AovId::IndirectVolume:
         case AovId::Shadow:
         case AovId::Count:
             break;

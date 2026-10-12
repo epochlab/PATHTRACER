@@ -209,9 +209,9 @@ std::optional<VolumeSet::Volume> loadVolume(const pathtracer::config::VolumeConf
         glm::mat3(glm::dmat3(indexFromWorld)),
         glm::vec3(indexFromWorld[3]),
         1.0F / config.scale,
-        material->absorption,
-        material->scattering,
-        glm::compMax(material->absorption + material->scattering),
+        material->density * material->absorption,
+        material->density * material->scattering,
+        material->density * glm::compMax(material->absorption + material->scattering),
         material->anisotropy,
     };
     volume.density = volume.densityHandle.grid<float>();
