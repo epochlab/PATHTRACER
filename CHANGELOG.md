@@ -3,6 +3,38 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## OpenVDB volumes
+
+VDB density grids render as heterogeneous participating media, with absorption and multiple scattering, through OpenVDB 13
+and NanoVDB (`brew install openvdb`).
+- **Scene:** a `volumes` array in scene.json, each entry a `.vdb` path, its float grid's name, a world `position`, `rotation`
+  and uniform `scale`, and a `materialPath`. A scene may now omit `model` (and with it `materialPath`, `materialOverrides`
+  and `textures`), so lights and volumes alone make a scene. An optional `camera` block (`position`, `rotation`,
+  `farClip`) replaces profile.json's pose and far clip for that scene; the lens stays the profile's.
+- **The cloud:** `scenes/cloud.json` is the WDAS cloud at unit scale, its density-weighted centroid (-12.95, 45.19, -28.67)
+  moved to the origin, under a 420 x 540 quad light at y = 300 that covers its footprint, with the HDRI. Its camera sits at
+  z = 2200, the nearest distance that frames the cloud's 168-unit upper extent, with far clip 4000.
+- **Volume material:** `absorption`, `scattering` and `anisotropy` (Henyey-Greenstein g), named after MaterialX's
+  `anisotropic_vdf`, per unit of the grid's own space, so a placement scale keeps the optical depth. An optional `density`
+  (default 1) multiplies the grid, changing thickness but not colour or albedo. `materials/volume.json` carries the
+  cloud's published scattering 1, absorption 0 and g 0.877 at density 1, a quarter of its published density 4.
+- **Loading:** OpenVDB reads the grid, which must be a float fog volume with background 0, a linear transform, and every
+  value, inactive ones included, finite and non-negative. Grids convert to NanoVDB for tracing. A majorant grid at leaf
+  resolution holds the maximum density over each cell's trilinear support, one voxel wider for DDA rounding, so it bounds
+  every point a ray in that cell samples. Loading and converting the 68 MB cloud takes about 1 s.
+- **Transport:** free flight by spectral tracking with history-aware probabilities (Kutz et al. 2017). Rays step through
+  the majorant cells by DDA and draw nothing in empty ones. Overlapping volumes are merged as independent collision
+  processes. A scattering is a path vertex: NEE with a ratio-tracking shadow ray (Novák et al. 2014), Henyey-Greenstein
+  sampling for the continuation, and the power heuristic between them. Shadow rays from surfaces are attenuated the same
+  way. Tracking draws from its own sampler stream.
+- **AOVs:** `directVolume` and `indirectVolume` hold paths whose first vertex is a scattering, so the seven transport
+  buckets still sum to Beauty. Alpha on a camera ray that leaves through a medium is 1 minus its mean transmittance. At a
+  volume vertex the denoiser's albedo is the tracking weight and its normal is zero.
+- **Measured:** scenes without volumes are bit-identical (12/12 EXRs), with no change in pass time (cornell 0.98x at
+  n = 6, interval containing 1). volume_validate checks majorant bounds exhaustively and closed-form transmittance, the
+  free-flight law, unbiased spectral weights, Henyey-Greenstein, a chromatic white furnace, single scattering against
+  quadrature, alpha and the bucket partition.
+
 ## Hexagonal pixels
 
 The camera can now render a hexagonal sensor: `camera.pixelLattice` in profile.json, the HUD's lattice dropdown,
