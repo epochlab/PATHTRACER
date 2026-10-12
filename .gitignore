@@ -1,22 +1,18 @@
 .DS_Store
-build/
-renders/
+
 *.gltf
+*.vdb
 *.bin
-# cornell and macbeth are the checked-in meshes; un-ignore exactly their files, not the directories, which also re-admitted .DS_Store
+*.exr
+
+/build
+/results
+
+__pycache__/
+*.egg-info/
+*.*_cache/
+
 !**/cornell/*.gltf
 !**/cornell/*.bin
 !**/macbeth/*.gltf
 !**/macbeth/*.bin
-*.exr
-
-# Before/after measurement captures: renders, bench logs and validator output, kept locally for review
-/results
-
-# Python binding build artefacts. The package itself is source-only -- the renderer is a dylib loaded at runtime -- so
-# there is nothing here but caches.
-__pycache__/
-*.egg-info/
-*.pytest_cache/
-*.mypy_cache/
-*.ruff_cache/

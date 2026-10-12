@@ -17,7 +17,7 @@ and NanoVDB (`brew install openvdb`).
 - **Volume material:** `absorption`, `scattering` and `anisotropy` (Henyey-Greenstein g), named after MaterialX's
   `anisotropic_vdf`, per unit of the grid's own space, so a placement scale keeps the optical depth. An optional `density`
   (default 1) multiplies the grid, changing thickness but not colour or albedo. `materials/volume.json` carries the
-  cloud's published values: scattering 1 at density 4, absorption 0, g 0.877.
+  cloud's published scattering 1, absorption 0 and g 0.877 at density 1, a quarter of its published density 4.
 - **Loading:** OpenVDB reads the grid, which must be a float fog volume with background 0, a linear transform, and every
   value, inactive ones included, finite and non-negative. Grids convert to NanoVDB for tracing. A majorant grid at leaf
   resolution holds the maximum density over each cell's trilinear support, one voxel wider for DDA rounding, so it bounds
