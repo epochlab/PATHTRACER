@@ -370,12 +370,18 @@ void renderGBuffer(const Camera& camera, const Camera& previousCamera, const Emb
         }
     }
     const GBufferScene scene{accel, shadingTriangles, instances, lookaheadDistance};
+    // One slot per row, so threads write disjoint floats and the reduction is order-independent and deterministic.
+    std::vector<float> rowDepthMax(static_cast<std::size_t>(height));
     threadPool.parallelFor(height, [&](int y) {
         clearRow(result, y);
         for (int x = 0; x < width; ++x) {
             renderPixel(result, view, scene, x, y);
         }
+        // Read back while the row is cache-warm; depth is a ray distance, so the cleared 0 of a miss never exceeds a hit.
+        const auto row = result.depth.texels.begin() + (static_cast<std::ptrdiff_t>(y) * width);
+        rowDepthMax[static_cast<std::size_t>(y)] = *std::max_element(row, row + width);
     });
+    result.depthMax = *std::max_element(rowDepthMax.begin(), rowDepthMax.end());
 }
 
 }  // namespace pathtracer::scene

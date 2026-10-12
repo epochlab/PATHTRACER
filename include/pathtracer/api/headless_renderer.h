@@ -90,6 +90,8 @@ public:
     // The buffer behind one requested AOV of the most recent render(), at aovChannels, valid until the next: for an EXR write or encode.
     [[nodiscard]] const pathtracer::gfx::HdrImage& lastImage(pathtracer::debug::AovId aov) const;
     [[nodiscard]] const RenderStats& lastStats() const { return stats_; }
+    // The largest Depth texel of the most recent G-buffer render, the display's range; 0 where nothing was hit or none ran.
+    [[nodiscard]] float lastDepthMax() const { return gbuffer_.depthMax; }
 
     // Resolved scene state a caller may need to report rather than render with: a benchmark naming its settings.
     [[nodiscard]] const pathtracer::scene::PathTraceSettings& baseSettings() const { return baseSettings_; }

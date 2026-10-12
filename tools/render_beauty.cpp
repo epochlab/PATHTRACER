@@ -535,7 +535,7 @@ int main(int argc, char** argv) {
 
     // The same display decision presentFrame makes, so a PNG and the viewer agree by construction rather than by two copies staying level.
     const pathtracer::debug::AovDisplay prepared = pathtracer::debug::aovDisplay(
-        options.aov, accumulated, {options.passes, renderer->baseSettings().maxBounces});
+        options.aov, accumulated, {options.passes, renderer->baseSettings().maxBounces, renderer->lastDepthMax()});
     pathtracer::debug::BipolarDisplay display = prepared.affine;
     // The photographic exposure, which only the caller knows; aovDisplay leaves the gain at unity for every AOV that takes one.
     if (pathtracer::debug::aovTakesDisplayExposure(options.aov)) {

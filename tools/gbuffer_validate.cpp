@@ -719,6 +719,22 @@ PT_CHECK(presence_walks_through_cutouts, Fast, Exact) {
     PT_EXPECT(ctx, present.depth.texels != behind.depth.texels, "an opacity-1 occluder did not hide the surface behind it");
 }
 
+// The pass's row reduction is the Depth lane's own maximum bit for bit, through misses and a fisheye's unimaged corners alike.
+PT_CHECK(depth_max_is_the_depth_lanes_maximum, Fast, Exact) {
+    ctx.plan(3);
+    const std::unique_ptr<Fixture> cluster = makeClusterFixture(ctx);
+    for (const Camera& camera : {angledCamera(), fisheyeCamera(220.0F)}) {
+        const GBuffer g = cluster->render(camera, camera);
+        const float scanned = *std::max_element(g.depth.texels.begin(), g.depth.texels.end());
+        PT_EXPECT(ctx, scanned > 0.0F && g.depthMax == scanned,
+                  "depthMax " + std::to_string(g.depthMax) + " is not the depth lane's maximum " + std::to_string(scanned));
+    }
+    // A quad behind the camera: every pixel misses, so there is no span and the published maximum is the cleared 0.
+    const std::array<ShadingTriangle, 2> behind = makeQuad(5.0F, glm::vec3(0.0F, 0.0F, 10.0F), 0);
+    const GBuffer empty = makeFixture({behind[0], behind[1]}, 1)->render(straightOnCamera(), straightOnCamera());
+    PT_EXPECT(ctx, empty.depthMax == 0.0F, "an all-miss frame published depthMax " + std::to_string(empty.depthMax));
+}
+
 // One box per instance: two separated quads must draw disjoint boxes, where a single fused box would span both.
 PT_CHECK(per_instance_boxes, Fast, Exact) {
     ctx.plan(2);

@@ -33,6 +33,8 @@ struct GBuffer {
     pathtracer::gfx::HdrImage objectId;
     // Colour-coded, not a 0/1 mask: white near a mesh triangle edge, the instance's falseColorForId hue near the instance boundary.
     pathtracer::gfx::HdrImage wireframe;
+    // The largest `depth` texel of the last call, reduced in the pass so a display range needs no rescan; 0 where nothing was hit.
+    float depthMax = 0.0F;
     // Bumped by every renderGBuffer call: the buffer is reused in place, so a consumer caching by pointer needs this to see a change.
     std::uint64_t generation = 0;
     bool wrapsHorizontally = false;  // the lens it was cast through joins its left and right edges, so neighbour reads wrap in x

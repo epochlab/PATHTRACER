@@ -3,6 +3,21 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Depth display range from the G-buffer pass
+
+The Depth AOV's display range is now reduced inside the G-buffer pass. The render thread no longer scans the frame for it.
+- **Producer:** `renderGBuffer` takes each row's depth maximum while the row is still cache-warm, one slot per row, so the result
+  is deterministic. It publishes the reduction as `GBuffer::depthMax`, 0 when nothing was hit. `HeadlessRenderer::lastDepthMax()`
+  exposes the same value to `render_beauty`.
+- **Display:** `AovDisplayContext::depthMax` carries the maximum to `aovDisplay`, whose Depth arm no longer scans. The gain
+  `2^-log2(max(maxDepth, 1e-4))` becomes `1/depthMax`, with unity gain when `depthMax` is 0, the rule `bipolarGain` already
+  uses. The `1e-4` floor is gone.
+- **Image:** the Depth PNGs are byte-identical on cornell, stump and the all-miss cloud, and the viewer frames are unchanged.
+- **Measured:** no resolved change to the G-buffer pass at n = 3. On the Depth stage, the viewer's upload median fell from 0.220 ms
+  to 0.177 ms. `ctest` 362/362 (was 361), including the new check `depth_max_is_the_depth_lanes_maximum`.
+
+Evidence is in `results/depth_range`.
+
 ## Python binding in ctest
 
 The pytest suite now runs as the ctest entry `api.python` (labels `api;fast;exact`), so the binding is gated with every
