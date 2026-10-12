@@ -46,7 +46,7 @@ struct QuadLightConfig {
     glm::vec3 position;  // quad centre, before the model root transform
     glm::vec3 rotation;  // degrees; Rz*Ry*Rx as ModelConfig::rotation, so X applies first
     glm::vec2 size;  // width along local X, height along local Y; loadSceneConfig rejects non-positive extents
-    glm::vec3 color;  // loadSceneConfig rejects a negative color or intensity
+    glm::vec3 color;  // authored, or resolved from a kelvin temperature at unit luminance; loadSceneConfig rejects a negative one
     float intensity;
     bool twoSided = false;
 };

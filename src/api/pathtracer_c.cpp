@@ -154,6 +154,10 @@ void writeError(char* err, int errCap, const std::string& message) {
                                    ? std::optional(glm::make_vec3(request.root_rotation_degrees))
                                    : std::nullopt,
         .lightRotationsDegrees = toLightRotations(request.light_rotation_degrees, lightCount),
+        .lightTemperaturesKelvin = request.light_temperature_kelvin != nullptr
+                                       ? std::optional(std::vector<float>(request.light_temperature_kelvin,
+                                                                          request.light_temperature_kelvin + lightCount))
+                                       : std::nullopt,
         .envRotationDegrees = glm::make_vec3(request.env_rotation_degrees),
     };
 }

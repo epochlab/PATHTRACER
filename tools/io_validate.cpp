@@ -35,6 +35,7 @@
 #include "pathtracer/gfx/scalar_type.h"
 #include "pathtracer/gfx/ocio_display_transform.h"
 #include "pathtracer/gfx/texture.h"
+#include "pathtracer/scene/cie.h"
 #include "pathtracer/scene/gbuffer_shading.h"
 #include "pathtracer/scene/gltf_loader.h"
 #include "pathtracer/scene/shading_scene.h"
@@ -477,6 +478,19 @@ PT_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
         {"negative light colour", "engine_io_scene_negcolor.json",
          scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
                "\"color\":[1,-1,1],\"intensity\":5.0,\"twoSided\":false}]")},
+        // A light's colour is authored once: both keys leave it ambiguous, neither leaves it unset.
+        {"a light with both color and temperature", "engine_io_scene_colortemp.json",
+         scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
+               "\"color\":[1,1,1],\"temperature\":2856,\"intensity\":5.0}]")},
+        {"a light with neither color nor temperature", "engine_io_scene_nocolor.json",
+         scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],\"intensity\":5.0}]")},
+        {"a zero light temperature", "engine_io_scene_zerotemp.json",
+         scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
+               "\"temperature\":0,\"intensity\":5.0}]")},
+        // The locus leaves BT.709 below 1900 K: 1000 K has negative blue, which a clamp would hide as a hue shift.
+        {"a light temperature outside Rec.709", "engine_io_scene_gamuttemp.json",
+         scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
+               "\"temperature\":1000,\"intensity\":5.0}]")},
     };
 
     // Anti-vacuity: the base the scene() rows are built from must itself LOAD, or they would prove nothing.
@@ -484,9 +498,18 @@ PT_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
     const bool baseLoads = pathtracer::config::loadSceneConfig(basePath.string()).has_value();
     std::filesystem::remove(basePath);
 
-    ctx.plan(static_cast<int>(cases.size()) + 1);
+    // Anti-vacuity for the temperature rows: an in-gamut temperature loads, resolved to the blackbody colour.
+    const std::filesystem::path tempPath = writeJson("engine_io_scene_temp.json",
+        scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
+              "\"temperature\":2856,\"intensity\":5.0}]"));
+    const std::optional<pathtracer::config::SceneConfig> tempScene = pathtracer::config::loadSceneConfig(tempPath.string());
+    std::filesystem::remove(tempPath);
+
+    ctx.plan(static_cast<int>(cases.size()) + 2);
     PT_EXPECT(ctx, baseLoads,
                   "the unmutated base scene must load, or every mutated row below passes vacuously");
+    PT_EXPECT(ctx, tempScene && tempScene->lights.at(0).color == glm::vec3(*pathtracer::scene::cie::blackbodyToRec709(2856.0)),
+              "a 2856 K light did not load as the blackbody colour");
     for (const Case& testCase : cases) {
         const std::filesystem::path path = writeJson(testCase.file, testCase.text);
         const bool accepted = pathtracer::config::loadSceneConfig(path.string()).has_value();

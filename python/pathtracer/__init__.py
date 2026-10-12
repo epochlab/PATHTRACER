@@ -43,8 +43,8 @@ def _aov_id(name: str) -> int:
     return identifier
 
 
-def _rotation_array(rotation: Sequence[float] | Sequence[Sequence[float]], shape: tuple[int, ...], name: str) -> np.ndarray:
-    array = np.ascontiguousarray(rotation, dtype=np.float32)
+def _float_array(values: Sequence[float] | Sequence[Sequence[float]], shape: tuple[int, ...], name: str) -> np.ndarray:
+    array = np.ascontiguousarray(values, dtype=np.float32)
     if array.shape != shape:
         raise ValueError(f"{name} must have shape {shape}, got {array.shape}")
     return array
@@ -318,6 +318,7 @@ class Renderer:
         env_light_enabled: bool | None = None,
         root_rotation: Sequence[float] | None = None,
         light_rotations: Sequence[Sequence[float]] | None = None,
+        light_temperatures: Sequence[float] | None = None,
         env_rotation: Sequence[float] = (0.0, 0.0, 0.0),
     ) -> Mapping[str, np.ndarray]:
         """Renders the requested AOVs and returns them keyed by the names given.
@@ -347,6 +348,11 @@ class Renderer:
         previous render's reloads the glTF and rebuilds the BVH, so batch renders by pose rather than alternating poses.
         ``env_rotation`` turns the environment map, background and lighting alike; zero is the map unrotated.
 
+        ``light_temperatures`` replaces each light's colour, one kelvin per light in scene order, with the Planckian
+        radiator's linear Rec.709 colour at unit luminance, so ``intensity`` keeps its meaning. Below 1900 K the colour
+        leaves Rec.709 (blue turns negative) and is refused rather than clamped. ``None`` keeps the authored colours.
+        Only the lights' radiance changes, so it never rebuilds the BVH. The environment keeps its measured colour.
+
         Returns arrays of shape ``(height, width, channels)``, float32, row 0 at the top.
         """
         names = tuple(aovs)
@@ -361,13 +367,12 @@ class Renderer:
         if width < 1 or height < 1:
             raise ValueError(f"resolution must be positive, got {width}x{height}")
 
-        # Shape-checked here: the ABI reads 3 floats per pointer, and 3 per light, with no length to check against.
-        root = None if root_rotation is None else _rotation_array(root_rotation, (3,), "root_rotation")
-        lights = None
-        if light_rotations is not None:
-            count = _LIB.pt_renderer_light_count(self._handle)
-            lights = _rotation_array(light_rotations, (count, 3), "light_rotations")
-        env = _rotation_array(env_rotation, (3,), "env_rotation")
+        # Shape-checked here: the ABI reads 3 floats per pointer, and 3 or 1 per light, with no length to check against.
+        root = None if root_rotation is None else _float_array(root_rotation, (3,), "root_rotation")
+        count = _LIB.pt_renderer_light_count(self._handle)
+        lights = None if light_rotations is None else _float_array(light_rotations, (count, 3), "light_rotations")
+        kelvin = None if light_temperatures is None else _float_array(light_temperatures, (count,), "light_temperatures")
+        env = _float_array(env_rotation, (3,), "env_rotation")
 
         identifiers = [_aov_id(name) for name in names]
         # numpy owns every byte, so nothing is freed across the ABI and the arrays outlive the call without a copy.
@@ -395,6 +400,8 @@ class Renderer:
             request.root_rotation_degrees = root.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
         if lights is not None:
             request.light_rotation_degrees = lights.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+        if kelvin is not None:
+            request.light_temperature_kelvin = kelvin.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
         request.env_rotation_degrees = (ctypes.c_float * 3)(*env)
 
         error = _ffi.make_error_buffer()

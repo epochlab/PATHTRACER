@@ -1,5 +1,7 @@
 #include "pathtracer/scene/cie.h"
 
+#include <cmath>
+
 namespace pathtracer::scene::cie {
 
 namespace {
@@ -67,5 +69,25 @@ const glm::dmat3& xyzToRec709() {
 }
 
 glm::dvec3 reflectanceToRec709(const Spectrum& reflectance) { return xyzToRec709() * reflectanceToXyz(reflectance); }
+
+std::optional<glm::dvec3> blackbodyToRec709(double kelvin) {
+    if (!(kelvin > 0.0) || !std::isfinite(kelvin)) {
+        return std::nullopt;
+    }
+    // Planck's second radiation constant, CIE 015:2018's ITS-90 value; c1 and the 1 nm interval cancel in the Y = 1 normalisation.
+    constexpr double kC2 = 1.4388e-2;
+    glm::dvec3 xyz(0.0);
+    for (int i = 0; i < kSampleCount; ++i) {
+        const double lambda = wavelengthNm(i) * 1e-9;
+        const Sample& s = kTable[i];
+        xyz += glm::dvec3(s.xBar, s.yBar, s.zBar) / (std::pow(lambda, 5) * std::expm1(kC2 / (lambda * kelvin)));
+    }
+    const glm::dvec3 rgb = xyzToRec709() * (xyz / xyz.y);
+    // Below 1900 K the locus leaves Rec.709 (blue < 0): a clamp would shift hue, and an underflowed spectrum is NaN, so both are refused.
+    if (!glm::all(glm::greaterThanEqual(rgb, glm::dvec3(0.0)))) {
+        return std::nullopt;
+    }
+    return rgb;
+}
 
 }  // namespace pathtracer::scene::cie

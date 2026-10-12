@@ -13,7 +13,7 @@ typedef struct PtRenderer PtRenderer;
 #define PT_OK 0
 #define PT_ERROR 1
 /* PtCamera is passed by value, so a caller built against a different layout must be caught rather than reading the fields as garbage. */
-#define PT_ABI_VERSION 7
+#define PT_ABI_VERSION 8
 /* Lens projections, PtCamera.lens_projection: the pinhole, Kannala & Brandt's polynomial fisheye, and the 360-degree lat-long. */
 #define PT_LENS_RECTILINEAR 0
 #define PT_LENS_FISHEYE_POLYNOMIAL 1
@@ -95,6 +95,8 @@ typedef struct {
     const float* root_rotation_degrees;
     /* NULL keeps every authored lights[i].rotation, else 3 * pt_renderer_light_count floats, each light under the root. */
     const float* light_rotation_degrees;
+    /* NULL keeps every authored light colour, else pt_renderer_light_count kelvin: each a Planckian colour at unit luminance. */
+    const float* light_temperature_kelvin;
     /* The environment map to world, background and lighting alike; all zero is the map unrotated. */
     float env_rotation_degrees[3];
 } PtRenderRequest;

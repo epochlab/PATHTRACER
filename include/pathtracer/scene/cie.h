@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <optional>
 
 #include <glm/glm.hpp>
 
@@ -29,5 +30,8 @@ struct TableRow {
 
 // Linear Rec.709 of a reflectance under D65 (Rec.709's white), via CIE 015:2018 tristimulus integration.
 [[nodiscard]] glm::dvec3 reflectanceToRec709(const Spectrum& reflectance);
+
+// Linear Rec.709 of a Planckian radiator at unit luminance (Y = 1); nullopt unless kelvin is finite, positive and inside the gamut.
+[[nodiscard]] std::optional<glm::dvec3> blackbodyToRec709(double kelvin);
 
 }  // namespace pathtracer::scene::cie

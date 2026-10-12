@@ -3,6 +3,27 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Kelvin light temperature
+
+A quad light can now be authored by colour temperature: its colour is the Planckian radiator's, at unit luminance.
+- **Colour:** `cie::blackbodyToRec709(kelvin)` sums Planck's law, with CIE 015:2018's `c2 = 1.4388e-2 m K`, against
+  the tabulated CIE 1931 observer at 1 nm. It normalises to Y = 1 and maps through the same RP 177 matrix, so
+  `intensity` means the same as it does with `color: [1, 1, 1]`. Below 1900 K the locus leaves Rec.709 (blue turns
+  negative), and that temperature is refused rather than clamped, as are non-finite and non-positive values.
+- **scene.json:** a light takes exactly one of `color` or `temperature`. It resolves at load, so the binding, the
+  BVH and every shipped scene are unchanged.
+- **API:** `Request::lightTemperaturesKelvin`, the C field `light_temperature_kelvin` and Python's
+  `render(light_temperatures=...)` override every light's colour per render; NULL/`None` keeps the authored colours.
+  Only `QuadLight::radiance` changes, so the BVH is never rebuilt. `PT_ABI_VERSION` 8.
+- **Scope:** quad lights only. An HDRI keeps the colour it was measured under; white-balancing it is chromatic
+  adaptation, added to the Roadmap as HDRI white balance.
+- **Measured:** Planck at CIE A's exponent gives the published A chromaticity to four decimals. On the ColorChecker
+  the render applies the light colour to within float epsilon. Against spectral ground truth, RGB rendering's mean
+  CIEDE2000 is 0.42 at 6504 K and 4.05 at 2856 K (neutral row at most 0.42): that is RGB transport's own error
+  away from D65, not the light's. Shipped renders are byte-identical, with no resolved cost. `ctest` 365/365 (was 362).
+
+Evidence is in `results/kelvin_light`.
+
 ## Depth display range from the G-buffer pass
 
 The Depth AOV's display range is now reduced inside the G-buffer pass. The render thread no longer scans the frame for it.
