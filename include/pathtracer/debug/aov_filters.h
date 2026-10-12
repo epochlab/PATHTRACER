@@ -15,9 +15,6 @@ namespace pathtracer::debug {
 
 // CPU implementations of the eight Beauty-reading AOVs. Sobel clamps at the edge, DoG and Gabor mirror; all three wrap a periodic x.
 
-// Rec.709 luminance weights (ITU-R BT.709-6), the one triple every luminance reduction in the engine dots against.
-inline constexpr glm::vec3 kRec709LuminanceWeights{0.2126F, 0.7152F, 0.0722F};
-
 // Radial half-response bandwidth of the Morlet bank, in octaves: DoG's fine-to-coarse spacing, so both operators resolve one band.
 inline constexpr float kMorletOctaves = 1.0F;
 
@@ -57,7 +54,7 @@ void demodulate(std::span<const float> plane, const MorletPlaneWave& wave, int w
     return {centredReal, centredImaginary};
 }
 
-// Rec.709 luminance, one channel. Single centre tap, no neighbourhood.
+// Scene luminance, one channel. Single centre tap, no neighbourhood.
 [[nodiscard]] pathtracer::gfx::HdrImage luminanceAov(const pathtracer::gfx::HdrImage& beauty,
                                                   pathtracer::scene::ThreadPool& threadPool);
 
@@ -77,17 +74,17 @@ void demodulate(std::span<const float> plane, const MorletPlaneWave& wave, int w
 [[nodiscard]] pathtracer::gfx::HdrImage dogAov(const pathtracer::gfx::HdrImage& beauty,
                                             pathtracer::scene::ThreadPool& threadPool, bool wrapsHorizontally = false);
 
-// Cone-opponent displacement from Rec.709 white (cone_space.h): (l - l_white, s - s_white), two channels, invariant to a positive gain.
+// Cone-opponent displacement from scene white (cone_space.h): (l - l_white, s - s_white), two channels, invariant to a positive gain.
 [[nodiscard]] pathtracer::gfx::HdrImage colourOpponentAov(const pathtracer::gfx::HdrImage& beauty,
                                                           pathtracer::scene::ThreadPool& threadPool);
 
-// Rec.709 luminance SNR from replicated RQMC: the replicates' mean over its standard error, from their spread (L'Ecuyer & Lemieux 2002).
+// Scene luminance SNR from replicated RQMC: the replicates' mean over its standard error, from their spread (L'Ecuyer & Lemieux 2002).
 [[nodiscard]] pathtracer::gfx::HdrImage snrAov(int width, int height, const float* replicateLuminance, int replicates, int samples,
                                             pathtracer::scene::ThreadPool& threadPool);
 
 // Everything a BeautyFilter AOV reads, as explicit fields rather than a PathTraceResult, so a validator can build one with no renderer.
 struct FilterInput {
-    const pathtracer::gfx::HdrImage& beauty;  // published mean radiance, linear Rec.709, scene-referred and unbounded
+    const pathtracer::gfx::HdrImage& beauty;  // published mean radiance, linear scene space, scene-referred and unbounded
     // Per-replicate running luminance means, `replicates` per texel, and the passes averaged in: min(samples, replicates) are populated.
     const float* replicateLuminance = nullptr;
     int replicates = 1;

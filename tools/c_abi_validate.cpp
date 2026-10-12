@@ -268,7 +268,7 @@ PT_CHECK(render_rejects_invalid_requests_without_writing, Slow, Exact) {
     static const std::array<float, 3> kInfRotation{std::numeric_limits<float>::infinity(), 0.0F, 0.0F};
     // The locus leaves BT.709 below 1900 K, so 1000 K has negative blue, which no clamp may hide.
     static const std::array<float, 1> kZeroKelvin{0.0F};
-    static const std::array<float, 1> kOutOfGamutKelvin{1000.0F};
+    static const std::array<float, 1> kOutOfGamutKelvin{500.0F};
     // Sobel at depth's one channel, so the request's buffers fit it: refused for its square stencil before any is written.
     static const std::array<int, 2> kSobelAovs{pt_aov_id("beauty"), pt_aov_id("sobel")};
     const std::array<Case, 16> cases{{
@@ -294,7 +294,7 @@ PT_CHECK(render_rejects_invalid_requests_without_writing, Slow, Exact) {
          [](PtRenderRequest& r, std::vector<float*>&) { r.light_rotation_degrees = kInfRotation.data(); }},
         {"zero light temperature", "light temperature",
          [](PtRenderRequest& r, std::vector<float*>&) { r.light_temperature_kelvin = kZeroKelvin.data(); }},
-        {"out-of-gamut light temperature", "outside Rec.709",
+        {"out-of-gamut light temperature", "outside the scene gamut",
          [](PtRenderRequest& r, std::vector<float*>&) { r.light_temperature_kelvin = kOutOfGamutKelvin.data(); }},
         {"NaN environment rotation", "environment rotation",
          [](PtRenderRequest& r, std::vector<float*>&) { r.env_rotation_degrees[1] = std::numeric_limits<float>::quiet_NaN(); }},

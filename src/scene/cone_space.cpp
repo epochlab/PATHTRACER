@@ -12,14 +12,14 @@ namespace {
 }
 
 OpponentBasis deriveOpponentBasis() {
-    const glm::dmat3 rgbToLms = xyzToLms() * glm::inverse(cie::xyzToRec709());
+    const glm::dmat3 rgbToLms = xyzToLms() * glm::inverse(cie::xyzToScene());
     // glm stores columns, so row r of the transform is the r-th component of each column: exactly the coefficients dotted against RGB.
     const glm::dvec3 longRow(rgbToLms[0][0], rgbToLms[1][0], rgbToLms[2][0]);
     const glm::dvec3 mediumRow(rgbToLms[0][1], rgbToLms[1][1], rgbToLms[2][1]);
     const glm::dvec3 shortRow(rgbToLms[0][2], rgbToLms[1][2], rgbToLms[2][2]);
     const glm::dvec3 sumRow = longRow + mediumRow;
 
-    // White is RGB (1,1,1) by xyzToRec709()'s construction, so every reference excitation is one row sum, not a second integration.
+    // White is RGB (1,1,1) by xyzToScene()'s construction, so every reference excitation is one row sum, not a second integration.
     const double whiteSum = sumRow.x + sumRow.y + sumRow.z;
     const double whiteLong = (longRow.x + longRow.y + longRow.z) / whiteSum;
     const double whiteShort = shortRow.x + shortRow.y + shortRow.z;
@@ -43,7 +43,7 @@ glm::dvec2 coneChromaticity(const glm::dvec3& lms) {
 
 glm::dvec2 whiteConeChromaticity() {
     static const glm::dvec2 kWhite =
-        coneChromaticity(xyzToLms() * (glm::inverse(cie::xyzToRec709()) * glm::dvec3(1.0)));
+        coneChromaticity(xyzToLms() * (glm::inverse(cie::xyzToScene()) * glm::dvec3(1.0)));
     return kWhite;
 }
 

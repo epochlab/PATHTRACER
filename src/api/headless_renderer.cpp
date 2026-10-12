@@ -116,9 +116,9 @@ struct SceneInputs {
             continue;
         }
         const float kelvin = (*request.lightTemperaturesKelvin)[i];
-        const std::optional<glm::dvec3> rgb = pathtracer::scene::cie::blackbodyToRec709(kelvin);
+        const std::optional<glm::dvec3> rgb = pathtracer::scene::cie::blackbodyToScene(kelvin);
         if (!rgb) {
-            error = "light temperature " + std::to_string(kelvin) + " K is not positive or lies outside Rec.709";
+            error = "light temperature " + std::to_string(kelvin) + " K is not positive or lies outside the scene gamut";
             return std::nullopt;
         }
         colours.emplace_back(*rgb);

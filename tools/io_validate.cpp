@@ -33,6 +33,7 @@
 #include "pathtracer/debug/bench_log.h"
 #include "pathtracer/gfx/hdr_image.h"
 #include "pathtracer/gfx/scalar_type.h"
+#include "pathtracer/gfx/ocio_cpu_transform.h"
 #include "pathtracer/gfx/ocio_display_transform.h"
 #include "pathtracer/gfx/texture.h"
 #include "pathtracer/scene/cie.h"
@@ -166,12 +167,12 @@ PT_CHECK(exr_write_declares_its_pixel_lattice, Fast, Exact) {
               "a hexagonal EXR's PixelAspectRatio " + std::to_string(aspect) + " is not 2/sqrt(3)");
 }
 
-// Colour EXRs carry the working space twice, as OIIO's tag and OpenEXR's chromaticities; the oracle is BT.709's own published xy.
+// Colour EXRs carry the working space twice, as OIIO's tag and OpenEXR's chromaticities; the oracle is AP1's own published xy.
 PT_CHECK(exr_write_declares_its_colour_space, Fast, Exact) {
-    // ITU-R BT.709-6 Table 1, items 1.3 and 1.4: R, G, B primaries and the D65 white, the working space's definition.
-    constexpr std::array<float, 8> kBt709{0.640F, 0.330F, 0.300F, 0.600F, 0.150F, 0.060F, 0.3127F, 0.3290F};
-    // Half a unit in the fourth decimal, the precision BT.709 publishes its white point at.
-    constexpr float kPublishedPrecision = 5e-5F;
+    // SMPTE ST 2065-1 / ACES S-2014-004: AP1's R, G, B primaries and the ACES white, the working space's definition.
+    constexpr std::array<float, 8> kAp1{0.713F, 0.293F, 0.165F, 0.830F, 0.128F, 0.044F, 0.32168F, 0.33767F};
+    // Half a unit in the fifth decimal, the precision the ACES white is published at.
+    constexpr float kPublishedPrecision = 5e-6F;
     ctx.plan(4);
     const pathtracer::gfx::HdrImage image{1, 1, pathtracer::gfx::kRgbChannels, {0.25F, 0.5F, 0.75F}};
     const std::filesystem::path path = scratchPath("engine_io_validate_tags.exr");
@@ -192,12 +193,12 @@ PT_CHECK(exr_write_declares_its_colour_space, Fast, Exact) {
     float worst = std::numeric_limits<float>::infinity();
     if (chromaticities != nullptr) {
         worst = 0.0F;
-        for (std::size_t i = 0; i < kBt709.size(); ++i) {
-            worst = std::max(worst, std::abs(static_cast<const float*>(chromaticities->data())[i] - kBt709[i]));
+        for (std::size_t i = 0; i < kAp1.size(); ++i) {
+            worst = std::max(worst, std::abs(static_cast<const float*>(chromaticities->data())[i] - kAp1[i]));
         }
     }
     char detail[160];
-    std::snprintf(detail, sizeof(detail), "Colour EXR chromaticities differ from BT.709 by %.3g, over its published %.3g", worst,
+    std::snprintf(detail, sizeof(detail), "Colour EXR chromaticities differ from AP1 by %.3g, over its published %.3g", worst,
                   kPublishedPrecision);
     PT_EXPECT(ctx, worst <= kPublishedPrecision, detail);
     PT_EXPECT(ctx, data && config.isData(config.resolve(data->get_string_attribute("oiio:ColorSpace"))), "a Data EXR is not tagged as data");
@@ -215,14 +216,15 @@ PT_CHECK(image_load_converts_colour_to_the_working_space, Fast, Exact) {
         return expected;
     };
     ctx.plan(5);
-    const std::filesystem::path path = scratchPath("engine_io_validate_acescg.exr");
+    const std::filesystem::path path = scratchPath("engine_io_validate_rec709.exr");
     const bool written = writeExrPlanes(path, 2, 1, {"R", "G", "B"}, stored, [](OIIO::ImageSpec& spec) {
-        spec.attribute("oiio:ColorSpace", "ACEScg");
+        spec.attribute("oiio:ColorSpace", "Linear Rec.709 (sRGB)");
     });
     const std::optional<pathtracer::gfx::HdrImage> colour = pathtracer::gfx::loadImage(path.string(), pathtracer::gfx::ImageRole::Colour);
     const std::optional<pathtracer::gfx::HdrImage> data = pathtracer::gfx::loadImage(path.string(), pathtracer::gfx::ImageRole::Data);
     std::filesystem::remove(path);
-    PT_EXPECT(ctx, written && colour && colour->texels == oracle("ACEScg"), "an ACEScg EXR did not read as OCIO's ACEScg to working space");
+    PT_EXPECT(ctx, written && colour && colour->texels == oracle("Linear Rec.709 (sRGB)"),
+              "a linear Rec.709 EXR did not read as OCIO's conversion to the working space");
     PT_EXPECT(ctx, data && data->texels == stored, "a Data read converted values it must leave raw");
 
     // Linear EXR is the one input: a PNG, and an EXR tagged with the sRGB texture curve, are refused rather than decoded.
@@ -244,7 +246,7 @@ PT_CHECK(image_load_converts_colour_to_the_working_space, Fast, Exact) {
     std::filesystem::remove(encoded);
 }
 
-// Untagged EXRs mean BT.709 by OpenEXR's own rule; untagged chromaticities naming other primaries cannot be honoured, so are refused.
+// Untagged EXRs mean BT.709 by OpenEXR's rule, converted to the scene space; other untagged primaries cannot be honoured, so are refused.
 PT_CHECK(image_load_honours_untagged_exr_chromaticities, Fast, Exact) {
     const std::vector<float> stored{0.25F, 0.5F, 0.75F};
     const auto withChromaticities = [&](const char* name, std::array<float, 8> xy) {
@@ -259,7 +261,9 @@ PT_CHECK(image_load_honours_untagged_exr_chromaticities, Fast, Exact) {
     const std::filesystem::path rec709 = withChromaticities("engine_io_validate_709.exr", {0.64F, 0.33F, 0.30F, 0.60F, 0.15F, 0.06F, 0.3127F, 0.3290F});
     const std::filesystem::path ap1 = withChromaticities("engine_io_validate_ap1.exr", {0.713F, 0.293F, 0.165F, 0.830F, 0.128F, 0.044F, 0.32168F, 0.33767F});
     const std::optional<pathtracer::gfx::HdrImage> asRec709 = pathtracer::gfx::loadImage(rec709.string(), pathtracer::gfx::ImageRole::Colour);
-    PT_EXPECT(ctx, asRec709 && asRec709->texels == stored, "an untagged BT.709 EXR did not read unchanged into the BT.709 working space");
+    std::vector<float> expected = stored;
+    pathtracer::gfx::convertToSceneSpace(expected, pathtracer::gfx::kOcioLinearRec709);
+    PT_EXPECT(ctx, asRec709 && asRec709->texels == expected, "an untagged BT.709 EXR did not read as OCIO's linear Rec.709 to the scene space");
     std::cout << "  the stderr diagnostic below is expected: untagged AP1 chromaticities name no space the file is tagged with\n";
     PT_EXPECT(ctx, !pathtracer::gfx::loadImage(ap1.string(), pathtracer::gfx::ImageRole::Colour),
               "untagged AP1 chromaticities were read as BT.709");
@@ -487,10 +491,10 @@ PT_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
         {"a zero light temperature", "engine_io_scene_zerotemp.json",
          scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
                "\"temperature\":0,\"intensity\":5.0}]")},
-        // The locus leaves BT.709 below 1900 K: 1000 K has negative blue, which a clamp would hide as a hue shift.
-        {"a light temperature outside Rec.709", "engine_io_scene_gamuttemp.json",
+        // The locus leaves AP1 below about 600 K: 500 K has negative green, which a clamp would hide as a hue shift.
+        {"a light temperature outside the scene gamut", "engine_io_scene_gamuttemp.json",
          scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
-               "\"temperature\":1000,\"intensity\":5.0}]")},
+               "\"temperature\":500,\"intensity\":5.0}]")},
     };
 
     // Anti-vacuity: the base the scene() rows are built from must itself LOAD, or they would prove nothing.
@@ -508,7 +512,7 @@ PT_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
     ctx.plan(static_cast<int>(cases.size()) + 2);
     PT_EXPECT(ctx, baseLoads,
                   "the unmutated base scene must load, or every mutated row below passes vacuously");
-    PT_EXPECT(ctx, tempScene && tempScene->lights.at(0).color == glm::vec3(*pathtracer::scene::cie::blackbodyToRec709(2856.0)),
+    PT_EXPECT(ctx, tempScene && tempScene->lights.at(0).color == glm::vec3(*pathtracer::scene::cie::blackbodyToScene(2856.0)),
               "a 2856 K light did not load as the blackbody colour");
     for (const Case& testCase : cases) {
         const std::filesystem::path path = writeJson(testCase.file, testCase.text);
@@ -522,7 +526,7 @@ PT_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
 
 // Anti-vacuity for the rejection rows below: every material the repo ships must still load once loadMaterialConfig validates.
 PT_CHECK(material_config_accepts_the_shipped_materials, Fast, Exact) {
-    const std::vector<const char*> shipped = {"chrome.json", "clay.json", "emission.json", "glass.json", "principled.json"};
+    const std::vector<const char*> shipped = {"chrome.json", "clay.json", "emission.json", "glass.json", "gold.json", "principled.json"};
     ctx.plan(static_cast<int>(shipped.size()));
     for (const char* name : shipped) {
         const std::filesystem::path path = std::filesystem::path(ASSET_ROOT_DIR) / "materials" / name;
@@ -976,7 +980,7 @@ PT_CHECK(texture_keeps_float32_sources, Fast, Exact) {
     const std::filesystem::path path = scratchPath("engine_io_texture_float32.exr");
     const bool written = writeExrPlanes(path, 2, 1, {"R", "G", "B"}, texels);
     const std::shared_ptr<const pathtracer::gfx::ImageTexture> texture =
-        written ? pathtracer::gfx::openTexture(path.string(), pathtracer::gfx::kRgbChannels, pathtracer::gfx::ImageRole::Colour,
+        written ? pathtracer::gfx::openTexture(path.string(), pathtracer::gfx::kRgbChannels, pathtracer::gfx::ImageRole::Data,
                                                pathtracer::gfx::TextureWrap::LatLong)
                 : nullptr;
     ctx.plan(2);
@@ -1045,7 +1049,7 @@ PT_CHECK(texture_converts_colour_to_the_working_space, Fast, Exact) {
         });
         return written ? path : std::filesystem::path();
     };
-    const std::filesystem::path tagged = write("engine_io_texture_acescg.exr", "ACEScg");
+    const std::filesystem::path tagged = write("engine_io_texture_rec709.exr", "Linear Rec.709 (sRGB)");
     const std::filesystem::path untagged = write("engine_io_texture_untagged.exr", nullptr);
     const auto open = [](const std::filesystem::path& path, pathtracer::gfx::ImageRole role, const std::optional<std::string>& colorSpace) {
         return pathtracer::gfx::openTexture(path.string(), pathtracer::gfx::kRgbChannels, role, pathtracer::gfx::TextureWrap::Repeat, colorSpace);
@@ -1064,17 +1068,23 @@ PT_CHECK(texture_converts_colour_to_the_working_space, Fast, Exact) {
     const std::vector<std::uint8_t> codes{0, 46, 128, 188, 255, 255};
     const std::unique_ptr<OIIO::ImageOutput> output = OIIO::ImageOutput::create("png");
     const bool pngWritten = output && output->open(png.string(), pngSpec) && output->write_image(OIIO::TypeUInt8, codes.data()) && output->close();
-    ctx.plan(6);
+    ctx.plan(7);
     PT_EXPECT(ctx, !tagged.empty() && !untagged.empty() && reference && raw && reference->texels != raw->texels,
-              "could not write the ACEScg probes, or ACEScg read as the working space");
+              "could not write the Rec.709 probes, or Rec.709 read as the working space");
     PT_EXPECT(ctx, texels(open(tagged, pathtracer::gfx::ImageRole::Colour, std::nullopt)) == expected,
-              "an ACEScg half texture is not loadImage's conversion rounded once to half");
-    PT_EXPECT(ctx, texels(open(untagged, pathtracer::gfx::ImageRole::Colour, "ACEScg")) == expected,
+              "a Rec.709 half texture is not loadImage's conversion rounded once to half");
+    PT_EXPECT(ctx, texels(open(untagged, pathtracer::gfx::ImageRole::Colour, std::nullopt)) == expected,
+              "an untagged half texture did not read as OpenEXR's BT.709 default");
+    std::vector<float> asScene;
+    for (const float texel : stored) {
+        asScene.push_back(static_cast<float>(static_cast<pathtracer::gfx::Half>(texel)));
+    }
+    PT_EXPECT(ctx, texels(open(untagged, pathtracer::gfx::ImageRole::Colour, "ACEScg")) == asScene,
               "a scene colorSpace did not override an untagged file's BT.709 default");
     PT_EXPECT(ctx, raw && texels(open(tagged, pathtracer::gfx::ImageRole::Data, std::nullopt)) == raw->texels,
               "a data texture was converted rather than read raw");
     std::cout << "  the stderr diagnostics below are expected: a data texture refuses a colour space, and a PNG is not linear EXR\n";
-    PT_EXPECT(ctx, !open(tagged, pathtracer::gfx::ImageRole::Data, "ACEScg"), "a data texture accepted a colour space");
+    PT_EXPECT(ctx, !open(tagged, pathtracer::gfx::ImageRole::Data, "Linear Rec.709 (sRGB)"), "a data texture accepted a colour space");
     PT_EXPECT(ctx, pngWritten && !open(png, pathtracer::gfx::ImageRole::Colour, std::nullopt), "a PNG was opened as a texture");
     std::filesystem::remove(tagged);
     std::filesystem::remove(untagged);
@@ -1325,6 +1335,7 @@ struct GltfPrimitive {
     std::vector<glm::vec4> tangents;
     std::vector<unsigned int> indices;
     int mode = 4;  // glTF primitive.mode: 0 POINTS, 1 LINES, 4 TRIANGLES, 5 TRIANGLE_STRIP, 6 TRIANGLE_FAN
+    std::vector<glm::vec3> colours = {};  // COLOR_0
 };
 
 // Writes a one-mesh .gltf and its .bin to scratch, the mesh instanced by one node per entry of nodeScales; returns the .gltf path.
@@ -1354,6 +1365,9 @@ std::filesystem::path writeGltf(const std::string& stem, const std::vector<GltfP
         }
         if (!prim.tangents.empty()) {
             primitive["attributes"]["TANGENT"] = addAccessor(prim.tangents, kFloat, "VEC4");
+        }
+        if (!prim.colours.empty()) {
+            primitive["attributes"]["COLOR_0"] = addAccessor(prim.colours, kFloat, "VEC3");
         }
         if (!prim.indices.empty()) {
             primitive["indices"] = addAccessor(prim.indices, kUnsignedInt, "SCALAR");
@@ -1390,6 +1404,24 @@ GltfPrimitive makeQuad() {
                          {{0.0F, 1.0F}, {1.0F, 1.0F}, {1.0F, 0.0F}, {0.0F, 0.0F}},
                          std::vector<glm::vec4>(4, glm::vec4(1.0F, 0.0F, 0.0F, 1.0F)),
                          {0, 1, 2, 0, 2, 3}};
+}
+
+// glTF COLOR_0 is linear BT.709 (glTF 2.0 3.7.2.1); the loader gives the scene space OCIO's conversion, and an absent one stays white.
+PT_CHECK(gltf_vertex_colours_convert_to_the_scene_space, Fast, Exact) {
+    GltfPrimitive quad = makeQuad();
+    quad.colours = {{0.8F, 0.1F, 0.05F}, {0.1F, 0.6F, 0.2F}, {0.2F, 0.3F, 0.9F}, {1.0F, 1.0F, 1.0F}};
+    const std::optional<pathtracer::scene::LoadedModel> tinted = pathtracer::scene::loadGltf(writeGltf("engine_io_validate_tint", {quad}, {glm::vec3(1.0F)}).string());
+    const std::optional<pathtracer::scene::LoadedModel> plain =
+        pathtracer::scene::loadGltf(writeGltf("engine_io_validate_plain", {makeQuad()}, {glm::vec3(1.0F)}).string());
+    ctx.plan(2);
+    // Triangle 0 of the quad is vertices 0, 1, 2 and its second is 0, 2, 3, so v0 of triangle 1 is vertex 0 again.
+    std::vector<float> expected = {0.8F, 0.1F, 0.05F, 0.1F, 0.6F, 0.2F, 0.2F, 0.3F, 0.9F};
+    pathtracer::gfx::convertToSceneSpace(expected, pathtracer::gfx::kOcioLinearRec709);
+    const bool converted = tinted && glm::vec3(expected[0], expected[1], expected[2]) == tinted->shadingTriangles[0].v0.colour &&
+                           glm::vec3(expected[3], expected[4], expected[5]) == tinted->shadingTriangles[0].v1.colour &&
+                           glm::vec3(expected[6], expected[7], expected[8]) == tinted->shadingTriangles[0].v2.colour;
+    PT_EXPECT(ctx, converted, "COLOR_0 did not arrive as OCIO's linear Rec.709 to the scene space");
+    PT_EXPECT(ctx, plain && plain->shadingTriangles[0].v0.colour == glm::vec3(1.0F), "a primitive with no COLOR_0 is not white");
 }
 
 // glTF 2.0 3.7.2.1: winding follows the determinant, so a mirrored node must keep its face normal on the shading normal's side.

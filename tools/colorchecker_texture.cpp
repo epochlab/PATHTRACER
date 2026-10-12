@@ -1,4 +1,4 @@
-// Writes the ColorChecker Classic as a linear Rec.709 albedo EXR from BabelColor's averaged spectral reflectances.
+// Writes the ColorChecker Classic as a scene-space (ACEScg) albedo EXR from BabelColor's averaged spectral reflectances.
 
 #include <cstddef>
 #include <cstdio>
@@ -24,7 +24,7 @@ pathtracer::gfx::HdrImage makeChart(const std::vector<Patch>& patches, int patch
     pathtracer::gfx::HdrImage image = pathtracer::gfx::makeImage(width, height, pathtracer::gfx::kRgbChannels);
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
-            const glm::dvec3& rgb = patches[static_cast<std::size_t>(((y / patchPx) * kColumns) + (x / patchPx))].rec709;
+            const glm::dvec3& rgb = patches[static_cast<std::size_t>(((y / patchPx) * kColumns) + (x / patchPx))].scene;
             writeTexel(image, x, y, glm::vec3(rgb));
         }
     }
@@ -61,9 +61,9 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
     std::cout << "colorchecker_texture: wrote " << outPath << " (" << kColumns * patchPx << "x" << kRows * patchPx
-              << ", linear Rec.709, D65, CIE 1931 2-degree)\n";
+              << ", scene space, D65, CIE 1931 2-degree)\n";
     for (const Patch& patch : *patches) {
-        std::printf("  %-22s %.6f %.6f %.6f\n", patch.name.c_str(), patch.rec709.r, patch.rec709.g, patch.rec709.b);
+        std::printf("  %-22s %.6f %.6f %.6f\n", patch.name.c_str(), patch.scene.r, patch.scene.g, patch.scene.b);
     }
     return EXIT_SUCCESS;
 }

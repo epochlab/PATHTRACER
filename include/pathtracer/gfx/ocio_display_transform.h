@@ -13,8 +13,10 @@ namespace pathtracer::gfx {
 
 // The colour pipeline's definition for CPU-side consumers. kOcioConfigName is pinned, not "-latest", so the transform cannot move.
 inline constexpr const char* kOcioConfigName = "cg-config-v1.0.0_aces-v1.3_ocio-v2.1";
-inline constexpr const char* kOcioSceneColorSpace = "Linear Rec.709 (sRGB)";
-// Verified against the installed library: this view is a pure colorimetric pass (0->0, 1->1, zero crosstalk).
+inline constexpr const char* kOcioSceneColorSpace = "ACEScg";
+// glTF's linear colours (vertex colours) are BT.709 primaries at D65, the config's linear sRGB.
+inline constexpr const char* kOcioLinearRec709 = "Linear Rec.709 (sRGB)";
+// A colorimetric view with no tone curve: the scene space's gamut matrix to the display's primaries, then its curve.
 inline constexpr const char* kOcioView = "Un-tone-mapped";
 inline constexpr const char* kOcioSrgbDisplay = "sRGB - Display";
 inline constexpr const char* kOcioRec709Display = "Rec.1886 Rec.709 - Display";

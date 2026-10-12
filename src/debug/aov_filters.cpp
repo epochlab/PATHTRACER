@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "pathtracer/debug/scale_space.h"
+#include "pathtracer/scene/cie.h"
 #include "pathtracer/scene/cone_space.h"
 
 namespace pathtracer::debug {
@@ -18,8 +19,9 @@ namespace {
 using pathtracer::gfx::HdrImage;
 using pathtracer::scene::ThreadPool;
 
-// Rec.709 luminance, materialised once (Sobel reads 8 neighbours); `pad` wrapped columns each side extend a periodic image past its seam.
+// Scene luminance, materialised once (Sobel reads 8 neighbours); `pad` wrapped columns each side extend a periodic image past its seam.
 [[nodiscard]] std::vector<float> luminancePlane(const HdrImage& beauty, ThreadPool& threadPool, int pad = 0) {
+    const glm::vec3 weights = pathtracer::scene::cie::sceneLuminanceWeights();
     const int width = beauty.width + (2 * pad);
     std::vector<float> plane(static_cast<std::size_t>(width) * static_cast<std::size_t>(beauty.height));
     threadPool.parallelFor(beauty.height, [&](int y) {
@@ -28,10 +30,8 @@ using pathtracer::scene::ThreadPool;
         for (int x = 0; x < width; ++x) {
             const auto column = static_cast<std::size_t>((((x - pad) % beauty.width) + beauty.width) % beauty.width);
             const std::size_t texel = (sourceRow + column) * static_cast<std::size_t>(beauty.channels);
-            plane[row + static_cast<std::size_t>(x)] =
-                (beauty.texels[texel] * kRec709LuminanceWeights.r) +
-                (beauty.texels[texel + 1] * kRec709LuminanceWeights.g) +
-                (beauty.texels[texel + 2] * kRec709LuminanceWeights.b);
+            plane[row + static_cast<std::size_t>(x)] = (beauty.texels[texel] * weights.r) + (beauty.texels[texel + 1] * weights.g) +
+                                                       (beauty.texels[texel + 2] * weights.b);
         }
     });
     return plane;
@@ -70,8 +70,9 @@ HdrImage sobelAov(const HdrImage& beauty, ThreadPool& threadPool, bool wrapsHori
             const float bl = tap(plane, width, height, x - 1, y + 1, wrapsHorizontally);
             const float b = tap(plane, width, height, x, y + 1, wrapsHorizontally);
             const float br = tap(plane, width, height, x + 1, y + 1, wrapsHorizontally);
-            const float gx = (-tl - (2.0F * l) - bl) + tr + (2.0F * r) + br;
-            const float gy = (-bl - (2.0F * b) - br) + tl + (2.0F * t) + tr;
+            // Differences first, so a constant field cancels exactly rather than to the rounding of 4 * value.
+            const float gx = (tr - tl) + (2.0F * (r - l)) + (br - bl);
+            const float gy = (tl - bl) + (2.0F * (t - b)) + (tr - br);
             writeTexel(out, x, y, std::sqrt((gx * gx) + (gy * gy)));
         }
     });

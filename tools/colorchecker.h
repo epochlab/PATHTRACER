@@ -8,7 +8,7 @@
 
 #include "pathtracer/scene/cie.h"
 
-// ColorChecker Classic spectral reflectance to linear Rec.709 albedo by CIE 1931 2-degree tristimulus integration under D65.
+// ColorChecker Classic spectral reflectance to scene-space albedo by CIE 1931 2-degree tristimulus integration under D65.
 namespace tools::colorchecker {
 
 // The Classic chart's 6x4 layout; patches are stored row-major from dark skin (top-left) to black (bottom-right).
@@ -18,7 +18,7 @@ inline constexpr int kPatchCount = kColumns * kRows;
 
 struct Patch {
     std::string name;
-    glm::dvec3 rec709;  // unclamped: cyan lies outside the Rec.709 gamut, so its red is negative
+    glm::dvec3 scene;  // unclamped: a saturated patch may lie outside the scene gamut, so a channel can be negative
 };
 
 // Sprague (1880) quintic through uniformly spaced samples (CIE 167:2005), on the CIE 1 nm grid; nearest value beyond the data's ends.

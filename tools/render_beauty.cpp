@@ -33,6 +33,7 @@
 #include "pathtracer/gfx/ocio_cpu_transform.h"
 #include "pathtracer/gfx/ocio_display_transform.h"
 #include "pathtracer/scene/camera.h"
+#include "pathtracer/scene/cie.h"
 
 namespace {
 
@@ -111,11 +112,12 @@ std::optional<Png16> readPng16(const std::string& path) {
 // Each octave band's share of total error power.
 void reportErrorSpectrum(const pathtracer::gfx::HdrImage& image, const pathtracer::gfx::HdrImage& reference) {
     const auto pixels = static_cast<std::size_t>(image.width) * static_cast<std::size_t>(image.height);
+    const glm::vec3& weights = pathtracer::scene::cie::sceneLuminanceWeights();
     std::vector<double> luminanceError(pixels);
     double squaredSum = 0.0;
     for (std::size_t p = 0; p < pixels; ++p) {
         const glm::vec3 delta = image.rgb(p) - reference.rgb(p);
-        const double e = (0.2126 * delta.r) + (0.7152 * delta.g) + (0.0722 * delta.b);
+        const double e = glm::dot(glm::dvec3(weights), glm::dvec3(delta));
         luminanceError[p] = e;
         squaredSum += e * e;
     }
@@ -408,7 +410,7 @@ int main(int argc, char** argv) {
         for (std::size_t px = 0; px < pixels; ++px) {
             const auto luminance = [&](const pathtracer::gfx::HdrImage& image) {
                 const glm::vec3 rgb = image.rgb(px);
-                return (0.2126 * rgb.r) + (0.7152 * rgb.g) + (0.0722 * rgb.b);
+                return glm::dot(glm::dvec3(pathtracer::scene::cie::sceneLuminanceWeights()), glm::dvec3(rgb));
             };
             tools::stats::Welford wa;
             tools::stats::Welford wb;

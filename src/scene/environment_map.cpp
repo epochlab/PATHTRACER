@@ -5,6 +5,7 @@
 
 #include <glm/gtc/constants.hpp>
 
+#include "pathtracer/scene/cie.h"
 #include "pathtracer/scene/lat_long.h"
 #include "pathtracer/scene/sampler.h"
 
@@ -12,10 +13,10 @@ namespace pathtracer::scene {
 
 namespace {
 
-// Rec.709 weights, kRec709LuminanceWeights, floored at 0: a negative texel makes the CDF non-monotonic, which invertCdf's search needs.
+// Scene luminance, floored at 0: a negative texel makes the CDF non-monotonic, which invertCdf's search needs.
 float luminanceOf(const pathtracer::gfx::HdrImage& image, int x, int y) {
     const glm::vec3 texel = image.rgb((static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width)) + static_cast<std::size_t>(x));
-    return std::max(0.0F, (0.2126F * texel.r) + (0.7152F * texel.g) + (0.0722F * texel.b));
+    return std::max(0.0F, glm::dot(cie::sceneLuminanceWeights(), texel));
 }
 
 // The integer texel a direction falls in, plus that row's sin(theta) for the Jacobian, as pdf()'s piecewise-constant cell.

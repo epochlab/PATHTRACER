@@ -528,9 +528,9 @@ def test_light_temperature_scales_each_channel_of_the_light(renderer: Renderer) 
     ("kelvin", "message"),
     [
         ((2856.0, 2856.0), "light_temperatures must have shape"),
-        ((0.0,), "not positive or lies outside Rec.709"),
-        ((math.inf,), "not positive or lies outside Rec.709"),
-        ((1000.0,), "not positive or lies outside Rec.709"),
+        ((0.0,), "not positive or lies outside the scene gamut"),
+        ((math.inf,), "not positive or lies outside the scene gamut"),
+        ((500.0,), "not positive or lies outside the scene gamut"),
     ],
 )
 def test_invalid_light_temperature_is_rejected_by_name(renderer: Renderer, kelvin: tuple, message: str) -> None:

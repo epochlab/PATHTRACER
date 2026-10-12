@@ -60,7 +60,7 @@ from pathtracer import Renderer
 renderer = Renderer("scenes/cornell.json")
 frame = renderer.render(aovs=("beauty", "depth", "normal"), width=128, height=64, samples=8, seed=1)
 
-frame["beauty"]   # (64, 128, 3) float32, linear Rec.709 radiance
+frame["beauty"]   # (64, 128, 3) float32, linear ACEScg radiance
 frame["depth"]    # (64, 128, 1) float32, camera-space Z
 ```
 
@@ -80,7 +80,6 @@ frame["depth"]    # (64, 128, 1) float32, camera-space Z
 | Texture | Aliasing test asset | A high-frequency noise material that exposes minification aliasing before and after. | low | ready |
 | Sampling | Adaptive sampling | Variance-driven per-pixel sample budget. The error estimate it needs already ships (the SNR’s replicate means). Foveal density is the same mechanism with an eccentricity weight. | medium | ready |
 | Sampling | Blue noise beyond one dimension | The mask is a scalar array, so a pixel's shift lies on a line. An annealed d-dimensional matrix (Georgiev and Fajardo 2016) changes the baked table and its lookup, not the sampler. | medium | ready |
-| Colour | Out-of-gamut metals | Gold’s F0 red is 1.038 in linear Rec.709, outside `base_color`’s unit range, so the F82-tint metal cannot represent it and clamping would silently change hue; copper, silver, nickel, iron and titanium fit. Render in ACEScg with the OCIO scene space to match. | high | ready |
 | Colour | Photometric calibration | Tie radiometric output to lux and candela through the CIE ȳ curve, so EV100 can be checked against a light meter. | medium | ready |
 | Colour | HDRI white balance | Light temperature sets quad-light emission only; an HDRI keeps the colour it was measured under. Balancing it is chromatic adaptation, not a tint: a von Kries transform in CAT16's cone space (Li et al. 2017) from a Planckian white at the authored kelvin to D65, one 3 × 3 matrix on environment radiance beside its exposure. | medium | ready |
 | Colour | Measured-observer cones | Hunt-Pointer-Estevez is the only cone basis exact on the CIE 1931 observer, so `L + M` is not V(λ) and the opponent plane is not strictly isoluminant. Closing that needs the Judd-Vos modified matching functions and a spectral description of the primaries, so it lands with spectral transport. Chromatic contrast sensitivity (Mullen 1985) goes with it. | high | blocked |

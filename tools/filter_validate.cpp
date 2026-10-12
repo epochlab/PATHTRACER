@@ -17,6 +17,7 @@
 #include "pathtracer/debug/denoiser.h"
 #include "pathtracer/debug/scale_space.h"
 #include "pathtracer/gfx/hdr_image.h"
+#include "pathtracer/scene/cie.h"
 #include "pathtracer/scene/thread_pool.h"
 
 namespace {
@@ -52,9 +53,9 @@ constexpr float kFloatEpsilon = 0x1p-23F;  // distance from 1 to the next float,
 
 // Rec.709 weights sum to one only in decimal, so the luminance of a grey field is this factor, not exactly the field value.
 [[nodiscard]] float greyLuminanceGain() {
-    return (1.0F * pathtracer::debug::kRec709LuminanceWeights.r) +
-           (1.0F * pathtracer::debug::kRec709LuminanceWeights.g) +
-           (1.0F * pathtracer::debug::kRec709LuminanceWeights.b);
+    return (1.0F * pathtracer::scene::cie::sceneLuminanceWeights().r) +
+           (1.0F * pathtracer::scene::cie::sceneLuminanceWeights().g) +
+           (1.0F * pathtracer::scene::cie::sceneLuminanceWeights().b);
 }
 
 // Exactly representable affine field: small integer values, so every tap pair in the centre-relative convolution cancels bit-exactly.

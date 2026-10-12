@@ -24,6 +24,7 @@
 #include "pathtracer/debug/scale_space.h"
 #include "pathtracer/debug/aov_routing.h"
 #include "pathtracer/scene/camera.h"
+#include "pathtracer/scene/cie.h"
 #include "pathtracer/scene/rotation.h"
 #include "pathtracer/scene/thread_pool.h"
 
@@ -484,7 +485,7 @@ PT_CHECK(sobel_step_edge_matches_closed_form, Fast, Exact) {
 }
 
 // Luminance IS the Rec.709 weighted sum (ITU-R BT.709-6), so each primary returns its own weight exactly: a definition, not a measurement.
-PT_CHECK(luminance_returns_rec709_weights, Fast, Exact) {
+PT_CHECK(luminance_returns_scene_weights, Fast, Exact) {
     ctx.plan(4);
     pathtracer::scene::ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
     HdrImage primaries = makeRgbImage(4, 1, 0.0F);
@@ -494,9 +495,9 @@ PT_CHECK(luminance_returns_rec709_weights, Fast, Exact) {
     setTexel(primaries, 3, 0, 1.0F, 1.0F, 1.0F);
 
     const HdrImage luminance = pathtracer::debug::luminanceAov(primaries, pool);
-    PT_EXPECT(ctx, texelR(luminance, 0, 0) == pathtracer::debug::kRec709LuminanceWeights.r, "red weight");
-    PT_EXPECT(ctx, texelR(luminance, 1, 0) == pathtracer::debug::kRec709LuminanceWeights.g, "green weight");
-    PT_EXPECT(ctx, texelR(luminance, 2, 0) == pathtracer::debug::kRec709LuminanceWeights.b, "blue weight");
+    PT_EXPECT(ctx, texelR(luminance, 0, 0) == pathtracer::scene::cie::sceneLuminanceWeights().r, "red weight");
+    PT_EXPECT(ctx, texelR(luminance, 1, 0) == pathtracer::scene::cie::sceneLuminanceWeights().g, "green weight");
+    PT_EXPECT(ctx, texelR(luminance, 2, 0) == pathtracer::scene::cie::sceneLuminanceWeights().b, "blue weight");
     // The three weights are defined to sum to 1, so white maps to 1 and the AOV is a true relative luminance.
     PT_EXPECT(ctx, std::fabs(texelR(luminance, 3, 0) - 1.0F) < 1e-6F,
                   "white luminance " + std::to_string(texelR(luminance, 3, 0)));

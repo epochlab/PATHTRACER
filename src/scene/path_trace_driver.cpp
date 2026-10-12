@@ -2,6 +2,7 @@
 
 #include "pathtracer/debug/aov_filters.h"
 #include "pathtracer/debug/aov_routing.h"
+#include "pathtracer/scene/cie.h"
 
 #include <algorithm>
 #include <chrono>
@@ -101,7 +102,7 @@ void foldRunningMean(const float* previousMean, const float* drawn, float* mean,
 
 void foldReplicateLuminance(const float* previousMeans, const float* drawn, std::size_t channels, float* means, std::size_t pixels,
                             int replicates, int replicate, float invCount) {
-    const glm::vec3 weights = pathtracer::debug::kRec709LuminanceWeights;
+    const glm::vec3 weights = pathtracer::scene::cie::sceneLuminanceWeights();
     const auto stride = static_cast<std::size_t>(replicates);
     const auto slot = static_cast<std::size_t>(replicate);
     for (std::size_t pixel = 0; pixel < pixels; ++pixel) {

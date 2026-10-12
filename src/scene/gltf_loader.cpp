@@ -15,6 +15,8 @@
 #include <glm/gtc/matrix_inverse.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
+#include "pathtracer/gfx/ocio_cpu_transform.h"
+
 namespace pathtracer::scene {
 
 namespace {
@@ -132,6 +134,15 @@ std::vector<Vertex> readVertices(const RequiredAccessors& acc) {
             v.colour = glm::vec3(raw[0], raw[1], raw[2]);
         } else {
             v.colour = glm::vec3(1.0F);
+        }
+    }
+    if (acc.color != nullptr && !vertices.empty()) {
+        // glTF's COLOR_0 is linear BT.709; the scene space holds ACEScg, so the colours convert once here.
+        std::vector<glm::vec3> colours(vertices.size());
+        std::ranges::transform(vertices, colours.begin(), &Vertex::colour);
+        pathtracer::gfx::convertToSceneSpace({glm::value_ptr(colours.front()), colours.size() * 3}, pathtracer::gfx::kOcioLinearRec709);
+        for (std::size_t vi = 0; vi < vertices.size(); ++vi) {
+            vertices[vi].colour = colours[vi];
         }
     }
     return vertices;

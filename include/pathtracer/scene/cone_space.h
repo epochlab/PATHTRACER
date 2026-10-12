@@ -11,7 +11,7 @@ namespace pathtracer::scene::cone {
 // Cone chromaticity in MacLeod & Boynton 1979's form: (l, s) = (L, S)/(L+M), exactly invariant to any positive scale on the stimulus.
 [[nodiscard]] glm::dvec2 coneChromaticity(const glm::dvec3& lms);
 
-// Rec.709 white's cone chromaticity, the achromatic origin. It is xyzToRec709()'s own white, so RGB (v, v, v) lands here by construction.
+// The scene white's cone chromaticity, the achromatic origin. It is xyzToScene()'s own white, so RGB (v, v, v) lands here by construction.
 [[nodiscard]] glm::dvec2 whiteConeChromaticity();
 
 // The two opponent axes as coefficients on the chromatic differences (R-G, B-G), over their shared denominator: one divide per texel.

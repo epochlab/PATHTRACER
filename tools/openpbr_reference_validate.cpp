@@ -404,9 +404,9 @@ PT_CHECK(fresnel_average_matches_reference, Fast, Exact) {
     expectWithin(ctx, "fresnelAverage vs 2 int openpbr_fresnel mu dmu", worst, 1e-5, where);
 }
 
-// Rec.709 of a reflectance spectrum under D65, normalised so a flat unit spectrum is white and clamped, as filmReflectance integrates.
+// Scene RGB of a reflectance spectrum under D65, normalised so a flat unit spectrum is white and clamped, as filmReflectance integrates.
 template <typename Reflectance>
-glm::vec3 spectralRec709(Reflectance reflectance) {
+glm::vec3 spectralScene(Reflectance reflectance) {
     glm::dvec3 xyz(0.0);
     double whiteY = 0.0;
     for (int i = 0; i < scene::cie::kSampleCount; ++i) {
@@ -414,7 +414,7 @@ glm::vec3 spectralRec709(Reflectance reflectance) {
         xyz += row.colourMatching * row.d65 * static_cast<double>(reflectance(static_cast<float>(scene::cie::wavelengthNm(i))));
         whiteY += row.colourMatching.y * row.d65;
     }
-    return glm::clamp(glm::vec3(scene::cie::xyzToRec709() * (xyz / whiteY)), 0.0F, 1.0F);
+    return glm::clamp(glm::vec3(scene::cie::xyzToScene() * (xyz / whiteY)), 0.0F, 1.0F);
 }
 
 // The thin film: Adobe's per-wavelength Airy reflectance integrated against CIE 1931 x D65, against filmReflectance's exact transform.
@@ -432,7 +432,7 @@ PT_CHECK(thin_film_matches_reference, Fast, Exact) {
                     glm::vec3 reference;
                     glm::vec3 ours;
                     if (baseIor > 0.0F) {
-                        reference = spectralRec709([&](float lambda) {
+                        reference = spectralScene([&](float lambda) {
                             return openpbr_thin_film_and_base_reflectance(mu, 1.0F, filmIor, vec3(baseIor), false, vec3(0.0F), vec3(1.0F), true,
                                                                           false, thickness, vec3(lambda))
                                 .reflectance_dielectric.x;
@@ -441,7 +441,7 @@ PT_CHECK(thin_film_matches_reference, Fast, Exact) {
                     } else {
                         // Per channel the conductor is grey across the spectrum: each Rec.709 channel integrates its own (F0, tint).
                         for (int c = 0; c < 3; ++c) {
-                            reference[c] = spectralRec709([&](float lambda) {
+                            reference[c] = spectralScene([&](float lambda) {
                                 return openpbr_thin_film_and_base_reflectance(mu, 1.0F, filmIor, vec3(1.0F), false, vec3(metalF0[c]),
                                                                               vec3(metalTint[c]), false, true, thickness, vec3(lambda))
                                     .reflectance_metal.x;
