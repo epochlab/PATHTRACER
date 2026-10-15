@@ -1532,7 +1532,7 @@ PT_CHECK(presence_and_window_transmission, Slow, Statistical) {
     finish(ctx, ok, "presence_and_window_transmission failed; see the rows above");
 }
 
-// A normal-mapped white Lambertian plane under a uniform sky returns its microsurface's albedo, at grazing views classic maps blacken.
+// A normal-mapped white Lambertian plane under a uniform sky returns the sky: the microsurface loses nothing at all orders, nor blackens.
 PT_CHECK(normal_mapped_furnace, Slow, Statistical) {
     constexpr float kTolerance = 0.02F;
     constexpr float kTilt = 0.6F;
@@ -1544,7 +1544,6 @@ PT_CHECK(normal_mapped_furnace, Slow, Statistical) {
     const float pitch = glm::radians(kCameraPitch);
     const Camera camera(glm::vec3(0.0F, -5.0F * std::sin(pitch), 5.0F * std::cos(pitch)), glm::vec3(kCameraPitch, 0.0F, 0.0F),
                         Camera::FilmBack{36.0F, 24.0F}, kFocalLengthMm, 0.01F, 1000.0F, 2.8F, 1.0F / 125.0F, 100.0F);
-    const glm::vec3 wo(0.0F, -std::sin(pitch), std::cos(pitch));
     bool ok = true;
     for (const float toward : {1.0F, -1.0F}) {
         // The facet tilted toward +y faces away from the camera, the classic black-fringe case; toward -y it faces the camera.
@@ -1564,31 +1563,16 @@ PT_CHECK(normal_mapped_furnace, Slow, Statistical) {
             return;
         }
         const pathtracer::scene::PathTraceResult result = renderPass(scene, sky, makeSettings(4, 999), *accel, pool, true, 7U, camera);
-        // The reference: the same microsurface's albedo at wo, Simpson over the hemisphere the plane reflects into.
-        const ShadingTriangle& triangle = scene.shadingTriangles[0];
-        const ShadingVertex shading = pathtracer::scene::interpolateShading(triangle, 0.25F, 0.25F);
-        const pathtracer::scene::ShadingFrame frame = pathtracer::scene::buildShadingFrame(triangle, shading, scene.instances[0].material.geometryNormal);
-        const pathtracer::scene::NormalMappedBsdf bsdf = pathtracer::scene::makeNormalMappedBsdf(
-            pathtracer::scene::resolveInputs(scene.instances[0].material, shading.uv, {}, glm::vec3(1.0F)), wo * frame,
-            glm::normalize(shading.normal) * frame, std::nullopt, glm::vec3(0.0F, 0.0F, 1.0F), glm::vec3(1.0F, 0.0F, 0.0F));
-        const double albedo = tools::stats::simpson(0.0, 1.0, 512, [&](double z) {
-            const double sine = std::sqrt(std::max(0.0, 1.0 - (z * z)));
-            return tools::stats::simpson(0.0, 2.0 * std::numbers::pi, 512, [&](double phi) {
-                const glm::vec3 wi(static_cast<float>(sine * std::cos(phi)), static_cast<float>(sine * std::sin(phi)), static_cast<float>(z));
-                return static_cast<double>(pathtracer::scene::evaluateBsdfSplit(bsdf, wi * frame).total().x);
-            });
-        });
         const glm::vec3 lo = centreMean(result.beauty);
         float darkest = std::numeric_limits<float>::infinity();
         for (std::size_t i = 0; i < result.beauty.texels.size(); ++i) {
             darkest = std::min(darkest, result.beauty.texels[i]);
         }
-        std::cout << "  facet toward " << (toward > 0.0F ? "+y" : "-y") << ": rendered " << lo.x << ", microsurface albedo " << albedo
-                  << ", darkest texel " << darkest << '\n';
-        ok = ok && std::abs(lo.x - static_cast<float>(albedo)) <= kTolerance * static_cast<float>(albedo) && darkest > 0.0F;
+        std::cout << "  facet toward " << (toward > 0.0F ? "+y" : "-y") << ": rendered " << lo.x << ", darkest texel " << darkest << '\n';
+        ok = ok && std::abs(lo.x - 1.0F) <= kTolerance && darkest > 0.0F;
     }
     std::filesystem::remove(map);
-    finish(ctx, ok, "a normal-mapped plane under a uniform sky differs from its microsurface's albedo, or a texel went black");
+    finish(ctx, ok, "a normal-mapped white plane under a uniform sky differs from the sky, or a texel went black");
 }
 
 // A bulk surface emits from its front alone; a thin wall, with no interior, emits from both faces alike.

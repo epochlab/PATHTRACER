@@ -236,7 +236,7 @@ struct BsdfClosure {
 // A smooth thin wall's undeviated transmission toward -wo, through fuzz, coat and sheet; zero for any other closure.
 [[nodiscard]] glm::vec3 passThrough(const BsdfClosure& closure);
 
-// Schussler et al. 2017's default model (eq. 23) in the perturbed frame: facet +z and a mirror wall over the interpolated normal.
+// Schussler et al. 2017 to all orders (Algorithm 2) in the perturbed frame: facet +z and a mirror wall over the interpolated normal.
 struct NormalMappedBsdf {
     bool perturbed = false;  // no normal or bump input: facet alone is the BSDF and every call forwards to it unchanged
     BsdfClosure facet;       // at wo, the walk meeting the perturbed facet first; built where lambdaP > 0
@@ -248,6 +248,18 @@ struct NormalMappedBsdf {
     float side;              // sign <wo, omega_g>: seen from below, the microsurface is the point reflection of the one above
     float lambdaP = 0.0F;    // the facets' shares of wo's projected area (eq. 9)
     float lambdaT = 0.0F;
+    // What the walk builds each later facet vertex from, at the direction the wall returns it along; set where perturbed.
+    OpenPbrInputs<Constant> inputs;
+    std::optional<int> heroChannel;
+    glm::vec3 coatNormal;
+    glm::vec3 coatTangent;
+};
+
+// Where a walk first returns to the facet, its Markov state: what NEE's estimate of the later orders resumes from.
+struct WalkVertex {
+    glm::vec3 direction;  // the ray the wall sends back to the facet
+    float sigma;          // the medium it travels in, as mediumOf names it
+    glm::vec3 weight;     // the walk's throughput on arrival
 };
 
 // The closure at wo with geometricLocal, the interpolated normal in the perturbed frame, where a normal or bump input bends it.
@@ -261,12 +273,18 @@ struct NormalMappedBsdf {
 // Selects a technique by its mass and draws from it; the throughput divides by the whole mixture's density (one-sample MIS).
 [[nodiscard]] std::optional<BsdfSample> sampleBsdf(const BsdfClosure& closure, Sampler& sampler);
 
-// The microsurface's forms: eq. 23 evaluated exactly, its walk sampled with the walk's exact density, components by omega_g's side.
+// The microsurface's forms, components by omega_g's side; walk draws the escapes, later vertices and the evaluation's higher orders.
 [[nodiscard]] bool scatters(const NormalMappedBsdf& bsdf);
 [[nodiscard]] bool transmits(const NormalMappedBsdf& bsdf);
 [[nodiscard]] glm::vec3 passThrough(const NormalMappedBsdf& bsdf);
-[[nodiscard]] BsdfEval evaluateBsdfSplit(const NormalMappedBsdf& bsdf, const glm::vec3& wiLocal);
-[[nodiscard]] std::optional<BsdfSample> sampleBsdf(const NormalMappedBsdf& bsdf, Sampler& sampler);
+// The walk's first facet vertex in closed form: eq. 23 and the t-p-t exit. Its pdf is the MIS density both estimators share (sec. 7.3).
+[[nodiscard]] BsdfEval evaluateFirstScattering(const NormalMappedBsdf& bsdf, const glm::vec3& wiLocal);
+// The first scattering plus the later orders, resumed from a draw's revisit: unbiased, as the draw's first leg is the walk's own.
+[[nodiscard]] BsdfEval evaluateBsdfSplit(const NormalMappedBsdf& bsdf, const glm::vec3& wiLocal, const std::optional<WalkVertex>& revisit,
+                                         Sampler& walk);
+// Algorithm 2 to termination, weighted by its throughput, pdf the first scattering's; revisit is its first return to the facet, if any.
+[[nodiscard]] std::optional<BsdfSample> sampleBsdf(const NormalMappedBsdf& bsdf, Sampler& sampler, Sampler& walk,
+                                                   std::optional<WalkVertex>& revisit);
 [[nodiscard]] glm::vec3 fresnelAtMicrofacet(const NormalMappedBsdf& bsdf, glm::vec2 u);
 
 // The slabs' reflected Fresnel at cosTheta = dot(h, wo), each at its layer and mix weight: coat, metal F82, tinted dielectric.

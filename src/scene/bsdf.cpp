@@ -699,20 +699,76 @@ float masking(const NormalMappedBsdf& bsdf, const glm::vec3& w, Facet facet, flo
     return std::clamp(sigma * glm::dot(w, bsdf.geometric) / (perturbed + wall), 0.0F, 1.0F);
 }
 
-// The walk's chance to leave the facet along w rather than meet the wall and leave along its mirror; 1 where neither carries.
-float escapeShare(float maskFacet, float maskMirrorWall) {
-    const float total = maskFacet + ((1.0F - maskFacet) * maskMirrorWall);
-    return total > 0.0F ? maskFacet / total : 1.0F;
-}
-
-// One facet closure's lobes at w toward the medium the microsurface leaves into, weighted: reflection on wo's side, else transmission.
-void accumulate(BsdfEval& eval, const BsdfEval& lobes, float weight, bool reflected) {
-    if (reflected) {
+// A facet closure's lobes at w, weighted: reflection's if w stays in the vertex's medium, else transmission's; filed by wo's side.
+void accumulate(BsdfEval& eval, const BsdfEval& lobes, float weight, bool atVertex, bool overall) {
+    if (!overall) {
+        eval.transmission += weight * (atVertex ? lobes.diffuse + lobes.specular : lobes.transmission);
+    } else if (atVertex) {
         eval.diffuse += weight * lobes.diffuse;
         eval.specular += weight * lobes.specular;
     } else {
-        eval.transmission += weight * lobes.transmission;
+        eval.specular += weight * lobes.transmission;  // twice across the sheet: back on wo's side, as the walk's draw names it
     }
+    eval.pdf += weight * lobes.pdf;
+}
+
+// eval += weight * terms by lobe, the density by pdfWeight: lambda for a first-vertex branch, zero for the walk's later orders.
+void addScaled(BsdfEval& eval, const BsdfEval& terms, const glm::vec3& weight, float pdfWeight) {
+    eval.diffuse += weight * terms.diffuse;
+    eval.specular += weight * terms.specular;
+    eval.transmission += weight * terms.transmission;
+    eval.pdf += pdfWeight * terms.pdf;
+}
+
+// A facet vertex met in medium sigma, its exits toward w: directly, or off the wall after the facet's ray along w's mirror is masked.
+BsdfEval exitsAt(const NormalMappedBsdf& bsdf, const BsdfClosure& closure, float sigma, const glm::vec3& w) {
+    BsdfEval eval{};
+    const float exit = mediumOf(bsdf, w);
+    const bool atVertex = exit == sigma;
+    const bool overall = exit == bsdf.side;
+    if (const float maskFacet = masking(bsdf, w, Facet::Perturbed, exit); maskFacet > 0.0F) {
+        accumulate(eval, evaluateBsdfSplit(closure, w), maskFacet, atVertex, overall);
+    }
+    if (const float maskWall = masking(bsdf, w, Facet::Wall, exit); maskWall > 0.0F) {
+        const glm::vec3 mirrored = offWall(bsdf, w);
+        if (const float odds = (1.0F - masking(bsdf, mirrored, Facet::Perturbed, exit)) * maskWall; odds > 0.0F) {
+            accumulate(eval, evaluateBsdfSplit(closure, mirrored), odds, atVertex, overall);
+        }
+    }
+    return eval;
+}
+
+// One leg of the walk from a facet vertex: the facet's draw, then an exit off the facet, an exit off the wall, or a return to the facet.
+struct Leg {
+    BsdfSample drawn;
+    glm::vec3 direction;  // the exit when escaped, else the ray the wall sends back to the facet
+    bool escaped;
+    bool direct;          // left off the facet without meeting the wall
+};
+
+// Draws from closure and walks the ray to its next event; sigma and weight carry the ray's medium and throughput across the leg.
+std::optional<Leg> leave(const NormalMappedBsdf& bsdf, const BsdfClosure& closure, float& sigma, glm::vec3& weight, Sampler& draw,
+                         Sampler& walk) {
+    const std::optional<BsdfSample> drawn = sampleBsdf(closure, draw);
+    if (!drawn) {
+        return std::nullopt;
+    }
+    // A draw across the facet's plane is a transmission lobe's and moves the ray to the far medium; any other is a reflection's.
+    const bool crossed = (drawn->wiLocal.z > 0.0F) != (closure.sign > 0.0F);
+    weight *= crossed ? drawn->transmitWeight : drawn->throughputWeight - drawn->transmitWeight;
+    sigma = crossed ? -sigma : sigma;
+    const float maskFacet = masking(bsdf, drawn->wiLocal, Facet::Perturbed, sigma);
+    if (maskFacet == 1.0F || (maskFacet > 0.0F && walk.next1D() < maskFacet)) {
+        return Leg{*drawn, drawn->wiLocal, true, true};
+    }
+    const glm::vec3 mirrored = offWall(bsdf, drawn->wiLocal);
+    const float maskWall = masking(bsdf, mirrored, Facet::Wall, sigma);
+    return Leg{*drawn, mirrored, maskWall == 1.0F || (maskWall > 0.0F && walk.next1D() < maskWall), false};
+}
+
+// The facet met again along the wall's ray: its closure toward the reversed ray.
+BsdfClosure returnedTo(const NormalMappedBsdf& bsdf, const glm::vec3& direction) {
+    return makeBsdfClosure(bsdf.inputs, -direction, bsdf.heroChannel, bsdf.coatNormal, bsdf.coatTangent);
 }
 
 }  // namespace
@@ -726,6 +782,10 @@ NormalMappedBsdf makeNormalMappedBsdf(const OpenPbrInputs<Constant>& inputs, con
         return bsdf;
     }
     bsdf.perturbed = true;
+    bsdf.inputs = inputs;
+    bsdf.heroChannel = heroChannel;
+    bsdf.coatNormal = coatNormalLocal;
+    bsdf.coatTangent = coatTangentLocal;
     bsdf.geometric = *geometricLocal;
     bsdf.cosP = bsdf.geometric.z;
     const glm::vec3 tilt = glm::vec3(0.0F, 0.0F, 1.0F) - (bsdf.cosP * bsdf.geometric);
@@ -774,38 +834,44 @@ glm::vec3 passThrough(const NormalMappedBsdf& bsdf) {
     return (bsdf.lambdaP * masking(bsdf, through, Facet::Perturbed, -bsdf.side)) * passThrough(bsdf.facet);
 }
 
-// Eq. 23 by component, i -> p -> o, i -> p -> t -> o and i -> t -> p -> o; the density is the walk's own, branch by branch.
-BsdfEval evaluateBsdfSplit(const NormalMappedBsdf& bsdf, const glm::vec3& wiLocal) {
+BsdfEval evaluateFirstScattering(const NormalMappedBsdf& bsdf, const glm::vec3& wiLocal) {
     if (!bsdf.perturbed) {
         return evaluateBsdfSplit(bsdf.facet, wiLocal);
     }
     BsdfEval eval{};
-    const float sigma = mediumOf(bsdf, wiLocal);
-    const bool reflected = sigma == bsdf.side;
-    const float maskFacet = masking(bsdf, wiLocal, Facet::Perturbed, sigma);
     if (bsdf.lambdaP > 0.0F) {
-        const glm::vec3 mirrored = offWall(bsdf, wiLocal);
-        const BsdfEval direct = evaluateBsdfSplit(bsdf.facet, wiLocal);
-        accumulate(eval, direct, bsdf.lambdaP * maskFacet, reflected);
-        eval.pdf += bsdf.lambdaP * direct.pdf * escapeShare(maskFacet, masking(bsdf, mirrored, Facet::Wall, sigma));
-        const float maskWall = masking(bsdf, wiLocal, Facet::Wall, sigma);
-        if (maskWall > 0.0F) {
-            const BsdfEval bounced = evaluateBsdfSplit(bsdf.facet, mirrored);
-            const float maskMirrored = masking(bsdf, mirrored, Facet::Perturbed, sigma);
-            accumulate(eval, bounced, bsdf.lambdaP * (1.0F - maskMirrored) * maskWall, reflected);
-            eval.pdf += bsdf.lambdaP * bounced.pdf * (1.0F - escapeShare(maskMirrored, maskWall));
-        }
+        addScaled(eval, exitsAt(bsdf, bsdf.facet, bsdf.side, wiLocal), glm::vec3(bsdf.lambdaP), bsdf.lambdaP);
     }
     if (bsdf.lambdaT > 0.0F) {
-        const BsdfEval viaWall = evaluateBsdfSplit(bsdf.viaWall, wiLocal);
-        accumulate(eval, viaWall, bsdf.lambdaT * maskFacet, reflected);
-        eval.pdf += bsdf.lambdaT * viaWall.pdf;
+        addScaled(eval, exitsAt(bsdf, bsdf.viaWall, bsdf.side, wiLocal), glm::vec3(bsdf.lambdaT), bsdf.lambdaT);
     }
     return eval;
 }
 
-// Algorithm 2 to second order: the first facet by lambda, a facet draw, then escape or the wall by the masking odds at that draw.
-std::optional<BsdfSample> sampleBsdf(const NormalMappedBsdf& bsdf, Sampler& sampler) {
+BsdfEval evaluateBsdfSplit(const NormalMappedBsdf& bsdf, const glm::vec3& wiLocal, const std::optional<WalkVertex>& revisit,
+                           Sampler& walk) {
+    BsdfEval eval = evaluateFirstScattering(bsdf, wiLocal);
+    if (!revisit) {
+        return eval;
+    }
+    // The later orders: each facet vertex the walk returns to adds its exits toward wiLocal, weighted by its throughput.
+    float sigma = revisit->sigma;
+    glm::vec3 weight = revisit->weight;
+    glm::vec3 direction = revisit->direction;
+    while (true) {
+        const BsdfClosure vertex = returnedTo(bsdf, direction);
+        addScaled(eval, exitsAt(bsdf, vertex, sigma, wiLocal), weight, 0.0F);
+        const std::optional<Leg> leg = leave(bsdf, vertex, sigma, weight, walk, walk);
+        if (!leg || leg->escaped || weight == glm::vec3(0.0F)) {
+            return eval;
+        }
+        direction = leg->direction;
+    }
+}
+
+// Algorithm 2: the first facet by lambda, then facet draws until the ray escapes the facet or the wall; weight is the walk's throughput.
+std::optional<BsdfSample> sampleBsdf(const NormalMappedBsdf& bsdf, Sampler& sampler, Sampler& walk, std::optional<WalkVertex>& revisit) {
+    revisit.reset();
     if (!bsdf.perturbed) {
         return sampleBsdf(bsdf.facet, sampler);
     }
@@ -813,37 +879,33 @@ std::optional<BsdfSample> sampleBsdf(const NormalMappedBsdf& bsdf, Sampler& samp
         return std::nullopt;
     }
     const bool facetFirst = bsdf.lambdaT == 0.0F || (bsdf.lambdaP > 0.0F && sampler.next1D() < bsdf.lambdaP);
-    const std::optional<BsdfSample> drawn = sampleBsdf(facetFirst ? bsdf.facet : bsdf.viaWall, sampler);
-    if (!drawn) {
+    float sigma = bsdf.side;
+    glm::vec3 weight(1.0F);
+    std::optional<Leg> leg = leave(bsdf, facetFirst ? bsdf.facet : bsdf.viaWall, sigma, weight, sampler, walk);
+    // Only the facet-first walk's direct escape along -wo is the null vertex passThrough counts; a later exit there is a plain delta.
+    const bool passesThrough = leg && leg->drawn.passThrough && facetFirst && leg->direct;
+    if (leg && !leg->escaped && weight != glm::vec3(0.0F)) {
+        revisit = WalkVertex{leg->direction, sigma, weight};
+    }
+    bool delta = true;
+    while (leg && !leg->escaped && weight != glm::vec3(0.0F)) {
+        delta = delta && leg->drawn.delta;
+        leg = leave(bsdf, returnedTo(bsdf, leg->direction), sigma, weight, walk, walk);
+    }
+    if (!leg || weight == glm::vec3(0.0F)) {
         return std::nullopt;
     }
-    glm::vec3 wi = drawn->wiLocal;
-    const float sigma = mediumOf(bsdf, wi);
-    const float maskFacet = masking(bsdf, wi, Facet::Perturbed, sigma);
-    // A delta's weight on the direction the walk leaves along: the branch's odds cancel against eq. 23's lambda.
-    float walkWeight = maskFacet;
-    bool escaped = true;
-    if (facetFirst) {
-        const glm::vec3 mirrored = offWall(bsdf, wi);
-        const float maskWall = masking(bsdf, mirrored, Facet::Wall, sigma);
-        const float escape = escapeShare(maskFacet, maskWall);
-        escaped = escape == 1.0F || (escape > 0.0F && sampler.next1D() < escape);
-        walkWeight = escaped ? maskFacet / escape : (1.0F - maskFacet) * maskWall / (1.0F - escape);
-        wi = escaped ? wi : mirrored;
-    }
+    delta = delta && leg->drawn.delta;
+    const glm::vec3 wi = leg->direction;
     const bool reflected = sigma == bsdf.side;
-    const LobeType type = !reflected ? LobeType::Transmission : drawn->type == LobeType::Transmission ? LobeType::SpecularReflection : drawn->type;
-    if (drawn->delta) {
-        const glm::vec3 weight = walkWeight * (reflected ? drawn->throughputWeight - drawn->transmitWeight : drawn->transmitWeight);
-        return BsdfSample{wi, weight, reflected ? glm::vec3(0.0F) : weight, type, 0.0F, true, drawn->passThrough && facetFirst && escaped};
+    const LobeType last = leg->drawn.type == LobeType::Transmission ? LobeType::SpecularReflection : leg->drawn.type;
+    const LobeType type = reflected ? last : LobeType::Transmission;
+    const glm::vec3 transmitted = reflected ? glm::vec3(0.0F) : weight;
+    if (delta) {
+        return BsdfSample{wi, weight, transmitted, type, 0.0F, true, passesThrough};
     }
-    // A continuous draw divides by the whole walk's density over both branches and both exits, one-sample MIS as weighSample does.
-    const BsdfEval eval = evaluateBsdfSplit(bsdf, wi);
-    if (!(eval.pdf > 0.0F)) {
-        return std::nullopt;
-    }
-    // The wall is a mirror, an isometry of directions, so the drawn lobe's density carries over unchanged.
-    return BsdfSample{wi, eval.total() / eval.pdf, eval.transmission / eval.pdf, type, eval.pdf, false, false, drawn->lobePdf};
+    // The walk's own density has no closed form; MIS needs only a deterministic one that NEE shares, the first scattering's.
+    return BsdfSample{wi, weight, transmitted, type, evaluateFirstScattering(bsdf, wi).pdf, false, false, leg->drawn.lobePdf};
 }
 
 glm::vec3 fresnelAtMicrofacet(const NormalMappedBsdf& bsdf, glm::vec2 u) {

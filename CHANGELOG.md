@@ -3,6 +3,29 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Microsurface to all orders
+
+Normal and bump maps now scatter through Schussler et al. 2017's microsurface to every order rather than eq. 23's second, so a mapped
+white surface under a uniform sky returns the sky. The second-order cut dropped light the facet sends into the wall that needs a third
+bounce to escape: a white diffuse facet tilted 69 degrees kept 36% of its albedo.
+- **Sampling:** the paper's Algorithm 2 runs to termination: the first facet by lambda, a facet draw, then escape off the facet, off
+  the wall, or a return to the facet with a closure rebuilt there. The weight is the walk's throughput, so a white facet weighs exactly 1.
+  Escapes and later vertices draw from their own sampler stream.
+- **Evaluation:** eq. 23 plus the t-p-t exit in closed form, and the later orders resumed from the continuation draw's first return to
+  the facet: unbiased, and drawing only where that walk returned. MIS uses the closed form's density for both estimators (the paper's section 7.3); NEE takes
+  light only the later orders reach at weight 1 rather than dropping it.
+- **Measured:** the mapped white plane at a 70 degree view renders 1.001 and 1.000, facet toward and away, against 0.630 and 0.825
+  before. A white Lambert facet's evaluation integrates to 1 within its standard error at 17, 46 and 69 degrees of tilt. stump is 5.2%
+  brighter (RMSE 0.0022 against seed noise 0.0037); cornell and macbeth are bit-identical. The stump pays +4-10% best-of-16 pass time
+  (paired median 1.03, no interval at 3 rounds) for the extra orders; unmapped surfaces pay nothing measurable.
+- **Not changed:** the microsurface stays on the interpolated normal. Standing it on the face normal closed the Fig. 18 residual
+  but faceted and speckled cornell's chrome sphere at its rim, so that residual is left as the paper leaves it.
+- **Tests:** the first scattering against a double transcription of its four paths; its reciprocity and point symmetry; draws against
+  evaluation bin by bin, with each draw's pdf exactly the first scattering's; the white furnace by draws and by evaluation; the mapped
+  plane against the sky. `ctest` 367/367.
+
+Evidence is in `results/microsurface_all_orders`.
+
 ## ACEScg scene space
 
 The renderer now works in ACEScg (AP1 primaries, ACES white) instead of linear Rec.709, so measured gold fits OpenPBR's unit-range `base_color`.

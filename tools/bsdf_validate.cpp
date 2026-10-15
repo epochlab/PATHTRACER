@@ -3205,11 +3205,35 @@ pathtracer::scene::NormalMappedBsdf normalMapped(const Surface& surface, const g
     return pathtracer::scene::makeNormalMappedBsdf(surface, wo, geometric, std::nullopt, glm::vec3(0.0F, 0.0F, 1.0F), glm::vec3(1.0F, 0.0F, 0.0F));
 }
 
+// A white Lambertian facet: base colour 1 under an index-matched, so absent, specular layer; each draw weighs its albedo, 1.
+Surface whiteLambert() {
+    Surface surface = makeParams(0.0F, 0.0F, 0.0F);
+    surface.specularIor = 1.0F;
+    return surface;
+}
+
+// A draw that keeps no revisit, where only the draw's own exit matters.
+std::optional<pathtracer::scene::BsdfSample> drawFrom(const pathtracer::scene::NormalMappedBsdf& bsdf, pathtracer::scene::Sampler& sampler,
+                                                      pathtracer::scene::Sampler& walk) {
+    std::optional<pathtracer::scene::WalkVertex> revisit;
+    return pathtracer::scene::sampleBsdf(bsdf, sampler, walk, revisit);
+}
+
+// NEE's evaluation as the integrator makes it: the later orders resume from a fresh draw's revisit, on that draw's walk stream.
+pathtracer::scene::BsdfEval evaluateAfterDraw(const pathtracer::scene::NormalMappedBsdf& bsdf, const glm::vec3& wi, std::mt19937& rng) {
+    pathtracer::scene::Sampler sampler(0, 0, 0, 1, rng());
+    pathtracer::scene::Sampler walk(0, 0, 0, 1, rng());
+    std::optional<pathtracer::scene::WalkVertex> revisit;
+    static_cast<void>(pathtracer::scene::sampleBsdf(bsdf, sampler, walk, revisit));
+    return pathtracer::scene::evaluateBsdfSplit(bsdf, wi, revisit, walk);
+}
+
 // No normal or bump input: the microsurface is the closure itself, every value, density and draw bit-identical.
 PT_CHECK(normal_map_unperturbed_is_identity, Fast, Exact) {
     constexpr int kDraws = 64;
     const std::array<Surface, 4> surfaces = {makeParams(0.4F, 0.0F, 0.0F), makeParams(0.0F, 1.0F, 0.0F), makeParams(0.3F, 0.0F, 1.0F),
                                              thinWalled(makeParams(0.0F, 0.0F, 0.0F), 1.0F)};
+    pathtracer::scene::Sampler walk(0, 0, 0, 1, 73001U);
     bool ok = true;
     for (const Surface& surface : surfaces) {
         for (const float mu : {0.9F, 0.3F, -0.6F}) {
@@ -3218,14 +3242,14 @@ PT_CHECK(normal_map_unperturbed_is_identity, Fast, Exact) {
             const pathtracer::scene::NormalMappedBsdf wrapped = normalMapped(surface, wo, std::nullopt);
             for (const float muI : {0.8F, 0.2F, -0.4F}) {
                 const pathtracer::scene::BsdfEval a = pathtracer::scene::evaluateBsdfSplit(closure, directionAt(muI, 2.0F));
-                const pathtracer::scene::BsdfEval b = pathtracer::scene::evaluateBsdfSplit(wrapped, directionAt(muI, 2.0F));
+                const pathtracer::scene::BsdfEval b = pathtracer::scene::evaluateBsdfSplit(wrapped, directionAt(muI, 2.0F), std::nullopt, walk);
                 ok = ok && a.diffuse == b.diffuse && a.specular == b.specular && a.transmission == b.transmission && a.pdf == b.pdf;
             }
             for (int i = 0; i < kDraws; ++i) {
                 pathtracer::scene::Sampler first(0, 0, i, kDraws, 73000U);
                 pathtracer::scene::Sampler second(0, 0, i, kDraws, 73000U);
                 const std::optional<pathtracer::scene::BsdfSample> a = pathtracer::scene::sampleBsdf(closure, first);
-                const std::optional<pathtracer::scene::BsdfSample> b = pathtracer::scene::sampleBsdf(wrapped, second);
+                const std::optional<pathtracer::scene::BsdfSample> b = drawFrom(wrapped, second, walk);
                 ok = ok && a.has_value() == b.has_value() && (!a || (a->wiLocal == b->wiLocal && a->throughputWeight == b->throughputWeight &&
                                                                      a->pdf == b->pdf && a->passThrough == b->passThrough));
             }
@@ -3234,8 +3258,8 @@ PT_CHECK(normal_map_unperturbed_is_identity, Fast, Exact) {
     finish(ctx, ok, "an unperturbed microsurface differs from its closure");
 }
 
-// Eq. 23 transcribed from the paper in double, its facets' areas (eq. 8), lambda (eq. 9) and masking (eq. 13) derived anew.
-PT_CHECK(normal_map_matches_eq23, Fast, Exact) {
+// The first scattering transcribed in double: eq. 23's three paths and the t-p-t exit, areas (eq. 8), lambda (eq. 9), masking (eq. 13).
+PT_CHECK(normal_map_first_scattering_matches_paper, Fast, Exact) {
     constexpr double kTolerance = 1e-5;
     const std::array<Surface, 3> surfaces = {makeParams(0.4F, 1.0F, 0.0F), makeParams(0.5F, 0.0F, 0.0F, 0.6F),
                                              coated(makeColoredMetalParams(0.3F), 1.0F, glm::vec3(0.9F), 0.2F, 1.5F, 1.0F)};
@@ -3264,12 +3288,15 @@ PT_CHECK(normal_map_matches_eq23, Fast, Exact) {
                     for (const float muI : {0.8F, 0.3F}) {
                         for (const float phiI : {0.4F, 2.5F, 4.4F}) {
                             const glm::dvec3 wi(aboutGeometric(glm::vec3(g), muI, phiI));
-                            glm::dvec3 reference = lambdaP * f(wo, wi) * g1(wi, p);
-                            reference += lambdaP * f(wo, reflectT(wi)) * (1.0 - g1(reflectT(wi), p)) * g1(wi, t);
+                            // The facet first, each branch leaving off the facet or off the wall; the wall first, then the same two exits.
+                            const auto exits = [&](const glm::dvec3& eye) {
+                                return (f(eye, wi) * g1(wi, p)) + (f(eye, reflectT(wi)) * (1.0 - g1(reflectT(wi), p)) * g1(wi, t));
+                            };
+                            glm::dvec3 reference = lambdaP * exits(wo);
                             if (lambdaP < 1.0) {
-                                reference += (1.0 - lambdaP) * f(reflectT(wo), wi) * g1(wi, p);
+                                reference += (1.0 - lambdaP) * exits(reflectT(wo));
                             }
-                            const glm::dvec3 ours(pathtracer::scene::evaluateBsdfSplit(bsdf, glm::vec3(wi)).total());
+                            const glm::dvec3 ours(pathtracer::scene::evaluateFirstScattering(bsdf, glm::vec3(wi)).total());
                             const double scale = std::max(maxChannel(glm::vec3(reference)), 1e-3F);
                             worst = std::max(worst, static_cast<double>(maxChannel(glm::vec3(glm::abs(ours - reference)))) / scale);
                         }
@@ -3278,16 +3305,14 @@ PT_CHECK(normal_map_matches_eq23, Fast, Exact) {
             }
         }
     }
-    std::cout << "bsdf_validate: microsurface against eq. 23 in double, worst relative " << worst << '\n';
-    finish(ctx, worst <= kTolerance, "the microsurface differs from Schussler et al.'s eq. 23");
+    std::cout << "bsdf_validate: first scattering against eq. 23 and the t-p-t exit in double, worst relative " << worst << '\n';
+    finish(ctx, worst <= kTolerance, "the microsurface's first scattering differs from Schussler et al.'s paths");
 }
 
-// Eq. 23 is symmetric for a reciprocal facet BRDF (the paper's default works with any transport): f(wo, wi) = f(wi, wo).
+// Each scattering order is symmetric for a reciprocal facet BRDF, so the closed-form first one is too: f(wo, wi) = f(wi, wo).
 PT_CHECK(normal_map_reciprocity, Fast, Exact) {
     constexpr float kRelativeTolerance = 1e-4F;
-    Surface lambert = makeParams(0.5F, 0.0F, 0.0F);
-    lambert.specularIor = 1.0F;
-    const std::array<Surface, 2> surfaces = {makeColoredMetalParams(0.4F), lambert};
+    const std::array<Surface, 2> surfaces = {makeColoredMetalParams(0.4F), whiteLambert()};
     float worst = 0.0F;
     for (const Surface& surface : surfaces) {
         for (const float tilt : {0.3F, 0.9F}) {
@@ -3295,9 +3320,9 @@ PT_CHECK(normal_map_reciprocity, Fast, Exact) {
             for (const auto& [muA, muB] : {std::pair{0.9F, 0.5F}, std::pair{0.4F, 0.7F}, std::pair{0.2F, 0.85F}}) {
                 const glm::vec3 a = aboutGeometric(g, muA, 0.7F);
                 const glm::vec3 b = aboutGeometric(g, muB, 2.9F);
-                // f itself: eq. 23 is f <wi, omega_g>, the cosine about the geometric normal.
+                // f itself: the microsurface's value is f <wi, omega_g>, the cosine about the geometric normal.
                 const auto value = [&](const glm::vec3& wo, const glm::vec3& wi) {
-                    return pathtracer::scene::evaluateBsdfSplit(normalMapped(surface, wo, g), wi).total() / glm::dot(wi, g);
+                    return pathtracer::scene::evaluateFirstScattering(normalMapped(surface, wo, g), wi).total() / glm::dot(wi, g);
                 };
                 const glm::vec3 forward = value(a, b);
                 const glm::vec3 backward = value(b, a);
@@ -3306,106 +3331,106 @@ PT_CHECK(normal_map_reciprocity, Fast, Exact) {
         }
     }
     std::cout << "bsdf_validate: microsurface reciprocity, worst relative " << worst << '\n';
-    finish(ctx, worst <= kRelativeTolerance, "the microsurface is not reciprocal for a reciprocal facet BRDF");
+    finish(ctx, worst <= kRelativeTolerance, "the microsurface's first scattering is not reciprocal for a reciprocal facet BRDF");
 }
 
-// The walk's draws: density against eq. 23's pdf by chi-square, and mean weight against the integrated value (unbiasedness).
-PT_CHECK(normal_map_sampling, Slow, Statistical) {
-    constexpr int kCosBins = 16;
+// Draws and evaluation estimate one f to all orders: per direction bin, E[weight 1{bin}] against the bin's integrated E[value].
+PT_CHECK(normal_map_sampling_matches_evaluation, Slow, Statistical) {
+    constexpr int kCosBins = 8;
     constexpr int kPhiBins = 8;
-    constexpr int kPanels = 128;
+    constexpr int kBins = kCosBins * kPhiBins;
     constexpr int kSampleCount = 200000;
-    constexpr double kMinExpected = 5.0;
+    constexpr int kEvaluationsPerBin = 4000;
     struct Case {
         const char* name;
         Surface surface;
         float mu;
         float tilt;
     };
-    const std::array<Case, 6> cases{{
+    const std::array<Case, 7> cases{{
         {"rough metal, tilt 10", makeParams(0.4F, 1.0F, 0.0F), 0.7F, 0.17F},
         {"rough metal, tilt 60, grazing", makeParams(0.4F, 1.0F, 0.0F), 0.25F, 1.05F},
         {"glossy diffuse, tilt 30", makeParams(0.5F, 0.0F, 0.0F), 0.5F, 0.52F},
+        {"white Lambert, tilt 45", whiteLambert(), 0.6F, 0.79F},
         {"rough glass, tilt 30", makeParams(0.3F, 0.0F, 1.0F), 0.6F, 0.52F},
         {"rough glass from inside, tilt 30", makeParams(0.3F, 0.0F, 1.0F), -0.6F, 0.52F},
         {"coated glossy diffuse, tilt 60", coated(makeParams(0.5F, 0.0F, 0.0F), 1.0F, glm::vec3(1.0F), 0.2F, 1.5F, 1.0F), 0.6F, 1.05F},
     }};
     ctx.plan(1);
-    const double perCase = tools::stats::sidak(ctx.alpha(), static_cast<int>(cases.size()));
+    const double perBin = tools::stats::sidak(ctx.alpha(), static_cast<int>(cases.size()) * kBins);
+    const auto binOf = [](const glm::vec3& w) {
+        const int ci = std::min(static_cast<int>((w.z + 1.0F) * 0.5F * kCosBins), kCosBins - 1);
+        float phi = std::atan2(w.y, w.x);
+        phi += phi < 0.0F ? static_cast<float>(2.0 * kPiDouble) : 0.0F;
+        return (ci * kPhiBins) + std::min(static_cast<int>(phi / static_cast<float>(2.0 * kPiDouble) * kPhiBins), kPhiBins - 1);
+    };
     bool ok = true;
     for (const Case& c : cases) {
         const pathtracer::scene::NormalMappedBsdf bsdf = normalMapped(c.surface, directionAt(c.mu, 0.8F), geometricAt(c.tilt));
-        std::vector<double> expected(static_cast<std::size_t>(kCosBins) * kPhiBins + 1, 0.0);
-        double mass = 0.0;
-        glm::dvec3 integral(0.0);
-        // Each bin's density and value by one Simpson rule: (value, pdf) integrated together per direction.
-        for (int ci = 0; ci < kCosBins; ++ci) {
-            for (int pi = 0; pi < kPhiBins; ++pi) {
-                const double c0 = -1.0 + (2.0 * ci / kCosBins);
-                const double p0 = 2.0 * kPiDouble * pi / kPhiBins;
-                const glm::dvec4 bin = simpson(c0, c0 + (2.0 / kCosBins), kPanels, [&](double z) {
-                    const double sine = std::sqrt(std::max(0.0, 1.0 - (z * z)));
-                    return simpson(p0, p0 + (2.0 * kPiDouble / kPhiBins), kPanels, [&](double phi) {
-                        const glm::vec3 wi(static_cast<float>(sine * std::cos(phi)), static_cast<float>(sine * std::sin(phi)), static_cast<float>(z));
-                        const pathtracer::scene::BsdfEval eval = pathtracer::scene::evaluateBsdfSplit(bsdf, wi);
-                        return glm::dvec4(glm::dvec3(eval.total()), eval.pdf);
-                    });
-                });
-                expected[static_cast<std::size_t>((ci * kPhiBins) + pi)] = bin.w * kSampleCount;
-                mass += bin.w;
-                integral += glm::dvec3(bin);
-            }
-        }
-        expected.back() = std::max(1.0 - mass, 0.0) * kSampleCount;
-        std::vector<double> observed(expected.size(), 0.0);
-        glm::dvec3 weightSum(0.0);
+        std::vector<tools::stats::Welford> drawn(kBins);
         std::mt19937 rng(0x5EED1U);
+        bool pdfShared = true;
         for (int i = 0; i < kSampleCount; ++i) {
             pathtracer::scene::Sampler sampler(0, 0, 0, 1, rng());
-            const std::optional<pathtracer::scene::BsdfSample> sample = pathtracer::scene::sampleBsdf(bsdf, sampler);
-            if (!sample || !(sample->pdf > 0.0F)) {
-                observed.back() += 1.0;
-                continue;
+            pathtracer::scene::Sampler walk(0, 0, 0, 1, rng());
+            const std::optional<pathtracer::scene::BsdfSample> sample = drawFrom(bsdf, sampler, walk);
+            const int hit = sample ? binOf(sample->wiLocal) : -1;
+            for (int b = 0; b < kBins; ++b) {
+                drawn[static_cast<std::size_t>(b)].add(b == hit ? static_cast<double>(sample->throughputWeight.x) : 0.0);
             }
-            weightSum += glm::dvec3(sample->throughputWeight);
-            const glm::vec3 wi = sample->wiLocal;
-            const int ci = std::min(static_cast<int>((wi.z + 1.0F) * 0.5F * kCosBins), kCosBins - 1);
-            float phi = std::atan2(wi.y, wi.x);
-            phi += phi < 0.0F ? static_cast<float>(2.0 * kPiDouble) : 0.0F;
-            const int pi = std::min(static_cast<int>(phi / static_cast<float>(2.0 * kPiDouble) * kPhiBins), kPhiBins - 1);
-            observed[static_cast<std::size_t>((ci * kPhiBins) + pi)] += 1.0;
+            // MIS holds only if a draw carries the very density NEE evaluates at its direction.
+            pdfShared = pdfShared && (!sample || sample->delta ||
+                                      sample->pdf == pathtracer::scene::evaluateFirstScattering(bsdf, sample->wiLocal).pdf);
         }
-        double chiSquare = 0.0;
-        int cells = 0;
-        double pooledExpected = 0.0;
-        double pooledObserved = 0.0;
-        for (std::size_t i = 0; i < expected.size(); ++i) {
-            if (expected[i] < kMinExpected) {
-                pooledExpected += expected[i];
-                pooledObserved += observed[i];
-                continue;
+        int worstBin = 0;
+        double worstGap = 0.0;
+        double drawnTotal = 0.0;
+        double evaluatedTotal = 0.0;
+        for (int ci = 0; ci < kCosBins; ++ci) {
+            for (int pi = 0; pi < kPhiBins; ++pi) {
+                // Uniform over the bin's solid angle, (dz, dphi) being area-preserving on the sphere: value times the bin's area.
+                const double z0 = -1.0 + (2.0 * ci / kCosBins);
+                const double phi0 = 2.0 * kPiDouble * pi / kPhiBins;
+                const double area = (2.0 / kCosBins) * (2.0 * kPiDouble / kPhiBins);
+                tools::stats::Welford evaluated;
+                for (int i = 0; i < kEvaluationsPerBin; ++i) {
+                    const double z = z0 + ((2.0 / kCosBins) * std::uniform_real_distribution<double>()(rng));
+                    const double phi = phi0 + ((2.0 * kPiDouble / kPhiBins) * std::uniform_real_distribution<double>()(rng));
+                    const double sine = std::sqrt(std::max(0.0, 1.0 - (z * z)));
+                    const glm::vec3 wi(static_cast<float>(sine * std::cos(phi)), static_cast<float>(sine * std::sin(phi)),
+                                       static_cast<float>(z));
+                    evaluated.add(area * static_cast<double>(evaluateAfterDraw(bsdf, wi, rng).total().x));
+                }
+                const int b = (ci * kPhiBins) + pi;
+                const tools::stats::Welford& sampled = drawn[static_cast<std::size_t>(b)];
+                const double gap = sampled.mean() - evaluated.mean();
+                drawnTotal += sampled.mean();
+                evaluatedTotal += evaluated.mean();
+                const tools::stats::Band band = tools::stats::differenceBand(sampled, evaluated, perBin);
+                if (!band.contains(gap)) {
+                    std::cerr << "bsdf_validate: FAILED " << c.name << " bin " << b << ": drawn " << sampled.mean() << ", evaluated "
+                              << evaluated.mean() << ", band +-" << band.halfWidth() << '\n';
+                    ok = false;
+                }
+                if (std::abs(gap) > std::abs(worstGap)) {
+                    worstGap = gap;
+                    worstBin = b;
+                }
             }
-            chiSquare += (observed[i] - expected[i]) * (observed[i] - expected[i]) / expected[i];
-            ++cells;
         }
-        if (pooledExpected >= kMinExpected) {
-            chiSquare += (pooledObserved - pooledExpected) * (pooledObserved - pooledExpected) / pooledExpected;
-            ++cells;
-        }
-        const double p = tools::stats::chiSquareUpperTail(chiSquare, cells - 1);
-        const glm::dvec3 mean = weightSum / static_cast<double>(kSampleCount);
-        const double gap = static_cast<double>(maxChannel(glm::vec3(glm::abs(mean - integral))));
-        std::cout << "  " << c.name << ": chi2 p " << p << ", mean weight " << mean.x << " vs integrated value " << integral.x << '\n';
-        if (p < perCase || gap > 0.01) {
-            std::cerr << "bsdf_validate: FAILED microsurface sampling for " << c.name << " p=" << p << " |E[weight] - integral|=" << gap << '\n';
+        std::cout << "  " << c.name << ": albedo drawn " << drawnTotal << ", evaluated " << evaluatedTotal << ", worst bin " << worstBin
+                  << " gap " << worstGap << '\n';
+        if (!pdfShared) {
+            std::cerr << "bsdf_validate: FAILED " << c.name << ": a draw's pdf is not the first scattering's at its direction\n";
             ok = false;
         }
     }
-    PT_EXPECT(ctx, ok, "the microsurface's walk disagrees with its density or its value; see the rows above");
+    PT_EXPECT(ctx, ok, "the microsurface's walk and its evaluation disagree; see the rows above");
 }
 
 // The microsurface keeps each lobe in its medium: reflection only on wo's side of omega_g, transmission only across it.
 PT_CHECK(normal_map_confines_lobes_to_their_side, Fast, Exact) {
+    constexpr int kDraws = 256;
     bool ok = true;
     for (const Surface& surface : {makeParams(0.4F, 0.0F, 1.0F), makeParams(0.5F, 0.0F, 0.0F), thinWalled(makeParams(0.3F, 0.0F, 0.0F), 0.6F, 0.4F)}) {
         for (const float tilt : {0.3F, 1.0F}) {
@@ -3413,12 +3438,24 @@ PT_CHECK(normal_map_confines_lobes_to_their_side, Fast, Exact) {
             for (const float muO : {0.7F, 0.15F, -0.5F}) {
                 const glm::vec3 wo = aboutGeometric(g, muO, 1.0F);
                 const pathtracer::scene::NormalMappedBsdf bsdf = normalMapped(surface, wo, g);
+                std::mt19937 rng(73100U);
+                pathtracer::scene::Sampler walk(0, 0, 0, 1, 73101U);
                 for (const float muI : {0.9F, 0.4F, 0.05F, -0.05F, -0.4F, -0.9F}) {
                     for (const float phi : {0.0F, 1.6F, 3.2F, 4.8F}) {
                         const glm::vec3 wi = aboutGeometric(g, muI, phi);
-                        const pathtracer::scene::BsdfEval eval = pathtracer::scene::evaluateBsdfSplit(bsdf, wi);
+                        const pathtracer::scene::BsdfEval eval = evaluateAfterDraw(bsdf, wi, rng);
                         const bool sameSide = (muI > 0.0F) == (muO > 0.0F);
                         ok = ok && (sameSide ? eval.transmission == glm::vec3(0.0F) : eval.diffuse + eval.specular == glm::vec3(0.0F));
+                    }
+                }
+                // A walk exits on wo's side exactly when it reflected: its transmit share is the whole weight across, none on wo's side.
+                for (int i = 0; i < kDraws; ++i) {
+                    pathtracer::scene::Sampler sampler(0, 0, i, kDraws, 73200U);
+                    if (const std::optional<pathtracer::scene::BsdfSample> sample = drawFrom(bsdf, sampler, walk)) {
+                        const bool sameSide = (glm::dot(sample->wiLocal, g) > 0.0F) == (muO > 0.0F);
+                        const bool transmitted = sample->type == pathtracer::scene::LobeType::Transmission;
+                        ok = ok && sameSide != transmitted &&
+                             sample->transmitWeight == (transmitted ? sample->throughputWeight : glm::vec3(0.0F));
                     }
                 }
             }
@@ -3439,8 +3476,8 @@ PT_CHECK(normal_map_point_symmetry, Fast, Exact) {
             const pathtracer::scene::NormalMappedBsdf below = normalMapped(surface, -wo, g);
             for (const float muI : {0.7F, 0.2F, -0.3F, -0.8F}) {
                 const glm::vec3 wi = aboutGeometric(g, muI, 2.3F);
-                const glm::vec3 a = pathtracer::scene::evaluateBsdfSplit(above, wi).total();
-                const glm::vec3 b = pathtracer::scene::evaluateBsdfSplit(below, -wi).total();
+                const glm::vec3 a = pathtracer::scene::evaluateFirstScattering(above, wi).total();
+                const glm::vec3 b = pathtracer::scene::evaluateFirstScattering(below, -wi).total();
                 worst = std::max(worst, maxChannel(glm::abs(a - b)) / std::max(maxChannel(a), 1e-6F));
             }
         }
@@ -3453,19 +3490,21 @@ PT_CHECK(normal_map_point_symmetry, Fast, Exact) {
 PT_CHECK(normal_map_limits, Fast, Exact) {
     const Surface surface = makeColoredMetalParams(0.4F);
     const glm::vec3 wo = directionAt(0.6F, 0.3F);
+    std::mt19937 rng(74001U);
+    pathtracer::scene::Sampler walk(0, 0, 0, 1, 74002U);
     float worst = 0.0F;
     for (const float muI : {0.9F, 0.5F, 0.1F}) {
         const glm::vec3 wi = directionAt(muI, 2.0F);
-        const glm::vec3 flat = pathtracer::scene::evaluateBsdfSplit(normalMapped(surface, wo, std::nullopt), wi).total();
-        const glm::vec3 nearly = pathtracer::scene::evaluateBsdfSplit(normalMapped(surface, wo, geometricAt(1e-4F)), wi).total();
+        const glm::vec3 flat = evaluateAfterDraw(normalMapped(surface, wo, std::nullopt), wi, rng).total();
+        const glm::vec3 nearly = evaluateAfterDraw(normalMapped(surface, wo, geometricAt(1e-4F)), wi, rng).total();
         worst = std::max(worst, maxChannel(glm::abs(flat - nearly)) / maxChannel(flat));
     }
     const pathtracer::scene::NormalMappedBsdf past = normalMapped(surface, wo, geometricAt(1.7F));
     pathtracer::scene::Sampler sampler(0, 0, 0, 1, 74000U);
     ctx.plan(2);
     PT_EXPECT(ctx, worst <= 1e-3F, "a vanishing tilt moved the closure by more than first order");
-    PT_EXPECT(ctx, !pathtracer::scene::scatters(past) && !pathtracer::scene::sampleBsdf(past, sampler) &&
-                       pathtracer::scene::evaluateBsdfSplit(past, directionAt(0.5F, 0.0F)).total() == glm::vec3(0.0F),
+    PT_EXPECT(ctx, !pathtracer::scene::scatters(past) && !drawFrom(past, sampler, walk) &&
+                       evaluateAfterDraw(past, directionAt(0.5F, 0.0F), rng).total() == glm::vec3(0.0F),
               "a facet tilted past 90 degrees still scattered");
 }
 
@@ -3483,7 +3522,8 @@ PT_CHECK(normal_map_pass_through, Slow, Statistical) {
             glm::dvec3 sum(0.0);
             for (int i = 0; i < kDraws; ++i) {
                 pathtracer::scene::Sampler sampler(0, 0, i, kDraws, 75000U);
-                const std::optional<pathtracer::scene::BsdfSample> sample = pathtracer::scene::sampleBsdf(bsdf, sampler);
+                pathtracer::scene::Sampler walk(0, 0, i, kDraws, 75001U);
+                const std::optional<pathtracer::scene::BsdfSample> sample = drawFrom(bsdf, sampler, walk);
                 if (sample && sample->passThrough) {
                     ok = ok && sample->wiLocal == -wo;
                     sum += glm::dvec3(sample->throughputWeight);
@@ -3497,34 +3537,59 @@ PT_CHECK(normal_map_pass_through, Slow, Statistical) {
     finish(ctx, ok, "a mapped window's undeviated draws disagree with its passThrough");
 }
 
-// Energy: a white facet under the second-order model never gains; it loses the truncated third and later bounces (reported, Fig. 13).
+// Energy at all orders (the paper's Fig. 13 and 18): a facet that absorbs nothing loses nothing, by its draws and by its evaluation.
 PT_CHECK(normal_map_white_furnace, Slow, Statistical) {
-    constexpr int kSampleCount = 200000;
-    constexpr float kNoise = 0.01F;
+    constexpr int kDraws = 20000;
+    constexpr int kEvaluations = 200000;
+    // A white Lambert draw weighs 1 to a few ulps; a walk compounds one rounding per facet vertex, so its throughput is 1 to 1e-5.
+    constexpr float kRounding = 1e-5F;
+    struct Case {
+        const char* name;
+        Surface surface;
+        bool continuous;  // a smooth mirror's walk is all deltas: its draws carry the energy and its evaluation is zero
+    };
+    const std::array<Case, 2> cases{{{"white Lambert", whiteLambert(), true}, {"white mirror", makeParams(0.0F, 1.0F, 0.0F), false}}};
+    ctx.plan(1);
+    const double perRow = tools::stats::sidak(ctx.alpha(), 9);
     bool ok = true;
     std::uint32_t seed = 76000;
-    for (const Surface& surface : {makeParams(0.4F, 1.0F, 0.0F), makeParams(0.0F, 1.0F, 0.0F), makeParams(0.5F, 0.0F, 0.0F)}) {
+    for (const Case& c : cases) {
         for (const float tilt : {0.3F, 0.8F, 1.2F}) {
             const glm::vec3 g = geometricAt(tilt);
             for (const float mu : {0.9F, 0.4F, 0.1F}) {
-                const glm::vec3 wo = aboutGeometric(g, mu, 0.0F);
-                const pathtracer::scene::NormalMappedBsdf bsdf = normalMapped(surface, wo, g);
-                glm::dvec3 sum(0.0);
-                for (int i = 0; i < kSampleCount; ++i) {
-                    pathtracer::scene::Sampler sampler(0, 0, i, kSampleCount, seed);
-                    if (const std::optional<pathtracer::scene::BsdfSample> sample = pathtracer::scene::sampleBsdf(bsdf, sampler)) {
-                        sum += glm::dvec3(sample->throughputWeight);
-                    }
+                const pathtracer::scene::NormalMappedBsdf bsdf = normalMapped(c.surface, aboutGeometric(g, mu, 0.0F), g);
+                // Every draw: each facet event weighs 1, so no walk is absorbed and each one's throughput is 1.
+                float worstDraw = 0.0F;
+                for (int i = 0; i < kDraws; ++i) {
+                    pathtracer::scene::Sampler sampler(0, 0, i, kDraws, seed);
+                    pathtracer::scene::Sampler walk(0, 0, i, kDraws, seed + 1U);
+                    const std::optional<pathtracer::scene::BsdfSample> sample = drawFrom(bsdf, sampler, walk);
+                    worstDraw = std::max(worstDraw, sample ? maxChannel(glm::abs(sample->throughputWeight - 1.0F)) : 1.0F);
                 }
-                ++seed;
-                const glm::vec3 lo(sum / static_cast<double>(kSampleCount));
-                std::cout << "  metal=" << surface.baseMetalness << " r=" << surface.specularRoughness << " tilt " << tilt << " mu " << mu
-                          << ": albedo " << lo.x << '\n';
-                ok = ok && maxChannel(lo) <= 1.0F + kNoise && minChannel(lo) >= 0.0F;
+                seed += 2U;
+                ok = ok && worstDraw <= kRounding;
+                std::cout << "  " << c.name << " tilt " << tilt << " mu " << mu << ": worst draw |w - 1| " << worstDraw;
+                if (!c.continuous) {
+                    std::cout << '\n';
+                    continue;
+                }
+                // Uniform directions over the sphere: 4 pi times the mean value, against 1, with the first scattering's share beside it.
+                tools::stats::Welford all;
+                tools::stats::Welford first;
+                std::mt19937 rng(seed);
+                for (int i = 0; i < kEvaluations; ++i) {
+                    glm::vec3 wi = sampleUniformHemisphere(rng);
+                    wi.z = (rng() & 1U) != 0U ? -wi.z : wi.z;  // the lower hemisphere's mirror at equal odds: uniform over the sphere
+                    all.add(4.0 * kPiDouble * static_cast<double>(evaluateAfterDraw(bsdf, wi, rng).total().x));
+                    first.add(4.0 * kPiDouble * static_cast<double>(pathtracer::scene::evaluateFirstScattering(bsdf, wi).total().x));
+                }
+                const double half = tools::stats::studentTTwoSided(perRow, static_cast<double>(all.count() - 1)) * all.standardError();
+                std::cout << ", evaluated " << all.mean() << " +- " << half << ", first scattering " << first.mean() << '\n';
+                ok = ok && std::abs(all.mean() - 1.0) <= half;
             }
         }
     }
-    finish(ctx, ok, "a white microsurface returned more than it received");
+    PT_EXPECT(ctx, ok, "a white microsurface lost or gained energy at all orders; see the rows above");
 }
 
 // The layer branches the sweeps above leave untouched, each an audit regression: every draw finite, non-negative and self-consistent.
