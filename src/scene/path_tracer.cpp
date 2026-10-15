@@ -29,6 +29,8 @@ constexpr std::uint32_t kAoSeedOffset = 0x9E3779B9U;
 constexpr std::uint32_t kFresnelSeedOffset = 0x6A09E667U;
 // And for volume tracking, whose draw count varies per path: frac(sqrt 3)*2^32, so no BSDF dimension shifts with it.
 constexpr std::uint32_t kVolumeSeedOffset = 0xBB67AE85U;
+// And for the microsurface walk, whose length varies per vertex: frac(sqrt 11)*2^32, the next odd one of the series.
+constexpr std::uint32_t kWalkSeedOffset = 0x510E527FU;
 
 // pbrt's ShadowEpsilon (PBR 6.8.6): a relative back-off on tMax, or a light's own front face occludes it. A no-op for the environment.
 constexpr float kShadowDistanceEpsilon = 1e-3F;
@@ -292,7 +294,7 @@ float obscuranceAlong(Ray ray, const PassThroughScene& scene, float maxDistance)
 TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, float pixelSolidAngle, const PassThroughScene& scene,
                        const std::vector<int>& instanceLightIndex, const LightSet& lights,
                        bool showSky, const PathTraceSettings& settings,
-                       Sampler& sampler, Sampler& volumeSampler, glm::vec2 aoSample, glm::vec2 fresnelSample,
+                       Sampler& sampler, Sampler& volumeSampler, Sampler& walkSampler, glm::vec2 aoSample, glm::vec2 fresnelSample,
                        pathtracer::debug::RayCounts& __restrict rays) {
     const EmbreeAccel& accel = scene.accel;
     glm::vec3 radiance(0.0F);
@@ -603,7 +605,8 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
         }
 
         // A failed sample must not skip the NEE block: the two are independent estimators, sharing only this vertex's params and frame.
-        const std::optional<BsdfSample> sample = sampleBsdf(closure, sampler);
+        std::optional<WalkVertex> revisit;  // where the draw's walk first returned to the facet: NEE resumes its later orders there
+        const std::optional<BsdfSample> sample = sampleBsdf(closure, sampler, walkSampler, revisit);
 
         // Bucket assignment: bounce 0 sets it from scratch, any later bounce only ever overrides it to Refraction, stickily.
         if (sample.has_value()) {
@@ -628,10 +631,10 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
             if (!farSide || transmits(closure)) {
                 const glm::vec3 wiLocalLight = lightSample->direction * frame;
                 // One evaluation for the value, pdf and per-lobe split, each lobe cosine-weighted about its own normal.
-                const BsdfEval eval = evaluateBsdfSplit(closure, wiLocalLight);
+                const BsdfEval eval = evaluateBsdfSplit(closure, wiLocalLight, revisit, walkSampler);
                 const glm::vec3 bsdfValue = farSide ? eval.transmission : eval.diffuse + eval.specular;
-                if (eval.pdf > 0.0F &&
-                    (bsdfValue.x > 0.0F || bsdfValue.y > 0.0F || bsdfValue.z > 0.0F)) {
+                // A zero pdf is light only the walk's later orders reach: the BSDF draw's MIS weight is 0 there, so NEE takes it whole.
+                if (bsdfValue.x > 0.0F || bsdfValue.y > 0.0F || bsdfValue.z > 0.0F) {
                     // Offset along geoNormal toward the light's side: the far side crosses the interface, so it takes the curvature offset.
                     const float shadowEpsilon =
                         farSide ? transmissionOffsetEpsilon(triangle) : kRayEpsilon;
@@ -831,6 +834,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                     Sampler fresnelSampler(x, y, sampleIndex, replicateCount, seed ^ kFresnelSeedOffset, lattice);
                     const glm::vec2 fresnelSample = fresnelSampler.next2D();
                     Sampler volumeSampler(x, y, sampleIndex, replicateCount, seed ^ kVolumeSeedOffset, lattice);
+                    Sampler walkSampler(x, y, sampleIndex, replicateCount, seed ^ kWalkSeedOffset, lattice);
                     // The pixel's footprint on the unit sphere, read only by the feature chain and only where a ray exists.
                     const auto pixelSolidAngle = [&] {
                         const glm::mat2x3 dirPerPixel = primary->dirPerNdc * ndcPerPixel;
@@ -840,7 +844,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                     const TraceResult trace =
                         primary ? tracePath(primary->ray, primary->dirPerNdc * ndcPerStratum,
                                             settings.denoiseFeatures ? pixelSolidAngle() : 0.0F, scene, instanceLightIndex, lights,
-                                            showSky, settings, sampler, volumeSampler, aoSample, fresnelSample, tileRays)
+                                            showSky, settings, sampler, volumeSampler, walkSampler, aoSample, fresnelSample, tileRays)
                                 : TraceResult{};
                     const std::array<float, kSampleLanes> values{
                         trace.radiance.x,          trace.radiance.y,
