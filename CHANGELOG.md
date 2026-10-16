@@ -3,6 +3,29 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Display optics in the API
+
+Bloom and colour fringing are no longer viewer-only. `render(..., bloom_strength=k, aberration=a)`, `PtRenderRequest.bloom_strength`
+/ `.aberration` and `render_beauty --bloom K --aberration A` apply them on the CPU, both 0 (off) by default. The result is the viewer's
+frame at one texel per pixel: (1 - k) A(I) + k (I * P) in scene-linear, before exposure.
+- **Where:** on beauty and denoised only, after every filter and the denoiser have read the clean beauty. Data AOVs keep every float,
+  and an AOV requested twice takes the optics once.
+- **Bloom:** the viewer's pyramid, now one definition. The 13-tap down and 9-tap up kernels and the octave count live in
+  `display_optics.h`; the viewer's shaders are generated from them, and the CPU evaluates the same taps with GL_LINEAR's addressing,
+  clamped or wrapping across a lat-long's seam. The up pass sums into the down chain in place, so memory is a third of the image.
+- **Fringe:** R is read at the film point scaled 1 - a about the frame centre, B at 1 + a, G in place. The display texture
+  magnifies with GL_NEAREST, so at 1:1 the viewer reads the nearest cell; the CPU does the same through `nearestPixel`, on either lattice.
+- **Ranges:** k in [0, 1], an energy fraction; a in [0, 1), keeping red's magnification positive. Bloom on the hexagonal lattice is
+  refused by name, as the viewer leaves it off. `PT_ABI_VERSION` is 9.
+- **Measured:** against a float32 transcription of the viewer's GLSL, bloom agrees to 3e-7 of the peak and the fringe reads the same
+  cell at every pixel, square, lat-long and hexagonal. The regenerated shaders draw 0 differing pixels in the viewer. Off, the image's
+  CRC equals the base's. Both optics cost 1.4 ms at 256x128, about 0.4% of 16 passes; render_beauty logs it as `optics_ms`.
+- **Tests:** `display_validate` checks bloom against a double-precision transcription of the shader passes at odd, degenerate and
+  wrapped sizes, the lat-long seam bit for bit, the fringe cell by cell on both lattices, and off as the identity. `api_validate` and
+  the Python suite check picture-only, once per AOV, the defaults and each refusal by name.
+
+Evidence is in `results/display_optics`.
+
 ## Grazing transmission
 
 The transmissive sphere is now scored over its whole disc. Its rim loss was light trapped inside the glass and cut off by the bounce

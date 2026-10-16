@@ -7,8 +7,9 @@
     (256, 256, 3)
 
 Values are scene-referred linear, unclamped, with no display transform applied: what a model should train on, not
-what a monitor should show. Pass one through ``display_encode`` for a picture that matches the viewer, or use
-``render_beauty --out`` to write one from the CLI. ``lattice_preview`` draws a hexagonal render's cells as the viewer does.
+what a monitor should show. The viewer's lens optics, bloom and colour fringing, are off unless ``render`` asks for
+them. Pass one through ``display_encode`` for a picture that matches the viewer, or use ``render_beauty --out`` to write
+one from the CLI. ``lattice_preview`` draws a hexagonal render's cells as the viewer does.
 
 Arrays are C-contiguous float32, so ``torch.from_numpy(frame["beauty"])`` shares memory with no copy, leaving one
 explicit ``.to(device)``.
@@ -320,6 +321,8 @@ class Renderer:
         light_rotations: Sequence[Sequence[float]] | None = None,
         light_temperatures: Sequence[float] | None = None,
         env_rotation: Sequence[float] = (0.0, 0.0, 0.0),
+        bloom_strength: float = 0.0,
+        aberration: float = 0.0,
     ) -> Mapping[str, np.ndarray]:
         """Renders the requested AOVs and returns them keyed by the names given.
 
@@ -352,6 +355,14 @@ class Renderer:
         radiator's linear ACEScg colour at unit luminance, so ``intensity`` keeps its meaning. A colour outside the scene
         gamut (blue turns negative) is refused rather than clamped. ``None`` keeps the authored colours.
         Only the lights' radiance changes, so it never rebuilds the BVH. The environment keeps its measured colour.
+
+        ``bloom_strength`` and ``aberration`` are the viewer's lens optics, both 0 (off) by default, applied in scene-linear to
+        ``beauty`` and ``denoised`` only, after every filter has read the clean beauty; data AOVs are never touched. The result
+        is the viewer's frame at one texel per pixel: ``(1 - k) * fringed + k * glare`` with ``k = bloom_strength``.
+        ``bloom_strength`` in ``[0, 1]`` is the fraction of energy a glare PSF scatters: an equal-weight Gaussian pyramid whose
+        octaves reach the frame, so it falls off as ``1 / r**2``. It needs the square lattice. ``aberration`` in ``[0, 1)`` reads
+        red at the film point scaled ``1 - aberration`` about the frame centre and blue at ``1 + aberration``, each from its
+        nearest pixel; green stays. On the lat-long both wrap across the seam.
 
         Returns arrays of shape ``(height, width, channels)``, float32, row 0 at the top.
         """
@@ -403,6 +414,8 @@ class Renderer:
         if kelvin is not None:
             request.light_temperature_kelvin = kelvin.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
         request.env_rotation_degrees = (ctypes.c_float * 3)(*env)
+        request.bloom_strength = bloom_strength
+        request.aberration = aberration
 
         error = _ffi.make_error_buffer()
         if _LIB.pt_render(self._handle, ctypes.byref(request), pointers, error, len(error)) != 0:

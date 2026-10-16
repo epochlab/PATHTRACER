@@ -23,6 +23,7 @@
 #include "pathtracer/debug/colormap.h"
 #include "pathtracer/debug/scale_space.h"
 #include "pathtracer/debug/aov_routing.h"
+#include "pathtracer/gfx/display_optics.h"
 #include "pathtracer/scene/camera.h"
 #include "pathtracer/scene/cie.h"
 #include "pathtracer/scene/rotation.h"
@@ -926,6 +927,100 @@ PT_CHECK(render_rejects_an_invalid_camera, Fast, Exact) {
               "a zero field of view was not rejected by name: " + error);
     PT_EXPECT(ctx, !render(camera, zeroFieldOfView) && error.starts_with("previousCamera: "),
               "an invalid previous camera was not rejected under its own name: " + error);
+}
+
+// Optics act on the picture after every producer: Beauty changes, data AOVs and the Sobel of clean Beauty keep every float, once per AOV.
+PT_CHECK(display_optics_touch_only_the_picture_once, Fast, Exact) {
+    const std::vector<AovId> aovs = {AovId::Beauty, AovId::Depth, AovId::Normal, AovId::Sobel};
+    ctx.plan(static_cast<int>(aovs.size()) + 1);
+    std::string error;
+    const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", error);
+    if (!renderer) {
+        for (std::size_t i = 0; i <= aovs.size(); ++i) {
+            PT_EXPECT(ctx, false, "scene load failed: " + error);
+        }
+        return;
+    }
+    constexpr int kWidth = 32;
+    constexpr int kHeight = 24;
+    const pathtracer::gfx::DisplayOptics optics{.aberration = 0.05F, .bloomStrength = 0.3F};
+    const auto render = [&](const std::vector<AovId>& requested, const pathtracer::gfx::DisplayOptics& displayOptics) {
+        const pathtracer::api::HeadlessRenderer::Request request{.camera = renderer->defaultCamera(),
+                                                                 .width = kWidth,
+                                                                 .height = kHeight,
+                                                                 .samples = 2,
+                                                                 .aovs = requested,
+                                                                 .displayOptics = displayOptics};
+        std::vector<std::vector<float>> buffers;
+        std::vector<float*> pointers;
+        buffers.reserve(requested.size());
+        for (const AovId aov : requested) {
+            buffers.emplace_back(static_cast<std::size_t>(kWidth) * kHeight *
+                                 static_cast<std::size_t>(pathtracer::debug::aovChannels(aov)));
+            pointers.push_back(buffers.back().data());
+        }
+        error.clear();
+        const bool rendered = renderer->render(request, std::span<float* const>(pointers.data(), pointers.size()), error);
+        return rendered ? buffers : std::vector<std::vector<float>>{};
+    };
+    const std::vector<std::vector<float>> off = render(aovs, {});
+    const std::vector<std::vector<float>> on = render(aovs, optics);
+    const std::vector<std::vector<float>> twice = render({AovId::Beauty, AovId::Beauty}, optics);
+    if (off.empty() || on.empty() || twice.empty()) {
+        for (std::size_t i = 0; i <= aovs.size(); ++i) {
+            PT_EXPECT(ctx, false, "render failed: " + error);
+        }
+        return;
+    }
+    for (std::size_t i = 0; i < aovs.size(); ++i) {
+        const bool picture = pathtracer::debug::aovIsPicture(aovs[i]);
+        PT_EXPECT(ctx, (off[i] != on[i]) == picture,
+                  std::string(pathtracer::debug::kAovNames[static_cast<int>(aovs[i])]) +
+                      (picture ? " was left untouched by the optics" : " is a data AOV, yet the optics changed it"));
+    }
+    PT_EXPECT(ctx, twice[0] == on[0] && twice[1] == on[0], "Beauty requested twice took the optics other than once");
+}
+
+// Each optic is ranged at the boundary and named: bloom a fraction in [0, 1] on the square lattice, the fringe in [0, 1).
+PT_CHECK(render_rejects_invalid_display_optics, Fast, Exact) {
+    struct Case {
+        pathtracer::gfx::DisplayOptics optics;
+        pathtracer::gfx::PixelLattice lattice;
+        const char* name;
+    };
+    constexpr float kNaN = std::numeric_limits<float>::quiet_NaN();
+    const std::array<Case, 7> cases{{{{.bloomStrength = -0.1F}, pathtracer::gfx::PixelLattice::Square, "bloom"},
+                                     {{.bloomStrength = 1.1F}, pathtracer::gfx::PixelLattice::Square, "bloom"},
+                                     {{.bloomStrength = kNaN}, pathtracer::gfx::PixelLattice::Square, "bloom"},
+                                     {{.aberration = -0.1F}, pathtracer::gfx::PixelLattice::Square, "aberration"},
+                                     {{.aberration = 1.0F}, pathtracer::gfx::PixelLattice::Square, "aberration"},
+                                     {{.aberration = kNaN}, pathtracer::gfx::PixelLattice::Square, "aberration"},
+                                     {{.bloomStrength = 0.2F}, pathtracer::gfx::PixelLattice::Hexagonal, "bloom"}}};
+    ctx.plan(static_cast<int>(cases.size()) + 1);
+    std::string error;
+    const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", error);
+    if (!renderer) {
+        for (std::size_t i = 0; i <= cases.size(); ++i) {
+            PT_EXPECT(ctx, false, "scene load failed: " + error);
+        }
+        return;
+    }
+    const pathtracer::scene::Camera& authored = renderer->defaultCamera();
+    const auto render = [&](const pathtracer::gfx::DisplayOptics& optics, pathtracer::gfx::PixelLattice lattice) {
+        const pathtracer::scene::Camera camera{authored.position(), authored.rotationDegrees(), authored.filmBack(),
+                                               authored.focalLengthMm(), authored.nearClip(), authored.farClip(), authored.aperture(),
+                                               authored.shutterSeconds(), authored.iso(), authored.lens(), lattice};
+        const pathtracer::api::HeadlessRenderer::Request request{
+            .camera = camera, .width = 8, .height = 8, .aovs = {AovId::Beauty}, .displayOptics = optics};
+        error.clear();
+        return renderer->render(request, error);
+    };
+    PT_EXPECT(ctx, render({.aberration = 0.99F, .bloomStrength = 1.0F}, pathtracer::gfx::PixelLattice::Square),
+              "the largest valid optics were rejected: " + error);
+    for (const Case& testCase : cases) {
+        PT_EXPECT(ctx, !render(testCase.optics, testCase.lattice) && error.starts_with(testCase.name),
+                  std::string("an invalid ") + testCase.name + " was not rejected by name: " + error);
+    }
 }
 
 // An asset root whose config/profile.json disables the denoiser, every other file and directory linked to the real one.

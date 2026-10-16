@@ -159,6 +159,7 @@ void writeError(char* err, int errCap, const std::string& message) {
                                                                           request.light_temperature_kelvin + lightCount))
                                        : std::nullopt,
         .envRotationDegrees = glm::make_vec3(request.env_rotation_degrees),
+        .displayOptics = {.aberration = request.aberration, .bloomStrength = request.bloom_strength},
     };
 }
 

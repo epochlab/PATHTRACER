@@ -1,13 +1,16 @@
-// Correctness gate for the CPU-evaluable display and statistics path: the OCIO display transform and the frame-time ring buffer.
+// Correctness gate for the CPU-evaluable display and statistics path: the OCIO display transform, lens optics and frame-time ring buffer.
 
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <numeric>
 #include <random>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -16,9 +19,13 @@
 #include "check.h"
 #include "pathtracer/debug/frame_stats.h"
 #include "pathtracer/debug/power_spectrum.h"
+#include "pathtracer/gfx/display_optics.h"
+#include "pathtracer/gfx/hdr_image.h"
+#include "pathtracer/gfx/pixel_lattice.h"
 #include "pathtracer/gfx/ocio_cpu_transform.h"
 #include "pathtracer/gfx/viewport.h"
 #include "pathtracer/scene/sampler.h"
+#include "pathtracer/scene/thread_pool.h"
 
 namespace {
 
@@ -307,6 +314,235 @@ PT_CHECK(dither_mask_independent_of_sampler, Fast, Statistical) {
     std::snprintf(detail, sizeof(detail), "worst |r| = %.4f over all %d shifts", worst, kTileTexels);
     ctx.plan(1);
     PT_EXPECT(ctx, worst < 0.1, detail);
+}
+
+// --- Display optics: the CPU path against the viewer's shaders, transcribed here in double precision with GL's own sampling rules.
+
+using pathtracer::gfx::BloomTap;
+using pathtracer::gfx::DisplayOptics;
+using pathtracer::gfx::HdrImage;
+using pathtracer::gfx::PixelLattice;
+
+HdrImage randomImage(int width, int height, std::uint64_t seed) {
+    std::mt19937_64 rng(seed);
+    std::uniform_real_distribution<float> radiance(0.0F, 4.0F);
+    HdrImage image = pathtracer::gfx::makeImage(width, height, 3);
+    std::generate(image.texels.begin(), image.texels.end(), [&] { return radiance(rng); });
+    return image;
+}
+
+struct ShaderImage {
+    int width;
+    int height;
+    std::vector<glm::dvec3> rgb;
+};
+
+// GL_LINEAR at (u, v): x = u * w - 1/2, each of the 2x2 indices addressed after the floor; S repeats or clamps, T clamps.
+glm::dvec3 glLinear(const ShaderImage& image, double u, double v, bool wrapsS) {
+    const auto address = [](int index, int size, bool wraps) {
+        return wraps ? (((index % size) + size) % size) : std::clamp(index, 0, size - 1);
+    };
+    const double x = (u * image.width) - 0.5;
+    const double y = (v * image.height) - 0.5;
+    const int x0 = static_cast<int>(std::floor(x));
+    const int y0 = static_cast<int>(std::floor(y));
+    const double fx = x - x0;
+    const double fy = y - y0;
+    const auto at = [&](int i, int j) {
+        return image.rgb[(static_cast<std::size_t>(address(j, image.height, false)) * static_cast<std::size_t>(image.width)) +
+                         static_cast<std::size_t>(address(i, image.width, wrapsS))];
+    };
+    return ((1.0 - fx) * (1.0 - fy) * at(x0, y0)) + (fx * (1.0 - fy) * at(x0 + 1, y0)) + ((1.0 - fx) * fy * at(x0, y0 + 1)) +
+           (fx * fy * at(x0 + 1, y0 + 1));
+}
+
+// One bloom shader pass: target texel (i, j) sums its taps at uv = (i + 1/2, j + 1/2) / target + offset / source.
+ShaderImage shaderPass(const ShaderImage& source, int width, int height, std::span<const BloomTap> taps, bool wrapsS) {
+    ShaderImage target{width, height, std::vector<glm::dvec3>(static_cast<std::size_t>(width) * static_cast<std::size_t>(height))};
+    for (int j = 0; j < height; ++j) {
+        for (int i = 0; i < width; ++i) {
+            glm::dvec3 sum(0.0);
+            for (const BloomTap& tap : taps) {
+                const double u = ((i + 0.5) / width) + (static_cast<double>(tap.dx) / source.width);
+                const double v = ((j + 0.5) / height) + (static_cast<double>(tap.dy) / source.height);
+                sum += static_cast<double>(tap.weight) * glLinear(source, u, v, wrapsS);
+            }
+            target.rgb[(static_cast<std::size_t>(j) * static_cast<std::size_t>(width)) + static_cast<std::size_t>(i)] = sum;
+        }
+    }
+    return target;
+}
+
+// BloomPass::build then the display shader's mix(I, bloom, k): separate down and up chains, each up adding its down octave, the last 1/L.
+ShaderImage shaderBloom(const HdrImage& image, double k, bool wraps) {
+    ShaderImage input{image.width, image.height, {}};
+    for (std::size_t i = 0; i < image.texels.size(); i += 3) {
+        input.rgb.emplace_back(image.texels[i], image.texels[i + 1], image.texels[i + 2]);
+    }
+    const int octaves = pathtracer::gfx::bloomOctaves(image.width, image.height);
+    std::vector<ShaderImage> down;
+    const ShaderImage* source = &input;
+    for (int octave = 1; octave <= octaves; ++octave) {
+        down.push_back(shaderPass(*source, std::max(1, image.width >> octave), std::max(1, image.height >> octave),
+                                  pathtracer::gfx::kBloomDownTaps, wraps));
+        source = &down.back();
+    }
+    ShaderImage up = down.back();
+    for (int octave = octaves - 1; octave >= 0; --octave) {
+        ShaderImage next = shaderPass(up, std::max(1, image.width >> octave), std::max(1, image.height >> octave),
+                                      pathtracer::gfx::kBloomUpTaps, wraps);
+        for (std::size_t i = 0; i < next.rgb.size(); ++i) {
+            next.rgb[i] = octave > 0 ? next.rgb[i] + down[static_cast<std::size_t>(octave - 1)].rgb[i] : next.rgb[i] / double(octaves);
+        }
+        up = std::move(next);
+    }
+    for (std::size_t i = 0; i < up.rgb.size(); ++i) {
+        up.rgb[i] = ((1.0 - k) * input.rgb[i]) + (k * up.rgb[i]);
+    }
+    return up;
+}
+
+// Bloom against the shader transcription, odd and degenerate sizes, both seam modes; float error is bounded by the pass depth.
+PT_CHECK(bloom_matches_the_shader_passes, Fast, Exact) {
+    struct Case {
+        int width;
+        int height;
+        bool wraps;
+    };
+    constexpr std::array<Case, 4> kCases{{{37, 23, false}, {64, 15, true}, {3, 1, false}, {1, 1, true}}};
+    constexpr float kStrength = 0.6F;
+    ctx.plan(static_cast<int>(kCases.size()));
+    pathtracer::scene::ThreadPool pool;
+    for (const Case& testCase : kCases) {
+        HdrImage image = randomImage(testCase.width, testCase.height, ctx.seed());
+        const ShaderImage reference = shaderBloom(image, kStrength, testCase.wraps);
+        pathtracer::gfx::applyDisplayOptics(image, PixelLattice::Square, testCase.wraps, DisplayOptics{.bloomStrength = kStrength}, pool);
+        double worst = 0.0;
+        for (std::size_t i = 0; i < reference.rgb.size(); ++i) {
+            for (glm::length_t lane = 0; lane < 3; ++lane) {
+                worst = std::max(worst, std::fabs(image.texels[(i * 3) + static_cast<std::size_t>(lane)] - reference.rgb[i][lane]));
+            }
+        }
+        // 2L + 1 dependent passes of at most 3 roundings per tap plus the sum, on intermediates no larger than L times the input's 4.
+        const int octaves = pathtracer::gfx::bloomOctaves(testCase.width, testCase.height);
+        const double bound = (2.0 * octaves + 1.0) * ((3.0 * pathtracer::gfx::kBloomDownTaps.size()) + 1.0) *
+                             std::numeric_limits<float>::epsilon() * octaves * 4.0;
+        char detail[160];
+        std::snprintf(detail, sizeof(detail), "%dx%d %s: worst |CPU - shader| %.3g against the float bound %.3g", testCase.width,
+                      testCase.height, testCase.wraps ? "wrapped" : "clamped", worst, bound);
+        PT_EXPECT(ctx, worst <= bound, detail);
+    }
+}
+
+// A lat-long rolled by 2^L columns rolls every octave by whole texels, so its bloom must roll with it, bit for bit, across the seam.
+PT_CHECK(bloom_wraps_a_lat_long_seam, Fast, Exact) {
+    constexpr int kWidth = 64;
+    constexpr int kHeight = 16;
+    const int roll = 1 << pathtracer::gfx::bloomOctaves(kWidth, kHeight);
+    ctx.plan(1);
+    pathtracer::scene::ThreadPool pool;
+    HdrImage image = randomImage(kWidth, kHeight, ctx.seed());
+    HdrImage rolled = image;
+    for (int y = 0; y < kHeight; ++y) {
+        const auto row = image.texels.begin() + (static_cast<std::ptrdiff_t>(y) * kWidth * 3);
+        std::rotate_copy(row, row + (static_cast<std::ptrdiff_t>(kWidth - roll) * 3), row + (static_cast<std::ptrdiff_t>(kWidth) * 3),
+                         rolled.texels.begin() + (static_cast<std::ptrdiff_t>(y) * kWidth * 3));
+    }
+    const DisplayOptics optics{.bloomStrength = 1.0F};
+    pathtracer::gfx::applyDisplayOptics(image, PixelLattice::Square, true, optics, pool);
+    pathtracer::gfx::applyDisplayOptics(rolled, PixelLattice::Square, true, optics, pool);
+    std::size_t differing = 0;
+    for (int y = 0; y < kHeight; ++y) {
+        for (int x = 0; x < kWidth; ++x) {
+            for (int lane = 0; lane < 3; ++lane) {
+                const std::size_t row = static_cast<std::size_t>(y) * kWidth;
+                const std::size_t at = ((row + static_cast<std::size_t>(x)) * 3) + static_cast<std::size_t>(lane);
+                const std::size_t shifted = ((row + static_cast<std::size_t>((x + roll) % kWidth)) * 3) + static_cast<std::size_t>(lane);
+                differing += image.texels[at] != rolled.texels[shifted] ? 1 : 0;
+            }
+        }
+    }
+    PT_EXPECT(ctx, differing == 0, std::to_string(differing) + " floats differ after rolling by " + std::to_string(roll) + " columns");
+}
+
+// The display shader's fetch at 1:1 as a cell: GL_NEAREST magnification on the square grid, latticeTexel on the hexagonal one.
+glm::ivec2 shaderCell(PixelLattice lattice, glm::vec2 uv, int width, int height, bool wraps) {
+    if (lattice == PixelLattice::Square) {
+        const int column = static_cast<int>(std::floor(uv.x * static_cast<float>(width)));
+        const int row = std::clamp(static_cast<int>(std::floor(uv.y * static_cast<float>(height))), 0, height - 1);
+        return {wraps ? (((column % width) + width) % width) : std::clamp(column, 0, width - 1), row};
+    }
+    const float rowPitch = pathtracer::gfx::rowPitch(lattice);
+    const glm::vec2 film = uv * glm::vec2(static_cast<float>(width), static_cast<float>(height) * rowPitch);
+    const int below = std::clamp(static_cast<int>(std::floor((film.y / rowPitch) - 0.5F)), 0, height - 1);
+    glm::ivec2 nearest(0, below);
+    float nearestDistance = -1.0F;
+    for (int row = below; row <= std::min(below + 1, height - 1); ++row) {
+        const float offset = 0.25F + (0.5F * static_cast<float>(row & 1));
+        int column = static_cast<int>(std::floor(film.x - offset + 0.5F));
+        column = wraps ? column : std::clamp(column, 0, width - 1);
+        const glm::vec2 delta = glm::vec2(static_cast<float>(column) + offset, (static_cast<float>(row) + 0.5F) * rowPitch) - film;
+        const float distance = glm::dot(delta, delta);
+        if (nearestDistance < 0.0F || distance < nearestDistance) {
+            nearestDistance = distance;
+            nearest = glm::ivec2(column, row);
+        }
+    }
+    nearest.x = (nearest.x + width) % width;
+    return nearest;
+}
+
+// The fringe reads R at uv - (uv - 1/2) a and B at uv + (uv - 1/2) a from the shader's cell at each pixel centre; G stays put.
+PT_CHECK(aberration_reads_the_shader_cell_of_the_scaled_film, Fast, Exact) {
+    struct Case {
+        PixelLattice lattice;
+        bool wraps;
+    };
+    constexpr std::array<Case, 4> kCases{{{PixelLattice::Square, false},
+                                          {PixelLattice::Square, true},
+                                          {PixelLattice::Hexagonal, false},
+                                          {PixelLattice::Hexagonal, true}}};
+    constexpr int kWidth = 29;
+    constexpr int kHeight = 17;
+    // Not a short decimal: 0.3 lands whole columns of 29 exactly on a cell edge, where GL's own rounding is unspecified.
+    constexpr float kAberration = 0.2718282F;
+    ctx.plan(static_cast<int>(kCases.size()));
+    pathtracer::scene::ThreadPool pool;
+    for (const Case& testCase : kCases) {
+        const HdrImage input = randomImage(kWidth, kHeight, ctx.seed());
+        HdrImage image = input;
+        pathtracer::gfx::applyDisplayOptics(image, testCase.lattice, testCase.wraps, DisplayOptics{.aberration = kAberration}, pool);
+        const glm::vec2 frame = pathtracer::gfx::frameExtent(testCase.lattice, kWidth, kHeight);
+        const auto lane = [&](glm::ivec2 cell, int channel) {
+            return input.texels[(((static_cast<std::size_t>(cell.y) * kWidth) + static_cast<std::size_t>(cell.x)) * 3) +
+                                static_cast<std::size_t>(channel)];
+        };
+        std::size_t differing = 0;
+        for (int y = 0; y < kHeight; ++y) {
+            for (int x = 0; x < kWidth; ++x) {
+                const glm::vec2 uv = pathtracer::gfx::pixelCentre(testCase.lattice, x, y) / frame;
+                const glm::vec2 shift = (uv - 0.5F) * kAberration;
+                const glm::vec3 expected(lane(shaderCell(testCase.lattice, uv - shift, kWidth, kHeight, testCase.wraps), 0),
+                                         lane({x, y}, 1),
+                                         lane(shaderCell(testCase.lattice, uv + shift, kWidth, kHeight, testCase.wraps), 2));
+                const std::size_t at = ((static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x)) * 3;
+                differing += glm::vec3(image.texels[at], image.texels[at + 1], image.texels[at + 2]) != expected ? 1 : 0;
+            }
+        }
+        PT_EXPECT(ctx, differing == 0,
+                  std::string(pathtracer::gfx::kPixelLatticeNames[static_cast<int>(testCase.lattice)]) +
+                      (testCase.wraps ? " wrapped: " : " clamped: ") + std::to_string(differing) + " pixels read another cell");
+    }
+}
+
+// Off is the identity, not a pass that happens to reproduce its input: every float of the image is left as it was.
+PT_CHECK(display_optics_off_is_identity, Fast, Exact) {
+    ctx.plan(1);
+    pathtracer::scene::ThreadPool pool;
+    const HdrImage input = randomImage(13, 7, ctx.seed());
+    HdrImage image = input;
+    pathtracer::gfx::applyDisplayOptics(image, PixelLattice::Square, false, DisplayOptics{}, pool);
+    PT_EXPECT(ctx, image.texels == input.texels, "zero bloom and zero aberration changed the image");
 }
 
 // --- FrameStats: testable exactly only because tick() takes an injectable clock, steady_clock having made every assertion a race.

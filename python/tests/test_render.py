@@ -354,8 +354,12 @@ def test_unknown_scene_raises() -> None:
         Renderer("scenes/does_not_exist.json")
 
 
-def test_beauty_matches_render_beauty_cli(renderer: Renderer, tmp_path: Path) -> None:
-    """Python's Beauty must be bit-identical to the CLI's, which is what proves the two paths are one renderer."""
+@pytest.mark.parametrize(
+    ("flags", "optics"),
+    [((), {}), (("--bloom", "0.2", "--aberration", "0.02"), {"bloom_strength": 0.2, "aberration": 0.02})],
+)
+def test_beauty_matches_render_beauty_cli(renderer: Renderer, tmp_path: Path, flags: tuple, optics: dict) -> None:
+    """Python's Beauty must be bit-identical to the CLI's, which is what proves the two paths are one renderer, optics included."""
     openexr = pytest.importorskip("OpenEXR", reason="reading the reference EXR needs the OpenEXR module")
     imath = pytest.importorskip("Imath")
 
@@ -368,7 +372,7 @@ def test_beauty_matches_render_beauty_cli(renderer: Renderer, tmp_path: Path) ->
         [str(binary), "--scene", SCENE, "--width", "64", "--height", "64",
          "--passes", "8", "--seed", "1", "--aov", "beauty",
          # --out is mandatory; the PNG is display-encoded and discarded, the EXR is the linear reference.
-         "--out", str(tmp_path / "cli.png"), "--out-exr", str(reference)],
+         "--out", str(tmp_path / "cli.png"), "--out-exr", str(reference), *flags],
         check=True, capture_output=True,
     )
 
@@ -377,8 +381,41 @@ def test_beauty_matches_render_beauty_cli(renderer: Renderer, tmp_path: Path) ->
     channels = [np.frombuffer(exr.channel(c, pixel), dtype=np.float32).reshape(64, 64) for c in ("R", "G", "B")]
     expected = np.stack(channels, axis=-1)
 
-    actual = renderer.render(aovs=("beauty",), width=64, height=64, samples=8, seed=1)["beauty"]
+    actual = renderer.render(aovs=("beauty",), width=64, height=64, samples=8, seed=1, **optics)["beauty"]
     assert np.array_equal(actual, expected)
+
+
+def test_display_optics_are_off_by_default(renderer: Renderer) -> None:
+    """Omitting the optics is exactly asking for zero of each."""
+    default = renderer.render(aovs=("beauty",), width=32, height=24, samples=2)["beauty"]
+    zero = renderer.render(aovs=("beauty",), width=32, height=24, samples=2, bloom_strength=0.0, aberration=0.0)["beauty"]
+    assert np.array_equal(default, zero)
+
+
+def test_display_optics_change_only_the_picture(renderer: Renderer) -> None:
+    """Bloom and fringe act on beauty; depth is data and keeps every float."""
+    kwargs = {"aovs": ("beauty", "depth"), "width": 32, "height": 24, "samples": 2}
+    off = renderer.render(**kwargs)
+    on = renderer.render(**kwargs, bloom_strength=0.3, aberration=0.05)
+    assert not np.array_equal(off["beauty"], on["beauty"])
+    assert np.array_equal(off["depth"], on["depth"])
+
+
+@pytest.mark.parametrize(
+    ("optics", "lattice", "message"),
+    [
+        ({"bloom_strength": 1.1}, "square", "bloom strength .* lies outside"),
+        ({"bloom_strength": math.nan}, "square", "bloom strength .* lies outside"),
+        ({"aberration": 1.0}, "square", "aberration .* lies outside"),
+        ({"aberration": -0.1}, "square", "aberration .* lies outside"),
+        ({"bloom_strength": 0.2}, "hexagonal", "bloom reads a square neighbourhood"),
+    ],
+)
+def test_invalid_display_optics_are_rejected_by_name(renderer: Renderer, optics: dict, lattice: str, message: str) -> None:
+    """Bloom is a fraction in [0, 1] on the square lattice only; the fringe lies in [0, 1)."""
+    camera = dataclasses.replace(renderer.default_camera, pixel_lattice=lattice)
+    with pytest.raises(RuntimeError, match=message):
+        renderer.render(aovs=("beauty",), width=8, height=8, camera=camera, **optics)
 
 
 def _srgb_encode(linear: np.ndarray) -> np.ndarray:

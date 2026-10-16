@@ -29,6 +29,7 @@
 #include "pathtracer/debug/render_stats.h"
 #include "check.h"
 #include "stats.h"
+#include "pathtracer/gfx/display_optics.h"
 #include "pathtracer/gfx/hdr_image.h"
 #include "pathtracer/gfx/ocio_cpu_transform.h"
 #include "pathtracer/gfx/ocio_display_transform.h"
@@ -68,6 +69,8 @@ struct Options {
     bool omnidirectional = false;
     // profile.json's camera on the hexagonal pixel lattice; --width and --height still count columns and rows.
     pathtracer::gfx::PixelLattice lattice = pathtracer::gfx::PixelLattice::Square;
+    // The viewer's bloom and fringe on the picture AOV, both off by default; HeadlessRenderer validates their ranges.
+    pathtracer::gfx::DisplayOptics displayOptics;
 };
 
 // All AOVs are reachable now HeadlessRenderer drives the G-buffer and filters; names come from pathtracer/debug/aov.h, not restated here.
@@ -148,7 +151,7 @@ void reportErrorSpectrum(const pathtracer::gfx::HdrImage& image, const pathtrace
 // Everything the timed loop's cost depends on goes in config; output paths and exposure do not, so they never split two comparable runs.
 bool appendTimingRecord(const Options& options, int argc, char** argv, int width, int height,
                         const std::string& aovName, const pathtracer::scene::PathTraceSettings& settings,
-                        bool envLightEnabled, double gbufferMs, double filterMs,
+                        bool envLightEnabled, double gbufferMs, double filterMs, double opticsMs,
                         const std::vector<double>& milliseconds, const pathtracer::debug::RayCounts& rays,
                         const pathtracer::gfx::HdrImage& accumulated) {
     pathtracer::debug::BenchRecord record{
@@ -168,7 +171,9 @@ bool appendTimingRecord(const Options& options, int argc, char** argv, int width
                    {"rr_start_bounce", settings.russianRouletteStartBounce},
                    {"ao_max_distance", settings.aoMaxDistance},
                    {"fisheye_focal_length_mm", options.fisheyeFocalLengthMm},
-                   {"omnidirectional", options.omnidirectional}},
+                   {"omnidirectional", options.omnidirectional},
+                   {"bloom_strength", options.displayOptics.bloomStrength},
+                   {"aberration", options.displayOptics.aberration}},
         .samples = {milliseconds.empty() ? std::pair<std::string, std::vector<double>>{"gbuffer_ms", {gbufferMs}}
                                           : std::pair<std::string, std::vector<double>>{"pass_ms", milliseconds}},
         .work = {{"rays", {{"primary", rays.primary}, {"bounce", rays.bounce}, {"ao", rays.ao}, {"shadow", rays.shadow}}},
@@ -181,6 +186,10 @@ bool appendTimingRecord(const Options& options, int argc, char** argv, int width
     // A Beauty filter runs once after the passes, so its wall clock is its own column rather than a pass sample.
     if (filterMs > 0.0) {
         record.samples["filter_ms"] = std::vector<double>{filterMs};
+    }
+    // The display optics run once after the passes too, so their wall clock is a column of its own.
+    if (opticsMs > 0.0) {
+        record.samples["optics_ms"] = std::vector<double>{opticsMs};
     }
     return pathtracer::debug::appendBenchRecord(options.benchLogPath, record);
 }
@@ -247,6 +256,12 @@ bool parseArgs(int argc, char** argv, Options& options) {
             options.omnidirectional = true;
         } else if (std::strcmp(argv[i], "--hexagonal") == 0) {
             options.lattice = pathtracer::gfx::PixelLattice::Hexagonal;
+        } else if (std::strcmp(argv[i], "--bloom") == 0) {
+            if (!needsValue("--bloom")) { return false; }
+            options.displayOptics.bloomStrength = static_cast<float>(std::atof(argv[++i]));
+        } else if (std::strcmp(argv[i], "--aberration") == 0) {
+            if (!needsValue("--aberration")) { return false; }
+            options.displayOptics.aberration = static_cast<float>(std::atof(argv[++i]));
         } else if (std::strcmp(argv[i], "--env-light") == 0) {
             if (!needsValue("--env-light")) { return false; }
             options.envLight = std::atoi(argv[++i]) != 0 ? 1 : 0;
@@ -254,7 +269,8 @@ bool parseArgs(int argc, char** argv, Options& options) {
             std::cerr << "render_beauty: unknown argument '" << argv[i]
                       << "'\nusage: render_beauty [--scene scenes/x.json] --out out.png [--out-exr out.exr] [--compare-exr ref.exr] "
                          "[--compare ref.png] [--error-spectrum] [--seed N] [--passes N] [--width W] [--height H] "
-                         "[--exposure EV] [--aov name] [--fisheye FOCAL_MM | --omnidirectional] [--hexagonal] [--env-light 0|1] "
+                         "[--exposure EV] [--aov name] [--fisheye FOCAL_MM | --omnidirectional] [--hexagonal] [--bloom K] [--aberration A] "
+                         "[--env-light 0|1] "
                          "[--bench-log log.jsonl] [--assert-deterministic] [--assert-converged]\n";
             return false;
         }
@@ -352,9 +368,10 @@ int main(int argc, char** argv) {
             .scrambleSeed = scrambleSeed,
             .aovs = requested,
             .envLightEnabled = envLightOverride,
+            .displayOptics = options.displayOptics,
         };
         if (!renderer->render(request, error)) {
-            // Unreachable: parseArgs rejects a non-positive pass count and a lattice's unsupported AOV, and the resolution is positive.
+            // parseArgs rejects every other fault; the renderer alone ranges the display optics, and names the value it refuses.
             std::cerr << "render_beauty: " << error << "\n";
             std::exit(EXIT_FAILURE);
         }
@@ -482,10 +499,13 @@ int main(int argc, char** argv) {
     if (stats.filterMilliseconds > 0.0) {
         std::cout << "render_beauty: Beauty filter in " << stats.filterMilliseconds << " ms\n";
     }
+    if (stats.opticsMilliseconds > 0.0) {
+        std::cout << "render_beauty: display optics in " << stats.opticsMilliseconds << " ms\n";
+    }
     // Before any output encode, so the record's rusage covers load, build and the timed passes but not PNG/EXR writing.
     if (!options.benchLogPath.empty() &&
         !appendTimingRecord(options, argc, argv, width, height, aovName, renderer->baseSettings(),
-                            envLightEnabled, stats.gbufferMilliseconds, stats.filterMilliseconds,
+                            envLightEnabled, stats.gbufferMilliseconds, stats.filterMilliseconds, stats.opticsMilliseconds,
                             milliseconds,
                             rays, accumulated)) {
         return EXIT_FAILURE;

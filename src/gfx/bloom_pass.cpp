@@ -1,14 +1,18 @@
 #include "pathtracer/gfx/bloom_pass.h"
 
 #include <algorithm>
-#include <bit>
 #include <cstddef>
+#include <iomanip>
+#include <limits>
+#include <span>
+#include <sstream>
 #include <string>
 #include <utility>
 
 #include <GL/glew.h>
 
 #include "pathtracer/debug/memory_tracker.h"
+#include "pathtracer/gfx/display_optics.h"
 #include "pathtracer/gfx/gl_debug.h"
 
 namespace pathtracer::gfx {
@@ -31,30 +35,31 @@ constexpr const char* kTargetUvGlsl =
     "uniform vec2 uTargetTexel;\n"
     "vec3 tap(vec2 uv, vec2 offset) { return texture(uSource, uv + offset * uSourceTexel).rgb; }\n";
 
-// Jimenez 2014's 13 taps: five bilinear 2x2 boxes, the centre box weighted 1/2 and the four corner boxes 1/8, so weights sum to 1.
-constexpr const char* kDownGlsl =
-    "void main() {\n"
-    "    vec2 uv = gl_FragCoord.xy * uTargetTexel;\n"
-    "    vec3 inner = tap(uv, vec2(-1, 1)) + tap(uv, vec2(1, 1)) + tap(uv, vec2(-1, -1)) + tap(uv, vec2(1, -1));\n"
-    "    vec3 edges = tap(uv, vec2(0, 2)) + tap(uv, vec2(-2, 0)) + tap(uv, vec2(2, 0)) + tap(uv, vec2(0, -2));\n"
-    "    vec3 corners = tap(uv, vec2(-2, 2)) + tap(uv, vec2(2, 2)) + tap(uv, vec2(-2, -2)) + tap(uv, vec2(2, -2));\n"
-    "    vec3 sum = 0.125 * inner + 0.125 * tap(uv, vec2(0)) + 0.0625 * edges + 0.03125 * corners;\n"
-    "    fragColor = vec4(sum, 1.0);\n"
-    "}\n";
+// The pass's taps as GLSL, one fetch each: the weights are dyadic, so max_digits10 prints each exactly as the CPU path holds it.
+std::string tapSumGlsl(std::span<const BloomTap> taps) {
+    std::ostringstream glsl;
+    glsl << std::setprecision(std::numeric_limits<float>::max_digits10) << "    vec2 uv = gl_FragCoord.xy * uTargetTexel;\n"
+         << "    vec3 sum = vec3(0.0);\n";
+    for (const BloomTap& tap : taps) {
+        glsl << "    sum += " << tap.weight << " * tap(uv, vec2(" << tap.dx << ", " << tap.dy << "));\n";
+    }
+    return glsl.str();
+}
 
-// 3x3 tent (1 2 1)/4 squared at one coarse texel, plus this octave's down level so each octave enters the sum once at unit weight.
-constexpr const char* kUpGlsl =
-    "uniform sampler2D uBase;\n"
-    "uniform bool uHasBase;\n"
-    "uniform float uScale;\n"
-    "void main() {\n"
-    "    vec2 uv = gl_FragCoord.xy * uTargetTexel;\n"
-    "    vec3 edges = tap(uv, vec2(0, 1)) + tap(uv, vec2(-1, 0)) + tap(uv, vec2(1, 0)) + tap(uv, vec2(0, -1));\n"
-    "    vec3 corners = tap(uv, vec2(-1, 1)) + tap(uv, vec2(1, 1)) + tap(uv, vec2(-1, -1)) + tap(uv, vec2(1, -1));\n"
-    "    vec3 sum = 0.25 * tap(uv, vec2(0)) + 0.125 * edges + 0.0625 * corners;\n"
-    "    if (uHasBase) { sum += texture(uBase, uv).rgb; }\n"
-    "    fragColor = vec4(sum * uScale, 1.0);\n"
-    "}\n";
+std::string downGlsl() {
+    return "void main() {\n" + tapSumGlsl(kBloomDownTaps) + "    fragColor = vec4(sum, 1.0);\n}\n";
+}
+
+// Adds this octave's down level, so each octave enters the sum once at unit weight; uScale is 1/L on the last pass, else 1.
+std::string upGlsl() {
+    return "uniform sampler2D uBase;\n"
+           "uniform bool uHasBase;\n"
+           "uniform float uScale;\n"
+           "void main() {\n" +
+           tapSumGlsl(kBloomUpTaps) +
+           "    if (uHasBase) { sum += texture(uBase, uv).rgb; }\n"
+           "    fragColor = vec4(sum * uScale, 1.0);\n}\n";
+}
 
 GLint glInternalFormat(ScalarType format) {
     return format == ScalarType::Float16 ? GL_RGBA16F : GL_RGBA32F;
@@ -75,8 +80,8 @@ std::optional<BloomPass> BloomPass::create() {
     if (!vertSrc) {
         return std::nullopt;
     }
-    std::optional<ShaderProgram> downShader = ShaderProgram::loadFromSource(*vertSrc, std::string(kTargetUvGlsl) + kDownGlsl);
-    std::optional<ShaderProgram> upShader = ShaderProgram::loadFromSource(*vertSrc, std::string(kTargetUvGlsl) + kUpGlsl);
+    std::optional<ShaderProgram> downShader = ShaderProgram::loadFromSource(*vertSrc, kTargetUvGlsl + downGlsl());
+    std::optional<ShaderProgram> upShader = ShaderProgram::loadFromSource(*vertSrc, kTargetUvGlsl + upGlsl());
     if (!downShader || !upShader) {
         return std::nullopt;
     }
@@ -164,11 +169,11 @@ void BloomPass::releaseLevels() {
     byteSize_ = 0;
 }
 
-// L = floor(log2(min(w, h))) octaves, the last with a 1-texel short side: the PSF's 1/r^2 reaches the frame, then stops.
+// bloomOctaves(width, height) octaves, the display_optics.h definition the CPU path shares.
 void BloomPass::allocate(int width, int height, ScalarType format) {
     releaseLevels();
     format_ = format;
-    const int octaves = std::max(1, std::bit_width(static_cast<unsigned>(std::min(width, height))) - 1);
+    const int octaves = bloomOctaves(width, height);
     // One framebuffer per level, attached once, so a build only binds them.
     const auto makeLevel = [&](int octave) {
         Level level{0, 0, std::max(1, width >> octave), std::max(1, height >> octave)};

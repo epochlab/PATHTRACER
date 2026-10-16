@@ -18,7 +18,7 @@ _ERROR_CAPACITY = 512
 PT_DEFAULT = -1
 
 # PT_ABI_VERSION in pathtracer_c.h. PtCamera and PtRenderRequest cross the boundary by value, so a layout drift must fail loudly.
-PT_ABI_VERSION = 8
+PT_ABI_VERSION = 9
 
 # PtCamera.lens_projection, PT_LENS_* in pathtracer_c.h. Index-parallel with LENS_PROJECTIONS in __init__.py.
 PT_LENS_RECTILINEAR = 0
@@ -68,6 +68,8 @@ class PtRenderRequest(ctypes.Structure):
         ("light_rotation_degrees", ctypes.POINTER(ctypes.c_float)),
         ("light_temperature_kelvin", ctypes.POINTER(ctypes.c_float)),
         ("env_rotation_degrees", ctypes.c_float * 3),
+        ("bloom_strength", ctypes.c_float),
+        ("aberration", ctypes.c_float),
     ]
 
 
