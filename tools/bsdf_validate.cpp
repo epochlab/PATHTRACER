@@ -725,6 +725,26 @@ PT_CHECK(transmissive_energy_balance, Slow, Statistical) {
             }
         }
     }
+    // A sphere's rim: entry at impact parameter b has mu sqrt(1 - b^2), the chord meets the far side at Snell's cosine, TIR past mu_c.
+    const float ior = makeParams(0.0F, 0.0F, 1.0F).specularIor;
+    const auto inside = [ior](float b) { return -std::sqrt(1.0F - ((b * b) / (ior * ior))); };
+    const std::array<float, 7> rimCosines = {std::sqrt(1.0F - (0.9F * 0.9F)), std::sqrt(1.0F - (0.95F * 0.95F)), std::sqrt(1.0F - (0.98F * 0.98F)),
+                                             inside(0.9F), inside(0.95F), inside(0.98F), inside(1.0F)};
+    const std::array<float, 7> rimRoughnesses = {0.05F, 0.1F, 0.2F, 0.3F, 0.4F, 0.7F, 1.0F};
+    std::cout << "  rim cosines (entering at b = 0.9, 0.95, 0.98; exiting at their chords and the critical cosine)\n";
+    for (float roughness : rimRoughnesses) {
+        for (float ndotV : rimCosines) {
+            ++seed;
+            const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
+            const glm::vec3 lo = transmissiveEnergyLo(makeParams(roughness, 0.0F, 1.0F), wo, kSampleCount, seed);
+            std::cout << "  " << roughness << "        " << ndotV << "     " << minChannel(lo) << '\n';
+            if (!withinBand(lo, 1.0F, kTolerance)) {
+                std::cerr << "bsdf_validate: FAILED transmissive energy balance at the rim, roughness=" << roughness << " ndotV=" << ndotV
+                          << " Lo=[" << minChannel(lo) << ", " << maxChannel(lo) << "] (expected 1.0 +/- " << kTolerance << ")\n";
+                ok = false;
+            }
+        }
+    }
     finish(ctx, ok, "transmissive_energy_balance failed; see the rows above");
     return;
 }
