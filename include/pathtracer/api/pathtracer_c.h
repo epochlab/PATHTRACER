@@ -13,7 +13,7 @@ typedef struct PtRenderer PtRenderer;
 #define PT_OK 0
 #define PT_ERROR 1
 /* PtCamera is passed by value, so a caller built against a different layout must be caught rather than reading the fields as garbage. */
-#define PT_ABI_VERSION 8
+#define PT_ABI_VERSION 9
 /* Lens projections, PtCamera.lens_projection: the pinhole, Kannala & Brandt's polynomial fisheye, and the 360-degree lat-long. */
 #define PT_LENS_RECTILINEAR 0
 #define PT_LENS_FISHEYE_POLYNOMIAL 1
@@ -99,6 +99,10 @@ typedef struct {
     const float* light_temperature_kelvin;
     /* The environment map to world, background and lighting alike; all zero is the map unrotated. */
     float env_rotation_degrees[3];
+    /* The viewer's glare on beauty and denoised, 0 = off: the fraction in [0, 1] its PSF scatters. Square lattice only. */
+    float bloom_strength;
+    /* The viewer's colour fringe on beauty and denoised, 0 = off: R and B read at 1 -/+ aberration film scale, in [0, 1). */
+    float aberration;
 } PtRenderRequest;
 
 /* Renders every requested AOV. out parallels request->aovs at width * height * pt_aov_channels(aovs[i]) floats, row-major top-left. */

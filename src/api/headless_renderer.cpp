@@ -126,6 +126,25 @@ struct SceneInputs {
     return colours;
 }
 
+// Bloom is an energy fraction, so [0, 1]; the fringe keeps R's magnification 1 - a positive, so [0, 1). NaN fails every comparison.
+[[nodiscard]] bool validDisplayOptics(const pathtracer::gfx::DisplayOptics& optics, pathtracer::gfx::PixelLattice lattice,
+                                      std::string& error) {
+    if (!(optics.bloomStrength >= 0.0F && optics.bloomStrength <= 1.0F)) {
+        error = "bloom strength " + std::to_string(optics.bloomStrength) + " lies outside [0, 1]";
+        return false;
+    }
+    if (!(optics.aberration >= 0.0F && optics.aberration < 1.0F)) {
+        error = "aberration " + std::to_string(optics.aberration) + " lies outside [0, 1)";
+        return false;
+    }
+    if (optics.bloomStrength > 0.0F && lattice != pathtracer::gfx::PixelLattice::Square) {
+        error = std::string("bloom reads a square neighbourhood, so the ") +
+                pathtracer::gfx::kPixelLatticeNames[static_cast<int>(lattice)] + " lattice cannot render it";
+        return false;
+    }
+    return true;
+}
+
 // Rejects a request no producer can serve, before any buffer is touched; error names the first fault.
 [[nodiscard]] bool validRequest(const HeadlessRenderer::Request& request, std::size_t lightCount, bool denoiserEnabled, std::string& error) {
     if (request.width <= 0 || request.height <= 0) {
@@ -184,7 +203,7 @@ struct SceneInputs {
         error = "environment rotation is not finite";
         return false;
     }
-    return true;
+    return validDisplayOptics(request.displayOptics, lattice, error);
 }
 
 // The path-traced lanes a request needs, each once. Beauty joins whenever a filter is asked for, every filter reading accumulated Beauty.
@@ -398,6 +417,7 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
     stats_.passMilliseconds.clear();
     stats_.gbufferMilliseconds = 0.0;
     stats_.filterMilliseconds = 0.0;
+    stats_.opticsMilliseconds = 0.0;
     stats_.rays = pathtracer::debug::RayCounts{};
     if (!accumulatedLanes_.empty()) {
         accumulatePathTraced(request);
@@ -410,6 +430,7 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
     if (wantsFilter) {
         evaluateFilters(request);
     }
+    applyDisplayOptics(request);
     return true;
 }
 
@@ -535,6 +556,33 @@ void HeadlessRenderer::evaluateFilters(const Request& request) {
     }
     stats_.filterMilliseconds =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - filterStart).count();
+}
+
+// Picture AOVs are path-traced (Beauty) or Beauty-derived (Denoised), never G-buffer, so each lives in an accumulator or a filter result.
+void HeadlessRenderer::applyDisplayOptics(const Request& request) {
+    if (request.displayOptics.aberration == 0.0F && request.displayOptics.bloomStrength == 0.0F) {
+        return;
+    }
+    const auto opticsStart = std::chrono::steady_clock::now();
+    const pathtracer::gfx::PixelLattice lattice = request.camera.pixelLattice();
+    const bool wraps = pathtracer::scene::wrapsHorizontally(request.camera.lens().projection);
+    std::vector<AovId> applied;
+    for (const AovId aov : request.aovs) {
+        if (!pathtracer::debug::aovIsPicture(aov) || std::find(applied.begin(), applied.end(), aov) != applied.end()) {
+            continue;
+        }
+        applied.push_back(aov);
+        const PathTracedLane lane = pathtracer::debug::pathTracedLane(aov);
+        pathtracer::gfx::HdrImage& image =
+            pathtracer::debug::aovSource(aov) == AovSource::PathTraced
+                ? accumulators_.at(static_cast<std::size_t>(std::find(accumulatedLanes_.begin(), accumulatedLanes_.end(), lane) -
+                                                            accumulatedLanes_.begin()))
+                : filtered_.at(static_cast<std::size_t>(std::find(filteredAovs_.begin(), filteredAovs_.end(), aov) -
+                                                        filteredAovs_.begin()));
+        pathtracer::gfx::applyDisplayOptics(image, lattice, wraps, request.displayOptics, threadPool_);
+    }
+    stats_.opticsMilliseconds =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - opticsStart).count();
 }
 
 }  // namespace pathtracer::api

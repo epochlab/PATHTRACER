@@ -13,6 +13,7 @@
 #include "pathtracer/debug/aov_routing.h"
 #include "pathtracer/debug/denoiser.h"
 #include "pathtracer/debug/render_stats.h"
+#include "pathtracer/gfx/display_optics.h"
 #include "pathtracer/gfx/scalar_type.h"
 #include "pathtracer/gfx/hdr_image.h"
 #include "pathtracer/scene/camera.h"
@@ -54,6 +55,8 @@ public:
         std::optional<std::vector<float>> lightTemperaturesKelvin;
         // rotationXyz of the environment map to world, background and lighting alike; zero is the map unrotated.
         glm::vec3 envRotationDegrees{0.0F};
+        // The viewer's lens optics on picture AOVs, 0 = off: fringe in [0, 1), bloom's scattered fraction in [0, 1], square lattice only.
+        pathtracer::gfx::DisplayOptics displayOptics;
     };
 
     // Per-pass wall clock and ray counts for the most recent render(), so a benchmark measures the renderer rather than re-deriving it.
@@ -63,6 +66,8 @@ public:
         // Wall clock of the G-buffer and Beauty-filter work, 0 when it did not run; averaging it with passes would mean nothing.
         double gbufferMilliseconds = 0.0;
         double filterMilliseconds = 0.0;
+        // Wall clock of the display optics over every picture AOV, 0 when both are off.
+        double opticsMilliseconds = 0.0;
         pathtracer::debug::RayCounts rays;
     };
 
@@ -138,6 +143,8 @@ private:
     void renderGBufferLanes(const Request& request);
     // Evaluates each distinct BeautyFilter AOV the request names once, over the accumulated Beauty.
     void evaluateFilters(const Request& request);
+    // Applies request.displayOptics once to each distinct picture AOV the request names, after every filter has read clean Beauty.
+    void applyDisplayOptics(const Request& request);
 
     std::string assetRoot_;
     pathtracer::config::ProfileConfig profile_;

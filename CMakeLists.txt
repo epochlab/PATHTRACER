@@ -152,6 +152,7 @@ add_library(pathtracer_core STATIC
     src/debug/perf_dashboard.cpp
     src/debug/power_spectrum.cpp
     src/debug/scale_space.cpp
+    src/gfx/display_optics.cpp
     src/gfx/hdr_image.cpp
     src/gfx/ocio_cpu_transform.cpp
     src/gfx/viewport.cpp
