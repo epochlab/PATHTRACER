@@ -183,10 +183,9 @@ struct Lane {
     pathtracer::gfx::HdrImage PathTraceResult::*image;
     const char* name;
 };
-constexpr std::array<Lane, 13> kLanes{{{&PathTraceResult::beauty, "beauty"},
+constexpr std::array<Lane, 14> kLanes{{{&PathTraceResult::beauty, "beauty"},
                                       {&PathTraceResult::bounceHeatmap, "bounceHeatmap"},
                                       {&PathTraceResult::ao, "ao"},
-                                      {&PathTraceResult::shadow, "shadow"},
                                       {&PathTraceResult::directDiffuse, "directDiffuse"},
                                       {&PathTraceResult::indirectDiffuse, "indirectDiffuse"},
                                       {&PathTraceResult::directSpecular, "directSpecular"},
@@ -195,7 +194,9 @@ constexpr std::array<Lane, 13> kLanes{{{&PathTraceResult::beauty, "beauty"},
                                       {&PathTraceResult::fresnel, "fresnel"},
                                       {&PathTraceResult::alpha, "alpha"},
                                       {&PathTraceResult::denoiseAlbedo, "denoiseAlbedo"},
-                                      {&PathTraceResult::denoiseNormal, "denoiseNormal"}}};
+                                      {&PathTraceResult::denoiseNormal, "denoiseNormal"},
+                                      {&PathTraceResult::shadowLost, "shadowLost"},
+                                      {&PathTraceResult::shadowUnoccluded, "shadowUnoccluded"}}};
 
 // Per float: the batch mean rounded once to float and the bound on the driver's distance from it; per lane, whether any float moved.
 struct OracleMean {

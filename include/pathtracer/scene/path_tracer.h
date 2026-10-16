@@ -81,10 +81,11 @@ struct OverRangeStats {
 struct PathTraceResult {
     pathtracer::gfx::HdrImage beauty;
     pathtracer::gfx::HdrImage bounceHeatmap;   // mean bounce depth at termination, across samples
-    // Cosine-weighted obscurance (Zhukov 1998; Iones 2003), one bounded ray/sample. 1.0 = unoccluded, the OPPOSITE polarity to `shadow`.
+    // Cosine-weighted obscurance (Zhukov 1998; Iones 2003), one bounded ray/sample. 1.0 = unoccluded, the opposite polarity to Shadow.
     pathtracer::gfx::HdrImage ao;
-    // Bounce-0 shadow: 1.0 on a surface unless the one NEE shadow ray was unoccluded, 0.0 on background; stays 1.0 with no NEE sample.
-    pathtracer::gfx::HdrImage shadow;
+    // Shadow's two means, no AOV of their own: bounce-0 direct luminance the occluders remove, and the same with visibility 1.
+    pathtracer::gfx::HdrImage shadowLost;
+    pathtracer::gfx::HdrImage shadowUnoccluded;
 
     // These seven plus the background sum to beauty per channel, bucketed by the bounce-0 lobe; transmission sticks to refraction.
     pathtracer::gfx::HdrImage directDiffuse;
@@ -118,7 +119,7 @@ struct PathTraceResult {
     int samples = 0;  // passes averaged in, stamped with generation so image and count publish as one snapshot
 };
 
-// The 13 AOV lanes at their aovChannels counts, the 2 RGB denoise features and the replicate means, zeroed: renderPathTraced's `out`.
+// The 12 AOV lanes at their aovChannels counts, the 2 RGB denoise features, the 2 shadow means and the replicate means, zeroed.
 [[nodiscard]] PathTraceResult makePathTraceResult(int width, int height, int replicates);
 
 // Whether a primary ray that misses returns environment radiance when nothing overrides it; viewer, driver and headless share it.

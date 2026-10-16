@@ -205,6 +205,12 @@ struct SceneInputs {
                 add(lane);
             }
         }
+        // Shadow is the ratio of two lane means, both accumulated over the request's samples.
+        if (aov == AovId::Shadow) {
+            for (const PathTracedLane lane : pathtracer::debug::kShadowLanes) {
+                add(lane);
+            }
+        }
     }
     if (wantsFilter) {
         add(&pathtracer::scene::PathTraceResult::beauty);
@@ -505,6 +511,7 @@ void HeadlessRenderer::evaluateFilters(const Request& request) {
     const auto filterStart = std::chrono::steady_clock::now();
     const pathtracer::gfx::HdrImage& beauty = lastImage(AovId::Beauty);
     const bool denoises = std::find(request.aovs.begin(), request.aovs.end(), AovId::Denoised) != request.aovs.end();
+    const bool shadows = std::find(request.aovs.begin(), request.aovs.end(), AovId::Shadow) != request.aovs.end();
     if (denoises && denoiser_ == nullptr) {
         denoiser_ = std::make_unique<pathtracer::debug::Denoiser>(profile_.denoiser.options);
     }
@@ -515,7 +522,9 @@ void HeadlessRenderer::evaluateFilters(const Request& request) {
                                                      pathtracer::scene::wrapsHorizontally(request.camera.lens().projection),
                                                      denoises ? &accumulatedImage(pathtracer::debug::kDenoiseFeatureLanes[0]) : nullptr,
                                                      denoises ? &accumulatedImage(pathtracer::debug::kDenoiseFeatureLanes[1]) : nullptr,
-                                                     denoiser_.get()};
+                                                     denoiser_.get(),
+                                                     shadows ? &accumulatedImage(pathtracer::debug::kShadowLanes[0]) : nullptr,
+                                                     shadows ? &accumulatedImage(pathtracer::debug::kShadowLanes[1]) : nullptr};
     for (const AovId aov : request.aovs) {
         if (pathtracer::debug::aovSource(aov) != AovSource::BeautyFilter ||
             std::find(filteredAovs_.begin(), filteredAovs_.end(), aov) != filteredAovs_.end()) {

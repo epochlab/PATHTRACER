@@ -794,6 +794,17 @@ PT_CHECK(aov_filter_dispatch_is_total, Fast, Exact) {
     input.denoiseAlbedo = &albedo;
     input.denoiseNormal = &normal;
     input.denoiser = &denoiser;
+    // Shadow's lanes: a full unoccluded mean under a lost share ramping across x, so its ratio is the ramp itself.
+    HdrImage lost = pathtracer::gfx::makeImage(kWidth, kHeight, pathtracer::gfx::kScalarChannels);
+    HdrImage unoccluded = pathtracer::gfx::makeImage(kWidth, kHeight, pathtracer::gfx::kScalarChannels);
+    for (int y = 0; y < kHeight; ++y) {
+        for (int x = 0; x < kWidth; ++x) {
+            writeTexel(lost, x, y, static_cast<float>(x) / static_cast<float>(kWidth));
+            writeTexel(unoccluded, x, y, 1.0F);
+        }
+    }
+    input.shadowLost = &lost;
+    input.shadowUnoccluded = &unoccluded;
 
     std::vector<HdrImage> outputs;
     outputs.reserve(filters.size());

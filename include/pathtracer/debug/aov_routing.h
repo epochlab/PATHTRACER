@@ -24,7 +24,11 @@ using GBufferLane = pathtracer::gfx::HdrImage pathtracer::scene::GBuffer::*;
 inline constexpr std::array<PathTracedLane, 2> kDenoiseFeatureLanes{&pathtracer::scene::PathTraceResult::denoiseAlbedo,
                                                                     &pathtracer::scene::PathTraceResult::denoiseNormal};
 
-// Every lane of each producer in AovId order, the path tracer's then kDenoiseFeatureLanes, so a loop over a buffer's lanes misses none.
+// Shadow's numerator and denominator: a ratio does not average, so its two means accumulate and the ratio is taken after.
+inline constexpr std::array<PathTracedLane, 2> kShadowLanes{&pathtracer::scene::PathTraceResult::shadowLost,
+                                                            &pathtracer::scene::PathTraceResult::shadowUnoccluded};
+
+// Every lane of each producer in AovId order, then kDenoiseFeatureLanes and kShadowLanes, so a loop over a buffer's lanes misses none.
 [[nodiscard]] std::span<const PathTracedLane> pathTracedLanes();
 [[nodiscard]] std::span<const GBufferLane> gbufferLanes();
 

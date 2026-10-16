@@ -14,12 +14,11 @@ namespace pathtracer::debug {
 
 AovSource aovSource(AovId aov) {
     switch (aov) {
-        // Accumulated by renderPathTraced into PathTraceResult's 13 AOV lanes.
+        // Accumulated by renderPathTraced into PathTraceResult's 12 AOV lanes.
         case AovId::Beauty:
         case AovId::Alpha:
         case AovId::BounceCount:
         case AovId::AO:
-        case AovId::Shadow:
         case AovId::DirectDiffuse:
         case AovId::IndirectDiffuse:
         case AovId::DirectSpecular:
@@ -30,7 +29,7 @@ AovSource aovSource(AovId aov) {
         case AovId::Fresnel:
             return AovSource::PathTraced;
 
-        // Image-space filters over a finished Beauty, so they need light transport but are not lanes of it.
+        // Derived from finished accumulated lanes, Beauty or its companions, so they need light transport but are not lanes of it.
         case AovId::HSV:
         case AovId::Luminance:
         case AovId::Sobel:
@@ -38,6 +37,7 @@ AovSource aovSource(AovId aov) {
         case AovId::DoG:
         case AovId::ColourOpponent:
         case AovId::SNR:
+        case AovId::Shadow:
         case AovId::Denoised:
             return AovSource::BeautyFilter;
 
@@ -378,7 +378,6 @@ PathTracedLane pathTracedLane(AovId aov) {
         case AovId::Beauty:           return &Result::beauty;
         case AovId::BounceCount:      return &Result::bounceHeatmap;
         case AovId::AO:               return &Result::ao;
-        case AovId::Shadow:           return &Result::shadow;
         case AovId::DirectDiffuse:    return &Result::directDiffuse;
         case AovId::IndirectDiffuse:  return &Result::indirectDiffuse;
         case AovId::DirectSpecular:   return &Result::directSpecular;
@@ -433,6 +432,7 @@ std::span<const PathTracedLane> pathTracedLanes() {
     static const std::vector<PathTracedLane> lanes = [] {
         std::vector<PathTracedLane> all = collectLanes(&pathTracedLane);
         all.insert(all.end(), kDenoiseFeatureLanes.begin(), kDenoiseFeatureLanes.end());
+        all.insert(all.end(), kShadowLanes.begin(), kShadowLanes.end());
         return all;
     }();
     return lanes;
