@@ -72,11 +72,10 @@ Output that is wrong, lossy or unverified, most serious first.
 
 | Area | Item | Detail | Complexity | Status |
 | --- | --- | --- | --- | --- |
-| Validation | Grazing transmission | The transmissive energy test scores normal incidence only. Binned radially at roughness 0.2 it reads 0.9450 at 90% of the silhouette radius and 0.9020 at 95%, against 1.0000 at the centre, non-monotonic in roughness and absent by 0.7, measured before the OpenPBR interface. Instrument and re-measure first, then fix any loss. It gates authoring rough glass. | high | ready |
-| Validation | Curved transmissive epsilons | Reverting either curvature-scaled epsilon leaves the suite green. Needs rough glass against an opaque backdrop, which has no closed form, so a converged-reference or two-estimator invariant. | medium | ready |
-| Texture | Minification filtering | Primary hits ship: base colour, specular and a shown sky are filtered over the camera differential’s stratum. Secondary vertices still read level 0 at a point, so the stump’s 4K maps keep about 2000 level-0 tiles each resident; they need differentials propagated through each BSDF bounce. Normal, bump and roughness need appearance-preserving filtering first: prefiltered normals shorten and shade flatter (Toksvig 2005), 13% brighter on the minified stump, so their lost slope variance must move into roughness (Olano and Baker 2010). | high | ready |
-| Validation | Untested paths | Gabor response magnitude, GPU and CPU display parity, the display texture upload (the suite has no GL context), the histogram binning (extract it so the CPU can test it), and a standing false-rejection rate for derived tolerance bands. | medium | ready |
-| API | Display optics | Bloom and chromatic aberration run only in the viewer’s display shaders, so Python and `render_beauty` output carry neither. Each needs a CPU form applied to scene-linear Beauty before exposure, as the viewer applies it: the equal-weight Gaussian pyramid (Jimenez 2014), energy-conserving, and the radial per-channel offset. Exposed as `render` arguments that leave the output bit-identical at 0, with a GPU parity check. Bloom stays refused on the hexagonal lattice. | medium | ready |
+| Validation | Curved transmissive epsilons | Removing the offset that stops rays re-hitting curved glass still passes every test. Needs a test against a long reference render. | medium | ready |
+| Texture | Minification filtering | Distant textures still shimmer after a bounce. Normal, bump and roughness maps also need filtering that keeps surfaces from shading flat. | high | ready |
+| Validation | Untested paths | No tests yet for the Gabor filter's strength, GPU and CPU display matching, screen upload, the HUD histogram, or false tolerance failures. | medium | ready |
+| API | Display optics | Bloom and colour fringing exist only in the viewer, so Python output lacks them. Add CPU versions, off by default, that match the viewer. | medium | ready |
 
 ### Features
 
@@ -84,12 +83,11 @@ Capability the renderer lacks, most valuable first.
 
 | Area | Item | Detail | Complexity | Status |
 | --- | --- | --- | --- | --- |
-| Transport | Volume emission | Emission and temperature grids as volume radiance, gathered at real collisions by the same spectral tracking, with blackbody colour from temperature. The absorbed event becomes an emission vertex rather than a termination. | medium | ready |
-| Transport | Bounded media | OpenPBR's `transmission_scatter` and `subsurface_radius` as homogeneous media inside closed surfaces, tracked by the same free-flight and ratio-tracking code against a constant majorant. Needs a nested medium stack in place of today's single level. | high | ready |
-| Sampling | Adaptive sampling | Variance-driven per-pixel sample budget. The error estimate it needs already ships (the SNR’s replicate means). Foveal density is the same mechanism with an eccentricity weight. | medium | ready |
-| Camera | Scene graph and instancing | Geometry is baked to world space and duplicated per node. A scene graph would unlock motion blur and real instancing. | high | ready |
-| Colour | Photometric calibration | Tie radiometric output to lux and candela through the CIE ȳ curve, so EV100 can be checked against a light meter. | medium | ready |
-| Camera | Lens model | Equisolid, stereographic and orthographic projections are reachable only as truncated degree-9 polynomials, with error growing toward the circle edge; equidistant is exact at k = 0. Each family is a closed-form θ(r) with no root-finding. Also a calibrated principal point and non-square pixels: one focal length means fx = fy and a centred circle, so only a calibration's radial geometry transfers. | medium | ready |
+| Transport | Bounded media | Light scattering inside closed objects such as frosted glass, milk or skin. Needs tracking which object a ray is inside when they nest. | high | ready |
+| Sampling | Adaptive sampling | Spend more samples on noisy pixels and fewer on clean ones. The per-pixel noise estimate it needs already exists. | medium | ready |
+| Camera | Scene graph and instancing | Every copy of an object is stored separately. Keeping objects in a hierarchy would let copies share memory and enable motion blur. | high | ready |
+| Colour | Photometric calibration | Link the renderer's light values to real units (lux, candela), so exposure can be checked against a real light meter. | medium | ready |
+| Camera | Lens model | Most fisheye lenses are only approximated and lose accuracy near the edge. Real cameras also need an off-centre lens and non-square pixels. | medium | ready |
 
 ### Parked
 
@@ -97,14 +95,14 @@ Refinements, speculative or blocked; not scheduled.
 
 | Area | Item | Detail | Complexity | Status |
 | --- | --- | --- | --- | --- |
-| BSDF | Smith-exact transmission | Refraction’s shadowing and the reflected share of multiple scattering are already exact in energy; the transmitted multiple-scattering lobe is still a `(1 − escape) cos` shape and is not reciprocal. | high | ready |
-| Texture | Lookup cost | A TextureSystem lookup costs about twice a direct bilinear on the stump (12.2 ms against 5.6); secondary differentials would cut the level-0 traffic. | medium | ready |
-| Texture | Aliasing test asset | A high-frequency noise material that exposes minification aliasing before and after. | low | ready |
-| Sampling | Blue noise beyond one dimension | The mask is a scalar array, so a pixel's shift lies on a line; an annealed d-dimensional matrix (Georgiev and Fajardo 2016) fixes it. | medium | ready |
-| Colour | HDRI white balance | An HDRI keeps the colour it was measured under; a CAT16 von Kries matrix from the authored kelvin to D65 would balance it. | medium | ready |
-| Colour | Measured-observer cones | Needs the Judd-Vos matching functions and spectral primaries, so it lands with spectral transport. | high | blocked |
-| Camera | Anamorphic and distortion | Anamorphic squeeze and Brown-Conrady or STMap distortion, each needing an inverse for motion vectors and a Jacobian for ray differentials. | high | ready |
-| Camera | Hexagonal neighbourhoods | Sobel, Gabor, DoG, Denoised and bloom are refused on the hexagonal lattice; each needs its hexagonal form. | high | ready |
-| Camera | Compound-eye optics | A per-cell Gaussian acceptance angle (Land 1997) as an angular filter on the primary ray. | medium | ready |
-| Camera | Subdivision surfaces | Needs a scene-JSON flag and tessellation before the BVH build; follows the scene graph. | high | blocked |
-| AOV | Contrast sensitivity | Barten 1999 on the shared scale space with Peli contrast; needs luminance in cd/m². | high | blocked |
+| BSDF | Smith-exact transmission | Light that passes through rough glass after bouncing between tiny surface facets uses an approximate, physically lopsided shape. | high | ready |
+| Texture | Lookup cost | A filtered texture read costs about twice a direct one (12.2 ms against 5.6 ms); filtering after bounces would cut the cost. | medium | ready |
+| Texture | Aliasing test asset | A finely noisy material that makes texture shimmer easy to see, to compare before and after filtering. | low | ready |
+| Sampling | Blue noise beyond one dimension | Blue noise makes noise look finer, but the mask spreads error well in one dimension only; a multi-dimensional mask would fix it. | medium | ready |
+| Colour | HDRI white balance | An HDRI keeps the colour cast of the light it was shot under; white balancing from its colour temperature to daylight would fix it. | medium | ready |
+| Colour | Measured-observer cones | Model colour vision from measured human eye response. Needs light tracked by wavelength, so it waits for spectral rendering. | high | blocked |
+| Camera | Anamorphic and distortion | Stretched widescreen lenses and real lens distortion. Each needs an inverse to keep motion vectors and texture filtering right. | high | ready |
+| Camera | Hexagonal neighbourhoods | Edge detection, the Gabor and DoG filters, denoising and bloom do not work on hexagonal pixels yet; each needs a hexagonal version. | high | ready |
+| Camera | Compound-eye optics | Model an insect eye, where each facet sees a soft-edged cone of directions, by blurring each camera ray's direction. | medium | ready |
+| Camera | Subdivision surfaces | Smooth curved surfaces from coarse meshes, subdivided at load. Needs a scene-file flag and waits for the scene graph. | high | blocked |
+| AOV | Contrast sensitivity | An output showing which detail a human can actually see. Needs brightness in real units, so it waits for photometric calibration. | high | blocked |

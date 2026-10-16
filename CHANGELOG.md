@@ -3,6 +3,31 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Grazing transmission
+
+The transmissive sphere is now scored over its whole disc. Its rim loss was light trapped inside the glass and cut off by the bounce
+cap, not light the glass loses: the renderer is unchanged, and the README row is closed.
+- **Blind spot:** `transmissive_sphere_energy`'s 200 mm camera frames 0.30 of the radius and scores the centre 4x4, so the rim was never
+  seen at any depth. The README's 0.9450 / 0.9020 came from an uncommitted probe that predates the OpenPBR interface; `kSmoothAlpha` is
+  gone too, so roughness 0.02 now takes the rough path.
+- **Re-measured:** `transmissive_sphere_energy_radial` bins a 256x128 frame of the whole disc by each pixel's impact parameter b. At 16
+  bounces roughness 0.2 reads 0.947 at b 0.90-0.95 and 0.910 at 0.95-0.98, as recorded. Depth closes it: 0.994 / 0.989 at 64, 0.997 /
+  1.003 at 256, every bin within its band at 4096. Entry at b has cosine sqrt(1 - b^2); the chord meets the far side at Snell's
+  cosine, 36.9 and 39.3 degrees against a 41.8 degree critical angle, so moderate roughness scatters the rim's light past critical. It
+  escapes only by a slow random walk over facet tilts: none is trapped at 0.02, it mixes in a few bounces by 0.7, worst near 0.2.
+- **BSDF:** `transmissive_energy_balance` gains the rim's cosines (entry at b 0.9, 0.95, 0.98, their chords and the critical cosine) at
+  seven roughnesses. Every row conserves energy to 4e-4, the critical cosine included, so the escape tables are not the cause.
+- **Faceting:** past b 0.98 a 64x32 sphere reads 0.987 at every depth, smooth glass included. That is the interpolated-normal residual
+  (Schussler 2017 Fig. 18), already closed with #221: it scales with facet angle, 0.9989 at 256x128, which the radial check uses.
+- **Authoring:** cornell's glass sphere at roughness 0.2 against smooth glass, as a share of 256 bounces, over the sphere's 881 pixels:
+  0.917 against 0.933 at the shipped 8, 0.985 against 0.995 at 16, 0.999 against 1.000 at 64. The box's own truncation is common to
+  both, and trapping adds 1.7% at 8 bounces, 1.0% at 16, 0.07% at 64. It concentrates at the rim, so raise `maxBounces` for rough glass
+  seen edge-on. Smooth glass (`glass.json`, roughness 0) traps nothing.
+- **Tests:** the radial check runs 16 one-sample scrambles (16 samples per pixel in all) with a Student-t band per bin. Capping it at
+  16 bounces fails it, and so does dropping the transmitted multiple-scattering lobe, which also fails 33 BSDF rows.
+
+Evidence is in `results/grazing_transmission`.
+
 ## Shadow matte
 
 The Shadow AOV is now a luminance shadow matte: `1 - direct luminance / unoccluded direct luminance` at the primary vertex, one

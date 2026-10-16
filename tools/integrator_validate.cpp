@@ -1,5 +1,6 @@
 // Correctness check for path_tracer.cpp's integrator (renderPathTraced/tracePath).
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -279,17 +280,17 @@ glm::vec3 centreMean(const pathtracer::gfx::HdrImage& image) {
 // Runs one renderPathTraced pass over the scene's own per-instance materials.
 pathtracer::scene::PathTraceResult renderPass(const TestScene& scene, const EnvironmentMap& env, const PathTraceSettings& settings,
                                               EmbreeAccel& accel, pathtracer::scene::ThreadPool& pool, bool showSky,
-                                              std::uint32_t scrambleSeed = 7U, const Camera& camera = makeCamera()) {
+                                              std::uint32_t scrambleSeed = 7U, const Camera& camera = makeCamera(),
+                                              int width = kImageSize, int height = kImageSize) {
     const std::atomic<std::uint64_t> generation{1};
-    pathtracer::scene::PathTraceResult result =
-        pathtracer::scene::makePathTraceResult(kImageSize, kImageSize, settings.replicates);
+    pathtracer::scene::PathTraceResult result = pathtracer::scene::makePathTraceResult(width, height, settings.replicates);
     // No test scene here authors an emitter -- every instance is ordinary geometry.
     const std::vector<int> instanceLightIndex(scene.instances.size(), -1);
     const std::vector<pathtracer::scene::QuadLight> noQuads;
     const pathtracer::scene::LightSet lights(&env, /*envRotationDegrees=*/glm::vec3(0.0F), /*envExposure=*/1.0F, noQuads);
     pathtracer::debug::PassStats stats;  // required by renderPathTraced; this tool checks radiance, not throughput
     pathtracer::scene::renderPathTraced(camera, accel, scene.shadingTriangles, scene.instances,
-                                     instanceLightIndex, lights, pathtracer::scene::VolumeSet{}, kImageSize, kImageSize, showSky,
+                                     instanceLightIndex, lights, pathtracer::scene::VolumeSet{}, width, height, showSky,
                                      settings, scrambleSeed, /*sampleBase=*/0,
                                      /*sampleCount=*/settings.samplesPerPixel, generation,
                                      /*requestedGeneration=*/1U, pool, stats, result);
@@ -439,7 +440,7 @@ PT_CHECK(transmissive_slab_energy, Slow, Statistical) {
 
 // The curved counterpart on the same invariant: a sphere traps far more light, internal hits past the critical angle reflecting totally.
 PT_CHECK(transmissive_sphere_energy, Slow, Statistical) {
-    // Measured convergence point, not a guess: 32 and 96 bounces are bit-identical to this, and 12 is not.
+    // Converged at the centre, where the chord meets the far side head-on: the rim traps light, so its depth is the radial check's.
     constexpr int kSphereBounces = 16;
     constexpr float kTolerance = 0.03F;
     // 0 is the smooth interface and takes the delta path; the rest take the Walter lobe with far-side NEE.
@@ -509,6 +510,117 @@ PT_CHECK(transmissive_sphere_energy, Slow, Statistical) {
     }
     finish(ctx, ok, "transmissive_sphere_energy failed; see the rows above");
     return;
+}
+
+// Whole disc in frame: 50 mm on the 24 mm gate puts the silhouette, 11.5 degrees off axis from z = 5, at 0.85 of the half-height.
+constexpr int kDiscWidth = 256;
+constexpr int kDiscHeight = 128;
+constexpr float kDiscFocalLengthMm = 50.0F;
+// Impact-parameter edges b/R, dense at the rim where the entry cosine sqrt(1 - b^2) falls fastest; past 1 is sky, also 1.
+constexpr std::array<double, 8> kRimEdges = {0.0, 0.5, 0.7, 0.8, 0.9, 0.95, 0.98, 1.0};
+constexpr std::size_t kRimBins = kRimEdges.size() - 1;
+using RimEnergy = std::array<tools::stats::Welford, kRimBins>;
+
+Camera makeDiscCamera() {
+    const Camera base = makeCamera();
+    return Camera(base.position(), base.rotationDegrees(), base.filmBack(), kDiscFocalLengthMm, base.nearClip(), base.farClip(),
+                  base.aperture(), base.shutterSeconds(), base.iso());
+}
+
+// Each pixel's rim bin by its centre ray's impact parameter |o x d| about the sphere's centre, the origin; -1 where it misses.
+std::vector<int> rimBinOf(const Camera& camera) {
+    const glm::vec2 frame = pathtracer::gfx::frameExtent(camera.pixelLattice(), kDiscWidth, kDiscHeight);
+    std::vector<int> bins(static_cast<std::size_t>(kDiscWidth) * kDiscHeight, -1);
+    for (int y = 0; y < kDiscHeight; ++y) {
+        for (int x = 0; x < kDiscWidth; ++x) {
+            const glm::vec2 centre = pathtracer::gfx::pixelCentre(camera.pixelLattice(), x, y);
+            const std::optional<pathtracer::scene::Ray> ray =
+                camera.primaryRay(((centre.x / frame.x) * 2.0F) - 1.0F, 1.0F - ((centre.y / frame.y) * 2.0F), frame.x / frame.y);
+            const double b = glm::length(glm::cross(ray->origin, glm::normalize(ray->dir))) / kSphereRadius;
+            const auto upper = std::upper_bound(kRimEdges.begin(), kRimEdges.end(), b);
+            if (upper != kRimEdges.end()) {
+                bins[(static_cast<std::size_t>(y) * kDiscWidth) + x] = static_cast<int>(upper - kRimEdges.begin()) - 1;
+            }
+        }
+    }
+    return bins;
+}
+
+// Per-bin mean of kReplicates independent scrambles at settings.samplesPerPixel each, so each bin's band has kReplicates - 1 dof.
+RimEnergy rimEnergy(const TestScene& scene, const EnvironmentMap& env, const PathTraceSettings& settings, EmbreeAccel& accel,
+                    pathtracer::scene::ThreadPool& pool, std::uint64_t rowSeed) {
+    const Camera camera = makeDiscCamera();
+    const std::vector<int> binOf = rimBinOf(camera);
+    RimEnergy energy;
+    for (int r = 0; r < tools::stats::kReplicates; ++r) {
+        const pathtracer::gfx::HdrImage beauty =
+            renderPass(scene, env, settings, accel, pool, true, static_cast<std::uint32_t>(rowSeed + r), camera, kDiscWidth, kDiscHeight)
+                .beauty;
+        std::array<double, kRimBins> sum{};
+        std::array<int, kRimBins> count{};
+        for (std::size_t p = 0; p < binOf.size(); ++p) {
+            if (binOf[p] >= 0) {
+                const glm::vec3 rgb = beauty.rgb(p);
+                sum[binOf[p]] += std::max({rgb.x, rgb.y, rgb.z});
+                ++count[binOf[p]];
+            }
+        }
+        for (std::size_t b = 0; b < kRimBins; ++b) {
+            energy[b].add(sum[b] / count[b]);
+        }
+    }
+    return energy;
+}
+
+void printRim(const char* label, const RimEnergy& energy) {
+    std::printf("  %-9s", label);
+    for (const tools::stats::Welford& bin : energy) {
+        std::printf(" %.4f(%.4f)", bin.mean(), bin.standardError());
+    }
+    std::printf("\n");
+}
+
+// The whole disc, not the centre: entry at impact parameter b has cosine sqrt(1 - b^2), and the rim is where it reaches grazing.
+PT_CHECK(transmissive_sphere_energy_radial, Slow, Statistical) {
+    // Rim light scattered past the 41.8 degree critical angle escapes by a slow facet walk: 16 bounces read 0.910 at b 0.95-0.98, r 0.2.
+    constexpr int kRimBounces = 4096;  // measured: 1024 leaves r 0.1 at 0.9968 past b 0.98; 4096 is within every bin's band
+    // The interpolated-normal residual (Schussler 2017 Fig. 18) scales with facet angle: 0.987 past b 0.98 at 64x32, 0.9989 here.
+    constexpr int kRimSlices = 256;
+    constexpr int kRimStacks = 128;
+    const std::array<float, 8> roughnesses = {0.0F, 0.02F, 0.1F, 0.2F, 0.3F, 0.4F, 0.7F, 1.0F};
+
+    ctx.plan(static_cast<int>(roughnesses.size() * (kRimBins + 1)));
+    const EnvironmentMap env = makeUniformEnvironment();
+    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    PathTraceSettings settings = makeSettings(kRimBounces, 999);
+    settings.samplesPerPixel = 1;  // kReplicates scrambles of one sample: 256x128 at 16 samples per pixel in all
+    const double t = tools::stats::studentTTwoSided(ctx.alpha(), tools::stats::kReplicates - 1);
+    std::printf("integrator_validate: white non-absorbing glass sphere, uniform L0=1, mean(SE) per b/R bin (1.0 = invisible)\n  b/R      ");
+    for (std::size_t b = 0; b < kRimBins; ++b) {
+        std::printf("  [%.2f,%.2f)    ", kRimEdges[b], kRimEdges[b + 1]);
+    }
+    std::printf("\n");
+    for (float roughness : roughnesses) {
+        char label[64];
+        std::snprintf(label, sizeof(label), "r=%g", static_cast<double>(roughness));
+        const TestScene scene = withSurface(makeSphereScene(roughness, kRimSlices, kRimStacks), transmissive);
+        std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+        PT_EXPECT(ctx, accel.has_value(), "failed to build the Embree sphere scene");
+        if (!accel.has_value()) {
+            continue;
+        }
+        const RimEnergy energy = rimEnergy(scene, env, settings, *accel, pool, ctx.subSeed(label));
+        printRim(label, energy);
+        for (std::size_t b = 0; b < kRimBins; ++b) {
+            // The film's float32 mean resolves to one ulp: a smooth sphere's interior bins carry no variance above it.
+            const double half = (t * energy[b].standardError()) + (std::numeric_limits<float>::epsilon() * energy[b].mean());
+            char detail[256];
+            std::snprintf(detail, sizeof(detail),
+                          "%s b/R [%.2f,%.2f): Lo %.5f vs 1 +/- %.5f -- below means a transmissive vertex or the rim's paths lose energy",
+                          label, kRimEdges[b], kRimEdges[b + 1], energy[b].mean(), half);
+            PT_EXPECT(ctx, std::abs(energy[b].mean() - 1.0) <= half, detail);
+        }
+    }
 }
 
 // Beer-Lambert: transmissionDepth is the distance at which transmittance reaches transmissionColor, so that identity is the specification.
