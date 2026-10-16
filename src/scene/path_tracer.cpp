@@ -12,6 +12,7 @@
 
 #include "pathtracer/debug/aov_routing.h"
 #include "pathtracer/scene/bsdf.h"
+#include "pathtracer/scene/cie.h"
 #include "pathtracer/scene/gbuffer_shading.h"
 #include "pathtracer/scene/sampler.h"
 #include "pathtracer/scene/shading_scene.h"
@@ -65,8 +66,8 @@ constexpr double kBlackmanHarrisA2 = 0.14128;
 constexpr double kBlackmanHarrisA3 = 0.01168;
 // Knots of the half-filter CDF over |x| in [0, kFilterRadius]: exact at each knot, linear between, so 63 bins of 0.024 px each.
 constexpr int kFilterCdfKnots = 64;
-// Per-pixel lanes: beauty.rgb, bounce, shadow, five surface buckets, AO, Fresnel, alpha, denoise albedo, normal, two volume buckets.
-constexpr int kSampleLanes = 37;
+// Per-pixel lanes: beauty.rgb, bounce, shadow lost, surface buckets, AO, Fresnel, alpha, denoise features, volume buckets, unoccluded.
+constexpr int kSampleLanes = 38;
 
 // CDF of |x| / kFilterRadius from the window's closed-form integral: the window spans t in [0, 1] centred at 0.5, so |x| = 0 maps there.
 std::array<float, kFilterCdfKnots> buildFilterCdf() {
@@ -165,8 +166,9 @@ namespace {
 struct TraceResult {
     glm::vec3 radiance;
     int terminationBounce;  // bounce index the path stopped at (== maxBounces + 1 if depth-capped)
-    float shadow;           // 1.0 = shadowed/occluded, 0.0 = lit or no primary hit at all (background)
-    float ao;  // 1.0 = unoccluded, 0.0 = occluded within aoMaxDistance -- inverted relative to shadow above
+    float shadowLost;        // bounce-0 direct luminance the occluders remove, light-sampled without MIS; 0 with no shadow ray
+    float shadowUnoccluded;  // the same estimate with visibility 1: Shadow is the ratio of their means
+    float ao;  // 1.0 = unoccluded, 0.0 = occluded within aoMaxDistance
     // One VNDF draw's Fresnel at the primary hit; 0 where there is no BSDF vertex at bounce 0.
     glm::vec3 fresnel{0.0F};
     float alpha = 0.0F;  // PathTraceResult::alpha's per-sample estimate; 0 with no ray at all
@@ -340,7 +342,8 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
                 break;
         }
     };
-    float gShadow = 0.0F;  // default: no surface hit at all -- not "shadowed", just background
+    float gShadowLost = 0.0F;  // default: no bounce-0 shadow ray, so no direct light to lose
+    float gShadowUnoccluded = 0.0F;
     float gAo = 1.0F;      // default: background is fully unoccluded, matching the polarity in PathTraceResult
     // Default: no BSDF vertex at bounce 0 -- the camera ray missed, or hit an emitter, which returns before shading.
     glm::vec3 gFresnel(0.0F);
@@ -427,7 +430,6 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
             const glm::vec3 dir = glm::normalize(ray.dir);
             if (bounce == 0) {
                 pathBucket = PathBucket::Volume;
-                gShadow = 1.0F;  // as at a surface: shadowed unless the NEE ray below gets through
             }
             // The phase function integrates to 1, so the albedo estimate is the tracking weight already carried; no surface, no normal.
             if (featurePending) {
@@ -439,10 +441,14 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
                 const Ray shadowRay{position, lightSample->direction, 0.0F, lightSample->distance * (1.0F - kShadowDistanceEpsilon)};
                 ++rays.shadow;
                 const glm::vec3 visibility = transmittanceAlong(shadowRay, scene, heroChannel, rays.shadow, volumeSampler);
+                // Shadow's lanes take the light estimator without its MIS weight: alone it estimates all direct light, occluded or not.
+                if (bounce == 0) {
+                    const glm::vec3 direct = throughput * lightSample->radiance * (phase / lightSample->pdf);
+                    const glm::vec3& luminance = cie::sceneLuminanceWeights();
+                    gShadowUnoccluded = glm::dot(luminance, direct);
+                    gShadowLost = glm::dot(luminance, direct * (1.0F - visibility));
+                }
                 if (visibility != glm::vec3(0.0F)) {
-                    if (bounce == 0) {
-                        gShadow = 1.0F - channelMean(visibility);
-                    }
                     const float lightPdf2 = lightSample->pdf * lightSample->pdf;
                     const float misWeightLight = lightPdf2 / (lightPdf2 + (phase * phase));
                     const glm::vec3 neeContribution =
@@ -582,7 +588,6 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
         }
 
         if (bounce == 0) {
-            gShadow = 1.0F;  // assume shadowed once we know there's a real surface; the NEE check below may clear this
             // The Fresnel the microfacet lobe evaluates here, one VNDF draw per sample, on its own stream. No ray and no BVH query.
             gFresnel = fresnelAtMicrofacet(closure, fresnelSample);
             // Obscurance (Zhukov 1998; Iones 2003): sampling at pdf = cos/pi cancels both factors, so the estimator is the mean of rho.
@@ -652,10 +657,14 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
                                          shadowEpsilon, shadowDistance * (1.0F - kShadowDistanceEpsilon)};
                     ++rays.shadow;
                     const glm::vec3 visibility = transmittanceAlong(shadowRay, scene, heroChannel, rays.shadow, volumeSampler);
+                    // As at a scattering: the unweighted light estimator, its luminance and the share the occluders remove of it.
+                    if (bounce == 0) {
+                        const glm::vec3 direct = bsdfValue * throughput * lightSample->radiance / lightSample->pdf;
+                        const glm::vec3& luminance = cie::sceneLuminanceWeights();
+                        gShadowUnoccluded = glm::dot(luminance, direct);
+                        gShadowLost = glm::dot(luminance, direct * (1.0F - visibility));
+                    }
                     if (visibility != glm::vec3(0.0F)) {
-                        if (bounce == 0) {
-                            gShadow = 1.0F - channelMean(visibility);
-                        }
                         const float lightPdf2 = lightSample->pdf * lightSample->pdf;
                         const float bsdfPdf2 = eval.pdf * eval.pdf;
                         const float misWeightLight = lightPdf2 / (lightPdf2 + bsdfPdf2);
@@ -739,7 +748,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
         segmentStart = 0.0F;
     }
 
-    return {radiance,           bounce,               gShadow,              gAo,
+    return {radiance,           bounce,               gShadowLost,          gShadowUnoccluded,    gAo,
             gFresnel,           gAlpha,               directDiffuseAccum,   indirectDiffuseAccum,
             directSpecularAccum, indirectSpecularAccum, refractionAccum,    directVolumeAccum,
             indirectVolumeAccum, featureAlbedo,         featureNormal};
@@ -757,6 +766,9 @@ PathTraceResult makePathTraceResult(int width, int height, int replicates) {
     }
     for (const pathtracer::debug::PathTracedLane lane : pathtracer::debug::kDenoiseFeatureLanes) {
         result.*lane = pathtracer::gfx::makeImage(width, height, pathtracer::gfx::kRgbChannels);
+    }
+    for (const pathtracer::debug::PathTracedLane lane : pathtracer::debug::kShadowLanes) {
+        result.*lane = pathtracer::gfx::makeImage(width, height, pathtracer::gfx::kScalarChannels);
     }
     result.replicateLuminance.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) *
                                          static_cast<std::size_t>(replicates),
@@ -849,7 +861,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                     const std::array<float, kSampleLanes> values{
                         trace.radiance.x,          trace.radiance.y,
                         trace.radiance.z,          static_cast<float>(trace.terminationBounce),
-                        trace.shadow,              trace.directDiffuse.x,
+                        trace.shadowLost,          trace.directDiffuse.x,
                         trace.directDiffuse.y,     trace.directDiffuse.z,
                         trace.indirectDiffuse.x,   trace.indirectDiffuse.y,
                         trace.indirectDiffuse.z,   trace.directSpecular.x,
@@ -865,7 +877,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                         trace.denoiseNormal.z,     trace.directVolume.x,
                         trace.directVolume.y,      trace.directVolume.z,
                         trace.indirectVolume.x,    trace.indirectVolume.y,
-                        trace.indirectVolume.z};
+                        trace.indirectVolume.z,    trace.shadowUnoccluded};
                     for (int lane = 0; lane < kSampleLanes; ++lane) {
                         sum[lane] += values[lane];
                     }
@@ -873,7 +885,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                 // Unit weights make the estimate the plain mean; divided, not scaled by fl(1/n), so all-0 or all-1 samples read exactly.
                 writeTexel(out.beauty, x, y, glm::vec3(sum[0], sum[1], sum[2]) / samples);
                 writeTexel(out.bounceHeatmap, x, y, sum[3] / samples);
-                writeTexel(out.shadow, x, y, sum[4] / samples);
+                writeTexel(out.shadowLost, x, y, sum[4] / samples);
                 writeTexel(out.directDiffuse, x, y, glm::vec3(sum[5], sum[6], sum[7]) / samples);
                 writeTexel(out.indirectDiffuse, x, y, glm::vec3(sum[8], sum[9], sum[10]) / samples);
                 writeTexel(out.directSpecular, x, y, glm::vec3(sum[11], sum[12], sum[13]) / samples);
@@ -886,6 +898,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                 writeTexel(out.denoiseNormal, x, y, glm::vec3(sum[28], sum[29], sum[30]) / samples);
                 writeTexel(out.directVolume, x, y, glm::vec3(sum[31], sum[32], sum[33]) / samples);
                 writeTexel(out.indirectVolume, x, y, glm::vec3(sum[34], sum[35], sum[36]) / samples);
+                writeTexel(out.shadowUnoccluded, x, y, sum[37] / samples);
             }
         }
 

@@ -3,6 +3,28 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Shadow matte
+
+The Shadow AOV is now a luminance shadow matte: `1 - direct luminance / unoccluded direct luminance` at the primary vertex, one
+channel in [0, 1], white where occluded. It used to start at 1 and only a traced NEE shadow ray lowered it, so any pixel with no
+visibility test read fully shadowed: no light in the scene, a delta lobe (cornell's glass sphere), a light behind an opaque surface or
+below the shading hemisphere, an emission-only surface.
+- **Definition:** the bounce-0 light sample without its MIS weight, which alone estimates all direct light, gives the unoccluded
+  luminance `u = Y(f Le / pdf)` and the lost luminance `Y(f Le (1 - V) / pdf)`, visibility taken per channel before the ACEScg
+  luminance. Shadow is the ratio of their means, 0 where no direct light can arrive: there is nothing to shadow there.
+- **Lanes:** a ratio does not average, so `shadowLost` and `shadowUnoccluded` accumulate as hidden lanes (`kShadowLanes`) and Shadow is
+  derived after accumulation, as Denoised is from its features. Shadow moves from the path-traced lanes to the derived AOVs.
+- **Image:** Beauty and every ray count are bit-identical on cornell, stump, macbeth and cloud (no ray, no draw). Shadow changes:
+  cornell's glass sphere reads 0 (was 1) and its walls are weighted by the environment the box hides; stump's mean falls 0.045 to
+  0.015, the 1s from environment samples below the surface gone; macbeth reads 0 everywhere, nothing occluding its charts; cloud's
+  silhouette follows the key light's luminance. Pass time is neutral (B/A 0.995 cornell, 1.010 stump, 3 rounds).
+- **Tests:** `shadow_matte`, exact: open 0, opaque wall 1, half-present wall 0.5, and 0 with no direct light for a mirror, a light
+  behind the floor and no light; a (0.1, 0.9, 0.1) window's lit share is the luminance mix of grey 0.1 and 0.9 windows (0.578, a
+  channel mean reads 0.325). `shadow_matte_penumbra`: a half-hidden light against the Lambert polygon form factor, small far and large
+  near. Restoring the 1 or a channel mean fails them; an MIS weight in `u` moves Shadow by at most 0.2%, below the band.
+
+Evidence is in `results/shadow_matte`.
+
 ## Microsurface to all orders
 
 Normal and bump maps now scatter through Schussler et al. 2017's microsurface to every order rather than eq. 23's second, so a mapped

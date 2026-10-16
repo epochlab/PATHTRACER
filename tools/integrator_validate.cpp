@@ -24,11 +24,13 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include "pathtracer/config/scene_config.h"
+#include "pathtracer/debug/aov_filters.h"
 #include "pathtracer/gfx/hdr_image.h"
 #include "check.h"
 #include "fixtures.h"
 #include "stats.h"
 #include "pathtracer/scene/bsdf.h"
+#include "pathtracer/scene/cie.h"
 #include "pathtracer/scene/gbuffer_shading.h"
 #include "pathtracer/scene/camera.h"
 #include "pathtracer/scene/embree_accel.h"
@@ -1643,7 +1645,7 @@ PT_CHECK(quad_light_visibility_on_curved_receiver, Slow, Exact) {
         const pathtracer::scene::PathTraceResult result = renderPassWithLights(
             scene, instanceLightIndex, quads, /*env=*/nullptr, makeSettings(0, 999), *accel, pool,
             /*showSky=*/false);
-        const float shadow = regionMean(result.shadow, 0, 0, kImageSize, kImageSize).x;
+        const float shadow = regionMean(result.shadowLost, 0, 0, kImageSize, kImageSize).x;
         std::cout << "  " << row.name << "   shadow " << shadow << "\n";
         if (shadow != 0.0F) {
             std::cerr << "integrator_validate: FAILED curved-receiver visibility -- " << row.name
@@ -1657,6 +1659,192 @@ PT_CHECK(quad_light_visibility_on_curved_receiver, Slow, Exact) {
     }
     finish(ctx, ok, "quad_light_visibility_on_curved_receiver failed; see the rows above");
     return;
+}
+
+// Shadow is 1 - direct / unoccluded direct luminance: 0 where no direct light can arrive, never the fully-shadowed 1.
+PT_CHECK(shadow_matte, Slow, Exact) {
+    // Numerical, not physical: the three windows draw identical paths, so only float summation order separates the two sides.
+    constexpr float kUlpBand = 1e-5F;
+    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    const pathtracer::scene::QuadLight overhead = makeOverheadLight();
+    // makeOverheadLight's edges swapped and mirrored below the floor: it faces the floor's back, across an opaque surface.
+    const pathtracer::scene::QuadLight below{glm::vec3(0.5F, -0.5F, -1.5F), glm::vec3(1.0F, 0.0F, 0.0F),
+                                             glm::vec3(0.0F, 1.0F, 0.0F), glm::vec3(3.0F), false};
+    const Material opaque = makeLambertianFloor().instances[0].material;
+    // A smooth thin window tinted `tint`: its pass-through is nonlinear in the tint, but each channel depends on its own tint alone.
+    const auto window = [&opaque](const glm::vec3& tint) {
+        Material material = opaque;
+        material.geometryThinWalled = true;
+        material.transmissionWeight = 1.0F;
+        material.specularRoughness = 0.0F;
+        material.specularIor = 1.5F;
+        material.transmissionColor = tint;
+        return material;
+    };
+    Material halfPresent = opaque;
+    halfPresent.geometryOpacity = 0.5F;  // the shadow ray keeps (1 - alpha) + alpha * 0 = 0.5 exactly
+
+    // The centre block's Shadow and its unoccluded direct luminance, from one render of a floor under `quads` and an optional wall.
+    struct Reading {
+        float shadow;
+        float unoccluded;
+    };
+    const auto read = [&](const TestScene& floor, const std::vector<pathtracer::scene::QuadLight>& quads,
+                          const Material* wall) -> std::optional<Reading> {
+        TestScene scene = floor;
+        std::vector<int> instanceLightIndex(scene.instances.size(), -1);
+        for (std::size_t i = 0; i < quads.size(); ++i) {
+            appendLightGeometry(scene, quads[i], static_cast<int>(i), instanceLightIndex);
+        }
+        if (wall != nullptr) {
+            appendWall(scene, *wall, instanceLightIndex);
+        }
+        std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+        if (!accel.has_value()) {
+            return std::nullopt;
+        }
+        const pathtracer::scene::PathTraceResult result =
+            renderPassWithLights(scene, instanceLightIndex, quads, /*env=*/nullptr, makeSettings(0, 999), *accel, pool, false);
+        pathtracer::debug::FilterInput input{result.beauty};
+        input.shadowLost = &result.shadowLost;
+        input.shadowUnoccluded = &result.shadowUnoccluded;
+        const pathtracer::gfx::HdrImage shadow = pathtracer::debug::evaluateFilterAov(pathtracer::debug::AovId::Shadow, input, pool);
+        return Reading{centreMean(shadow).x, centreMean(result.shadowUnoccluded).x};
+    };
+
+    const TestScene lambert = makeLambertianFloor();
+    const TestScene mirror = withSurface(makeQuadScene(/*roughness=*/0.0F), metallic(1.0F));
+    const std::vector<pathtracer::scene::QuadLight> above{overhead};
+    struct Row {
+        const char* name;
+        const TestScene* floor;
+        std::vector<pathtracer::scene::QuadLight> quads;
+        const Material* wall;
+        float shadow;
+        bool lit;  // whether any direct light reaches the floor, so the unoccluded mean must be positive rather than exactly 0
+    };
+    const std::array<Row, 6> rows{{
+        {"open light", &lambert, above, nullptr, 0.0F, true},
+        {"opaque wall", &lambert, above, &opaque, 1.0F, true},
+        {"half-present wall", &lambert, above, &halfPresent, 0.5F, true},
+        {"smooth mirror", &mirror, above, nullptr, 0.0F, false},
+        {"light behind the floor", &lambert, {below}, nullptr, 0.0F, false},
+        {"no light", &lambert, {}, nullptr, 0.0F, false},
+    }};
+    bool ok = true;
+    for (const Row& row : rows) {
+        const std::optional<Reading> reading = read(*row.floor, row.quads, row.wall);
+        if (!reading.has_value()) {
+            finish(ctx, false, "failed to build the Embree shadow scene");
+            return;
+        }
+        std::cout << "  " << row.name << "   shadow " << reading->shadow << "   unoccluded " << reading->unoccluded << '\n';
+        const bool shadowOk = reading->shadow == row.shadow;
+        const bool unoccludedOk = row.lit ? reading->unoccluded > 0.0F : reading->unoccluded == 0.0F;
+        if (!shadowOk || !unoccludedOk) {
+            std::cerr << "integrator_validate: FAILED shadow matte, " << row.name << " -- shadow " << reading->shadow
+                      << ", unoccluded " << reading->unoccluded << '\n';
+            ok = false;
+        }
+    }
+
+    // Under a grey light the lit share 1 - Shadow of a (lo, hi, lo) window is the luminance-weighted mix of grey lo and grey hi windows.
+    constexpr float kLo = 0.1F;
+    constexpr float kHi = 0.9F;
+    const Material tinted = window(glm::vec3(kLo, kHi, kLo));
+    const Material greyLo = window(glm::vec3(kLo));
+    const Material greyHi = window(glm::vec3(kHi));
+    const std::optional<Reading> mixed = read(lambert, above, &tinted);
+    const std::optional<Reading> lo = read(lambert, above, &greyLo);
+    const std::optional<Reading> hi = read(lambert, above, &greyHi);
+    if (!mixed.has_value() || !lo.has_value() || !hi.has_value()) {
+        finish(ctx, false, "failed to build the Embree window scene");
+        return;
+    }
+    const glm::vec3& weights = pathtracer::scene::cie::sceneLuminanceWeights();
+    const float expected = ((weights.r + weights.b) * (1.0F - lo->shadow)) + (weights.g * (1.0F - hi->shadow));
+    // What a per-sample channel mean of visibility would read instead: 2/3 of the low window's share and 1/3 of the high one's.
+    const float channelMean = ((2.0F * (1.0F - lo->shadow)) + (1.0F - hi->shadow)) / 3.0F;
+    std::cout << "  tinted window   lit share " << 1.0F - mixed->shadow << "   luminance-weighted " << expected << "   channel mean "
+              << channelMean << '\n';
+    if (std::fabs((1.0F - mixed->shadow) - expected) > kUlpBand) {
+        std::cerr << "integrator_validate: FAILED shadow matte, tinted window -- lit share " << 1.0F - mixed->shadow
+                  << ", luminance-weighted greys " << expected << '\n';
+        ok = false;
+    }
+    finish(ctx, ok, "shadow_matte failed; see the rows above");
+}
+
+// A blocker hiding a light's near part: the penumbra reads 1 - E(visible part) / E(whole light) by the Lambert polygon form factor.
+PT_CHECK(shadow_matte_penumbra, Slow, Statistical) {
+    constexpr float kTolerance = 0.02F;  // Monte Carlo NEE noise at kSamplesPerPixel, as quad_light_irradiance_and_occlusion
+    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    // A blocker below the light, its near edge outside the view cone and past the light's in y, so only its far edge casts the penumbra.
+    struct Row {
+        const char* name;
+        pathtracer::scene::QuadLight light;
+        float blockerHeight;
+        float blockerNear;
+        float blockerFar;
+    };
+    // A small far light and a large near one: the ratio holds whatever solid angle the light subtends.
+    const std::array<Row, 2> rows{{
+        {"small far light", makeOverheadLight(), 1.45F, 0.4F, 1.0F},
+        {"large near light", {glm::vec3(0.4F, -1.5F, 0.5F), glm::vec3(0.0F, 3.0F, 0.0F), glm::vec3(3.0F, 0.0F, 0.0F), glm::vec3(3.0F)},
+         0.45F, 0.35F, 1.4F},
+    }};
+    const glm::vec3 normal(0.0F, 0.0F, 1.0F);
+    const glm::vec4 tangent(1.0F, 0.0F, 0.0F, 1.0F);
+    ctx.plan(static_cast<int>(rows.size()));
+    for (const Row& row : rows) {
+        const pathtracer::scene::QuadLight& light = row.light;
+        TestScene scene = makeLambertianFloor();
+        std::vector<int> instanceLightIndex(scene.instances.size(), -1);
+        appendLightGeometry(scene, light, /*quadIndex=*/0, instanceLightIndex);
+        const float reach = glm::length(light.edge0);  // past the light's own y extent on both sides
+        const auto vertex = [&](float x, float y) {
+            return ShadingVertex{glm::vec3(x, y, row.blockerHeight), normal, glm::vec2(0.5F, 0.5F), tangent};
+        };
+        const ShadingVertex b0 = vertex(row.blockerNear, -reach);
+        const ShadingVertex b1 = vertex(row.blockerFar, -reach);
+        const ShadingVertex b2 = vertex(row.blockerFar, reach);
+        const ShadingVertex b3 = vertex(row.blockerNear, reach);
+        const int blocker = static_cast<int>(scene.instances.size());
+        scene.worldTriangles.push_back(Triangle{b0.position, b1.position, b2.position});
+        scene.worldTriangles.push_back(Triangle{b0.position, b2.position, b3.position});
+        scene.shadingTriangles.push_back(ShadingTriangle{b0, b1, b2, blocker});
+        scene.shadingTriangles.push_back(ShadingTriangle{b0, b2, b3, blocker});
+        scene.instances.push_back(MeshInstance{makeLambertianFloor().instances[0].material, glm::mat4(1.0F), "blocker"});
+        instanceLightIndex.push_back(-1);
+        std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+        if (!accel.has_value()) {
+            PT_EXPECT(ctx, false, "failed to build the Embree penumbra scene");
+            return;
+        }
+        const std::vector<pathtracer::scene::QuadLight> quads{light};
+        const pathtracer::scene::PathTraceResult result =
+            renderPassWithLights(scene, instanceLightIndex, quads, /*env=*/nullptr, makeSettings(0, 999), *accel, pool, false);
+        pathtracer::debug::FilterInput input{result.beauty};
+        input.shadowLost = &result.shadowLost;
+        input.shadowUnoccluded = &result.shadowUnoccluded;
+        const float shadow = centreMean(pathtracer::debug::evaluateFilterAov(pathtracer::debug::AovId::Shadow, input, pool)).x;
+
+        // From the origin the blocker's far edge projects onto the light plane at x = edge * z_light / z_blocker; the light past it shows.
+        const float lightZ = light.origin.z;
+        const float visibleFrom = row.blockerFar * lightZ / row.blockerHeight;
+        const float far = light.origin.x + glm::length(light.edge1);
+        const float nearY = light.origin.y;
+        const float farY = light.origin.y + glm::length(light.edge0);
+        const std::array<glm::vec3, 4> whole{light.origin, light.origin + light.edge0, light.origin + light.edge0 + light.edge1,
+                                             light.origin + light.edge1};
+        const std::array<glm::vec3, 4> visible{glm::vec3(visibleFrom, nearY, lightZ), glm::vec3(visibleFrom, farY, lightZ),
+                                               glm::vec3(far, farY, lightZ), glm::vec3(far, nearY, lightZ)};
+        const float expected = 1.0F - (lambertPolygonIrradiance(visible, glm::vec3(0.0F), normal, light.radiance.x) /
+                                       lambertPolygonIrradiance(whole, glm::vec3(0.0F), normal, light.radiance.x));
+        std::cout << "  " << row.name << "   shadow " << shadow << "   form-factor reference " << expected << '\n';
+        PT_EXPECT(ctx, std::fabs(shadow - expected) <= kTolerance * expected,
+                  std::string(row.name) + ": Shadow is not 1 - E(visible) / E(whole) of the Lambert polygon form factor");
+    }
 }
 
 // Quadratic falloff is implicit: NEE divides by selectionPdf/solidAngle, and nothing asserted the point-source limit until this.

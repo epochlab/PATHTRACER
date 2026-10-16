@@ -13,7 +13,7 @@
 
 namespace pathtracer::debug {
 
-// CPU implementations of the eight Beauty-reading AOVs. Sobel clamps at the edge, DoG and Gabor mirror; all three wrap a periodic x.
+// CPU implementations of the nine derived AOVs. Sobel clamps at the edge, DoG and Gabor mirror; all three wrap a periodic x.
 
 // Radial half-response bandwidth of the Morlet bank, in octaves: DoG's fine-to-coarse spacing, so both operators resolve one band.
 inline constexpr float kMorletOctaves = 1.0F;
@@ -82,6 +82,10 @@ void demodulate(std::span<const float> plane, const MorletPlaneWave& wave, int w
 [[nodiscard]] pathtracer::gfx::HdrImage snrAov(int width, int height, const float* replicateLuminance, int replicates, int samples,
                                             pathtracer::scene::ThreadPool& threadPool);
 
+// 1 - direct luminance / unoccluded direct luminance at the primary vertex, as a ratio of means; 0 where no direct light arrives.
+[[nodiscard]] pathtracer::gfx::HdrImage shadowAov(const pathtracer::gfx::HdrImage& lost, const pathtracer::gfx::HdrImage& unoccluded,
+                                               pathtracer::scene::ThreadPool& threadPool);
+
 // Everything a BeautyFilter AOV reads, as explicit fields rather than a PathTraceResult, so a validator can build one with no renderer.
 struct FilterInput {
     const pathtracer::gfx::HdrImage& beauty;  // published mean radiance, linear scene space, scene-referred and unbounded
@@ -94,6 +98,9 @@ struct FilterInput {
     const pathtracer::gfx::HdrImage* denoiseAlbedo = nullptr;
     const pathtracer::gfx::HdrImage* denoiseNormal = nullptr;
     Denoiser* denoiser = nullptr;
+    // Shadow's two accumulated means, the occluded share's numerator and its denominator; Shadow needs both.
+    const pathtracer::gfx::HdrImage* shadowLost = nullptr;
+    const pathtracer::gfx::HdrImage* shadowUnoccluded = nullptr;
 };
 
 // The one dispatch for every BeautyFilter AOV; a non-filter id yields an empty image. No default arm, so a new filter must be routed.

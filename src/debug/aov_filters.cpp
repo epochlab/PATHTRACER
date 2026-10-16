@@ -297,6 +297,19 @@ HdrImage snrAov(int width, int height, const float* replicateLuminance, int repl
     return out;
 }
 
+HdrImage shadowAov(const HdrImage& lost, const HdrImage& unoccluded, ThreadPool& threadPool) {
+    HdrImage out = makeAovImage(AovId::Shadow, lost.width, lost.height);
+    threadPool.parallelFor(lost.height, [&](int y) {
+        for (int x = 0; x < lost.width; ++x) {
+            const std::size_t pixel = (static_cast<std::size_t>(y) * static_cast<std::size_t>(lost.width)) + static_cast<std::size_t>(x);
+            // No direct light to lose means no shadow, so zero rather than an undefined 0/0.
+            const float total = unoccluded.texels[pixel];
+            writeTexel(out, x, y, total > 0.0F ? lost.texels[pixel] / total : 0.0F);
+        }
+    });
+    return out;
+}
+
 HdrImage evaluateFilterAov(AovId aov, const FilterInput& input, ThreadPool& threadPool) {
     switch (aov) {
         case AovId::HSV:       return hsvAov(input.beauty, threadPool);
@@ -312,6 +325,11 @@ HdrImage evaluateFilterAov(AovId aov, const FilterInput& input, ThreadPool& thre
                 throw std::invalid_argument("denoised: needs the denoiseAlbedo and denoiseNormal lanes and a Denoiser");
             }
             return input.denoiser->denoise(input.beauty, *input.denoiseAlbedo, *input.denoiseNormal);
+        case AovId::Shadow:
+            if (input.shadowLost == nullptr || input.shadowUnoccluded == nullptr) {
+                throw std::invalid_argument("shadow: needs the shadowLost and shadowUnoccluded lanes");
+            }
+            return shadowAov(*input.shadowLost, *input.shadowUnoccluded, threadPool);
 
         // The lanes their own producers write. No default arm: -Werror then makes an unrouted new filter a compile error.
         case AovId::Beauty:
@@ -340,7 +358,6 @@ HdrImage evaluateFilterAov(AovId aov, const FilterInput& input, ThreadPool& thre
         case AovId::Refraction:
         case AovId::DirectVolume:
         case AovId::IndirectVolume:
-        case AovId::Shadow:
         case AovId::Count:
             break;
     }
