@@ -895,7 +895,7 @@ void applyCameraEdits(AppResources& app, const CameraEdits& edits) {
     app.debugCamera.setLensProjection(static_cast<pathtracer::scene::LensProjection>(edits.lensProjection));
     const auto lattice = static_cast<pathtracer::gfx::PixelLattice>(edits.pixelLattice);
     app.debugCamera.setPixelLattice(lattice);
-    // A square-neighbourhood AOV has nothing to show on another lattice, so the view falls back to the picture.
+    // An AOV with no version on the new lattice has nothing to show, so the view falls back to the picture.
     if (!pathtracer::debug::aovSupportsLattice(static_cast<pathtracer::debug::AovId>(app.aov), lattice)) {
         app.aov = static_cast<int>(pathtracer::debug::AovId::Beauty);
     }
@@ -1429,7 +1429,7 @@ bool validStartup(const Options& options, const std::optional<pathtracer::config
     if (!std::all_of(options.benchAovs.begin(), options.benchAovs.end(), [&](int aov) {
             return pathtracer::debug::aovSupportsLattice(static_cast<pathtracer::debug::AovId>(aov), profileConfig->camera.pixelLattice);
         })) {
-        std::cerr << "main: -bench-aovs names a square-neighbourhood AOV the profile's pixelLattice cannot render\n";
+        std::cerr << "main: -bench-aovs names an AOV the profile's pixelLattice cannot render\n";
         return false;
     }
     return true;

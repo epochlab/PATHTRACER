@@ -142,7 +142,7 @@ struct AovDisplay {
     return aovSource(aov) != AovSource::GBuffer;
 }
 
-// False where the AOV reads a square neighbourhood the lattice does not have: the square Morlet bank and OIDN's square-trained network.
+// False where the AOV has no version on the lattice: Denoised on hexagonal, OIDN's network being trained on square images.
 [[nodiscard]] bool aovSupportsLattice(AovId aov, pathtracer::gfx::PixelLattice lattice);
 
 // Exact lookup against kAovNames, so "bounceCount" resolves and "Bounce Count" does not. AovId::Count doubles as "unknown".

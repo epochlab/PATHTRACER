@@ -448,14 +448,14 @@ bool aovSupportsLattice(AovId aov, pathtracer::gfx::PixelLattice lattice) {
         return true;
     }
     switch (aov) {
-        // A square-grid stencil and a network trained on square images: neither is defined over six equidistant neighbours.
-        case AovId::Gabor:
+        // OIDN's network is trained on square images, so it has no meaning over offset rows.
         case AovId::Denoised:
             return false;
 
         // One texel each, a primary ray at the pixel's own centre, or a stencil with a hexagonal version.
         case AovId::Beauty:
         case AovId::Sobel:
+        case AovId::Gabor:
         case AovId::DoG:
         case AovId::Wireframe:
         case AovId::Alpha:

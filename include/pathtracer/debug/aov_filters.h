@@ -18,7 +18,7 @@ namespace pathtracer::debug {
 // Radial half-response bandwidth of the Morlet bank, in octaves: DoG's fine-to-coarse spacing, so both operators resolve one band.
 inline constexpr float kMorletOctaves = 1.0F;
 
-// Carrier frequency in radians per pixel at envelope variance t: sigma*omega depends on the bandwidth alone (Petkov 1995 eq. 4).
+// Carrier frequency in radians per pitch at envelope variance t: sigma*omega depends on the bandwidth alone (Petkov 1995 eq. 4).
 [[nodiscard]] float morletCarrier(float variance);
 
 // Orientations needed to cover every direction at half response or better, from the angular bandwidth the carrier already fixes.
@@ -26,14 +26,15 @@ inline constexpr float kMorletOctaves = 1.0F;
 
 // One bank orientation's plane wave exp(i(kx x + ky y)), held as row and column factors so no texel pays a transcendental.
 struct MorletPlaneWave {
-    double stepX = 0.0;  // kx, radians per pixel
-    double stepY = 0.0;  // ky, radians per pixel
+    double stepX = 0.0;  // kx, radians per pitch
+    double stepY = 0.0;  // ky, radians per pitch
     std::vector<float> cosX, sinX;  // cos(kx x), sin(kx x), one per column
-    std::vector<float> cosY, sinY;  // cos(ky y), sin(ky y), one per row
+    std::vector<float> cosY, sinY;  // cos, sin of row y's phase: ky y, plus kx/2 on odd hexagonal rows and the sqrt(3)/2 row pitch
 };
 
-// Orientation `index` of `count` spread over a half turn at `carrier` radians per pixel, tabulated on a width x height grid.
-[[nodiscard]] MorletPlaneWave morletPlaneWave(float carrier, int index, int count, int width, int height);
+// Orientation `index` of `count` spread over a half turn at `carrier` radians per pitch, tabulated at the lattice's texel centres.
+[[nodiscard]] MorletPlaneWave morletPlaneWave(float carrier, int index, int count, int width, int height,
+                                              pathtracer::gfx::PixelLattice lattice = pathtracer::gfx::PixelLattice::Square);
 
 // real + i imaginary = plane * exp(-i(kx x + ky y)): the carrier factors out, so a Gaussian blur after it is the Morlet envelope.
 void demodulate(std::span<const float> plane, const MorletPlaneWave& wave, int width, int height, std::span<float> real,
@@ -65,7 +66,8 @@ void demodulate(std::span<const float> plane, const MorletPlaneWave& wave, int w
 
 // Peak envelope of the 2-D Morlet bank over Luminance (Morlet 1982; Antoine & Murenzi 1996): a tuned grating's amplitude, one channel.
 [[nodiscard]] pathtracer::gfx::HdrImage gaborAov(const pathtracer::gfx::HdrImage& beauty,
-                                              pathtracer::scene::ThreadPool& threadPool, bool wrapsHorizontally = false);
+                                              pathtracer::scene::ThreadPool& threadPool, bool wrapsHorizontally = false,
+                                              pathtracer::gfx::PixelLattice lattice = pathtracer::gfx::PixelLattice::Square);
 
 // HSV as three channels: hue and saturation normalised to [0,1], value left scene-referred so it is not clamped at white.
 [[nodiscard]] pathtracer::gfx::HdrImage hsvAov(const pathtracer::gfx::HdrImage& beauty,
