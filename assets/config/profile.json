@@ -14,7 +14,8 @@
             "maxFieldOfViewDegrees": 180.0,
             "radialCoefficients": [0.0, 0.0, 0.0, 0.0]
         },
-        "pixelLattice": "square"
+        "pixelLattice": "square",
+        "acceptanceAngleDegrees": 0.0
     },
     "controls": {
         "flySpeedMetersPerSecond": 1.0,

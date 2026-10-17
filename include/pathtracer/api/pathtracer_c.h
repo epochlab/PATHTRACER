@@ -13,7 +13,7 @@ typedef struct PtRenderer PtRenderer;
 #define PT_OK 0
 #define PT_ERROR 1
 /* PtCamera is passed by value, so a caller built against a different layout must be caught rather than reading the fields as garbage. */
-#define PT_ABI_VERSION 9
+#define PT_ABI_VERSION 10
 /* Lens projections, PtCamera.lens_projection: the pinhole, Kannala & Brandt's polynomial fisheye, and the 360-degree lat-long. */
 #define PT_LENS_RECTILINEAR 0
 #define PT_LENS_FISHEYE_POLYNOMIAL 1
@@ -61,6 +61,8 @@ typedef struct {
     float fisheye_field_of_view_degrees;
     /* PT_LATTICE_*. Hexagonal refuses denoised: OIDN is trained on square images. */
     int pixel_lattice;
+    /* A compound-eye facet's full width at half maximum in [0, 360] degrees, replacing the film filter; 0 is the camera's filter. */
+    float acceptance_angle_degrees;
 } PtCamera;
 
 /* profile.json's authored camera and window size -- the defaults a caller overrides one field at a time. */

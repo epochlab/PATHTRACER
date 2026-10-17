@@ -176,6 +176,10 @@ class Camera:
     is the layout's only record. A written EXR carries it as ``pathtracer:pixelLattice`` with ``PixelAspectRatio`` ``2 / sqrt(3)``.
     The hexagonal lattice refuses ``denoised``: OIDN is trained on square images.
 
+    ``acceptance_angle_degrees`` makes each pixel a compound-eye facet: above 0 it is the full width at half maximum, in
+    ``[0, 360]``, of the facet's angular sensitivity, a von Mises-Fisher lobe about the pixel centre's ray that replaces the film
+    filter. Beauty and its lanes integrate the lobe; the G-buffer AOVs stay on the centre ray. 0 is the camera's own filter.
+
     Every AOV renders under every lens; G-buffer ``depth`` is the distance along the primary ray, the one depth a fisheye past
     90 degrees or the lat-long still defines.
 
@@ -203,6 +207,7 @@ class Camera:
     fisheye_coefficients: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
     fisheye_field_of_view_degrees: float = 180.0
     pixel_lattice: str = "square"
+    acceptance_angle_degrees: float = 0.0
 
     @classmethod
     def _from_struct(cls, struct: _ffi.PtCamera) -> Camera:
@@ -220,6 +225,7 @@ class Camera:
             fisheye_coefficients=tuple(struct.fisheye_coefficients),
             fisheye_field_of_view_degrees=struct.fisheye_field_of_view_degrees,
             pixel_lattice=PIXEL_LATTICES[struct.pixel_lattice],
+            acceptance_angle_degrees=struct.acceptance_angle_degrees,
         )
 
     def _to_struct(self) -> _ffi.PtCamera:
@@ -242,6 +248,7 @@ class Camera:
         if self.pixel_lattice not in PIXEL_LATTICES:
             raise ValueError(f"pixel_lattice must be one of {PIXEL_LATTICES}, got {self.pixel_lattice!r}")
         struct.pixel_lattice = PIXEL_LATTICES.index(self.pixel_lattice)
+        struct.acceptance_angle_degrees = self.acceptance_angle_degrees
         return struct
 
 

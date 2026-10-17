@@ -255,6 +255,20 @@ def test_pixel_lattice_round_trips_and_rejects_unknown_names(renderer: Renderer)
 
 
 @pytest.mark.parametrize("lattice", PIXEL_LATTICES)
+def test_acceptance_angle_blurs_beauty_and_leaves_the_gbuffer(renderer: Renderer, lattice: str) -> None:
+    """A facet's lobe replaces the film filter for beauty; the G-buffer's depth stays on the centre ray, float for float."""
+    assert renderer.default_camera.acceptance_angle_degrees == 0.0
+    camera = dataclasses.replace(renderer.default_camera, pixel_lattice=lattice)
+    kwargs = {"aovs": ("beauty", "depth"), "width": 32, "height": 24, "samples": 4}
+    plain = renderer.render(camera=camera, **kwargs)
+    facets = renderer.render(camera=dataclasses.replace(camera, acceptance_angle_degrees=5.0), **kwargs)
+    assert not np.array_equal(plain["beauty"], facets["beauty"])
+    assert np.array_equal(plain["depth"], facets["depth"])
+    with pytest.raises(RuntimeError, match="acceptance angle .* outside"):
+        renderer.render(camera=dataclasses.replace(camera, acceptance_angle_degrees=400.0), **kwargs)
+
+
+@pytest.mark.parametrize("lattice", PIXEL_LATTICES)
 @pytest.mark.parametrize("lens", ["fisheye_polynomial", "omnidirectional"])
 def test_lattice_preview_draws_each_texel_from_its_nearest_centre(renderer: Renderer, lattice: str, lens: str) -> None:
     """Every texel holds the pixel whose documented centre is nearest, by brute force over all of them, the lat-long's wrapping."""

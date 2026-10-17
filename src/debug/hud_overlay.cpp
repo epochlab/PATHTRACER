@@ -199,11 +199,11 @@ void drawAovSection(int& aov, int aovCount, int pixelLattice) {
     ImGui::Separator();
 }
 
-// pos/rot/clip read-only; projection, lattice and filmback dropdowns; focal length, aperture, shutter, ISO, aberration, bloom sliders.
+// pos/rot/clip read-only; projection, lattice, filmback dropdowns; focal length, acceptance, aperture, shutter, ISO, aberration, bloom.
 void drawCameraSection(const HudFrameData& frame, float& focalLengthMm, float& aperture,
                         float& shutterSeconds, float& iso, int& filmBackPresetIndex,
                         const std::vector<const char*>& filmBackPresetNames, int& lensProjection, int& pixelLattice,
-                        float& aberrationStrength, float& bloomStrength) {
+                        float& acceptanceAngleDegrees, float& aberrationStrength, float& bloomStrength) {
     ImGui::TextColored(kCyan, "Camera");
     const glm::vec3 camPos = frame.camera.position();
     ImGui::Text("pos  x %.2f  y %.2f  z %.2f", camPos.x, camPos.y, camPos.z);
@@ -233,6 +233,9 @@ void drawCameraSection(const HudFrameData& frame, float& focalLengthMm, float& a
     // Floors at a real circular-fisheye focal length (Nikon 6mm f/2.8): 10mm was a rectilinear assumption a fisheye cannot live with.
     ImGui::SliderFloat("##focalLength", &focalLengthMm, 6.0F, 300.0F, "Focal Length  %.0f mm");
     ImGui::EndDisabled();
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+    // A facet's half-maximum width over its whole domain, logarithmic so the degree-scale acceptance of real insect eyes gets the travel.
+    ImGui::SliderFloat("##acceptanceAngle", &acceptanceAngleDegrees, 0.0F, 360.0F, "Acceptance  %.2f deg", ImGuiSliderFlags_Logarithmic);
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
     ImGui::SliderFloat("##aperture", &aperture, 1.0F, 22.0F, "Aperture  f/%.1f");
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
@@ -370,7 +373,7 @@ void HudOverlay::beginFrame() const {
 void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm, float& aperture,
                        float& shutterSeconds, float& iso, int& filmBackPresetIndex,
                        const std::vector<const char*>& filmBackPresetNames, int& lensProjection, int& pixelLattice,
-                       bool& showSky, bool& envLightEnabled, int& envRotationDegrees, float& envExposureStops,
+                       float& acceptanceAngleDegrees, bool& showSky, bool& envLightEnabled, int& envRotationDegrees, float& envExposureStops,
                        float& aberrationStrength, float& bloomStrength, const FramingOverlayState& framing,
                        const PixelProbeSample& pixelProbe) const {
     ImGui::SetNextWindowPos(ImVec2(8, 8), ImGuiCond_Always);
@@ -393,7 +396,7 @@ void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm,
 
     drawAovSection(aov, frame.aovCount, pixelLattice);
     drawCameraSection(frame, focalLengthMm, aperture, shutterSeconds, iso, filmBackPresetIndex,
-                       filmBackPresetNames, lensProjection, pixelLattice, aberrationStrength, bloomStrength);
+                       filmBackPresetNames, lensProjection, pixelLattice, acceptanceAngleDegrees, aberrationStrength, bloomStrength);
     drawHdriSection(showSky, envLightEnabled, envRotationDegrees, envExposureStops);
 
     ImGui::End();

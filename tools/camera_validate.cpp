@@ -21,6 +21,7 @@
 #include "pathtracer/scene/camera.h"
 #include "pathtracer/scene/debug_camera_controller.h"
 #include "pathtracer/scene/lens.h"
+#include "pathtracer/scene/path_tracer.h"
 #include "pathtracer/scene/rotation.h"
 
 namespace {
@@ -70,10 +71,11 @@ struct CameraArgs {
     float shutterSeconds = 0.008F;
     float iso = 400.0F;
     Lens lens{};
+    float acceptanceAngleDegrees = 0.0F;
 
     [[nodiscard]] Camera build() const {
         return Camera{position, rotationDegrees, filmBack, focalLengthMm, nearClip, farClip, aperture,
-                      shutterSeconds, iso, lens};
+                      shutterSeconds, iso, lens, pathtracer::gfx::PixelLattice::Square, acceptanceAngleDegrees};
     }
 };
 
@@ -779,6 +781,13 @@ PT_CHECK(camera_validate_rejects_each_invalid_parameter, Fast, Exact) {
         {"omnidirectional", with([](CameraArgs& a) { a.lens.projection = LensProjection::Omnidirectional; }), true},
         {"non-monotone polynomial under rectilinear", with([&](CameraArgs& a) { a.lens.radialCoefficients = nonMonotone; }), false},
         {"non-monotone polynomial under fisheye", with([&](CameraArgs& a) { a.lens = fisheye(nonMonotone, 180.0F); }), false},
+        {"acceptance 0, a camera", with([](CameraArgs& a) { a.acceptanceAngleDegrees = 0.0F; }), true},
+        {"acceptance 2, an apposition facet", with([](CameraArgs& a) { a.acceptanceAngleDegrees = 2.0F; }), true},
+        {"acceptance 360, half density at the antipode", with([](CameraArgs& a) { a.acceptanceAngleDegrees = 360.0F; }), true},
+        {"acceptance -1", with([](CameraArgs& a) { a.acceptanceAngleDegrees = -1.0F; }), false},
+        {"acceptance 360.5", with([](CameraArgs& a) { a.acceptanceAngleDegrees = 360.5F; }), false},
+        {"acceptance NaN", with([&](CameraArgs& a) { a.acceptanceAngleDegrees = kNaN; }), false},
+        {"acceptance 1e-30, kappa overflows", with([](CameraArgs& a) { a.acceptanceAngleDegrees = 1e-30F; }), false},
     };
     ctx.plan(static_cast<int>(rows.size()));
     for (const Row& row : rows) {
@@ -888,7 +897,7 @@ PT_CHECK(euler_extraction_recomposes_the_rotation, Fast, Exact) {
 // The viewer's orbit rig at cornell's eye: 6 m from the origin, looking down -Z at it, a quarter degree per pixel.
 pathtracer::scene::DebugCameraController makeOrbitRig(const glm::vec3& rotationDegrees) {
     return {glm::vec3(0.0F, 0.0F, 6.0F), rotationDegrees, kFullFrame, 35.0F, 0.01F, 100.0F, 2.8F, 0.008F, 400.0F, Lens{},
-            pathtracer::gfx::PixelLattice::Square, 1.0F, 0.25F};
+            pathtracer::gfx::PixelLattice::Square, 0.0F, 1.0F, 0.25F};
 }
 
 // Orbit turns the rig rigidly about its pivot: the pivot stays on the view axis, the pole is passed, roll is kept, and it inverts.
@@ -1137,4 +1146,86 @@ PT_CHECK(hexagonal_reflection_is_a_lattice_symmetry, Fast, Exact) {
     }
     PT_EXPECT(ctx, misplaced == 0, std::to_string(misplaced) + " folded cells left the frame, changed parity or missed the reflected point");
     PT_EXPECT(ctx, singleRowOutside == 0, std::to_string(singleRowOutside) + " single-row folds left the frame");
+}
+
+// kappa is defined by its half maximum: the lobe's density at half the acceptance angle is half its peak, across the whole domain.
+PT_CHECK(acceptance_concentration_halves_the_density_at_half_the_angle, Fast, Exact) {
+    const std::array<double, 8> anglesDegrees{0.5, 1.0, 5.0, 30.0, 90.0, 180.0, 359.0, 360.0};
+    ctx.plan(static_cast<int>(anglesDegrees.size()));
+    for (const double degrees : anglesDegrees) {
+        const auto kappa = static_cast<double>(pathtracer::scene::acceptanceConcentration(static_cast<float>(degrees)));
+        const double halfAngle = 0.5 * degrees * std::numbers::pi / 180.0;
+        const double ratio = std::exp(-kappa * 2.0 * std::pow(std::sin(0.5 * halfAngle), 2.0));
+        // kappa is stored in float, so the exponent kappa (1 - cos) carries its half-ulp, which is ln2 times it at half maximum.
+        PT_EXPECT(ctx, std::abs(ratio - 0.5) <= std::numbers::ln2 * static_cast<double>(kEps),
+                  std::to_string(degrees) + " degrees: density at half the angle is " + std::to_string(ratio) + " of the peak");
+    }
+}
+
+// The lobe is von Mises-Fisher: v = 1 - cos(theta) follows (1 - e^-kv) / (1 - e^-2k), azimuth is uniform, and pdf is its density.
+PT_CHECK(acceptance_lobe_matches_the_von_mises_fisher_cdf, Slow, Statistical) {
+    const std::array<float, 3> anglesDegrees{2.0F, 30.0F, 180.0F};
+    ctx.plan(3 * static_cast<int>(anglesDegrees.size()));
+    constexpr int kBins = 32;
+    constexpr int kSamples = 200000;
+    std::mt19937 rng(static_cast<std::uint32_t>(ctx.subSeed("acceptance-lobe")));
+    std::uniform_real_distribution<float> unit(0.0F, 1.0F);
+    const double alpha = tools::stats::sidak(ctx.alpha(), 2);
+    for (const float degrees : anglesDegrees) {
+        const float kappa = pathtracer::scene::acceptanceConcentration(degrees);
+        const double mass = -std::expm1(-2.0 * static_cast<double>(kappa));
+        // An oblique axis, so the lobe's own frame is exercised away from the identity it has about +z.
+        const glm::vec3 axis = glm::normalize(glm::vec3(0.3F, -0.5F, 0.81F));
+        const glm::vec3 tangent = glm::normalize(glm::cross(axis, glm::vec3(1.0F, 0.0F, 0.0F)));
+        const glm::vec3 bitangent = glm::cross(axis, tangent);
+        std::array<long long, kBins> polar{};
+        std::array<long long, kBins> azimuth{};
+        double worstPdf = 0.0;
+        for (int i = 0; i < kSamples; ++i) {
+            const pathtracer::scene::AcceptanceSample sample = pathtracer::scene::sampleAcceptance(axis, kappa, {unit(rng), unit(rng)});
+            const double v = std::clamp(1.0 - static_cast<double>(glm::dot(sample.dir, axis)), 0.0, 2.0);
+            // Equal-probability polar bins: the CDF itself maps v to [0, 1].
+            const double cdf = -std::expm1(-static_cast<double>(kappa) * v) / mass;
+            ++polar[static_cast<std::size_t>(std::min(static_cast<int>(cdf * kBins), kBins - 1))];
+            const double phi = std::atan2(static_cast<double>(glm::dot(sample.dir, bitangent)), static_cast<double>(glm::dot(sample.dir, tangent)));
+            ++azimuth[static_cast<std::size_t>(std::min(static_cast<int>(((phi / (2.0 * std::numbers::pi)) + 0.5) * kBins), kBins - 1))];
+            const double density = static_cast<double>(kappa) * std::exp(-static_cast<double>(kappa) * v) / (2.0 * std::numbers::pi * mass);
+            worstPdf = std::max(worstPdf, std::abs((static_cast<double>(sample.pdf) / density) - 1.0));
+        }
+        const auto chiSquare = [](const std::array<long long, kBins>& counts) {
+            const double expected = static_cast<double>(kSamples) / kBins;
+            double sum = 0.0;
+            for (const long long count : counts) {
+                sum += (static_cast<double>(count) - expected) * (static_cast<double>(count) - expected) / expected;
+            }
+            return tools::stats::chiSquareUpperTail(sum, kBins - 1);
+        };
+        const std::string name = std::to_string(degrees) + " degrees";
+        PT_EXPECT(ctx, chiSquare(polar) > alpha, name + ": 1 - cos(theta) does not follow the von Mises-Fisher CDF");
+        PT_EXPECT(ctx, chiSquare(azimuth) > alpha, name + ": azimuth about the axis is not uniform");
+        // The float pdf against the double density: exp of kappa v carries kappa v ulps, bounded by 2 kappa, plus the products'.
+        PT_EXPECT(ctx, worstPdf <= ((2.0 * static_cast<double>(kappa)) + 8.0) * static_cast<double>(kEps),
+                  name + ": returned pdf is off the density by " + std::to_string(worstPdf));
+    }
+}
+
+// The equivalent solid angle is 1 / the peak density, and tends to Snyder's pi rho^2 / (4 ln2) as the facet narrows.
+PT_CHECK(acceptance_equivalent_solid_angle_is_snyders, Fast, Exact) {
+    const std::array<float, 4> anglesDegrees{0.5F, 2.0F, 10.0F, 40.0F};
+    ctx.plan(2 * static_cast<int>(anglesDegrees.size()));
+    for (const float degrees : anglesDegrees) {
+        const float kappa = pathtracer::scene::acceptanceConcentration(degrees);
+        const float solidAngle = pathtracer::scene::acceptanceSolidAngle(kappa);
+        // u at the concentric map's centre is the axis itself, where the density peaks.
+        const float peak = pathtracer::scene::sampleAcceptance(glm::vec3(0.0F, 0.0F, 1.0F), kappa, {0.5F, 0.5F}).pdf;
+        const std::string name = std::to_string(degrees) + " degrees";
+        PT_EXPECT(ctx, std::abs((static_cast<double>(solidAngle) * static_cast<double>(peak)) - 1.0) <= 8.0 * static_cast<double>(kEps),
+                  name + ": solid angle times peak density is not 1");
+        // 4 pi sin^2(rho/4) / ln2 against pi rho^2 / (4 ln2): sin^2 x = x^2 (1 - x^2/3 + ...), so they part by x^2 / 3, x = rho / 4.
+        const double rho = static_cast<double>(degrees) * std::numbers::pi / 180.0;
+        const double snyder = std::numbers::pi * rho * rho / (4.0 * std::numbers::ln2);
+        const double quarter = rho / 4.0;
+        PT_EXPECT(ctx, std::abs((static_cast<double>(solidAngle) / snyder) - 1.0) <= (quarter * quarter / 3.0) + (8.0 * static_cast<double>(kEps)),
+                  name + ": solid angle " + std::to_string(solidAngle) + " departs from Snyder's " + std::to_string(snyder));
+    }
 }

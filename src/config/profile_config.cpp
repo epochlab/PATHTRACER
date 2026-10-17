@@ -145,7 +145,7 @@ std::optional<RenderConfig> parseRenderOutput(const nlohmann::json& render, cons
     return RenderConfig{width, height, 0.0F, 0.0F, 0, *defaultLut, false, *displayFormat, toFloat(render.at("bloomStrength"))};
 }
 
-// The camera block in field order, then lens and lattice. Ranges need the film back, so Camera::validate runs once sensor.json supplies it.
+// The camera block in field order, then lens, lattice and acceptance. Ranges need the film back, so Camera::validate runs on the whole.
 std::optional<CameraConfig> parseCamera(const nlohmann::json& camera, const std::string& path) {
     CameraConfig config{
         camera.at("position").get<glm::vec3>(),
@@ -159,6 +159,7 @@ std::optional<CameraConfig> parseCamera(const nlohmann::json& camera, const std:
         toFloat(camera.at("iso")),
         {},
         {},
+        toFloat(camera.at("acceptanceAngleDegrees")),
     };
     const std::optional<pathtracer::scene::Lens> lens = parseLens(camera.at("lens"), path);
     const std::optional<pathtracer::gfx::PixelLattice> lattice = parsePixelLattice(camera.at("pixelLattice"), path);

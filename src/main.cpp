@@ -97,6 +97,7 @@ ViewInputState viewInputState(const pathtracer::scene::Camera& camera) {
 // Every input renderPathTraced depends on bar the resolution, compared frame to frame.
 struct PathTraceInputState {
     ViewInputState view;
+    float acceptanceAngleDegrees = 0.0F;  // Beauty's facet lobe only: the G-buffer stays on centre rays, so it is not view state
     int envRotationDegrees = 0;
     bool showSky = false;
     bool envLightEnabled = true;
@@ -342,7 +343,7 @@ pathtracer::scene::DebugCameraController makeDebugCamera(const pathtracer::confi
     const pathtracer::config::CameraConfig& camera = profileConfig.camera;
     return {camera.position, camera.rotation, filmBack, camera.focalLengthMm, camera.nearClip,
             camera.farClip, camera.aperture, camera.shutterSeconds, camera.iso, camera.lens, camera.pixelLattice,
-            profileConfig.controls.flySpeedMetersPerSecond, profileConfig.controls.orbitSensitivityDegPerPixel};
+            camera.acceptanceAngleDegrees, profileConfig.controls.flySpeedMetersPerSecond, profileConfig.controls.orbitSensitivityDegPerPixel};
 }
 
 std::optional<AppScene> loadAppScene(const pathtracer::config::SceneConfig& sceneConfig,
@@ -809,7 +810,7 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const pathtracer::scene
     const ViewInputState view = viewInputState(camera);
     const pathtracer::scene::Camera previousCamera = app.previousFrameCamera;
     app.previousFrameCamera = camera;
-    const PathTraceInputState input{view, app.envRotationDegrees, app.showSky, app.envLightEnabled,
+    const PathTraceInputState input{view, app.debugCamera.acceptanceAngleDegrees(), app.envRotationDegrees, app.showSky, app.envLightEnabled,
                                      app.envExposureStops};
 
     // Interaction is a change in anything but resolution, compared against the inputs alone so the scale promotion cannot re-arm the timer.
@@ -879,12 +880,13 @@ struct CameraEdits {
     int filmBackPresetIndex;
     int lensProjection;
     int pixelLattice;
+    float acceptanceAngleDegrees;
 };
 
 CameraEdits cameraEditsOf(const AppResources& app) {
     return {app.debugCamera.focalLengthMm(), app.debugCamera.aperture(), app.debugCamera.shutterSeconds(),
             app.debugCamera.iso(), app.filmBackPresetIndex, static_cast<int>(app.debugCamera.lens().projection),
-            static_cast<int>(app.debugCamera.pixelLattice())};
+            static_cast<int>(app.debugCamera.pixelLattice()), app.debugCamera.acceptanceAngleDegrees()};
 }
 
 void applyCameraEdits(AppResources& app, const CameraEdits& edits) {
@@ -895,6 +897,7 @@ void applyCameraEdits(AppResources& app, const CameraEdits& edits) {
     app.debugCamera.setLensProjection(static_cast<pathtracer::scene::LensProjection>(edits.lensProjection));
     const auto lattice = static_cast<pathtracer::gfx::PixelLattice>(edits.pixelLattice);
     app.debugCamera.setPixelLattice(lattice);
+    app.debugCamera.setAcceptanceAngleDegrees(edits.acceptanceAngleDegrees);
     // An AOV with no version on the new lattice has nothing to show, so the view falls back to the picture.
     if (!pathtracer::debug::aovSupportsLattice(static_cast<pathtracer::debug::AovId>(app.aov), lattice)) {
         app.aov = static_cast<int>(pathtracer::debug::AovId::Beauty);
@@ -949,7 +952,8 @@ void updateHud(AppResources& app, const pathtracer::platform::Window& window,
     const pathtracer::debug::ScopedCpuTimer hudTimer(app.stages.hudMs);
     if (app.showHud) {
         app.hud.draw(hudFrameData, app.aov, edits.focalLengthMm, edits.aperture, edits.shutterSeconds, edits.iso,
-                     edits.filmBackPresetIndex, app.filmBackPresetNames, edits.lensProjection, edits.pixelLattice, app.showSky,
+                     edits.filmBackPresetIndex, app.filmBackPresetNames, edits.lensProjection, edits.pixelLattice,
+                     edits.acceptanceAngleDegrees, app.showSky,
                      app.envLightEnabled, app.envRotationDegrees, app.envExposureStops, app.aberrationStrength,
                      app.bloomStrength, app.framingState, pixelProbe);
     }
@@ -1106,6 +1110,10 @@ nlohmann::json benchConfig(const AppResources& app, const BenchCapture& bench) {
     // Only off the square lattice, for the same reason.
     if (camera.pixelLattice() != pathtracer::gfx::PixelLattice::Square) {
         config["camera"]["pixel_lattice"] = pathtracer::gfx::kPixelLatticeNames[static_cast<int>(camera.pixelLattice())];
+    }
+    // Only on a compound eye, for the same reason.
+    if (camera.acceptanceAngleDegrees() > 0.0F) {
+        config["camera"]["acceptance_angle_deg"] = camera.acceptanceAngleDegrees();
     }
     return config;
 }
