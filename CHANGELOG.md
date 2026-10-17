@@ -3,6 +3,15 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Demo scenes removed
+
+`cornell_checker`, `cornell_disk_light`, `cornell_mesh_light` and `cornell_sphere_light` and their glTFs (`cornellEmpty_v001`,
+`meshLights_v001`) are removed, as is `materials/gold.json` with its Johnson and Christy table. The tests that read them go with
+them: `image.random_checker`, the `vertexColor` opt-out row of `io.scene_config_accepts_the_shipped_scenes`,
+`api.light_rotations_turn_every_light_type`, `integrator.mesh_light_pivots_on_its_bounding_box_centre` and
+`colour.gold_matches_measured_gold_in_the_scene_gamut`. Chrome, the one measured metal left, fits uncapped, so the capped-tint
+allowance goes too.
+
 ## Disk, sphere and mesh lights
 
 Three area-light types join the quad, each visible to the camera, sampled by NEE and MIS-weighted where a BSDF ray hits it.

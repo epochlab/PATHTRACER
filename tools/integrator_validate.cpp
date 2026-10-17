@@ -1124,57 +1124,6 @@ PT_CHECK(disk_and_sphere_light_placement, Fast, Exact) {
               "the sphere is not centred on its placed origin with its authored radius and radiance");
 }
 
-// A mesh light pivots on its bounding-box centre: that point lands on position, scaled about it, under root and light rotation.
-PT_CHECK(mesh_light_pivots_on_its_bounding_box_centre, Fast, Exact) {
-    const std::string assetRoot = ASSET_ROOT_DIR;
-    const std::string gltfPath = "geometry/cornell/meshLights_v001.gltf";
-    const glm::mat4 sceneMoved = glm::translate(glm::mat4(1.0F), glm::vec3(1.0F, 2.0F, 3.0F)) *
-                                 glm::rotate(glm::mat4(1.0F), glm::radians(90.0F), glm::vec3(0.0F, 1.0F, 0.0F));
-    const glm::vec3 position(0.25F, -0.5F, 0.75F);
-    const glm::vec3 rotation(20.0F, -40.0F, 65.0F);
-    constexpr float kScale = 0.25F;
-    const std::optional<pathtracer::scene::LoadedModel> source = pathtracer::scene::loadGltf(assetRoot + "/" + gltfPath, glm::mat4(1.0F), false);
-    const std::optional<std::vector<pathtracer::scene::AreaLight>> lights = pathtracer::scene::buildLights(
-        {{position, rotation, pathtracer::config::MeshShape{gltfPath, kScale}, glm::vec3(1.0F), 1.0F}}, sceneMoved, assetRoot);
-    ctx.plan(3);
-    const auto* mesh = lights ? std::get_if<pathtracer::scene::MeshLight>(&lights->front()) : nullptr;
-    PT_EXPECT(ctx, source && mesh && mesh->triangles.size() == source->worldTriangles.size(), "the mesh light lost or gained faces");
-    if (!source || !mesh || mesh->triangles.size() != source->worldTriangles.size()) {
-        return;
-    }
-    const auto bounds = [](const std::vector<pathtracer::scene::Triangle>& triangles) {
-        glm::vec3 lo(std::numeric_limits<float>::infinity());
-        glm::vec3 hi(-std::numeric_limits<float>::infinity());
-        float area = 0.0F;
-        for (const pathtracer::scene::Triangle& tri : triangles) {
-            lo = glm::min(lo, glm::min(tri.v0, glm::min(tri.v1, tri.v2)));
-            hi = glm::max(hi, glm::max(tri.v0, glm::max(tri.v1, tri.v2)));
-            area += 0.5F * glm::length(glm::cross(tri.v1 - tri.v0, tri.v2 - tri.v0));
-        }
-        return std::tuple{lo, hi, area};
-    };
-    const auto [lo, hi, sourceArea] = bounds(source->worldTriangles);
-    // The source's box centre, mapped by the placement, must reach the placed origin; and every point is the source scaled about it.
-    const glm::mat4 lightToWorld = sceneMoved * glm::translate(glm::mat4(1.0F), position) * glm::mat4(pathtracer::scene::rotationXyz(rotation));
-    const glm::vec3 expectedPivot(lightToWorld * glm::vec4(0.0F, 0.0F, 0.0F, 1.0F));
-    const glm::vec3 pivot = 0.5F * (lo + hi);
-    float worst = 0.0F;
-    for (std::size_t i = 0; i < mesh->triangles.size(); ++i) {
-        const glm::vec3 expected(lightToWorld * glm::vec4(kScale * (source->worldTriangles[i].v0 - pivot), 1.0F));
-        worst = std::max(worst, glm::length(mesh->triangles[i].v0 - expected));
-    }
-    // Higham's gamma_n over the 4x4 products and the pivot's subtraction, at coordinate magnitude <= 4: as quad_light_placement's bound.
-    constexpr float kTolerance = 8.0F * 4.0F * std::numeric_limits<float>::epsilon() * 4.0F;
-    PT_EXPECT(ctx, worst <= kTolerance,
-              "a placed vertex is " + std::to_string(worst) + " from the source scaled about its box centre and moved to " +
-                  std::to_string(expectedPivot.x) + ", " + std::to_string(expectedPivot.y) + ", " + std::to_string(expectedPivot.z));
-    // Area scales by s^2 under a similarity; the source's float sum of n faces errs by at most n eps of it (Higham 4.2).
-    const float expectedArea = kScale * kScale * sourceArea;
-    const float sumBound = static_cast<float>(mesh->triangles.size()) * std::numeric_limits<float>::epsilon() * expectedArea;
-    PT_EXPECT(ctx, std::abs(mesh->area - expectedArea) <= sumBound,
-              "mesh area " + std::to_string(mesh->area) + " is not scale^2 x the source's " + std::to_string(expectedArea));
-}
-
 // Texture binding: bindSceneTextures fills exactly the named nodes' named inputs, atomically, and rejects every bad entry.
 PT_CHECK(texture_binding_resolution, Fast, Exact) {
     const std::filesystem::path root = std::filesystem::temp_directory_path();

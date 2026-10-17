@@ -30,7 +30,6 @@ using tools::colorchecker::Patch;
 using tools::metal_fit::Interpolation;
 
 const std::string kChromiumTable = std::string(TOOLS_DATA_DIR) + "/chromium_johnson_christy_1974.csv";
-const std::string kGoldTable = std::string(TOOLS_DATA_DIR) + "/gold_johnson_christy_1972.csv";
 const std::string kColorCheckerTable = std::string(TOOLS_DATA_DIR) + "/colorchecker_babelcolor_average.csv";
 
 // Two 3x3 double inversions on O(1) entries round at ~1e-15; three orders of headroom still resolves any real defect.
@@ -144,9 +143,6 @@ PT_CHECK(blackbody_has_unit_luminance_and_refuses_outside_the_scene_gamut, Fast,
     }
 }
 
-// A tint above 1 caps, leaving F82 short of the data at mu-bar by (tint - 1) Schlick(F0): 1e-3 bounds gold's, measured 6.6e-4.
-constexpr double kCappedTintMisfit = 1e-3;
-
 // A material must be metal_fit's exact output; shading it must meet CIE-projected measurement at mu = 1 and, uncapped, mu-bar = 1/7.
 void expectMeasuredMetal(tools::check::Context& ctx, const std::string& table, const char* materialFile) {
     constexpr int kExpectations = 15;
@@ -180,18 +176,12 @@ void expectMeasuredMetal(tools::check::Context& ctx, const std::string& table, c
         std::snprintf(detail, sizeof(detail), "channel %d renderer R(mu=1/7) off the F82 model by %.3e", c, grazingError);
         PT_EXPECT(ctx, grazingError <= kFloatResolution, detail);
         const double misfit = std::abs(model - fit->atMuBar[c]);
-        std::snprintf(detail, sizeof(detail), "channel %d F82 misses the CIE target at mu-bar by %.3e (capped: %d)", c, misfit,
-                      static_cast<int>(fit->specularCapped[c]));
-        PT_EXPECT(ctx, fit->specularCapped[c] ? misfit <= kCappedTintMisfit : misfit <= kFloatResolution, detail);
+        std::snprintf(detail, sizeof(detail), "channel %d F82 misses the CIE target at mu-bar by %.3e", c, misfit);
+        PT_EXPECT(ctx, !fit->specularCapped[c] && misfit <= kFloatResolution, detail);
     }
 }
 
 PT_CHECK(chrome_matches_measured_chromium, Fast, Exact) { expectMeasuredMetal(ctx, kChromiumTable, "chrome.json"); }
-
-// Gold's F0 red is 1.038 in Rec.709 and no base_color carries it; in ACEScg all three F0 fit, and only the green tint caps.
-PT_CHECK(gold_matches_measured_gold_in_the_scene_gamut, Fast, Exact) {
-    expectMeasuredMetal(ctx, kGoldTable, "gold.json");
-}
 
 std::optional<std::vector<tools::metal_fit::NkSample>> loadText(const char* name, const std::string& text) {
     const std::filesystem::path path = std::filesystem::temp_directory_path() / name;

@@ -1147,59 +1147,6 @@ PT_CHECK(pose_override_matches_the_scene_authored_in_that_pose, Slow, Exact) {
     PT_EXPECT(ctx, restored == authoredPose, "returning to the authored pose did not reproduce it bit for bit");
 }
 
-// Every light type takes a per-light rotation: a sphere's emission has no direction, so turning it leaves Beauty bit-identical.
-PT_CHECK(light_rotations_turn_every_light_type, Slow, Exact) {
-    ctx.plan(4);
-    const nlohmann::json light = {{"rotation", {0.0, 0.0, 0.0}}, {"color", {1.0, 1.0, 1.0}}, {"intensity", 6.0}};
-    nlohmann::json disk = light;
-    disk.update({{"type", "disk"}, {"position", {-0.25, 0.25, 0.0}}, {"rotation", {-60.0, 0.0, 0.0}}, {"radius", 0.1}});
-    nlohmann::json sphere = light;
-    sphere.update({{"type", "sphere"}, {"position", {0.25, 0.25, 0.0}}, {"radius", 0.08}});
-    nlohmann::json mesh = light;
-    mesh.update({{"type", "mesh"}, {"position", {0.0, -0.2, 0.0}}, {"gltfPath", "geometry/cornell/meshLights_v001.gltf"}, {"scale", 0.2}});
-    const nlohmann::json scene = {{"model", {{"gltfPath", "geometry/cornell/cornellEmpty_v001.gltf"}, {"position", {0, 0, 0}}, {"rotation", {0, 0, 0}}}},
-                                  {"environment", {{"hdriPath", "textures/republiqueHDR_2k.exr"}, {"lightEnabled", false}}},
-                                  {"materialPath", "materials/clay.json"},
-                                  {"lights", {disk, sphere, mesh}}};
-    const std::filesystem::path root = posedAssetRoot(scene);
-    std::string error;
-    const auto renderer = pathtracer::api::HeadlessRenderer::open(root.string(), "scenes/posed.json", error);
-    if (!renderer) {
-        for (int i = 0; i < 4; ++i) {
-            PT_EXPECT(ctx, false, "scene load failed: " + error);
-        }
-        std::filesystem::remove_all(root);
-        return;
-    }
-    const std::vector<glm::vec3> authored = {glm::vec3(-60.0F, 0.0F, 0.0F), glm::vec3(0.0F), glm::vec3(0.0F)};
-    const auto beauty = [&](std::vector<glm::vec3> rotations) {
-        const pathtracer::api::HeadlessRenderer::Request request{.camera = renderer->defaultCamera(),
-                                                                 .width = 32,
-                                                                 .height = 24,
-                                                                 .samples = 2,
-                                                                 .scrambleSeed = 5,
-                                                                 .aovs = {AovId::Beauty},
-                                                                 .lightRotationsDegrees = std::move(rotations)};
-        return renderer->render(request, error) ? renderer->lastImage(AovId::Beauty).texels : std::vector<float>{};
-    };
-    const std::vector<float> reference = beauty(authored);
-    const auto turned = [&](std::size_t index) {
-        std::vector<glm::vec3> rotations = authored;
-        rotations[index] += glm::vec3(35.0F, -20.0F, 50.0F);
-        return beauty(rotations);
-    };
-    // Each pose rebuilds from the asset root, so every render precedes its removal; an empty image is a failed render, never a difference.
-    const std::vector<float> diskTurned = turned(0);
-    const std::vector<float> sphereTurned = turned(1);
-    const std::vector<float> meshTurned = turned(2);
-    std::filesystem::remove_all(root);
-    PT_EXPECT(ctx, renderer->scene().lights.size() == 3 && !reference.empty() && !diskTurned.empty() && !sphereTurned.empty() && !meshTurned.empty(),
-              "the three-light scene did not load and render in every pose: " + error);
-    PT_EXPECT(ctx, diskTurned != reference, "turning the disk did not turn its emission");
-    PT_EXPECT(ctx, sphereTurned == reference, "turning the sphere changed Beauty, though its emission has no direction");
-    PT_EXPECT(ctx, meshTurned != reference, "turning the mesh light did not turn it");
-}
-
 // render() refuses a pose it cannot build, naming the field, and the refusal leaves the renderer serving the authored pose.
 PT_CHECK(render_rejects_an_invalid_pose, Fast, Exact) {
     ctx.plan(5);
