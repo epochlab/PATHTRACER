@@ -1,8 +1,10 @@
 #pragma once
 
 #include <cstdint>
+#include <source_location>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 // Shared runner for the validators, not a test framework: a check is addressable by name, reproducible from the CLI, and has one alpha.
@@ -34,7 +36,9 @@ struct Registrar {
 
 class Context {
 public:
-    Context(const Registration& registration, std::uint64_t suiteSeed, std::string_view suiteName, int threads);
+    // perCheckAlpha is the whole check's false-rejection target, which plan() splits; quiet withholds FAIL lines (the calibration sweep).
+    Context(const Registration& registration, std::uint64_t suiteSeed, std::string_view suiteName, int threads, double perCheckAlpha,
+            bool quiet);
 
     // This check's master seed, derived from its NAME not its registry position, so adding a check reshuffles no other check's realization.
     [[nodiscard]] std::uint64_t seed() const { return seed_; }
@@ -45,8 +49,14 @@ public:
 
     // Declares how many assertions this check makes, so significance can be corrected for them. Call once, before asserting.
     void plan(int assertions);
-    // Per-assertion two-sided significance, already corrected across the whole registry and this check's assertions.
-    [[nodiscard]] double alpha() const;
+    // Per-assertion two-sided significance, corrected across the registry and this check's plan; asked before plan(), it fails the check.
+    [[nodiscard]] double alpha(std::source_location where = std::source_location::current());
+    // Whether the check asked for alpha() at all: a Statistical check that never does has a band calibration cannot move.
+    [[nodiscard]] bool alphaQueried() const { return alphaQueried_; }
+
+    // Marks the check unrunnable on this host, such as without a GL context: the run exits kSkipExitCode, which ctest shows as Not Run.
+    void skip(std::string reason) { skipReason_ = std::move(reason); }
+    [[nodiscard]] const std::string& skipReason() const { return skipReason_; }
 
     void recordPass() { ++asserted_; }
     void recordFailure(std::string_view expression, const std::string& detail, const char* file, int line);
@@ -58,12 +68,19 @@ public:
 private:
     std::uint64_t seed_;
     int threads_;
+    double perCheckAlpha_;
+    bool quiet_;
+    bool alphaQueried_ = false;
     int planned_ = -1;
     int asserted_ = 0;
     int failures_ = 0;
+    std::string skipReason_;
 };
 
-// Family-wise error rate per binary: across B binaries the suite rate is 1-(1-alpha)^B, about 1.4e-3 at B=14, one red per 700 runs.
+// Automake's skip status, declared to ctest as SKIP_RETURN_CODE, so a skipped check can never read as a pass.
+inline constexpr int kSkipExitCode = 77;
+
+// Family-wise error rate per binary: across B binaries the suite rate is 1-(1-alpha)^B, about 1.8e-3 at B=18, one red per 560 runs.
 inline constexpr double kFamilyAlpha = 1e-4;
 
 int run(int argc, char** argv, const char* suiteName);

@@ -164,10 +164,148 @@ PT_CHECK(hodges_lehmann_coverage_is_exact, Fast, Statistical) {
         shiftHits += shift.lower <= kShift && kShift <= shift.upper ? 1 : 0;
         shiftCoverage = shift.coverage;
     }
-    PT_EXPECT(ctx, ::tools::stats::wilsonBand(pairedHits, kTrials, ctx.alpha()).contains(pairedCoverage),
+    PT_EXPECT(ctx, ::tools::stats::clopperPearsonBand(pairedHits, kTrials, ctx.alpha()).contains(pairedCoverage),
                   "paired interval's empirical coverage disagrees with its exact coverage");
-    PT_EXPECT(ctx, ::tools::stats::wilsonBand(shiftHits, kTrials, ctx.alpha()).contains(shiftCoverage),
+    PT_EXPECT(ctx, ::tools::stats::clopperPearsonBand(shiftHits, kTrials, ctx.alpha()).contains(shiftCoverage),
                   "two-sample interval's empirical coverage disagrees with its exact coverage");
+}
+
+
+// The band's exact false rejection, P(p outside band(X)) for X ~ Bin(n, p), at p: accepted counts are contiguous, as both ends rise with k.
+double falseRejection(const std::vector<::tools::stats::Band>& bands, double p) {
+    const auto n = static_cast<long long>(bands.size()) - 1;
+    long long first = 0;
+    while (first <= n && !(bands[static_cast<std::size_t>(first)].hi >= p)) {
+        ++first;
+    }
+    long long last = n;
+    while (last >= 0 && !(bands[static_cast<std::size_t>(last)].lo <= p)) {
+        --last;
+    }
+    return ::tools::stats::binomialTail(first - 1, n, p, true) + ::tools::stats::binomialTail(last + 1, n, p, false);
+}
+
+// Coverage is a sum of adjacent pmfs, unimodal in p between band ends, so the false-rejection supremum sits beside an end: it is <= alpha.
+PT_CHECK(binomial_band_false_rejection_is_at_most_alpha, Fast, Exact) {
+    const std::vector<long long> trials{16, 100, 1000};
+    const std::vector<double> alphas{1e-2, 1e-4, 1e-6, 1e-8};
+    ctx.plan(static_cast<int>(trials.size() * alphas.size()));
+    for (const long long n : trials) {
+        for (const double alpha : alphas) {
+            std::vector<::tools::stats::Band> bands;
+            for (long long k = 0; k <= n; ++k) {
+                bands.push_back(::tools::stats::clopperPearsonBand(k, n, alpha));
+            }
+            const double u = 0.5 * std::numeric_limits<double>::epsilon();
+            const double size = static_cast<double>(n) + 1.0;
+            double worst = 0.0;
+            for (const ::tools::stats::Band& band : bands) {
+                for (const double end : {band.lo, band.hi}) {
+                    for (const double side : {0.0, 1.0}) {
+                        const double p = std::nextafter(end, side);
+                        if (!(p > 0.0 && p < 1.0)) {
+                            continue;
+                        }
+                        // Exponent: 3 lgammas <= size ln size, 2 log terms <= n|ln|, each rounding u; n+1 ratio steps and adds 6u.
+                        const double exponent = (3.0 * size * std::log(size)) + (static_cast<double>(n) * (std::abs(std::log(p)) + std::abs(std::log1p(-p))));
+                        const double relative = u * (exponent + (6.0 * size));
+                        worst = std::max(worst, falseRejection(bands, p) / (alpha * (1.0 + relative)));
+                    }
+                }
+            }
+            PT_EXPECT(ctx, worst <= 1.0, "n=" + std::to_string(n) + " alpha=" + std::to_string(alpha) + " rejects at " + std::to_string(worst) + " alpha");
+        }
+    }
+}
+
+// Trapezoid nodes in s = ln x of chi-square(dof), weights h x f(x), h = refinement * sqrt(2/dof), out from the mode to remainder <= floor.
+struct ChiSquareNodes {
+    std::vector<double> x;
+    std::vector<double> weight;
+    double remainder = 0.0;
+};
+
+ChiSquareNodes chiSquareNodes(int dof, double refinement, double floor) {
+    const double halfDof = 0.5 * static_cast<double>(dof);
+    const double h = refinement / std::sqrt(halfDof);
+    const auto logWeight = [&](double s) {
+        return (halfDof * s) - (0.5 * std::exp(s)) - (halfDof * std::log(2.0)) - std::lgamma(halfDof) + std::log(h);
+    };
+    ChiSquareNodes nodes;
+    const double mode = std::log(static_cast<double>(dof));
+    for (const int direction : {-1, 1}) {
+        // Outward, log g(s+step) - log g(s) falls monotonically on both sides, so the current ratio bounds every later one.
+        for (int k = direction < 0 ? 0 : 1;; k += direction) {
+            const double s = mode + (k * h);
+            const double weight = std::exp(logWeight(s));
+            nodes.x.push_back(std::exp(s));
+            nodes.weight.push_back(weight);
+            const double ratio = std::exp(logWeight(s + (direction * h)) - logWeight(s));
+            if (ratio < 1.0 && weight * ratio / (1.0 - ratio) <= floor) {
+                nodes.remainder += weight * ratio / (1.0 - ratio);
+                break;
+            }
+        }
+    }
+    return nodes;
+}
+
+// P(D outside differenceBand) for D ~ N(0, w + (1 - w)), both sample variances integrated over their chi-square laws on one grid.
+double differenceBandSize(int countA, int countB, double w, double alpha, double refinement, double floor) {
+    // n/2 values at each of +-sqrt(w x) have sample variance n w x / (n - 1), the law of S^2 when Var(mean) = w and x ~ chi-square(n-1).
+    const auto replicates = [](int count, double variance, const ChiSquareNodes& nodes) {
+        std::vector<::tools::stats::Welford> out(nodes.x.size());
+        for (std::size_t i = 0; i < nodes.x.size(); ++i) {
+            for (int r = 0; r < count; ++r) {
+                out[i].add((r % 2 == 0 ? 1.0 : -1.0) * std::sqrt(variance * nodes.x[i]));
+            }
+        }
+        return out;
+    };
+    const ChiSquareNodes nodesA = chiSquareNodes(countA - 1, refinement, floor);
+    const ChiSquareNodes nodesB = chiSquareNodes(countB - 1, refinement, floor);
+    const std::vector<::tools::stats::Welford> a = replicates(countA, w, nodesA);
+    const std::vector<::tools::stats::Welford> b = replicates(countB, 1.0 - w, nodesB);
+    double size = 0.0;
+    double massA = 0.0;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        massA += nodesA.weight[i];
+        for (std::size_t j = 0; j < b.size(); ++j) {
+            const ::tools::stats::Band band = ::tools::stats::differenceBand(a[i], b[j], alpha);
+            const double reject = 0.5 * (std::erfc(-band.lo / std::sqrt(2.0)) + std::erfc(band.hi / std::sqrt(2.0)));
+            size += nodesA.weight[i] * nodesB.weight[j] * reject;
+        }
+    }
+    double massB = 0.0;
+    for (const double weight : nodesB.weight) {
+        massB += weight;
+    }
+    // The rejection probability is <= 1, so the truncated grid adds at most the mass it leaves out.
+    return size + ((massA + nodesA.remainder) * (massB + nodesB.remainder)) - (massA * massB);
+}
+
+// Exact size on a Gaussian null, the law every differenceBand call assumes: exponentially convergent trapezoid (Trefethen & Weideman 2014).
+PT_CHECK(difference_band_false_rejection_is_at_most_alpha, Slow, Exact) {
+    const std::vector<std::pair<int, int>> counts{{::tools::stats::kReplicates, ::tools::stats::kReplicates},
+                                                  {::tools::stats::kReplicates, 4 * ::tools::stats::kReplicates}};
+    const std::vector<double> varianceRatios{1.0 / 256.0, 1.0 / 16.0, 1.0, 16.0, 256.0};
+    const std::vector<double> alphas{1e-2, 1e-4, 1e-6, 1e-8};
+    ctx.plan(static_cast<int>(counts.size() * varianceRatios.size() * alphas.size()));
+    for (const auto& [countA, countB] : counts) {
+        for (const double ratio : varianceRatios) {
+            const double w = ratio / (1.0 + ratio);
+            for (const double alpha : alphas) {
+                const double floor = std::numeric_limits<double>::epsilon() * alpha;
+                // Halving h squares the trapezoid's exponentially small error, so their difference bounds the coarse one's from above.
+                const double fine = differenceBandSize(countA, countB, w, alpha, 0.5, floor);
+                const double coarse = differenceBandSize(countA, countB, w, alpha, 1.0, floor);
+                const double bound = fine + std::abs(coarse - fine);
+                PT_EXPECT(ctx, bound <= alpha,
+                          "n=" + std::to_string(countA) + "/" + std::to_string(countB) + " variance ratio " + std::to_string(ratio) +
+                              " alpha=" + std::to_string(alpha) + " rejects at " + std::to_string(bound / alpha) + " alpha");
+            }
+        }
+    }
 }
 
 }  // namespace

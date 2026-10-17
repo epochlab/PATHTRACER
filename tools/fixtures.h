@@ -40,15 +40,15 @@ inline float referenceLo(const pathtracer::scene::OpenPbrInputs<pathtracer::scen
     return std::max({accum.x, accum.y, accum.z}) / static_cast<float>(sampleCount);
 }
 
-// A white infinite slab under uniform L0 = 1 by BSDF sampling alone: the BSDF's own round-trip energy closure, free of integrator.
+// A white infinite slab under uniform L0 = 1 by BSDF sampling alone, to maxVertices scatterings: the BSDF's own round-trip energy closure.
 struct SlabWalk {
     double mean;
     double verticesPerPath;
     long long truncated;
 };
 
-inline SlabWalk slabWalkLo(const pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant>& inputs, int paths, std::uint32_t seed) {
-    constexpr int kMaxVertices = 256;
+inline SlabWalk slabWalkLo(const pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant>& inputs, int paths, std::uint32_t seed,
+                           int maxVertices) {
     double sum = 0.0;
     long long vertices = 0;
     long long truncated = 0;
@@ -58,7 +58,7 @@ inline SlabWalk slabWalkLo(const pathtracer::scene::OpenPbrInputs<pathtracer::sc
         glm::vec3 throughput(1.0F);
         bool top = true;
         int vertex = 0;
-        for (; vertex < kMaxVertices; ++vertex) {
+        for (; vertex < maxVertices; ++vertex) {
             const float zSign = top ? 1.0F : -1.0F;
             const std::optional<pathtracer::scene::BsdfSample> sample =
                 pathtracer::scene::sampleBsdf(inputs, glm::vec3(-direction.x, -direction.y, -direction.z * zSign), sampler);
@@ -74,7 +74,7 @@ inline SlabWalk slabWalkLo(const pathtracer::scene::OpenPbrInputs<pathtracer::sc
             }
             top = !top;
         }
-        truncated += vertex == kMaxVertices ? 1 : 0;
+        truncated += vertex == maxVertices ? 1 : 0;
     }
     const auto count = static_cast<double>(paths);
     return {sum / count, static_cast<double>(vertices) / count, truncated};

@@ -201,31 +201,69 @@ private:
     double m2_ = 0.0;
 };
 
-// Band for the DIFFERENCE of two independent estimators at the null they estimate the same thing; Welch 1947 for the effective dof.
+// Band for the DIFFERENCE of two independent estimators at the null they estimate the same thing, on Welch's standard error.
 inline Band differenceBand(const Welford& a, const Welford& b, double alpha) {
-    const double va = a.sampleVariance() / static_cast<double>(a.count());
-    const double vb = b.sampleVariance() / static_cast<double>(b.count());
-    const double combined = va + vb;
+    const double combined = (a.sampleVariance() / static_cast<double>(a.count())) + (b.sampleVariance() / static_cast<double>(b.count()));
     if (!(combined > 0.0)) {
         return Band{0.0, 0.0};  // both estimators are constant; any difference at all is a real one
     }
-    const double dofA = static_cast<double>(a.count() - 1);
-    const double dofB = static_cast<double>(b.count() - 1);
-    const double dof = (combined * combined) / (((va * va) / dofA) + ((vb * vb) / dofB));
+    // Hsu 1938's min(n)-1 dof: size <= alpha at every variance ratio (Mickey & Brown 1966); Welch's dof is liberal at small alpha.
+    const double dof = static_cast<double>(std::min(a.count(), b.count()) - 1);
     const double half = studentTTwoSided(alpha, dof) * std::sqrt(combined);
     return Band{-half, half};
 }
 
-// Wilson score interval for a binomial proportion (Wilson 1927), NOT Wald, whose width collapses to zero as p approaches 0 or 1.
-inline Band wilsonBand(long long successes, long long trials, double alpha) {
-    const double n = static_cast<double>(trials);
-    const double z = normalQuantile(1.0 - (0.5 * alpha));
-    const double phat = static_cast<double>(successes) / n;
-    const double z2 = z * z;
-    const double denominator = 1.0 + (z2 / n);
-    const double centre = (phat + (z2 / (2.0 * n))) / denominator;
-    const double half = (z * std::sqrt((phat * (1.0 - phat) / n) + (z2 / (4.0 * n * n)))) / denominator;
-    return Band{centre - half, centre + half};
+// P(X <= k) or P(X >= k), X ~ Bin(n, p), summed outward from k past the mode, where terms fall geometrically: stops at remainder < ulp.
+inline double binomialTail(long long k, long long n, double p, bool lower) {
+    const auto pmf = [n, p](long long j) {
+        return std::exp(std::lgamma(static_cast<double>(n) + 1.0) - std::lgamma(static_cast<double>(j) + 1.0) -
+                        std::lgamma(static_cast<double>(n - j) + 1.0) + (static_cast<double>(j) * std::log(p)) +
+                        (static_cast<double>(n - j) * std::log1p(-p)));
+    };
+    if (k < 0 || k > n) {
+        return (k < 0) == lower ? 0.0 : 1.0;
+    }
+    if (p <= 0.0 || p >= 1.0) {
+        const long long all = p <= 0.0 ? 0 : n;  // the degenerate law puts every trial on one side
+        return (lower ? all <= k : all >= k) ? 1.0 : 0.0;
+    }
+    const double mode = std::floor(static_cast<double>(n + 1) * p);
+    // The tail that contains the mode is the complement of the other, which is summed instead so its terms decrease from the start.
+    if (lower ? static_cast<double>(k) >= mode : static_cast<double>(k) <= mode) {
+        return 1.0 - binomialTail(lower ? k + 1 : k - 1, n, p, !lower);
+    }
+    const double odds = p / (1.0 - p);
+    double term = pmf(k);
+    double sum = 0.0;
+    for (long long j = k; lower ? j >= 0 : j <= n; j += lower ? -1 : 1) {
+        sum += term;
+        const double ratio = lower ? static_cast<double>(j) / (static_cast<double>(n - j + 1) * odds)
+                                   : (static_cast<double>(n - j) * odds) / static_cast<double>(j + 1);
+        if (!(ratio < 1.0) || term * ratio / (1.0 - ratio) > 0.5 * std::numeric_limits<double>::epsilon() * sum) {
+            term *= ratio;
+            continue;
+        }
+        break;
+    }
+    return sum;
+}
+
+// Clopper & Pearson 1934: tails inverted at alpha/2, coverage >= 1 - alpha at every p, which Wilson's is not (Brown et al. 2001).
+inline Band clopperPearsonBand(long long successes, long long trials, double alpha) {
+    // Each bisection keeps its outer end, so rounding can only widen the band, never shrink its coverage.
+    const auto bisect = [&](bool lowerEnd) {
+        double low = 0.0;
+        double high = 1.0;
+        for (int i = 0; i < 200; ++i) {
+            const double mid = 0.5 * (low + high);
+            // Lower end: P(X >= k) rises with p to alpha/2; upper end: P(X <= k) falls with p to alpha/2.
+            const bool belowEnd = lowerEnd ? binomialTail(successes, trials, mid, false) < 0.5 * alpha
+                                           : binomialTail(successes, trials, mid, true) > 0.5 * alpha;
+            (belowEnd ? low : high) = mid;
+        }
+        return lowerEnd ? low : high;
+    };
+    return Band{successes == 0 ? 0.0 : bisect(true), successes == trials ? 1.0 : bisect(false)};
 }
 
 // --- Distribution-free location shift (Hollander, Wolfe & Chicken, 3rd ed.): timing noise is skewed, so normal bands understate it.

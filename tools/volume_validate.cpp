@@ -633,9 +633,9 @@ PT_CHECK(absorbing_slab_alpha_and_beauty, Slow, Statistical) {
         hiddenBlack = hiddenBlack && v == 0.0F;
     }
     const std::array<tools::stats::Welford, 3> means = pixelMeans(shown.beauty);
+    ctx.plan(6);
     const double t = tools::stats::studentTTwoSided(ctx.alpha(), kImage * kImage - 1);
     const double expectedAlpha = 1.0 - ((transmittance.x + transmittance.y + transmittance.z) / 3.0);
-    ctx.plan(6);
     PT_EXPECT(ctx, hiddenBlack, "a hidden sky behind an absorber lit a pixel");
     PT_EXPECT(ctx, shownOpaque, "a shown sky left alpha below 1");
     PT_EXPECT(ctx, std::abs(alpha.mean() - expectedAlpha) <= t * alpha.standardError(),
