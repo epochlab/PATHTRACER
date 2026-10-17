@@ -3,6 +3,41 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Hexagonal bloom
+
+Bloom now runs on hexagonal pixels: in the viewer (the HUD slider is no longer greyed out), `render_beauty --hexagonal --bloom`,
+the C ABI and Python.
+- **Pyramid:** an aperture-4 hexagonal pyramid. Coarse cell (j, m) is fine cell (2j + (m & 1), 2m), so each coarse lattice is the
+  fine one at twice the pitch, and every fine cell is either a coarse vertex or the midpoint of a coarse edge.
+- **Up:** Loop subdivision (Loop 1987; the three-direction box spline), the hexagonal counterpart of the square pyramid's tent
+  and bilinear refinement. Plain linear interpolation would leave creases along coarse edges.
+- **Down:** Loop's normalised adjoint, which is the 7-tap smoothing (1/4 centre, 1/8 ring) applied twice.
+- **Mask:** both passes read one 19-entry mask, `kHexBloomMask`. Static asserts check that it sums to 4 and gives each fine coset
+  unit weight. Octaves are combined as on square: each up pass adds its own down octave, and the last is weighted 1/L.
+- **Levels:** each level is anchored at the top-left and sized floor(n/2) + 1. That is the smallest level whose far mirror lines
+  lie on or past its finer level's, so every octave holds the whole frame. Rounding the size up instead would put the bottom and
+  right mirror lines one coarse pitch inside the frame, and on cornell bloom at strength 1 then gained 5% energy. A wrapped width
+  halves exactly to stay periodic.
+- **Boundary:** each level folds by its lattice's mirrors or wraps the lat-long. The GPU passes address cells with `texelFetch`
+  and fold in GLSL. The display reads the hexagonal bloom at the cell it shows, not by interpolation.
+- **Energy:** on cornell at strength 1, bloom keeps this fraction of the frame's energy, the rest scattered past its edges:
+
+  | Lattice | 256x128 | 255x127 | 1024x512 |
+  | --- | --- | --- | --- |
+  | Square | 0.977 | 0.995 | 0.982 |
+  | Hexagonal | 0.990 | 1.002 | 0.991 |
+- **Square:** CPU bloom is bit-identical. The GPU's square shaders are unchanged; BloomPass now holds one pyramid of programs per
+  lattice.
+- **Measured** (cornell, 256x128 at 16 passes, 3 runs, CPU `optics_ms` median): 0.97 ms hexagonal against 1.28 to 1.56 ms square
+  over two benchmark runs.
+- **Tests:**
+  - `display_validate`: every level covers its finer level's frame, minimally, for all frames up to 70x70, mirrored and wrapped.
+  - `display_validate`: the mask is Loop's (six-fold symmetric, unit coset weights, over 4 exactly the 7-tap smoothing twice); the
+    shipped single-mask pyramid matches its factorisation in double on odd, even, wrapped and degenerate frames; a constant blooms to
+    itself; a lat-long roll by 2^L columns is bit-exact. Dropping the down pass's half-row column shift fails the factorisation.
+  - `display_gl_validate`: the GPU pyramid against the CPU on hexagonal frames, clamped and wrapped, at 0.07 of the bound.
+  - API and pytest: the largest valid optics render on both lattices, and the picture-only check runs on both.
+
 ## Hexagonal Gabor
 
 Gabor (the Morlet bank) now renders on hexagonal pixels, so Denoised is the only AOV the hexagonal lattice refuses.

@@ -99,7 +99,7 @@ typedef struct {
     const float* light_temperature_kelvin;
     /* The environment map to world, background and lighting alike; all zero is the map unrotated. */
     float env_rotation_degrees[3];
-    /* The viewer's glare on beauty and denoised, 0 = off: the fraction in [0, 1] its PSF scatters. Square lattice only. */
+    /* The viewer's glare on beauty and denoised, 0 = off: the fraction in [0, 1] its PSF scatters, on either lattice. */
     float bloom_strength;
     /* The viewer's colour fringe on beauty and denoised, 0 = off: R and B read at 1 -/+ aberration film scale, in [0, 1). */
     float aberration;

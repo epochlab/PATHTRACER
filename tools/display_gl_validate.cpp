@@ -149,7 +149,7 @@ struct DisplayState {
 void present(DisplayPath& path, const pathtracer::gfx::Texture& image, int width, int height, ScalarType format,
              const DisplayState& state, ViewportRect rect, const RenderTarget& target) {
     if (state.bloomStrength > 0.0F) {
-        path.bloom.build(image.id(), width, height, format, state.wrapsHorizontally);
+        path.bloom.build(image.id(), width, height, format, state.wrapsHorizontally, state.lattice);
     }
     path.bloom.bind(pathtracer::gfx::kBloomTextureUnit);
     path.transform.setActiveLut(state.lut);
@@ -619,7 +619,7 @@ PT_CHECK(display_optics_match_the_cpu, Fast, Exact) {
                                               {PixelLattice::Square, true},
                                               {PixelLattice::Hexagonal, false},
                                               {PixelLattice::Hexagonal, true}}};
-    ctx.plan(1 + 2 + static_cast<int>(kFringes.size()) + 1);
+    ctx.plan(1 + 4 + static_cast<int>(kFringes.size()) + 1);
     PT_EXPECT(ctx, path.has_value(), "the display shaders did not build");
     if (!path) {
         return;
@@ -641,10 +641,17 @@ PT_CHECK(display_optics_match_the_cpu, Fast, Exact) {
         const double up = (12.0 * perOp) + gamma(static_cast<double>(pathtracer::gfx::kBloomUpTaps.size()) + 2.0);
         return octaves * (down + up);
     };
-    const double relative = pyramid(kFixedFunction) + (12.0 * kFixedFunction) + pyramid(kUnitRoundoff);
-    for (const bool wraps : {false, true}) {
+    // Hexagonal passes fetch texels exactly, so only the sums round: 19 down entries, at most 7 up, plus the base and scale, both sides.
+    const double hexagonalRelative =
+        2.0 * octaves * (gamma(static_cast<double>(pathtracer::gfx::kHexBloomMask.size()) + 2.0) + gamma(7.0 + 2.0));
+    for (const Fringe& bloomCase : kFringes) {
+        const bool wraps = bloomCase.wraps;
+        const double relative = bloomCase.lattice == PixelLattice::Hexagonal
+                                    ? hexagonalRelative
+                                    : pyramid(kFixedFunction) + (12.0 * kFixedFunction) + pyramid(kUnitRoundoff);
+        const std::string name = std::string(pathtracer::gfx::kPixelLatticeNames[static_cast<int>(bloomCase.lattice)]) + (wraps ? " wrapped" : " clamped");
         HdrImage expected = glow;
-        pathtracer::gfx::applyDisplayOptics(expected, PixelLattice::Square, wraps, {.aberration = 0.0F, .bloomStrength = kStrength}, pool);
+        pathtracer::gfx::applyDisplayOptics(expected, bloomCase.lattice, wraps, {.aberration = 0.0F, .bloomStrength = kStrength}, pool);
         pathtracer::gfx::Texture texture = pathtracer::gfx::Texture::createFromFloatPixels(kWidth, kHeight, 3, glow.texels.data(), ScalarType::Float32);
         texture.setWrapsHorizontally(wraps);
         const RenderTarget target(kWidth, kHeight, GL_RGBA32F);
@@ -652,6 +659,7 @@ PT_CHECK(display_optics_match_the_cpu, Fast, Exact) {
         DisplayState state;
         state.lut = Lut::Raw;
         state.bloomStrength = kStrength;
+        state.lattice = bloomCase.lattice;
         state.wrapsHorizontally = wraps;
         present(*path, texture, kWidth, kHeight, ScalarType::Float32, state, rect, target);
         const std::vector<float> drawn = target.read<float>(GL_RGBA, 4);
@@ -671,8 +679,8 @@ PT_CHECK(display_optics_match_the_cpu, Fast, Exact) {
                 }
             }
         }
-        std::printf("    bloom %s: worst |GPU - CPU| / bound %.3g\n", wraps ? "wrapped" : "clamped", worstRatio);
-        PT_EXPECT(ctx, worstRatio <= 1.0, std::string("bloom ") + (wraps ? "wrapped" : "clamped") + " exceeds its bound by " + std::to_string(worstRatio) + "x");
+        std::printf("    bloom %s: worst |GPU - CPU| / bound %.3g\n", name.c_str(), worstRatio);
+        PT_EXPECT(ctx, worstRatio <= 1.0, "bloom " + name + " exceeds its bound by " + std::to_string(worstRatio) + "x");
     }
 
     // Not a short decimal: 0.3 lands whole columns exactly on a cell edge, where GL's own rounding is unspecified.

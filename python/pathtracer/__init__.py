@@ -360,9 +360,9 @@ class Renderer:
         ``beauty`` and ``denoised`` only, after every filter has read the clean beauty; data AOVs are never touched. The result
         is the viewer's frame at one texel per pixel: ``(1 - k) * fringed + k * glare`` with ``k = bloom_strength``.
         ``bloom_strength`` in ``[0, 1]`` is the fraction of energy a glare PSF scatters: an equal-weight Gaussian pyramid whose
-        octaves reach the frame, so it falls off as ``1 / r**2``. It needs the square lattice. ``aberration`` in ``[0, 1)`` reads
-        red at the film point scaled ``1 - aberration`` about the frame centre and blue at ``1 + aberration``, each from its
-        nearest pixel; green stays. On the lat-long both wrap across the seam.
+        octaves reach the frame, so it falls off as ``1 / r**2``; the hexagonal lattice builds it by Loop subdivision of its own cells.
+        ``aberration`` in ``[0, 1)`` reads red at the film point scaled ``1 - aberration`` about the frame centre and blue at
+        ``1 + aberration``, each from its nearest pixel; green stays. On the lat-long both wrap across the seam.
 
         Returns arrays of shape ``(height, width, channels)``, float32, row 0 at the top.
         """

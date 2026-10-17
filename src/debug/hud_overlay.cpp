@@ -244,10 +244,8 @@ void drawCameraSection(const HudFrameData& frame, float& focalLengthMm, float& a
     // Beauty only -- main.cpp zeroes this elsewhere -- ranged so the full sweep stays a lens effect rather than an unreadable smear.
     ImGui::SliderFloat("##aberrationStrength", &aberrationStrength, 0.0F, 0.05F, "Aberration  %.3f");
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-    // The scattered fraction's whole domain, logarithmic so subtle glare gets most of the travel; greyed off the square lattice.
-    ImGui::BeginDisabled(pixelLattice != static_cast<int>(pathtracer::gfx::PixelLattice::Square));
+    // The scattered fraction's whole domain, logarithmic so subtle glare gets most of the travel.
     ImGui::SliderFloat("##bloomStrength", &bloomStrength, 0.0F, 1.0F, "Bloom  %.3f", ImGuiSliderFlags_Logarithmic);
-    ImGui::EndDisabled();
     ImGui::Separator();
 }
 

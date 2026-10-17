@@ -391,9 +391,11 @@ def test_display_optics_are_off_by_default(renderer: Renderer) -> None:
     assert np.array_equal(default, zero)
 
 
-def test_display_optics_change_only_the_picture(renderer: Renderer) -> None:
-    """Bloom and fringe act on beauty; depth is data and keeps every float."""
-    kwargs = {"aovs": ("beauty", "depth"), "width": 32, "height": 24, "samples": 2}
+@pytest.mark.parametrize("lattice", PIXEL_LATTICES)
+def test_display_optics_change_only_the_picture(renderer: Renderer, lattice: str) -> None:
+    """Bloom and fringe act on beauty on either lattice; depth is data and keeps every float."""
+    camera = dataclasses.replace(renderer.default_camera, pixel_lattice=lattice)
+    kwargs = {"aovs": ("beauty", "depth"), "width": 32, "height": 24, "samples": 2, "camera": camera}
     off = renderer.render(**kwargs)
     on = renderer.render(**kwargs, bloom_strength=0.3, aberration=0.05)
     assert not np.array_equal(off["beauty"], on["beauty"])
@@ -406,12 +408,12 @@ def test_display_optics_change_only_the_picture(renderer: Renderer) -> None:
         ({"bloom_strength": 1.1}, "square", "bloom strength .* lies outside"),
         ({"bloom_strength": math.nan}, "square", "bloom strength .* lies outside"),
         ({"aberration": 1.0}, "square", "aberration .* lies outside"),
-        ({"aberration": -0.1}, "square", "aberration .* lies outside"),
-        ({"bloom_strength": 0.2}, "hexagonal", "bloom reads a square neighbourhood"),
+        ({"aberration": -0.1}, "hexagonal", "aberration .* lies outside"),
+        ({"bloom_strength": 1.1}, "hexagonal", "bloom strength .* lies outside"),
     ],
 )
 def test_invalid_display_optics_are_rejected_by_name(renderer: Renderer, optics: dict, lattice: str, message: str) -> None:
-    """Bloom is a fraction in [0, 1] on the square lattice only; the fringe lies in [0, 1)."""
+    """Bloom is a fraction in [0, 1] and the fringe lies in [0, 1), on either lattice."""
     camera = dataclasses.replace(renderer.default_camera, pixel_lattice=lattice)
     with pytest.raises(RuntimeError, match=message):
         renderer.render(aovs=("beauty",), width=8, height=8, camera=camera, **optics)

@@ -981,26 +981,24 @@ PT_CHECK(display_optics_touch_only_the_picture_once, Fast, Exact) {
     PT_EXPECT(ctx, twice[0] == on[0] && twice[1] == on[0], "Beauty requested twice took the optics other than once");
 }
 
-// Each optic is ranged at the boundary and named: bloom a fraction in [0, 1] on the square lattice, the fringe in [0, 1).
+// Each optic is ranged at the boundary and named: bloom a fraction in [0, 1] on either lattice, the fringe in [0, 1).
 PT_CHECK(render_rejects_invalid_display_optics, Fast, Exact) {
     struct Case {
         pathtracer::gfx::DisplayOptics optics;
-        pathtracer::gfx::PixelLattice lattice;
         const char* name;
     };
     constexpr float kNaN = std::numeric_limits<float>::quiet_NaN();
-    const std::array<Case, 7> cases{{{{.bloomStrength = -0.1F}, pathtracer::gfx::PixelLattice::Square, "bloom"},
-                                     {{.bloomStrength = 1.1F}, pathtracer::gfx::PixelLattice::Square, "bloom"},
-                                     {{.bloomStrength = kNaN}, pathtracer::gfx::PixelLattice::Square, "bloom"},
-                                     {{.aberration = -0.1F}, pathtracer::gfx::PixelLattice::Square, "aberration"},
-                                     {{.aberration = 1.0F}, pathtracer::gfx::PixelLattice::Square, "aberration"},
-                                     {{.aberration = kNaN}, pathtracer::gfx::PixelLattice::Square, "aberration"},
-                                     {{.bloomStrength = 0.2F}, pathtracer::gfx::PixelLattice::Hexagonal, "bloom"}}};
-    ctx.plan(static_cast<int>(cases.size()) + 1);
+    const std::array<Case, 6> cases{{{{.bloomStrength = -0.1F}, "bloom"},
+                                     {{.bloomStrength = 1.1F}, "bloom"},
+                                     {{.bloomStrength = kNaN}, "bloom"},
+                                     {{.aberration = -0.1F}, "aberration"},
+                                     {{.aberration = 1.0F}, "aberration"},
+                                     {{.aberration = kNaN}, "aberration"}}};
+    ctx.plan(static_cast<int>(cases.size()) + 2);
     std::string error;
     const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", error);
     if (!renderer) {
-        for (std::size_t i = 0; i <= cases.size(); ++i) {
+        for (std::size_t i = 0; i <= cases.size() + 1; ++i) {
             PT_EXPECT(ctx, false, "scene load failed: " + error);
         }
         return;
@@ -1015,10 +1013,13 @@ PT_CHECK(render_rejects_invalid_display_optics, Fast, Exact) {
         error.clear();
         return renderer->render(request, error);
     };
-    PT_EXPECT(ctx, render({.aberration = 0.99F, .bloomStrength = 1.0F}, pathtracer::gfx::PixelLattice::Square),
-              "the largest valid optics were rejected: " + error);
+    for (const pathtracer::gfx::PixelLattice lattice : {pathtracer::gfx::PixelLattice::Square, pathtracer::gfx::PixelLattice::Hexagonal}) {
+        PT_EXPECT(ctx, render({.aberration = 0.99F, .bloomStrength = 1.0F}, lattice),
+                  std::string("the largest valid optics were rejected on ") + pathtracer::gfx::kPixelLatticeNames[static_cast<int>(lattice)] +
+                      ": " + error);
+    }
     for (const Case& testCase : cases) {
-        PT_EXPECT(ctx, !render(testCase.optics, testCase.lattice) && error.starts_with(testCase.name),
+        PT_EXPECT(ctx, !render(testCase.optics, pathtracer::gfx::PixelLattice::Square) && error.starts_with(testCase.name),
                   std::string("an invalid ") + testCase.name + " was not rejected by name: " + error);
     }
 }

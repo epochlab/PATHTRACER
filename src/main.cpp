@@ -778,12 +778,12 @@ void presentFrame(AppResources& app,
     // The picture only -- an artistic lens effect over the rendered image, not meaningful on a raw data AOV like Normal/Depth/Albedo.
     app.ocioTransform.setAberration(isPicture ? app.aberrationStrength : 0.0F);
     const unsigned int displayTexture = app.pathTraceDisplayTexture->id();
-    // Built only on a new upload, before bind() and draw() rebind its units; a square grid's pyramid, so a hexagonal image takes none.
-    const bool bloomOn = isPicture && app.bloomStrength > 0.0F && source.pixelLattice == pathtracer::gfx::PixelLattice::Square;
+    // Built only on a new upload, before bind() and draw() rebind its units, as the pyramid of the image's own lattice.
+    const bool bloomOn = isPicture && app.bloomStrength > 0.0F;
     if (bloomOn && app.bloomStale) {
         const pathtracer::gfx::HdrImage& shown =
             app.pathTraceDisplay.mapped.texels.empty() ? *source.image : app.pathTraceDisplay.mapped;
-        app.bloom.build(displayTexture, shown.width, shown.height, app.displayFormat, source.wrapsHorizontally);
+        app.bloom.build(displayTexture, shown.width, shown.height, app.displayFormat, source.wrapsHorizontally, source.pixelLattice);
         app.bloomStale = false;
     }
     app.bloom.bind(pathtracer::gfx::kBloomTextureUnit);

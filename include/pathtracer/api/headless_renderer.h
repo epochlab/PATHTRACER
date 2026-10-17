@@ -55,7 +55,7 @@ public:
         std::optional<std::vector<float>> lightTemperaturesKelvin;
         // rotationXyz of the environment map to world, background and lighting alike; zero is the map unrotated.
         glm::vec3 envRotationDegrees{0.0F};
-        // The viewer's lens optics on picture AOVs, 0 = off: fringe in [0, 1), bloom's scattered fraction in [0, 1], square lattice only.
+        // The viewer's lens optics on picture AOVs, 0 = off: fringe in [0, 1), bloom's scattered fraction in [0, 1].
         pathtracer::gfx::DisplayOptics displayOptics;
     };
 
