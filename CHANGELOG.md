@@ -3,6 +3,78 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Compound-eye optics
+
+A camera can now model an insect's compound eye. Each pixel becomes a facet that sees a soft cone of directions, whose half-maximum
+width is the acceptance angle. Set it with `camera.acceptanceAngleDegrees` in profile.json, the HUD's Acceptance slider (logarithmic,
+0 to 360 degrees), `render_beauty --acceptance-angle DEG`, `PtCamera.acceptance_angle_degrees` (ABI 10) or Python's
+`Camera.acceptance_angle_degrees`. At 0 it is a camera, and renders are bit-identical.
+- **The lobe:** a von Mises-Fisher distribution about the pixel centre's ray (Fisher 1953). Its concentration is
+  ln2 / (2 sin^2(rho/4)), so the density halves exactly at half the acceptance angle (Snyder 1977's full width at half maximum).
+  Writing it with sin^2 avoids cancellation at the degree-scale angles of real facets.
+- **Precedent:** CompoundRay (Millward, Maddock and Mangan 2022, eLife 11:e73893) samples each ommatidium the same way, with
+  equal-weight rays drawn from a Gaussian whose FWHM is the acceptance angle. Here the lobe is that Gaussian's form on the sphere,
+  matched exactly at any width. Facet axes come from the lens over the pixel lattice, all from one viewpoint and sharing one angle;
+  CompoundRay also places each ommatidium on its own eye surface; the README roadmap parks that as "Multi-viewpoint compound
+  eyes".
+- **It replaces the film filter:** a facet's angular sensitivity is its whole pixel response. Dimension set 0, which placed the
+  film offset, now draws the lobe through Shirley and Chiu's concentric map and Jakob 2012's stable inverse
+  v = -log1p(-rho^2 (1 - e^-2k)) / k, so strata and blue noise carry over and later dimensions stay aligned. Samples have weight 1.
+- **Footprints:** each sample's texture and environment footprint is its share of the lobe, 1 / (N pdf) steradians (Suykens and
+  Willems 2001). The feature chain's pixel solid angle is the lobe's equivalent solid angle 2 pi (1 - e^-2k) / k, which tends to
+  Snyder's pi rho^2 / (4 ln2).
+- **G-buffer:** unchanged; its AOVs stay on the centre ray. In the viewer the angle re-traces Beauty only, not the G-buffer.
+- **Range:** [0, 360]. At 360 the density halves at the antipode. An angle whose concentration overflows float is refused by name.
+- **Measured** (cornell, 256x128 at 16 passes, 3 runs, median pass time):
+
+  | Lattice | 0 degrees | 5 degrees |
+  | --- | --- | --- |
+  | Square | 22.0 ms | 20.1 ms |
+  | Hexagonal | 19.9 ms | 19.1 ms |
+
+  The difference is within run-to-run spread.
+- **Tests:**
+  - `camera_validate`: the validation rows; half density at half the angle from 0.5 to 360 degrees; the lobe's v and azimuth
+    against the von Mises-Fisher CDF by chi-square, with its returned pdf; the equivalent solid angle against 1 / peak and Snyder.
+  - `integrator_validate`: on both lattices, each pixel's coverage of a half-plane edge matches the lobe's analytic mass past it.
+    A 10% concentration error fails it by 18 standard errors or more.
+  - C ABI rejection rows; pytest checks that Beauty blurs while depth keeps every float, on both lattices.
+
+## Hexagonal bloom
+
+Bloom now runs on hexagonal pixels: in the viewer (the HUD slider is no longer greyed out), `render_beauty --hexagonal --bloom`,
+the C ABI and Python.
+- **Pyramid:** an aperture-4 hexagonal pyramid. Coarse cell (j, m) is fine cell (2j + (m & 1), 2m), so each coarse lattice is the
+  fine one at twice the pitch, and every fine cell is either a coarse vertex or the midpoint of a coarse edge.
+- **Up:** Loop subdivision (Loop 1987; the three-direction box spline), the hexagonal counterpart of the square pyramid's tent
+  and bilinear refinement. Plain linear interpolation would leave creases along coarse edges.
+- **Down:** Loop's normalised adjoint, which is the 7-tap smoothing (1/4 centre, 1/8 ring) applied twice.
+- **Mask:** both passes read one 19-entry mask, `kHexBloomMask`. Static asserts check that it sums to 4 and gives each fine coset
+  unit weight. Octaves are combined as on square: each up pass adds its own down octave, and the last is weighted 1/L.
+- **Levels:** each level is anchored at the top-left and sized floor(n/2) + 1. That is the smallest level whose far mirror lines
+  lie on or past its finer level's, so every octave holds the whole frame. Rounding the size up instead would put the bottom and
+  right mirror lines one coarse pitch inside the frame, and on cornell bloom at strength 1 then gained 5% energy. A wrapped width
+  halves exactly to stay periodic.
+- **Boundary:** each level folds by its lattice's mirrors or wraps the lat-long. The GPU passes address cells with `texelFetch`
+  and fold in GLSL. The display reads the hexagonal bloom at the cell it shows, not by interpolation.
+- **Energy:** on cornell at strength 1, bloom keeps this fraction of the frame's energy, the rest scattered past its edges:
+
+  | Lattice | 256x128 | 255x127 | 1024x512 |
+  | --- | --- | --- | --- |
+  | Square | 0.977 | 0.995 | 0.982 |
+  | Hexagonal | 0.990 | 1.002 | 0.991 |
+- **Square:** CPU bloom is bit-identical. The GPU's square shaders are unchanged; BloomPass now holds one pyramid of programs per
+  lattice.
+- **Measured** (cornell, 256x128 at 16 passes, 3 runs, CPU `optics_ms` median): 0.97 ms hexagonal against 1.28 to 1.56 ms square
+  over two benchmark runs.
+- **Tests:**
+  - `display_validate`: every level covers its finer level's frame, minimally, for all frames up to 70x70, mirrored and wrapped.
+  - `display_validate`: the mask is Loop's (six-fold symmetric, unit coset weights, over 4 exactly the 7-tap smoothing twice); the
+    shipped single-mask pyramid matches its factorisation in double on odd, even, wrapped and degenerate frames; a constant blooms to
+    itself; a lat-long roll by 2^L columns is bit-exact. Dropping the down pass's half-row column shift fails the factorisation.
+  - `display_gl_validate`: the GPU pyramid against the CPU on hexagonal frames, clamped and wrapped, at 0.07 of the bound.
+  - API and pytest: the largest valid optics render on both lattices, and the picture-only check runs on both.
+
 ## Hexagonal Gabor
 
 Gabor (the Morlet bank) now renders on hexagonal pixels, so Denoised is the only AOV the hexagonal lattice refuses.

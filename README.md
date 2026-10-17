@@ -103,8 +103,7 @@ Refinements, speculative or blocked; not scheduled.
 | Sampling | Blue noise beyond one dimension | Blue noise makes noise look finer, but the mask spreads error well in one dimension only; a multi-dimensional mask would fix it. | medium | ready |
 | Colour | Measured-observer cones | Model colour vision from measured human eye response. Needs light tracked by wavelength, so it waits for spectral rendering. | high | blocked |
 | Camera | Anamorphic and distortion | Stretched widescreen lenses and real lens distortion. Each needs an inverse to keep motion vectors and texture filtering right. | high | ready |
-| Camera | Hexagonal neighbourhoods | Bloom does not work on hexagonal pixels yet and needs a hexagonal version. | high | ready |
+| Camera | Multi-viewpoint compound eyes | Facets share one viewpoint and one acceptance angle. CompoundRay (Millward et al. 2022) places each on its own eye surface with its own axis and angle, from measured eye data. | high | ready |
 | Camera | Hexagonal denoising | Denoised stays refused on hexagonal pixels: OIDN's network is trained on square images, so it needs one trained on offset rows. | high | blocked |
-| Camera | Compound-eye optics | Model an insect eye, where each facet sees a soft-edged cone of directions, by blurring each camera ray's direction. | medium | ready |
 | Camera | Subdivision surfaces | Smooth curved surfaces from coarse meshes, subdivided at load. Needs a scene-file flag and waits for the scene graph. | high | blocked |
 | AOV | Contrast sensitivity | An output showing which detail a human can actually see. Needs brightness in real units, so it waits for photometric calibration. | high | blocked |

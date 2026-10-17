@@ -69,6 +69,8 @@ struct Options {
     bool omnidirectional = false;
     // profile.json's camera on the hexagonal pixel lattice; --width and --height still count columns and rows.
     pathtracer::gfx::PixelLattice lattice = pathtracer::gfx::PixelLattice::Square;
+    // Positive: each pixel a compound-eye facet of this half-maximum width in degrees; Camera::validate ranges it.
+    float acceptanceAngleDegrees = 0.0F;
     // The viewer's bloom and fringe on the picture AOV, both off by default; HeadlessRenderer validates their ranges.
     pathtracer::gfx::DisplayOptics displayOptics;
 };
@@ -183,6 +185,10 @@ bool appendTimingRecord(const Options& options, int argc, char** argv, int width
     if (options.lattice != pathtracer::gfx::PixelLattice::Square) {
         record.config["pixel_lattice"] = pathtracer::gfx::kPixelLatticeNames[static_cast<int>(options.lattice)];
     }
+    // Absent on a camera, for the same reason.
+    if (options.acceptanceAngleDegrees != 0.0F) {
+        record.config["acceptance_angle_deg"] = options.acceptanceAngleDegrees;
+    }
     // A Beauty filter runs once after the passes, so its wall clock is its own column rather than a pass sample.
     if (filterMs > 0.0) {
         record.samples["filter_ms"] = std::vector<double>{filterMs};
@@ -256,6 +262,9 @@ bool parseArgs(int argc, char** argv, Options& options) {
             options.omnidirectional = true;
         } else if (std::strcmp(argv[i], "--hexagonal") == 0) {
             options.lattice = pathtracer::gfx::PixelLattice::Hexagonal;
+        } else if (std::strcmp(argv[i], "--acceptance-angle") == 0) {
+            if (!needsValue("--acceptance-angle")) { return false; }
+            options.acceptanceAngleDegrees = static_cast<float>(std::atof(argv[++i]));
         } else if (std::strcmp(argv[i], "--bloom") == 0) {
             if (!needsValue("--bloom")) { return false; }
             options.displayOptics.bloomStrength = static_cast<float>(std::atof(argv[++i]));
@@ -269,7 +278,7 @@ bool parseArgs(int argc, char** argv, Options& options) {
             std::cerr << "render_beauty: unknown argument '" << argv[i]
                       << "'\nusage: render_beauty [--scene scenes/x.json] --out out.png [--out-exr out.exr] [--compare-exr ref.exr] "
                          "[--compare ref.png] [--error-spectrum] [--seed N] [--passes N] [--width W] [--height H] "
-                         "[--exposure EV] [--aov name] [--fisheye FOCAL_MM | --omnidirectional] [--hexagonal] [--bloom K] [--aberration A] "
+                         "[--exposure EV] [--aov name] [--fisheye FOCAL_MM | --omnidirectional] [--hexagonal] [--acceptance-angle DEG] [--bloom K] [--aberration A] "
                          "[--env-light 0|1] "
                          "[--bench-log log.jsonl] [--assert-deterministic] [--assert-converged]\n";
             return false;
@@ -333,8 +342,9 @@ int main(int argc, char** argv) {
     // Fixed camera from profile.json, no controller: what makes two runs comparable is that neither can have been nudged.
     const bool fisheye = options.fisheyeFocalLengthMm > 0.0F;
     const bool hexagonal = options.lattice != pathtracer::gfx::PixelLattice::Square;
-    const pathtracer::scene::Camera camera = fisheye || options.omnidirectional || hexagonal ? [&] {
-        // Rebuilt only for a lens or lattice flag; every accessor returns its constructor argument as given, so the pose carries over.
+    const bool compoundEye = options.acceptanceAngleDegrees != 0.0F;
+    const pathtracer::scene::Camera camera = fisheye || options.omnidirectional || hexagonal || compoundEye ? [&] {
+        // Rebuilt only for a lens, lattice or acceptance flag; each accessor returns its constructor argument, so the pose carries over.
         const pathtracer::scene::Camera& authored = renderer->defaultCamera();
         pathtracer::scene::Lens lens = authored.lens();
         if (fisheye || options.omnidirectional) {
@@ -344,7 +354,8 @@ int main(int argc, char** argv) {
         return pathtracer::scene::Camera{authored.position(), authored.rotationDegrees(), authored.filmBack(),
                                          fisheye ? options.fisheyeFocalLengthMm : authored.focalLengthMm(), authored.nearClip(),
                                          authored.farClip(), authored.aperture(), authored.shutterSeconds(),
-                                         authored.iso(), lens, hexagonal ? options.lattice : authored.pixelLattice()};
+                                         authored.iso(), lens, hexagonal ? options.lattice : authored.pixelLattice(),
+                                         compoundEye ? options.acceptanceAngleDegrees : authored.acceptanceAngleDegrees()};
     }() : renderer->defaultCamera();
     const int width = options.width;
     const int height = options.height;

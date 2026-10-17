@@ -80,7 +80,7 @@ struct SceneInputs {
     const pathtracer::config::CameraConfig& config = profile.camera;
     pathtracer::scene::Camera camera(config.position, config.rotation, preset->filmBack,
                                      config.focalLengthMm, config.nearClip, config.farClip, config.aperture,
-                                     config.shutterSeconds, config.iso, config.lens, config.pixelLattice);
+                                     config.shutterSeconds, config.iso, config.lens, config.pixelLattice, config.acceptanceAngleDegrees);
     if (!camera.validate(error)) {
         error = "profile.json camera: " + error;
         return std::nullopt;
@@ -128,19 +128,13 @@ struct SceneInputs {
 }
 
 // Bloom is an energy fraction, so [0, 1]; the fringe keeps R's magnification 1 - a positive, so [0, 1). NaN fails every comparison.
-[[nodiscard]] bool validDisplayOptics(const pathtracer::gfx::DisplayOptics& optics, pathtracer::gfx::PixelLattice lattice,
-                                      std::string& error) {
+[[nodiscard]] bool validDisplayOptics(const pathtracer::gfx::DisplayOptics& optics, std::string& error) {
     if (!(optics.bloomStrength >= 0.0F && optics.bloomStrength <= 1.0F)) {
         error = "bloom strength " + std::to_string(optics.bloomStrength) + " lies outside [0, 1]";
         return false;
     }
     if (!(optics.aberration >= 0.0F && optics.aberration < 1.0F)) {
         error = "aberration " + std::to_string(optics.aberration) + " lies outside [0, 1)";
-        return false;
-    }
-    if (optics.bloomStrength > 0.0F && lattice != pathtracer::gfx::PixelLattice::Square) {
-        error = std::string("bloom reads a square neighbourhood, so the ") +
-                pathtracer::gfx::kPixelLatticeNames[static_cast<int>(lattice)] + " lattice cannot render it";
         return false;
     }
     return true;
@@ -204,7 +198,7 @@ struct SceneInputs {
         error = "environment rotation is not finite";
         return false;
     }
-    return validDisplayOptics(request.displayOptics, lattice, error);
+    return validDisplayOptics(request.displayOptics, error);
 }
 
 // The path-traced lanes a request needs, each once. Beauty joins whenever a filter is asked for, every filter reading accumulated Beauty.

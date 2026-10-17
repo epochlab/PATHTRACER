@@ -20,7 +20,7 @@ public:
     DebugCameraController(const glm::vec3& position, const glm::vec3& rotationDegrees,
                            Camera::FilmBack filmBack, float focalLengthMm, float nearClip,
                            float farClip, float aperture, float shutterSeconds, float iso, Lens lens,
-                           pathtracer::gfx::PixelLattice pixelLattice, float flySpeedMetersPerSecond,
+                           pathtracer::gfx::PixelLattice pixelLattice, float acceptanceAngleDegrees, float flySpeedMetersPerSecond,
                            float orbitSensitivityDegPerPixel);
 
     // Builds an immutable Camera from the current pose. Call once per frame: this is the only point where a Camera value exists.
@@ -46,6 +46,7 @@ public:
     [[nodiscard]] float iso() const { return iso_; }
     [[nodiscard]] Lens lens() const { return lens_; }
     [[nodiscard]] pathtracer::gfx::PixelLattice pixelLattice() const { return pixelLattice_; }
+    [[nodiscard]] float acceptanceAngleDegrees() const { return acceptanceAngleDegrees_; }
 
     // Bound to the HUD's Camera section sliders/dropdown via setter, not a bare reference (controller-owned state).
     void setFocalLengthMm(float focalLengthMm) { focalLengthMm_ = focalLengthMm; }
@@ -56,6 +57,7 @@ public:
     // Projection only: the polynomial and its field of view are measured calibration data, authored in profile.json and immutable here.
     void setLensProjection(LensProjection projection) { lens_.projection = projection; }
     void setPixelLattice(pathtracer::gfx::PixelLattice pixelLattice) { pixelLattice_ = pixelLattice; }
+    void setAcceptanceAngleDegrees(float acceptanceAngleDegrees) { acceptanceAngleDegrees_ = acceptanceAngleDegrees; }
 
     // EV100 delta against profile.json defaults, applied at the display stage as pow(2,ev): the scene is not photometrically calibrated.
     [[nodiscard]] float relativeExposureEv() const {
@@ -81,6 +83,7 @@ private:
     float iso_;
     Lens lens_;
     pathtracer::gfx::PixelLattice pixelLattice_;
+    float acceptanceAngleDegrees_;
 
     const float defaultAperture_;
     const float defaultShutterSeconds_;

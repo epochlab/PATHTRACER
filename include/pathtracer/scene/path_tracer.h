@@ -30,6 +30,18 @@ inline constexpr int kTilesPerThread = 2;
 // Blackman-Harris (Harris 1978) at Arnold's default 1.5 px radius, importance-sampled (Ernst et al. 2006): pdf proportional to f, weight 1.
 inline constexpr float kFilterRadius = 1.5F;
 
+// A direction a facet's acceptance lobe draws, and its density per steradian.
+struct AcceptanceSample {
+    glm::vec3 dir;
+    float pdf;
+};
+
+// von Mises-Fisher about unit axis at kappa (Fisher 1953), weight 1 as Millward et al. 2022; Shirley-Chiu's map, Jakob 2012's inverse.
+[[nodiscard]] AcceptanceSample sampleAcceptance(const glm::vec3& axis, float kappa, glm::vec2 u);
+
+// The lobe's equivalent solid angle, 1 / its peak density 2 pi (1 - e^-2k) / k: pi rho^2 / (4 ln2) at small rho (Snyder 1977).
+[[nodiscard]] float acceptanceSolidAngle(float kappa);
+
 // Tile edge renderPathTraced splits `width` x `height` into for `threadCount` workers: kPathTraceTileSize unless that leaves the pool idle.
 [[nodiscard]] int pathTraceTileSize(int width, int height, unsigned int threadCount);
 

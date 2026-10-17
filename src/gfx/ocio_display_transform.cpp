@@ -42,8 +42,7 @@ constexpr const char* kInvertGlsl = "uniform bool uInvert;\n";
 constexpr const char* kLatticeGlsl =
     "uniform bool uHexagonal;\n"
     "uniform bool uWrapsHorizontally;\n"
-    "vec3 latticeTexel(vec2 uv) {\n"
-    "    if (!uHexagonal) { return textureGrad(uHdrColor, uv, dFdx(vUv), dFdy(vUv)).rgb; }\n"
+    "ivec2 latticeCell(vec2 uv) {\n"
     "    ivec2 size = textureSize(uHdrColor, 0);\n"
     "    float rowPitch = 0.5 * sqrt(3.0);\n"
     "    vec2 film = uv * vec2(float(size.x), float(size.y) * rowPitch);\n"
@@ -59,7 +58,11 @@ constexpr const char* kLatticeGlsl =
     "        if (nearestDistance < 0.0 || distance < nearestDistance) { nearestDistance = distance; nearest = ivec2(column, row); }\n"
     "    }\n"
     "    nearest.x = (nearest.x + size.x) % size.x;\n"
-    "    return texelFetch(uHdrColor, nearest, 0).rgb;\n"
+    "    return nearest;\n"
+    "}\n"
+    "vec3 latticeTexel(vec2 uv) {\n"
+    "    if (!uHexagonal) { return textureGrad(uHdrColor, uv, dFdx(vUv), dFdy(vUv)).rgb; }\n"
+    "    return texelFetch(uHdrColor, latticeCell(uv), 0).rgb;\n"
     "}\n";
 
 // Radial per-channel UV offset, 0 = off: R toward centre, B away, scaling with distance from centre. Beauty only, so no separate pass.
@@ -85,8 +88,12 @@ constexpr const char* kBloomGlsl =
     "uniform sampler2D uBloom;\n"
     "uniform float uBloomStrength;\n";
 
+// The hexagonal PSF is held per cell like the image, so it is read at the cell latticeTexel shows here, not interpolated.
 constexpr const char* kApplyBloomGlsl =
-    "    if (uBloomStrength > 0.0) { hdrColor = mix(hdrColor, texture(uBloom, vUv).rgb, uBloomStrength); }\n";
+    "    if (uBloomStrength > 0.0) {\n"
+    "        vec3 bloom = uHexagonal ? texelFetch(uBloom, latticeCell(vUv), 0).rgb : texture(uBloom, vUv).rgb;\n"
+    "        hdrColor = mix(hdrColor, bloom, uBloomStrength);\n"
+    "    }\n";
 
 // TPDF dither before the 8-bit quantization, else gradients band: encodeForDisplay's table and tiling, so a 1:1 frame matches it.
 constexpr const char* kDitherGlsl =

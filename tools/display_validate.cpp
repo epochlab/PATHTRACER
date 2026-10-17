@@ -466,6 +466,266 @@ PT_CHECK(bloom_wraps_a_lat_long_seam, Fast, Exact) {
     PT_EXPECT(ctx, differing == 0, std::to_string(differing) + " floats differ after rolling by " + std::to_string(roll) + " columns");
 }
 
+// The six axial unit steps of the hexagonal lattice: the smoothing step S's ring and the edges linear prolongation P halves.
+constexpr std::array<glm::ivec2, 6> kHexagonalRing{{{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {1, -1}, {-1, 1}}};
+
+// floor(a / 2) for either sign, as the shaders write it.
+int halfFloor(int a) {
+    return (a - (((a % 2) + 2) % 2)) / 2;
+}
+
+// Offset cell (x, y) of axial (q, r), and back: the lattice basis in which the aperture-4 coarse lattice is axial / 2.
+glm::ivec2 offsetOfAxial(glm::ivec2 axial) {
+    return {axial.x + halfFloor(axial.y), axial.y};
+}
+
+glm::ivec2 axialOfOffset(int x, int y) {
+    return {x - halfFloor(y), y};
+}
+
+// A level's value at any offset cell, folded by the lattice's mirrors or wrapped, as every hexagonal pass fetches it.
+glm::dvec3 foldedAt(const ShaderImage& level, glm::ivec2 cell, bool wraps) {
+    const glm::ivec2 folded = pathtracer::gfx::hexagonalReflection(cell.x, cell.y, level.width, level.height, wraps);
+    return level.rgb[(static_cast<std::size_t>(folded.y) * static_cast<std::size_t>(level.width)) + static_cast<std::size_t>(folded.x)];
+}
+
+// S: the centre at 1/4 and its six neighbours at 1/8, folded at this level's own frame.
+ShaderImage hexagonalSmooth(const ShaderImage& level, bool wraps) {
+    ShaderImage out{level.width, level.height, std::vector<glm::dvec3>(level.rgb.size())};
+    for (int y = 0; y < level.height; ++y) {
+        for (int x = 0; x < level.width; ++x) {
+            const glm::ivec2 axial = axialOfOffset(x, y);
+            glm::dvec3 sum = 0.25 * foldedAt(level, {x, y}, wraps);
+            for (const glm::ivec2 step : kHexagonalRing) {
+                sum += 0.125 * foldedAt(level, offsetOfAxial(axial + step), wraps);
+            }
+            out.rgb[(static_cast<std::size_t>(y) * static_cast<std::size_t>(level.width)) + static_cast<std::size_t>(x)] = sum;
+        }
+    }
+    return out;
+}
+
+// P at any fine cell: a coarse vertex copies its value, an edge midpoint averages its two ends; coarse cells fold at the coarse frame.
+glm::dvec3 hexagonalProlong(const ShaderImage& coarse, glm::ivec2 fineAxial, bool wraps) {
+    const auto vertex = [&](glm::ivec2 axial) { return foldedAt(coarse, offsetOfAxial(axial / 2), wraps); };
+    const glm::ivec2 parity((fineAxial.x % 2 + 2) % 2, (fineAxial.y % 2 + 2) % 2);
+    if (parity == glm::ivec2(0)) {
+        return vertex(fineAxial);
+    }
+    // The one unit step with this parity runs along the edge: (1,0), (0,1) or (1,-1).
+    const glm::ivec2 along = parity == glm::ivec2(1, 1) ? glm::ivec2(1, -1) : parity;
+    return 0.5 * (vertex(fineAxial - along) + vertex(fineAxial + along));
+}
+
+// Loop subdivision factorised, S after P: P is evaluated on S's whole stencil, so only the coarse frame folds.
+ShaderImage hexagonalUpReference(const ShaderImage& coarse, int width, int height, bool wraps) {
+    ShaderImage out{width, height, std::vector<glm::dvec3>(static_cast<std::size_t>(width) * static_cast<std::size_t>(height))};
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const glm::ivec2 axial = axialOfOffset(x, y);
+            glm::dvec3 sum = 0.25 * hexagonalProlong(coarse, axial, wraps);
+            for (const glm::ivec2 step : kHexagonalRing) {
+                sum += 0.125 * hexagonalProlong(coarse, axial + step, wraps);
+            }
+            out.rgb[(static_cast<std::size_t>(y) * static_cast<std::size_t>(width)) + static_cast<std::size_t>(x)] = sum;
+        }
+    }
+    return out;
+}
+
+// Its adjoint over 4, factorised: S twice on the fine frame, the fold a lattice symmetry each commutes with, sampled at coarse vertices.
+ShaderImage hexagonalDownReference(const ShaderImage& fine, int width, int height, bool wraps) {
+    const ShaderImage smoothed = hexagonalSmooth(hexagonalSmooth(fine, wraps), wraps);
+    ShaderImage out{width, height, std::vector<glm::dvec3>(static_cast<std::size_t>(width) * static_cast<std::size_t>(height))};
+    for (int m = 0; m < height; ++m) {
+        for (int j = 0; j < width; ++j) {
+            out.rgb[(static_cast<std::size_t>(m) * static_cast<std::size_t>(width)) + static_cast<std::size_t>(j)] =
+                foldedAt(smoothed, {(2 * j) + (m & 1), 2 * m}, wraps);
+        }
+    }
+    return out;
+}
+
+// The hexagonal pyramid with the display mix, from the factorised operators: the oracle the shipped 19-entry mask must equal.
+ShaderImage hexagonalBloomReference(const HdrImage& image, double k, bool wraps) {
+    ShaderImage input{image.width, image.height, {}};
+    for (std::size_t i = 0; i < image.texels.size(); i += 3) {
+        input.rgb.emplace_back(image.texels[i], image.texels[i + 1], image.texels[i + 2]);
+    }
+    const int octaves = pathtracer::gfx::bloomOctaves(image.width, image.height);
+    const auto size = [&](int octave) { return pathtracer::gfx::bloomLevelSize(PixelLattice::Hexagonal, image.width, image.height, octave, wraps); };
+    std::vector<ShaderImage> down;
+    const ShaderImage* source = &input;
+    for (int octave = 1; octave <= octaves; ++octave) {
+        down.push_back(hexagonalDownReference(*source, size(octave).x, size(octave).y, wraps));
+        source = &down.back();
+    }
+    ShaderImage up = down.back();
+    for (int octave = octaves - 1; octave >= 0; --octave) {
+        ShaderImage next = hexagonalUpReference(up, size(octave).x, size(octave).y, wraps);
+        for (std::size_t i = 0; i < next.rgb.size(); ++i) {
+            next.rgb[i] = octave > 0 ? next.rgb[i] + down[static_cast<std::size_t>(octave - 1)].rgb[i] : next.rgb[i] / double(octaves);
+        }
+        up = std::move(next);
+    }
+    for (std::size_t i = 0; i < up.rgb.size(); ++i) {
+        up.rgb[i] = ((1.0 - k) * input.rgb[i]) + (k * up.rgb[i]);
+    }
+    return up;
+}
+
+// Each hexagonal level is the least whose far mirror lines lie on or past its finer level's, so every octave holds the whole frame.
+PT_CHECK(hexagonal_bloom_levels_cover_the_frame, Fast, Exact) {
+    ctx.plan(1);
+    int failures = 0;
+    for (int width = 1; width <= 70; ++width) {
+        for (int height = 1; height <= 70; ++height) {
+            for (const bool wraps : {false, true}) {
+                glm::ivec2 finer(width, height);
+                for (int octave = 1; octave <= pathtracer::gfx::bloomOctaves(width, height); ++octave) {
+                    const glm::ivec2 level = pathtracer::gfx::bloomLevelSize(PixelLattice::Hexagonal, width, height, octave, wraps);
+                    // Coarse row m is finer row 2m, so the far mirror row is 2(h' - 1); one row fewer would fall short of h - 1.
+                    const bool rows = 2 * (level.y - 1) >= finer.y - 1 && 2 * (level.y - 2) < finer.y - 1;
+                    // Half-pitch column index: coarse 2w' - 1 is finer 4w' - 2; a wrapped width halves its period exactly.
+                    const bool columns =
+                        wraps ? level.x == (finer.x + 1) / 2 : (4 * level.x) - 2 >= (2 * finer.x) - 1 && (4 * level.x) - 6 < (2 * finer.x) - 1;
+                    failures += rows && columns ? 0 : 1;
+                    finer = level;
+                }
+            }
+        }
+    }
+    PT_EXPECT(ctx, failures == 0, std::to_string(failures) + " levels fall short of, or needlessly exceed, their finer level's frame");
+}
+
+// The shipped mask is Loop's: six-fold symmetric, unit weight per coset, and over 4 exactly S * S, the 7-tap smoothing composed twice.
+PT_CHECK(hexagonal_bloom_mask_is_loops, Fast, Exact) {
+    ctx.plan(3);
+    const auto weightAt = [](glm::ivec2 offset) {
+        for (const pathtracer::gfx::HexBloomTap& tap : pathtracer::gfx::kHexBloomMask) {
+            if (tap.dq == offset.x && tap.dr == offset.y) {
+                return static_cast<double>(tap.weight);
+            }
+        }
+        return 0.0;
+    };
+    bool symmetric = true;
+    for (const pathtracer::gfx::HexBloomTap& tap : pathtracer::gfx::kHexBloomMask) {
+        // A sixth of a turn in axial coordinates: (q, r) -> (-r, q + r).
+        symmetric = symmetric && weightAt({-tap.dr, tap.dq + tap.dr}) == static_cast<double>(tap.weight);
+    }
+    PT_EXPECT(ctx, symmetric, "the mask is not invariant under a sixth of a turn");
+    bool cosets = true;
+    for (int coset = 0; coset < 4; ++coset) {
+        const std::vector<pathtracer::gfx::HexBloomTap> taps = pathtracer::gfx::hexBloomCoset(coset & 1, coset >> 1);
+        const double sum = std::accumulate(taps.begin(), taps.end(), 0.0, [](double s, const auto& tap) { return s + tap.weight; });
+        cosets = cosets && sum == 1.0 && taps.size() == (coset == 0 ? 7U : 4U);
+    }
+    PT_EXPECT(ctx, cosets, "a coset does not carry unit weight over 7 (vertex) or 4 (edge) entries");
+    bool composed = true;
+    for (int r = -3; r <= 3; ++r) {
+        for (int q = -3; q <= 3; ++q) {
+            double sum = 0.0;
+            for (int s = -1; s <= 1; ++s) {
+                for (int p = -1; p <= 1; ++p) {
+                    const auto smooth = [](glm::ivec2 d) {
+                        const bool ring = std::find(kHexagonalRing.begin(), kHexagonalRing.end(), d) != kHexagonalRing.end();
+                        return d == glm::ivec2(0) ? 0.25 : (ring ? 0.125 : 0.0);
+                    };
+                    sum += smooth({p, s}) * smooth(glm::ivec2(q, r) - glm::ivec2(p, s));
+                }
+            }
+            composed = composed && sum == weightAt({q, r}) / 4.0;
+        }
+    }
+    PT_EXPECT(ctx, composed, "mask / 4 is not the 7-tap smoothing composed with itself");
+}
+
+// The shipped single-mask pyramid against its factorisation in double, odd, even and degenerate sizes, both seam modes.
+PT_CHECK(hexagonal_bloom_is_loop_subdivision_and_its_adjoint, Fast, Exact) {
+    struct Case {
+        int width;
+        int height;
+        bool wraps;
+    };
+    constexpr std::array<Case, 5> kCases{{{37, 23, false}, {38, 24, false}, {64, 16, true}, {3, 2, false}, {1, 1, true}}};
+    constexpr float kStrength = 0.6F;
+    ctx.plan(static_cast<int>(kCases.size()));
+    pathtracer::scene::ThreadPool pool;
+    for (const Case& testCase : kCases) {
+        HdrImage image = randomImage(testCase.width, testCase.height, ctx.seed());
+        const ShaderImage reference = hexagonalBloomReference(image, kStrength, testCase.wraps);
+        pathtracer::gfx::applyDisplayOptics(image, PixelLattice::Hexagonal, testCase.wraps, DisplayOptics{.bloomStrength = kStrength}, pool);
+        double worst = 0.0;
+        for (std::size_t i = 0; i < reference.rgb.size(); ++i) {
+            for (glm::length_t lane = 0; lane < 3; ++lane) {
+                worst = std::max(worst, std::fabs(image.texels[(i * 3) + static_cast<std::size_t>(lane)] - reference.rgb[i][lane]));
+            }
+        }
+        // 2L + 1 dependent passes of at most one rounding per tap plus the sum, on intermediates no larger than L times the input's 4.
+        const int octaves = pathtracer::gfx::bloomOctaves(testCase.width, testCase.height);
+        const double bound = (2.0 * octaves + 1.0) * ((2.0 * pathtracer::gfx::kHexBloomMask.size()) + 1.0) *
+                             std::numeric_limits<float>::epsilon() * octaves * 4.0;
+        char detail[160];
+        std::snprintf(detail, sizeof(detail), "%dx%d %s: worst |CPU - factorised| %.3g against the float bound %.3g", testCase.width,
+                      testCase.height, testCase.wraps ? "wrapped" : "mirrored", worst, bound);
+        PT_EXPECT(ctx, worst <= bound, detail);
+    }
+}
+
+// Every hexagonal pass carries unit weight per output, so a constant frame blooms to itself, border cells included.
+PT_CHECK(hexagonal_bloom_preserves_a_constant_field, Fast, Exact) {
+    ctx.plan(2);
+    pathtracer::scene::ThreadPool pool;
+    constexpr int kWidth = 37;
+    constexpr int kHeight = 23;
+    constexpr float kLevel = 0.75F;
+    for (const bool wraps : {false, true}) {
+        HdrImage image = pathtracer::gfx::makeImage(kWidth, kHeight, 3);
+        std::fill(image.texels.begin(), image.texels.end(), kLevel);
+        pathtracer::gfx::applyDisplayOptics(image, PixelLattice::Hexagonal, wraps, DisplayOptics{.bloomStrength = 1.0F}, pool);
+        double worst = 0.0;
+        for (const float value : image.texels) {
+            worst = std::max(worst, std::fabs(static_cast<double>(value) - kLevel));
+        }
+        // Dyadic weights sum exactly, so only the per-pass accumulations and the final 1/L round: 2L + 1 passes of 20 additions.
+        const int octaves = pathtracer::gfx::bloomOctaves(kWidth, kHeight);
+        const double bound = (2.0 * octaves + 1.0) * 20.0 * std::numeric_limits<float>::epsilon() * octaves * kLevel;
+        PT_EXPECT(ctx, worst <= bound, std::string(wraps ? "wrapped" : "mirrored") + ": a constant moved by " + std::to_string(worst));
+    }
+}
+
+// A lat-long rolled by 2^L columns rolls every hexagonal octave by whole cells, so its bloom must roll with it, bit for bit.
+PT_CHECK(hexagonal_bloom_wraps_a_lat_long_seam, Fast, Exact) {
+    constexpr int kWidth = 64;
+    constexpr int kHeight = 16;
+    const int roll = 1 << pathtracer::gfx::bloomOctaves(kWidth, kHeight);
+    ctx.plan(1);
+    pathtracer::scene::ThreadPool pool;
+    HdrImage image = randomImage(kWidth, kHeight, ctx.seed());
+    HdrImage rolled = image;
+    for (int y = 0; y < kHeight; ++y) {
+        const auto row = image.texels.begin() + (static_cast<std::ptrdiff_t>(y) * kWidth * 3);
+        std::rotate_copy(row, row + (static_cast<std::ptrdiff_t>(kWidth - roll) * 3), row + (static_cast<std::ptrdiff_t>(kWidth) * 3),
+                         rolled.texels.begin() + (static_cast<std::ptrdiff_t>(y) * kWidth * 3));
+    }
+    const DisplayOptics optics{.bloomStrength = 1.0F};
+    pathtracer::gfx::applyDisplayOptics(image, PixelLattice::Hexagonal, true, optics, pool);
+    pathtracer::gfx::applyDisplayOptics(rolled, PixelLattice::Hexagonal, true, optics, pool);
+    std::size_t differing = 0;
+    for (int y = 0; y < kHeight; ++y) {
+        for (int x = 0; x < kWidth; ++x) {
+            for (int lane = 0; lane < 3; ++lane) {
+                const std::size_t row = static_cast<std::size_t>(y) * kWidth;
+                const std::size_t at = ((row + static_cast<std::size_t>(x)) * 3) + static_cast<std::size_t>(lane);
+                const std::size_t shifted = ((row + static_cast<std::size_t>((x + roll) % kWidth)) * 3) + static_cast<std::size_t>(lane);
+                differing += image.texels[at] != rolled.texels[shifted] ? 1 : 0;
+            }
+        }
+    }
+    PT_EXPECT(ctx, differing == 0, std::to_string(differing) + " floats differ after rolling by " + std::to_string(roll) + " columns");
+}
+
 // The display shader's fetch at 1:1 as a cell: GL_NEAREST magnification on the square grid, latticeTexel on the hexagonal one.
 glm::ivec2 shaderCell(PixelLattice lattice, glm::vec2 uv, int width, int height, bool wraps) {
     if (lattice == PixelLattice::Square) {
