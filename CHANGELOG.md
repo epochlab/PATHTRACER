@@ -15,7 +15,8 @@ width is the acceptance angle. Set it with `camera.acceptanceAngleDegrees` in pr
 - **Precedent:** CompoundRay (Millward, Maddock and Mangan 2022, eLife 11:e73893) samples each ommatidium the same way, with
   equal-weight rays drawn from a Gaussian whose FWHM is the acceptance angle. Here the lobe is that Gaussian's form on the sphere,
   matched exactly at any width. Facet axes come from the lens over the pixel lattice, all from one viewpoint and sharing one angle;
-  CompoundRay also places each ommatidium on its own eye surface.
+  CompoundRay also places each ommatidium on its own eye surface; the README roadmap parks that as "Multi-viewpoint compound
+  eyes".
 - **It replaces the film filter:** a facet's angular sensitivity is its whole pixel response. Dimension set 0, which placed the
   film offset, now draws the lobe through Shirley and Chiu's concentric map and Jakob 2012's stable inverse
   v = -log1p(-rho^2 (1 - e^-2k)) / k, so strata and blue noise carry over and later dimensions stay aligned. Samples have weight 1.
