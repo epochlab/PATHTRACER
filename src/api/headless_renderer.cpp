@@ -171,7 +171,7 @@ struct SceneInputs {
     const auto unsupported = std::find_if(request.aovs.begin(), request.aovs.end(),
                                           [lattice](AovId aov) { return !pathtracer::debug::aovSupportsLattice(aov, lattice); });
     if (unsupported != request.aovs.end()) {
-        error = std::string(pathtracer::debug::kAovNames[static_cast<int>(*unsupported)]) + " reads a square neighbourhood, so the " +
+        error = std::string(pathtracer::debug::kAovNames[static_cast<int>(*unsupported)]) + " runs a network trained on square images, so the " +
                 pathtracer::gfx::kPixelLatticeNames[static_cast<int>(lattice)] + " lattice cannot render it";
         return false;
     }

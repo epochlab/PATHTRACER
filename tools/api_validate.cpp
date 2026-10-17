@@ -605,8 +605,8 @@ PT_CHECK(every_aov_renders_finite, Slow, Exact) {
     }
 }
 
-// The hexagonal lattice refuses exactly the square-neighbourhood AOVs, naming them, and renders every other AOV finite.
-PT_CHECK(hexagonal_lattice_refuses_only_square_stencils, Slow, Exact) {
+// The hexagonal lattice refuses exactly the AOVs with no hexagonal version, naming them, and renders every other AOV finite.
+PT_CHECK(hexagonal_lattice_refuses_only_denoised, Slow, Exact) {
     ctx.plan(kAovCount + 1);
     std::string error;
     const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", error);

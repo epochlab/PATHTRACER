@@ -3,6 +3,35 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Hexagonal Gabor
+
+Gabor (the Morlet bank) now renders on hexagonal pixels, so Denoised is the only AOV the hexagonal lattice refuses.
+- **Bank:** the same one-octave Morlet bank over the hexagonal scale space. The carrier is sqrt(2) rad per pitch from the
+  hexagonal inner scale (sqrt(3/2) on square); the five orientations are unchanged.
+- **Phase:** a hexagonal row's half-pitch shift and sqrt(3)/2 pitch go into its row factor, so demodulation still splits into one
+  column and one row table.
+- **Admissibility:** off-axis passes do not separate a plane wave, so the hexagonal bank diffuses the demodulated constant to get
+  the blurred wave. It is zero on a constant field at the border as well as inside.
+- **Refused:** only Denoised, because OIDN's network is trained on square images. The message now says so ("denoised runs a network
+  trained on square images, so the Hexagonal lattice cannot render it"). The README row "Hexagonal denoising" records it as
+  blocked.
+- **Square:** bit-identical.
+- **Measured** (cornell, 256x128 at 16 passes, 3 runs, median filter time):
+
+  | AOV | Square | Hexagonal |
+  | --- | --- | --- |
+  | Sobel | 0.24 ms | 0.18 ms |
+  | DoG | 0.69 ms | 1.21 ms |
+  | Gabor | 5.39 ms | 9.63 ms |
+
+  Hexagonal diffusion is three passes over a frame padded by its reach. Building the padding from per-parity column tables
+  instead of a fold per cell saved 7% of it.
+- **Tests:**
+  - `filter_validate`: the analytic Morlet response and its half-response floors on both lattices; hexagonal Sobel and Gabor are
+    zero on a constant, mirrored and wrapped; hexagonal Gabor commutes with a cyclic roll.
+  - Removing the odd-row phase shift or the admissibility term fails them.
+  - The refusal tests (C++ API, C ABI, profile, pytest) are Denoised-only.
+
 ## Hexagonal Sobel and DoG
 
 Sobel and DoG now render on hexagonal pixels, in the viewer, `render_beauty --hexagonal`, the C ABI and Python. Gabor and

@@ -851,7 +851,7 @@ PT_CHECK(profile_config_camera_lens, Fast, Exact) {
     }
 }
 
-// camera.pixelLattice names a lattice, and a hexagonal one refuses a defaultAOV whose stencil needs a square neighbourhood.
+// camera.pixelLattice names a lattice, and a hexagonal one refuses a defaultAOV with no hexagonal version: denoised.
 PT_CHECK(profile_config_camera_pixel_lattice, Fast, Exact) {
     using pathtracer::gfx::PixelLattice;
     struct Case {
@@ -865,7 +865,8 @@ PT_CHECK(profile_config_camera_pixel_lattice, Fast, Exact) {
         {"hexagonal", "hexagonal", pathtracer::debug::AovId::Beauty, PixelLattice::Hexagonal},
         {"hexagonal opening on a per-texel filter", "hexagonal", pathtracer::debug::AovId::Luminance, PixelLattice::Hexagonal},
         {"hexagonal opening on sobel", "hexagonal", pathtracer::debug::AovId::Sobel, PixelLattice::Hexagonal},
-        {"hexagonal opening on gabor", "hexagonal", pathtracer::debug::AovId::Gabor, std::nullopt},
+        {"hexagonal opening on gabor", "hexagonal", pathtracer::debug::AovId::Gabor, PixelLattice::Hexagonal},
+        {"hexagonal opening on denoised", "hexagonal", pathtracer::debug::AovId::Denoised, std::nullopt},
         {"an unknown lattice name", "triangular", pathtracer::debug::AovId::Beauty, std::nullopt},
         {"no lattice at all", nlohmann::json(nullptr), pathtracer::debug::AovId::Beauty, std::nullopt},
     };

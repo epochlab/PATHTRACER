@@ -307,7 +307,7 @@ bool parseArgs(int argc, char** argv, Options& options) {
     }
     if (!pathtracer::debug::aovSupportsLattice(options.aov, options.lattice)) {
         std::cerr << "render_beauty: " << pathtracer::debug::kAovNames[static_cast<int>(options.aov)]
-                  << " reads a square neighbourhood, so --hexagonal cannot render it\n";
+                  << " runs a network trained on square images, so --hexagonal cannot render it\n";
         return false;
     }
     return true;

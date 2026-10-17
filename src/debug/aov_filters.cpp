@@ -135,7 +135,7 @@ int morletOrientations() {
     return static_cast<int>(std::ceil(std::numbers::pi / angularWidth));
 }
 
-MorletPlaneWave morletPlaneWave(float carrier, int index, int count, int width, int height) {
+MorletPlaneWave morletPlaneWave(float carrier, int index, int count, int width, int height, PixelLattice lattice) {
     MorletPlaneWave wave;
     const double theta = (std::numbers::pi * static_cast<double>(index)) / static_cast<double>(count);
     wave.stepX = static_cast<double>(carrier) * std::cos(theta);
@@ -149,9 +149,14 @@ MorletPlaneWave morletPlaneWave(float carrier, int index, int count, int width, 
         wave.cosX[static_cast<std::size_t>(x)] = static_cast<float>(std::cos(wave.stepX * static_cast<double>(x)));
         wave.sinX[static_cast<std::size_t>(x)] = static_cast<float>(std::sin(wave.stepX * static_cast<double>(x)));
     }
+    // A hexagonal row's half-pitch parity shift and sqrt(3)/2 pitch go in its own factor, so the phase still splits by column and row.
+    const bool hexagonal = lattice == PixelLattice::Hexagonal;
+    const auto rowPitch = static_cast<double>(pathtracer::gfx::rowPitch(lattice));
     for (int y = 0; y < height; ++y) {
-        wave.cosY[static_cast<std::size_t>(y)] = static_cast<float>(std::cos(wave.stepY * static_cast<double>(y)));
-        wave.sinY[static_cast<std::size_t>(y)] = static_cast<float>(std::sin(wave.stepY * static_cast<double>(y)));
+        const double shift = hexagonal ? 0.5 * static_cast<double>(y & 1) : 0.0;
+        const double phase = (wave.stepX * shift) + (wave.stepY * static_cast<double>(y) * rowPitch);
+        wave.cosY[static_cast<std::size_t>(y)] = static_cast<float>(std::cos(phase));
+        wave.sinY[static_cast<std::size_t>(y)] = static_cast<float>(std::sin(phase));
     }
     return wave;
 }
@@ -173,11 +178,11 @@ void demodulate(std::span<const float> plane, const MorletPlaneWave& wave, int w
     });
 }
 
-HdrImage gaborAov(const HdrImage& beauty, ThreadPool& threadPool, bool wrapsHorizontally) {
+HdrImage gaborAov(const HdrImage& beauty, ThreadPool& threadPool, bool wrapsHorizontally, PixelLattice lattice) {
     // The finest scale the grid resolves, the same fine scale DoG starts from.
-    const float variance = innerScaleVariance();
-    // Off-harmonic carriers make demodulation Bloch-periodic, J(x+W) = J(x)exp(-ikW): wrapped padding to the blur radius keeps taps real.
-    const int pad = wrapsHorizontally ? static_cast<int>(discreteGaussianKernel(variance).size()) - 1 : 0;
+    const float variance = innerScaleVariance(lattice);
+    // Off-harmonic carriers make demodulation Bloch-periodic, J(x+W) = J(x)exp(-ikW): wrapped padding to the blur's reach keeps taps real.
+    const int pad = wrapsHorizontally ? diffusionReach(variance, lattice).x : 0;
     const int width = beauty.width + (2 * pad);
     const int height = beauty.height;
     const auto pixels = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
@@ -186,32 +191,45 @@ HdrImage gaborAov(const HdrImage& beauty, ThreadPool& threadPool, bool wrapsHori
 
     const float carrier = morletCarrier(variance);
     const int orientations = morletOrientations();
+    const bool hexagonal = lattice == PixelLattice::Hexagonal;
 
     std::vector<float> lowpass = plane;
-    diffuse(lowpass, width, height, variance, threadPool);
+    diffuse(lowpass, width, height, variance, threadPool, false, lattice);
 
     std::vector<float> peak(pixels, 0.0F);
     std::vector<float> real(pixels);
     std::vector<float> imaginary(pixels);
+    // Hexagonal only: the blurred plane wave, which no longer separates into a row and a column factor once the passes run off-axis.
+    const std::vector<float> ones(hexagonal ? pixels : 0, 1.0F);
+    std::vector<float> waveReal(hexagonal ? pixels : 0);
+    std::vector<float> waveImaginary(hexagonal ? pixels : 0);
     for (int orientation = 0; orientation < orientations; ++orientation) {
         // A half turn covers the bank: the magnitude at theta and theta+pi is the same, the two being complex conjugates.
-        const MorletPlaneWave wave = morletPlaneWave(carrier, orientation, orientations, width, height);
-        // Morlet's admissibility term as the blurred plane wave itself, under the same mirror: zero mean at the border, not just inside.
-        MorletPlaneWave mean = wave;
-        // Separable, so its own blur is the product of a width-long and a height-long one and costs nothing against the 2-D passes.
-        diffuse(mean.cosX, width, 1, variance, threadPool);
-        diffuse(mean.sinX, width, 1, variance, threadPool);
-        diffuse(mean.cosY, 1, height, variance, threadPool);
-        diffuse(mean.sinY, 1, height, variance, threadPool);
+        const MorletPlaneWave wave = morletPlaneWave(carrier, orientation, orientations, width, height, lattice);
+        // Morlet's admissibility term as the blurred plane wave itself, under the same boundary: zero mean at the border, not just inside.
+        MorletPlaneWave mean = hexagonal ? MorletPlaneWave{} : wave;
+        if (hexagonal) {
+            demodulate(ones, wave, width, height, waveReal, waveImaginary, threadPool);
+            diffuse(waveReal, width, height, variance, threadPool, false, lattice);
+            diffuse(waveImaginary, width, height, variance, threadPool, false, lattice);
+        } else {
+            // Separable, so its own blur is the product of a width-long and a height-long one and costs nothing against the 2-D passes.
+            diffuse(mean.cosX, width, 1, variance, threadPool);
+            diffuse(mean.sinX, width, 1, variance, threadPool);
+            diffuse(mean.cosY, 1, height, variance, threadPool);
+            diffuse(mean.sinY, 1, height, variance, threadPool);
+        }
         demodulate(plane, wave, width, height, real, imaginary, threadPool);
-        diffuse(real, width, height, variance, threadPool);
-        diffuse(imaginary, width, height, variance, threadPool);
+        diffuse(real, width, height, variance, threadPool, false, lattice);
+        diffuse(imaginary, width, height, variance, threadPool, false, lattice);
         // Remodulating is a rotation by the carrier's phase, which a magnitude discards, so only the admissibility term is left to apply.
         threadPool.parallelFor(height, [&](int y) {
             const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
             for (int x = 0; x < width; ++x) {
                 const std::size_t pixel = row + static_cast<std::size_t>(x);
-                const glm::vec2 centred = morletBaseband(mean, x, y, real[pixel], imaginary[pixel], lowpass[pixel]);
+                const glm::vec2 centred =
+                    hexagonal ? glm::vec2(real[pixel] - (waveReal[pixel] * lowpass[pixel]), imaginary[pixel] - (waveImaginary[pixel] * lowpass[pixel]))
+                              : morletBaseband(mean, x, y, real[pixel], imaginary[pixel], lowpass[pixel]);
                 // Squared, so the root is paid once per texel at the end rather than once per texel per orientation; max commutes with it.
                 peak[pixel] = std::max(peak[pixel], (centred.x * centred.x) + (centred.y * centred.y));
             }
@@ -356,7 +374,7 @@ HdrImage evaluateFilterAov(AovId aov, const FilterInput& input, ThreadPool& thre
         case AovId::HSV:       return hsvAov(input.beauty, threadPool);
         case AovId::Luminance: return luminanceAov(input.beauty, threadPool);
         case AovId::Sobel:     return sobelAov(input.beauty, threadPool, input.wrapsHorizontally, input.lattice);
-        case AovId::Gabor:     return gaborAov(input.beauty, threadPool, input.wrapsHorizontally);
+        case AovId::Gabor:     return gaborAov(input.beauty, threadPool, input.wrapsHorizontally, input.lattice);
         case AovId::DoG:       return dogAov(input.beauty, threadPool, input.wrapsHorizontally, input.lattice);
         case AovId::ColourOpponent:  return colourOpponentAov(input.beauty, threadPool);
         case AovId::SNR:

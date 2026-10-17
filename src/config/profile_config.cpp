@@ -170,14 +170,14 @@ std::optional<CameraConfig> parseCamera(const nlohmann::json& camera, const std:
     return config;
 }
 
-// The viewer would open on an AOV no producer serves: denoised with the denoiser off, or a square stencil on another lattice.
+// The viewer would open on an AOV no producer serves: denoised with the denoiser off, or on a lattice its network was not trained on.
 bool servedDefaultAov(int defaultAov, const DenoiserConfig& denoiser, const CameraConfig& camera, const std::string& path) {
     if (!denoiser.enabled && defaultAov == static_cast<int>(pathtracer::debug::AovId::Denoised)) {
         std::cerr << "loadProfileConfig: " << path << ": defaultAOV is denoised, but the denoiser is disabled\n";
         return false;
     }
     if (!pathtracer::debug::aovSupportsLattice(static_cast<pathtracer::debug::AovId>(defaultAov), camera.pixelLattice)) {
-        std::cerr << "loadProfileConfig: " << path << ": defaultAOV reads a square neighbourhood the camera's pixelLattice lacks\n";
+        std::cerr << "loadProfileConfig: " << path << ": defaultAOV's network is trained on square images, not the camera's pixelLattice\n";
         return false;
     }
     return true;
