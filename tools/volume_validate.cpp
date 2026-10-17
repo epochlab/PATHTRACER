@@ -490,8 +490,8 @@ PathTraceResult render(const Surfaces& surfaces, const VolumeSet& volumes, const
         std::abort();
     }
     const pathtracer::scene::EnvironmentMap env = tools::fixtures::makeUniformEnvironment();
-    const std::vector<pathtracer::scene::QuadLight> noQuads;
-    const pathtracer::scene::LightSet lights(&env, glm::vec3(0.0F), 1.0F, noQuads);
+    const std::vector<pathtracer::scene::AreaLight> noLights;
+    const pathtracer::scene::LightSet lights(&env, glm::vec3(0.0F), 1.0F, noLights);
     const std::vector<int> instanceLightIndex(surfaces.instances.size(), -1);
     const std::atomic<std::uint64_t> generation{1};
     pathtracer::debug::PassStats stats;

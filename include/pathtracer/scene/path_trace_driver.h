@@ -45,7 +45,7 @@ public:
     PathTraceDriver(const EmbreeAccel& accel, const std::vector<ShadingTriangle>& shadingTriangles,
                      const std::vector<MeshInstance>& instances,
                      const std::vector<int>& instanceLightIndex,
-                     const EnvironmentMap& environmentMap, const std::vector<QuadLight>& quadLights, const VolumeSet& volumes);
+                     const EnvironmentMap& environmentMap, const std::vector<AreaLight>& lights, const VolumeSet& volumes);
     ~PathTraceDriver();
 
     PathTraceDriver(const PathTraceDriver&) = delete;
@@ -86,7 +86,7 @@ private:
     const std::vector<MeshInstance>& instances_;
     const std::vector<int>& instanceLightIndex_;
     const EnvironmentMap& environmentMap_;
-    const std::vector<QuadLight>& quadLights_;
+    const std::vector<AreaLight>& lights_;
     const VolumeSet& volumes_;
 
     std::mutex requestMutex_;

@@ -4,6 +4,8 @@
 
 #include <glm/glm.hpp>
 
+#include "pathtracer/scene/ray_types.h"
+
 namespace pathtracer::scene {
 
 struct AabbBounds {
@@ -37,8 +39,11 @@ struct ShadingTriangle {
 // True for the inverted box computeInstanceBounds leaves on an instance with no triangles: a min/max identity, not a sentinel.
 [[nodiscard]] bool isEmpty(const AabbBounds& box);
 
-// World-space AABB per instance, indexed by instanceIndex. Positions are already world-space, so this is one linear pass.
-[[nodiscard]] std::vector<AabbBounds> computeInstanceBounds(const std::vector<ShadingTriangle>& triangles,
-                                                             int instanceCount);
+// World-space AABB per instance, indexed by instanceIndex, over its triangles and analytic shapes: one linear pass over each.
+[[nodiscard]] std::vector<AabbBounds> computeInstanceBounds(const std::vector<ShadingTriangle>& triangles, int instanceCount,
+                                                             const std::vector<AnalyticShape>& shapes = {});
+
+// The shading record at `point` on a shape: sphere uv lat-long in its frame, disc uv its frame's planar [0,1]^2 as a quad's; colour white.
+[[nodiscard]] ShadingVertex shadingAt(const AnalyticShape& shape, const glm::vec3& point);
 
 }  // namespace pathtracer::scene

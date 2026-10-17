@@ -251,6 +251,26 @@ glm::vec3 shadeHit(GBuffer& result, int x, int y, const Hit& hit, const PixelRay
     return shading.position;
 }
 
+// shadeHit's fields for a disk or sphere light: its analytic surface with Material{}'s inputs, as a quad light's triangles carry.
+glm::vec3 shadeShapeHit(GBuffer& result, int x, int y, const Hit& hit, const PixelRay& pixel, const AnalyticShape& shape,
+                        float lookaheadDistance) {
+    const ShadingVertex shading = shadingAt(shape, pixel.ray.origin + (hit.t * pixel.ray.dir));
+    const OpenPbrInputs<Constant> inputs = resolveInputs(Material{}, shading.uv, {}, shading.colour);
+    writeTexel(result.depth, x, y, hit.t);
+    writeTexel(result.lookahead, x, y, std::clamp(1.0F - (hit.t / lookaheadDistance), 0.0F, 1.0F));
+    writeTexel(result.worldPos, x, y, shading.position);
+    writeTexel(result.uv, x, y, glm::fract(shading.uv));
+    writeTexel(result.normal, x, y, shading.normal);
+    writeTexel(result.geomNormal, x, y, shading.normal);
+    writeTexel(result.albedo, x, y, inputs.baseWeight * inputs.baseColor);
+    writeTexel(result.metallic, x, y, inputs.baseMetalness);
+    writeTexel(result.roughness, x, y, inputs.specularRoughness);
+    writeTexel(result.tangent, x, y, glm::vec3(shading.tangent));
+    writeTexel(result.objectId, x, y, falseColorForId(shape.instanceIndex));
+    writeTexel(result.iorAov, x, y, modulatedIor(inputs, std::nullopt));
+    return shading.position;
+}
+
 // The scene a G-buffer call reads, bundled so a row's signature stays short.
 struct GBufferScene {
     const EmbreeAccel& accel;
@@ -285,7 +305,8 @@ void renderPixel(GBuffer& result, const GBufferView& view, const GBufferScene& s
     // OpenPBR's presence with one uniform per pixel, fixed so the buffer is stable: a cutout shows what lies behind where u >= alpha.
     std::optional<float> presence;
     Ray ray = pixel->ray;
-    while (hit) {
+    // A shape is a light's opaque surface, so presence never looks past one.
+    while (hit && hit->shape < 0) {
         const ShadingTriangle& triangle = scene.shadingTriangles[static_cast<std::size_t>(hit->triangleIndex)];
         const Material& material = scene.instances[static_cast<std::size_t>(triangle.instanceIndex)].material;
         const float opacity = opacityAt(material, interpolateShading(triangle, hit->u, hit->v).uv,
@@ -305,7 +326,10 @@ void renderPixel(GBuffer& result, const GBufferView& view, const GBufferScene& s
     }
     // A miss sees the environment, the plane at infinity, along the ray direction (w = 0); a hit is its worldPos (w = 1).
     glm::vec4 seen(pixel->ray.dir, 0.0F);
-    if (hit) {
+    if (hit && hit->shape >= 0) {
+        seen = glm::vec4(
+            shadeShapeHit(result, x, y, *hit, *pixel, scene.accel.shapes()[static_cast<std::size_t>(hit->shape)], scene.lookaheadDistance), 1.0F);
+    } else if (hit) {
         const ShadingTriangle& triangle = scene.shadingTriangles[static_cast<std::size_t>(hit->triangleIndex)];
         const auto instance = static_cast<std::size_t>(triangle.instanceIndex);
         seen = glm::vec4(shadeHit(result, x, y, *hit, *pixel, triangle, scene.instances[instance].material, scene.lookaheadDistance),

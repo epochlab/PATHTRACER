@@ -3,6 +3,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <variant>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -42,14 +43,35 @@ struct TextureConfig {
     std::optional<BumpConfig> bump;
 };
 
-// Rectangular area light: a size.x by size.y quad centred on its local origin in the XY plane, color * intensity leaving along -Z.
-struct QuadLightConfig {
-    glm::vec3 position;  // quad centre, before the model root transform
+// A size.x by size.y rectangle in the local XY plane, width along X and height along Y; loadSceneConfig rejects non-positive extents.
+struct QuadShape {
+    glm::vec2 size;
+};
+
+// A disk of `radius` in the local XY plane; loadSceneConfig rejects a non-positive one.
+struct DiskShape {
+    float radius;
+};
+
+// A sphere of `radius`, closed so emitting outward only: it takes no twoSided key. loadSceneConfig rejects a non-positive radius.
+struct SphereShape {
+    float radius;
+};
+
+// A glTF's triangles, materials ignored, pivoting on their bounding-box centre and uniformly scaled about it before rotation.
+struct MeshShape {
+    std::string gltfPath;  // relative to ASSET_ROOT_DIR
+    float scale = 1.0F;    // optional, default 1; loadSceneConfig rejects a non-positive one
+};
+
+// An area light centred on its local origin, color * intensity leaving along local -Z (quad, disk), outward (sphere) or each face's front.
+struct LightConfig {
+    glm::vec3 position;  // the shape's centre, before the model root transform
     glm::vec3 rotation;  // degrees; Rz*Ry*Rx as ModelConfig::rotation, so X applies first
-    glm::vec2 size;  // width along local X, height along local Y; loadSceneConfig rejects non-positive extents
+    std::variant<QuadShape, DiskShape, SphereShape, MeshShape> shape;
     glm::vec3 color;  // authored, or resolved from a kelvin temperature at unit luminance; loadSceneConfig rejects a negative one
     float intensity;
-    bool twoSided = false;
+    bool twoSided = false;  // a sphere's stays false
 };
 
 // A volume material file, MaterialX anisotropic_vdf's inputs: coefficients per unit of the grid's own space at density 1.
@@ -92,8 +114,8 @@ struct SceneConfig {
     std::map<std::string, std::string> materialOverrides;
     // glTF node name -> {OpenPBR input name -> texture}, a path string or a TextureConfig object; the only texture source. Optional.
     std::map<std::string, std::map<std::string, TextureConfig>> textures;
-    // Rectangular area lights, in the glTF's own vertex space (ModelConfig position/rotation applies too). Optional; absent means none.
-    std::vector<QuadLightConfig> lights;
+    // Area lights, in the glTF's own vertex space (ModelConfig position/rotation applies too). Optional; absent means none.
+    std::vector<LightConfig> lights;
     // VDB media in world space. Optional; absent means none.
     std::vector<VolumeConfig> volumes;
     // Optional; absent keeps profile.json's camera.

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <set>
@@ -276,23 +277,59 @@ bool bindSceneTextures(std::vector<MeshInstance>& instances,
     return true;
 }
 
-std::vector<QuadLight> buildQuadLights(const std::vector<pathtracer::config::QuadLightConfig>& lights,
-                                        const glm::mat4& sceneTransform) {
-    std::vector<QuadLight> quadLights;
-    quadLights.reserve(lights.size());
-    for (const pathtracer::config::QuadLightConfig& light : lights) {
+std::optional<std::vector<AreaLight>> buildLights(const std::vector<pathtracer::config::LightConfig>& lights, const glm::mat4& sceneTransform,
+                                                  const std::string& assetRoot) {
+    std::vector<AreaLight> placed;
+    placed.reserve(lights.size());
+    for (const pathtracer::config::LightConfig& light : lights) {
         const glm::mat4 lightToWorld = sceneTransform * placementTransform(light.position, light.rotation);
-        const glm::vec2 halfSize = 0.5F * light.size;
-        // edge0 = +X, edge1 = -Y: cross(edge0, edge1) is local -Z, the emitting side, from the (-x, +y) corner.
-        quadLights.push_back(QuadLight{
-            glm::vec3(lightToWorld * glm::vec4(-halfSize.x, halfSize.y, 0.0F, 1.0F)),
-            glm::vec3(lightToWorld * glm::vec4(light.size.x, 0.0F, 0.0F, 0.0F)),
-            glm::vec3(lightToWorld * glm::vec4(0.0F, -light.size.y, 0.0F, 0.0F)),
-            light.color * light.intensity,
-            light.twoSided,
-        });
+        const glm::vec3 centre(lightToWorld * glm::vec4(0.0F, 0.0F, 0.0F, 1.0F));
+        const glm::mat3 axes(lightToWorld);
+        const glm::vec3 radiance = light.color * light.intensity;
+        if (const auto* quad = std::get_if<pathtracer::config::QuadShape>(&light.shape)) {
+            const glm::vec2 halfSize = 0.5F * quad->size;
+            // edge0 = +X, edge1 = -Y: cross(edge0, edge1) is local -Z, the emitting side, from the (-x, +y) corner.
+            placed.emplace_back(QuadLight{
+                glm::vec3(lightToWorld * glm::vec4(-halfSize.x, halfSize.y, 0.0F, 1.0F)),
+                glm::vec3(lightToWorld * glm::vec4(quad->size.x, 0.0F, 0.0F, 0.0F)),
+                glm::vec3(lightToWorld * glm::vec4(0.0F, -quad->size.y, 0.0F, 0.0F)),
+                radiance,
+                light.twoSided,
+            });
+        } else if (const auto* disk = std::get_if<pathtracer::config::DiskShape>(&light.shape)) {
+            placed.emplace_back(DiskLight{centre, glm::mat3(axes[0], -axes[1], -axes[2]), disk->radius, radiance, light.twoSided});
+        } else if (const auto* sphere = std::get_if<pathtracer::config::SphereShape>(&light.shape)) {
+            placed.emplace_back(SphereLight{centre, axes, sphere->radius, radiance});
+        } else {
+            const auto& mesh = std::get<pathtracer::config::MeshShape>(light.shape);
+            std::optional<LoadedModel> model = loadGltf(assetRoot + "/" + mesh.gltfPath, glm::mat4(1.0F), /*vertexColor=*/false);
+            if (!model) {
+                return std::nullopt;
+            }
+            // Pivot on the bounding-box centre, so position places it and rotation and scale turn and size it in place.
+            glm::vec3 lo(std::numeric_limits<float>::infinity());
+            glm::vec3 hi(-std::numeric_limits<float>::infinity());
+            for (const Triangle& tri : model->worldTriangles) {
+                lo = glm::min(lo, glm::min(tri.v0, glm::min(tri.v1, tri.v2)));
+                hi = glm::max(hi, glm::max(tri.v0, glm::max(tri.v1, tri.v2)));
+            }
+            const glm::mat4 meshToWorld = lightToWorld * glm::scale(glm::mat4(1.0F), glm::vec3(mesh.scale)) *
+                                          glm::translate(glm::mat4(1.0F), -0.5F * (lo + hi));
+            for (Triangle& tri : model->worldTriangles) {
+                for (glm::vec3* vertex : {&tri.v0, &tri.v1, &tri.v2}) {
+                    *vertex = glm::vec3(meshToWorld * glm::vec4(*vertex, 1.0F));
+                }
+            }
+            MeshLight meshLight(std::move(model->worldTriangles), radiance, light.twoSided);
+            // A zero area has no point to sample and no surface to hit: an authoring error, not a dark light.
+            if (!(meshLight.area > 0.0F)) {
+                std::cerr << "buildLights: mesh light " << mesh.gltfPath << " has no area\n";
+                return std::nullopt;
+            }
+            placed.emplace_back(std::move(meshLight));
+        }
     }
-    return quadLights;
+    return placed;
 }
 
 glm::mat4 rootTransformOf(const pathtracer::config::ModelConfig& model) {

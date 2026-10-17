@@ -11,7 +11,7 @@ using RTCSceneTy = struct RTCSceneTy;
 
 namespace pathtracer::scene {
 
-// Ray-scene intersection over Embree's SIMD BVH: one RTC_GEOMETRY_TYPE_TRIANGLE geometry over a static soup, built once at load.
+// Ray-scene intersection over Embree's SIMD BVH: a static triangle soup plus native spheres and discs, built once at load.
 class EmbreeAccel {
 public:
     ~EmbreeAccel();
@@ -22,7 +22,7 @@ public:
     EmbreeAccel& operator=(EmbreeAccel&& other) noexcept;
 
     // nullopt if the Embree device or scene fails to initialize, logged to stderr: a real failure mode, surfaced rather than aborting.
-    static std::optional<EmbreeAccel> build(std::vector<Triangle> triangles);
+    static std::optional<EmbreeAccel> build(std::vector<Triangle> triangles, std::vector<AnalyticShape> shapes = {});
 
     [[nodiscard]] std::optional<Hit> intersect(const Ray& ray) const;
 
@@ -31,13 +31,20 @@ public:
 
     [[nodiscard]] int triangleCount() const { return triangleCount_; }
 
+    // Indexed by Hit::shape.
+    [[nodiscard]] const std::vector<AnalyticShape>& shapes() const { return shapes_; }
+
 private:
-    EmbreeAccel(RTCDeviceTy* device, RTCSceneTy* scene, std::vector<Triangle> triangles);
+    EmbreeAccel(RTCDeviceTy* device, RTCSceneTy* scene, std::vector<Triangle> triangles, std::vector<AnalyticShape> shapes,
+                unsigned int triangleGeometry, std::vector<std::vector<int>> shapeOfPrimitive);
     void release();
 
     RTCDeviceTy* device_ = nullptr;
     RTCSceneTy* scene_ = nullptr;
     std::vector<Triangle> triangles_;  // kept alive: the vertex buffer shares this memory with Embree
+    std::vector<AnalyticShape> shapes_;
+    unsigned int triangleGeometry_;  // the triangles' geomID, RTC_INVALID_GEOMETRY_ID when there are none
+    std::vector<std::vector<int>> shapeOfPrimitive_;  // [geomID][primID] -> index into shapes_ for the point geometries
     int triangleCount_ = 0;
 };
 

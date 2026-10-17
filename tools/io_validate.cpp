@@ -502,6 +502,26 @@ PT_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
         {"a zero light temperature", "engine_io_scene_zerotemp.json",
          scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
                "\"temperature\":0,\"intensity\":5.0}]")},
+        // Each shape's own extent is a measure, so zero or negative is no light; each key set is closed per type.
+        {"a disk light with a zero radius", "engine_io_scene_diskradius.json",
+         scene(",\"lights\":[{\"type\":\"disk\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"radius\":0,\"color\":[1,1,1],\"intensity\":5.0}]")},
+        {"a sphere light with a negative radius", "engine_io_scene_sphereradius.json",
+         scene(",\"lights\":[{\"type\":\"sphere\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"radius\":-1,\"color\":[1,1,1],\"intensity\":5.0}]")},
+        // A sphere is closed: its inside is never lit, so a twoSided switch would be a key with no meaning.
+        {"a sphere light with twoSided", "engine_io_scene_spheresided.json",
+         scene(",\"lights\":[{\"type\":\"sphere\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"radius\":1,\"color\":[1,1,1],\"intensity\":5.0,"
+               "\"twoSided\":true}]")},
+        {"a mesh light with a zero scale", "engine_io_scene_meshscale.json",
+         scene(",\"lights\":[{\"type\":\"mesh\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"gltfPath\":\"m.gltf\",\"scale\":0,"
+               "\"color\":[1,1,1],\"intensity\":5.0}]")},
+        {"a mesh light without its gltfPath", "engine_io_scene_meshpath.json",
+         scene(",\"lights\":[{\"type\":\"mesh\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"color\":[1,1,1],\"intensity\":5.0}]")},
+        {"a disk light with a quad's size key", "engine_io_scene_disksize.json",
+         scene(",\"lights\":[{\"type\":\"disk\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"radius\":1,\"size\":[1,1],"
+               "\"color\":[1,1,1],\"intensity\":5.0}]")},
+        // Point, spot and distant lights have no surface to hit: an unknown type fails rather than loading as another.
+        {"a point light", "engine_io_scene_pointlight.json",
+         scene(",\"lights\":[{\"type\":\"point\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"color\":[1,1,1],\"intensity\":5.0}]")},
         // The locus leaves AP1 below about 600 K: 500 K has negative green, which a clamp would hide as a hue shift.
         {"a light temperature outside the scene gamut", "engine_io_scene_gamuttemp.json",
          scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
@@ -533,6 +553,39 @@ PT_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
         PT_EXPECT(ctx, !accepted, detail);
         std::filesystem::remove(path);
     }
+}
+
+// Each light type reads into its own shape with the shared keys beside it; a mesh's scale is optional at 1, a twoSided at false.
+PT_CHECK(scene_config_reads_every_light_shape, Fast, Exact) {
+    const std::filesystem::path path = writeJson(
+        "engine_io_scene_shapes.json",
+        "{\"environment\":{\"hdriPath\":\"textures/republiqueHDR_2k.exr\"},\"lights\":["
+        "{\"type\":\"disk\",\"position\":[1,2,3],\"rotation\":[10,20,30],\"radius\":0.25,\"color\":[1,0.5,0.25],\"intensity\":4.0,\"twoSided\":true},"
+        "{\"type\":\"sphere\",\"position\":[0,1,0],\"rotation\":[0,0,0],\"radius\":0.5,\"temperature\":2856,\"intensity\":2.0},"
+        "{\"type\":\"mesh\",\"position\":[0,0,1],\"rotation\":[0,90,0],\"gltfPath\":\"geometry/cornell/meshLights_v001.gltf\","
+        "\"scale\":0.3,\"color\":[1,1,1],\"intensity\":8.0},"
+        "{\"type\":\"mesh\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"gltfPath\":\"m.gltf\",\"color\":[1,1,1],\"intensity\":1.0}]}");
+    const std::optional<pathtracer::config::SceneConfig> scene = pathtracer::config::loadSceneConfig(path.string());
+    std::filesystem::remove(path);
+    ctx.plan(4);
+    PT_EXPECT(ctx, scene && scene->lights.size() == 4, "a scene of one disk, one sphere and two mesh lights did not load as four lights");
+    if (!scene || scene->lights.size() != 4) {
+        return;
+    }
+    const auto* disk = std::get_if<pathtracer::config::DiskShape>(&scene->lights[0].shape);
+    PT_EXPECT(ctx, disk && disk->radius == 0.25F && scene->lights[0].position == glm::vec3(1.0F, 2.0F, 3.0F) &&
+                       scene->lights[0].rotation == glm::vec3(10.0F, 20.0F, 30.0F) && scene->lights[0].twoSided &&
+                       scene->lights[0].color == glm::vec3(1.0F, 0.5F, 0.25F) && scene->lights[0].intensity == 4.0F,
+              "the disk's radius, placement, side, colour or intensity did not read as authored");
+    const auto* sphere = std::get_if<pathtracer::config::SphereShape>(&scene->lights[1].shape);
+    PT_EXPECT(ctx, sphere && sphere->radius == 0.5F && !scene->lights[1].twoSided &&
+                       scene->lights[1].color == glm::vec3(*pathtracer::scene::cie::blackbodyToScene(2856.0)),
+              "the sphere's radius or temperature did not read as authored");
+    const auto* scaled = std::get_if<pathtracer::config::MeshShape>(&scene->lights[2].shape);
+    const auto* unscaled = std::get_if<pathtracer::config::MeshShape>(&scene->lights[3].shape);
+    PT_EXPECT(ctx, scaled && scaled->gltfPath == "geometry/cornell/meshLights_v001.gltf" && scaled->scale == 0.3F && unscaled &&
+                       unscaled->scale == 1.0F && !scene->lights[3].twoSided,
+              "a mesh light's path or scale did not read as authored, or an absent scale is not 1");
 }
 
 // Anti-vacuity for the rejection rows below: every material the repo ships must still load once loadMaterialConfig validates.

@@ -23,9 +23,9 @@ namespace pathtracer::scene {
                                      const std::map<std::string, std::map<std::string, pathtracer::config::TextureConfig>>& textures,
                                      const std::string& assetRoot);
 
-// Places each authored quad by sceneTransform * its own placement, as QuadLight corner + edges. sceneTransform must be rigid.
-[[nodiscard]] std::vector<QuadLight> buildQuadLights(
-    const std::vector<pathtracer::config::QuadLightConfig>& lights, const glm::mat4& sceneTransform);
+// Places each light by sceneTransform * its own placement, mesh glTFs loaded under assetRoot; nullopt logs why. Rigid sceneTransform.
+[[nodiscard]] std::optional<std::vector<AreaLight>> buildLights(const std::vector<pathtracer::config::LightConfig>& lights,
+                                                                const glm::mat4& sceneTransform, const std::string& assetRoot);
 
 // scene.json's model placement: translate * rotationXyz, the order every caller places the scene in.
 [[nodiscard]] glm::mat4 rootTransformOf(const pathtracer::config::ModelConfig& model);

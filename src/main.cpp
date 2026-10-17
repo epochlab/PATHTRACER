@@ -192,9 +192,9 @@ struct DisplayedAovSource {
 // The immutable scene initializeApp builds once: geometry, lights, environment, BVH and resolved materials, as HeadlessRenderer holds.
 struct AppScene {
     pathtracer::scene::LoadedModel model;  // model.shadingTriangles indexes accel's triangles 1:1
-    // Parallel to model.instances: -1 for ordinary geometry, else the index into quadLights this instance's triangles emit as.
+    // Parallel to model.instances: -1 for ordinary geometry, else the index into lights this instance's surface emits as.
     std::vector<int> instanceLightIndex;
-    std::vector<pathtracer::scene::QuadLight> quadLights;
+    std::vector<pathtracer::scene::AreaLight> lights;
     pathtracer::scene::EnvironmentMap environmentMap;
     pathtracer::scene::EmbreeAccel accel;  // path tracer scene intersection
     pathtracer::scene::VolumeSet volumes;  // VDB media in world space, traced alongside accel's surfaces
@@ -378,12 +378,21 @@ std::optional<AppScene> loadAppScene(const pathtracer::config::SceneConfig& scen
     }
 
     std::vector<int> instanceLightIndex(model->instances.size(), -1);
-    std::vector<pathtracer::scene::QuadLight> quadLights = pathtracer::scene::buildQuadLights(sceneConfig.lights, sceneTransform);
-    pathtracer::scene::appendQuadLights(*model, quadLights, instanceLightIndex);
+    std::optional<std::vector<pathtracer::scene::AreaLight>> lights =
+        pathtracer::scene::buildLights(sceneConfig.lights, sceneTransform, ASSET_ROOT_DIR);
+    if (!lights) {
+        std::cerr << "main: light build failed, aborting startup\n";
+        return std::nullopt;
+    }
+    pathtracer::scene::appendLightGeometry(*model, *lights, instanceLightIndex);
     const int totalTriangles = static_cast<int>(model->worldTriangles.size());
+    // After appendLightGeometry, so the lights' own instances are bounded too, and before the shapes move into the accel.
+    std::vector<pathtracer::scene::AabbBounds> instanceBounds =
+        pathtracer::scene::computeInstanceBounds(model->shadingTriangles, static_cast<int>(model->instances.size()), model->shapes);
 
     const auto accelBuildStart = std::chrono::steady_clock::now();
-    std::optional<pathtracer::scene::EmbreeAccel> accel = pathtracer::scene::EmbreeAccel::build(std::move(model->worldTriangles));
+    std::optional<pathtracer::scene::EmbreeAccel> accel =
+        pathtracer::scene::EmbreeAccel::build(std::move(model->worldTriangles), std::move(model->shapes));
     if (!accel) {
         std::cerr << "main: Embree scene build failed, aborting startup\n";
         return std::nullopt;
@@ -393,10 +402,7 @@ std::optional<AppScene> loadAppScene(const pathtracer::config::SceneConfig& scen
 
     const pathtracer::scene::PathTraceSettings baseSettings =
         pathtracer::scene::baseSettingsOf(profileConfig, profileConfig.pathTracer.samplesPerPixel);
-    // After appendQuadLights, so the light panels' own instances are bounded too.
-    std::vector<pathtracer::scene::AabbBounds> instanceBounds =
-        pathtracer::scene::computeInstanceBounds(model->shadingTriangles, static_cast<int>(model->instances.size()));
-    return AppScene{std::move(*model), std::move(instanceLightIndex), std::move(quadLights),
+    return AppScene{std::move(*model), std::move(instanceLightIndex), std::move(*lights),
                     pathtracer::scene::EnvironmentMap(std::move(environmentTexture)), std::move(*accel), std::move(*volumes), baseSettings,
                     std::move(instanceBounds), totalTriangles, loadMs, accelBuildMs};
 }
@@ -423,7 +429,7 @@ void printStartupSpec(const AppScene& scene, const pathtracer::config::SceneConf
         pathtracer::scene::ThreadPool::defaultThreadCount(),
         pathtracer::scene::kPathTraceTileSize,
         static_cast<int>(scene.model.instances.size()),
-        static_cast<int>(scene.quadLights.size()),
+        static_cast<int>(scene.lights.size()),
         scene.totalTriangles,
         scene.loadMs,
         scene.accelBuildMs,
@@ -998,7 +1004,7 @@ void updateDashboard(AppResources& app,
         pathtracer::debug::kAovNames[app.aov],
         app.sceneName.c_str(),
         static_cast<int>(app.scene.model.instances.size()),
-        static_cast<int>(app.scene.quadLights.size()),
+        static_cast<int>(app.scene.lights.size()),
         static_cast<int>(app.scene.totalTriangles),
         app.imageWidth,
         app.imageHeight,
@@ -1466,7 +1472,7 @@ int runApp(const Options& options, const pathtracer::config::SceneConfig& sceneC
     // Constructed here, not in the initializer list: this local is where the scene objects reach their final address.
     app->pathTraceDriver = std::make_unique<pathtracer::scene::PathTraceDriver>(
         app->scene.accel, app->scene.model.shadingTriangles, app->scene.model.instances, app->scene.instanceLightIndex,
-        app->scene.environmentMap, app->scene.quadLights, app->scene.volumes);
+        app->scene.environmentMap, app->scene.lights, app->scene.volumes);
 
     wireCallbacks(window, *app);
     if (!options.benchLogPath.empty()) {

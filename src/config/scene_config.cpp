@@ -122,47 +122,93 @@ std::optional<glm::vec3> lightColor(const nlohmann::json& light, const std::stri
     return glm::vec3(*rgb);
 }
 
+// The type's own shape, its keys closed per type; nullopt logs an unknown type, a foreign key or a non-positive extent.
+std::optional<std::variant<QuadShape, DiskShape, SphereShape, MeshShape>> lightShape(const nlohmann::json& light, const std::string& path,
+                                                                                 std::size_t index) {
+    const auto type = light.at("type").get<std::string>();
+    const auto reject = [&](const char* why) {
+        std::cerr << "loadSceneConfig: " << path << ": lights[" << index << "] " << why << '\n';
+        return std::nullopt;
+    };
+    // Each extent is a measure: zero subtends no solid angle, and a negative size would mirror a quad and flip which face emits.
+    if (type == "quad") {
+        if (!onlyKnownKeys(light, {"type", "position", "rotation", "size", "color", "temperature", "intensity", "twoSided"}, path, "light")) {
+            return std::nullopt;
+        }
+        const QuadShape quad{light.at("size").get<glm::vec2>()};
+        if (!(quad.size.x > 0.0F) || !(quad.size.y > 0.0F)) {
+            return reject("has a non-positive size");
+        }
+        return quad;
+    }
+    if (type == "disk") {
+        if (!onlyKnownKeys(light, {"type", "position", "rotation", "radius", "color", "temperature", "intensity", "twoSided"}, path, "light")) {
+            return std::nullopt;
+        }
+        const DiskShape disk{toFloat(light.at("radius"))};
+        if (!(disk.radius > 0.0F)) {
+            return reject("has a non-positive radius");
+        }
+        return disk;
+    }
+    if (type == "sphere") {
+        if (!onlyKnownKeys(light, {"type", "position", "rotation", "radius", "color", "temperature", "intensity"}, path, "light")) {
+            return std::nullopt;
+        }
+        const SphereShape sphere{toFloat(light.at("radius"))};
+        if (!(sphere.radius > 0.0F)) {
+            return reject("has a non-positive radius");
+        }
+        return sphere;
+    }
+    if (type == "mesh") {
+        if (!onlyKnownKeys(light, {"type", "position", "rotation", "gltfPath", "scale", "color", "temperature", "intensity", "twoSided"}, path,
+                           "light")) {
+            return std::nullopt;
+        }
+        const MeshShape mesh{light.at("gltfPath").get<std::string>(), light.contains("scale") ? toFloat(light.at("scale")) : 1.0F};
+        if (!(mesh.scale > 0.0F)) {
+            return reject("has a non-positive scale");
+        }
+        return mesh;
+    }
+    // Dispatched on rather than ignored: an unrecognised type must not silently load as another.
+    std::cerr << "loadSceneConfig: " << path << ": lights[" << index << "] has unknown type '" << type
+              << "', expected quad, disk, sphere or mesh\n";
+    return std::nullopt;
+}
+
 // Parses and validates the optional "lights" array. Separate so each stays one screen, and every check is an authoring boundary.
-std::optional<std::vector<QuadLightConfig>> parseQuadLights(const nlohmann::json& j, const std::string& path) {
-    std::vector<QuadLightConfig> lights;
+std::optional<std::vector<LightConfig>> parseLights(const nlohmann::json& j, const std::string& path) {
+    std::vector<LightConfig> lights;
     const auto it = j.find("lights");
     if (it == j.end()) {
         return lights;
     }
     for (const nlohmann::json& light : *it) {
         const std::size_t index = lights.size();
-        // Dispatched on rather than ignored: an unrecognised type must not silently load as a quad. A future light type branches here.
-        if (const auto type = light.at("type").get<std::string>(); type != "quad") {
-            std::cerr << "loadSceneConfig: " << path << ": lights[" << index << "] has unknown type '" << type << "', only 'quad' exists\n";
-            return std::nullopt;
-        }
-        if (!onlyKnownKeys(light, {"type", "position", "rotation", "size", "color", "temperature", "intensity", "twoSided"}, path,
-                           "light")) {
+        const auto shape = lightShape(light, path, index);
+        if (!shape) {
             return std::nullopt;
         }
         const std::optional<glm::vec3> color = lightColor(light, path, index);
         if (!color) {
             return std::nullopt;
         }
-        const QuadLightConfig quad{
+        const LightConfig config{
             light.at("position").get<glm::vec3>(),
             light.at("rotation").get<glm::vec3>(),
-            light.at("size").get<glm::vec2>(),
+            *shape,
             *color,
             toFloat(light.at("intensity")),
             light.value("twoSided", false),
         };
-        // A zero extent subtends no solid angle; a negative one mirrors the quad and flips which face emits.
-        if (!(quad.size.x > 0.0F) || !(quad.size.y > 0.0F)) {
-            std::cerr << "loadSceneConfig: " << path << ": lights[" << index << "] has a non-positive size\n";
-            return std::nullopt;
-        }
         // Negative radiance is unrepresentable and would propagate through NEE as a permanent bias no downstream clamp removes.
-        if (quad.intensity < 0.0F || glm::any(glm::lessThan(quad.color, glm::vec3(0.0F)))) {
+        if (config.intensity < 0.0F || glm::any(glm::lessThan(config.color, glm::vec3(0.0F)))) {
             std::cerr << "loadSceneConfig: " << path << ": lights[" << index << "] has a negative intensity/color\n";
             return std::nullopt;
         }
-        lights.push_back(quad);
+        lights.push_back(config);
     }
     return lights;
 }
@@ -280,7 +326,7 @@ std::optional<SceneConfig> loadSceneConfig(const std::string& path) {
             materialOverrides = it->get<std::map<std::string, std::string>>();
         }
         std::optional<std::map<std::string, std::map<std::string, TextureConfig>>> textures = parseTextures(j, path);
-        std::optional<std::vector<QuadLightConfig>> lights = parseQuadLights(j, path);
+        std::optional<std::vector<LightConfig>> lights = parseLights(j, path);
         std::optional<std::vector<VolumeConfig>> volumes = parseVolumes(j, path);
         if (!textures || !lights || !volumes) {
             return std::nullopt;

@@ -42,7 +42,7 @@ using pathtracer::scene::MeshInstance;
 using pathtracer::scene::PathTraceDriver;
 using pathtracer::scene::PathTraceResult;
 using pathtracer::scene::PathTraceSettings;
-using pathtracer::scene::QuadLight;
+using pathtracer::scene::AreaLight;
 using pathtracer::scene::ShadingTriangle;
 using pathtracer::scene::ShadingVertex;
 using pathtracer::scene::Triangle;
@@ -61,7 +61,7 @@ struct TestScene {
     std::vector<ShadingTriangle> shadingTriangles;
     std::vector<MeshInstance> instances;
     std::vector<int> instanceLightIndex;
-    std::vector<QuadLight> quadLights;
+    std::vector<AreaLight> lights;
 };
 
 // Corners wound counter-clockwise about `normal`, split along the 0-2 diagonal; the tangent is the first edge, so it lies in the plane.
@@ -132,7 +132,7 @@ std::unique_ptr<DriverFixture> makeFixture() {
     }
     fixture->driver.emplace(*fixture->accel, fixture->scene.shadingTriangles, fixture->scene.instances,
                              fixture->scene.instanceLightIndex, fixture->environment,
-                             fixture->scene.quadLights, fixture->volumes);
+                             fixture->scene.lights, fixture->volumes);
     return fixture;
 }
 
@@ -212,7 +212,7 @@ struct OracleMean {
 OracleMean oracleBatchMean(DriverFixture& fixture, const Camera& camera, int passes, std::uint32_t scrambleSeed) {
     constexpr double kUnitRoundoff = std::numeric_limits<float>::epsilon() / 2.0;
     constexpr double kGamma4 = (4.0 * kUnitRoundoff) / (1.0 - (4.0 * kUnitRoundoff));
-    const pathtracer::scene::LightSet lights(&fixture.environment, glm::vec3(0.0F), 1.0F, fixture.scene.quadLights);
+    const pathtracer::scene::LightSet lights(&fixture.environment, glm::vec3(0.0F), 1.0F, fixture.scene.lights);
     const PathTraceSettings settings = makeSettings();
     PathTraceResult pass = pathtracer::scene::makePathTraceResult(kImageSize, kImageSize, settings.replicates);
     std::array<std::vector<double>, kLanes.size()> sum;
@@ -773,7 +773,7 @@ PT_CHECK(render_is_invariant_to_tile_size, Slow, Exact) {
     PT_EXPECT(ctx, coarse != fine, sizes);
 
     const Camera camera = makeCamera();
-    const pathtracer::scene::LightSet lights(&fixture->environment, glm::vec3(0.0F), 1.0F, fixture->scene.quadLights);
+    const pathtracer::scene::LightSet lights(&fixture->environment, glm::vec3(0.0F), 1.0F, fixture->scene.lights);
     const std::atomic<std::uint64_t> generation{1};
     pathtracer::debug::PassStats stats;
     const auto renderWith = [&](unsigned int threads) {
@@ -808,7 +808,7 @@ PT_CHECK(render_is_invariant_to_thread_count, Slow, Exact) {
         return;
     }
     const Camera camera = makeCamera();
-    const pathtracer::scene::LightSet lights(&fixture->environment, glm::vec3(0.0F), 1.0F, fixture->scene.quadLights);
+    const pathtracer::scene::LightSet lights(&fixture->environment, glm::vec3(0.0F), 1.0F, fixture->scene.lights);
     const std::atomic<std::uint64_t> generation{1};
     pathtracer::debug::PassStats stats;
 
@@ -868,7 +868,7 @@ PT_CHECK(replicate_means_match_batch_means, Slow, Exact) {
     const glm::dvec3 weights = glm::dvec3(pathtracer::scene::cie::sceneLuminanceWeights());
 
     // The same passes the driver ran, synchronously: per replicate slot the exact luminance sum and the float recurrence's error bound.
-    const pathtracer::scene::LightSet lights(&fixture->environment, glm::vec3(0.0F), 1.0F, fixture->scene.quadLights);
+    const pathtracer::scene::LightSet lights(&fixture->environment, glm::vec3(0.0F), 1.0F, fixture->scene.lights);
     PathTraceResult pass = pathtracer::scene::makePathTraceResult(kImageSize, kImageSize, replicates);
     const auto scrambleSeed = static_cast<std::uint32_t>(generation);
     const std::atomic<std::uint64_t> oracleGeneration{scrambleSeed};
