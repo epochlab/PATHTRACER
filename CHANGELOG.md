@@ -3,6 +3,24 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Hexagonal Sobel and DoG
+
+Sobel and DoG now render on hexagonal pixels, in the viewer, `render_beauty --hexagonal`, the C ABI and Python. Gabor and
+Denoised are still refused there.
+- **Sobel:** on hexagonal pixels the edge AOV is the least-squares gradient over the six unit neighbours (Staunton 1989). It is
+  scaled by Sobel's own affine gain (2 x (1+2+1) against the six neighbours' 3), so both lattices read 8 |grad f|. At the frame's
+  edge it folds by the lattice's mirrors; index clamping would tilt the gradient by sqrt(3)/2 on offset rows.
+- **DoG:** the same fine-minus-coarse octave over the hexagonal scale space, from the hexagonal inner scale 9 ln2. The band is empty
+  below the coarse support, now measured by `diffusionReach`. The square test is unchanged.
+- **Square:** bit-identical.
+- **Tests:**
+  - `filter_validate`: hexagonal Sobel is zero on a constant, reads 8x every affine slope, and is bit-identical under a half turn.
+    Hexagonal DoG is flat on axial-affine fields and matches the three-axis transfer on oblique waves. The constant, empty-band,
+    polarity and cyclic-roll checks now run on both lattices.
+  - The roll check was 48 rows, below DoG's coarse support, so its DoG band was empty on both lattices; it is now 96 rows and
+    asserts a non-empty band.
+  - The refusal tests (C ABI, profile, pytest) move to Gabor; profile.json accepts a hexagonal opening on Sobel.
+
 ## Hexagonal scale space
 
 The shared Gaussian diffusion now runs on hexagonal pixels too. This is groundwork for the hexagonal Sobel, DoG and Gabor; no

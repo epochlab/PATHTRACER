@@ -269,8 +269,8 @@ PT_CHECK(render_rejects_invalid_requests_without_writing, Slow, Exact) {
     // The locus leaves BT.709 below 1900 K, so 1000 K has negative blue, which no clamp may hide.
     static const std::array<float, 1> kZeroKelvin{0.0F};
     static const std::array<float, 1> kOutOfGamutKelvin{500.0F};
-    // Sobel at depth's one channel, so the request's buffers fit it: refused for its square stencil before any is written.
-    static const std::array<int, 2> kSobelAovs{pt_aov_id("beauty"), pt_aov_id("sobel")};
+    // Gabor at depth's one channel, so the request's buffers fit it: refused for its square stencil before any is written.
+    static const std::array<int, 2> kGaborAovs{pt_aov_id("beauty"), pt_aov_id("gabor")};
     const std::array<Case, 16> cases{{
         {"aov_count 0", "no AOVs", [](PtRenderRequest& r, std::vector<float*>&) { r.aov_count = 0; }},
         {"null aovs", "no AOVs", [](PtRenderRequest& r, std::vector<float*>&) { r.aovs = nullptr; }},
@@ -280,10 +280,10 @@ PT_CHECK(render_rejects_invalid_requests_without_writing, Slow, Exact) {
         {"lens_projection one past the last", "lens_projection",
          [](PtRenderRequest& r, std::vector<float*>&) { r.camera.lens_projection = PT_LENS_OMNIDIRECTIONAL + 1; }},
         {"pixel_lattice 2", "pixel_lattice", [](PtRenderRequest& r, std::vector<float*>&) { r.camera.pixel_lattice = 2; }},
-        {"hexagonal sobel", "square neighbourhood",
+        {"hexagonal gabor", "square neighbourhood",
          [](PtRenderRequest& r, std::vector<float*>&) {
              r.camera.pixel_lattice = PT_LATTICE_HEXAGONAL;
-             r.aovs = kSobelAovs.data();
+             r.aovs = kGaborAovs.data();
          }},
         {"null out[1]", "output buffer 1", [](PtRenderRequest&, std::vector<float*>& p) { p[1] = nullptr; }},
         {"width 0", "resolution", [](PtRenderRequest& r, std::vector<float*>&) { r.width = 0; }},

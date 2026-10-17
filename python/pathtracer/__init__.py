@@ -174,7 +174,7 @@ class Camera:
     ``(x + 0.25 + 0.5 * (y % 2), (y + 0.5) * sqrt(3) / 2)`` column pitches, so odd rows sit half a pitch right of even ones and
     the frame spans ``width`` by ``height * sqrt(3) / 2`` pitches. The arrays keep shape ``(height, width, channels)``; this field
     is the layout's only record. A written EXR carries it as ``pathtracer:pixelLattice`` with ``PixelAspectRatio`` ``2 / sqrt(3)``.
-    The hexagonal lattice refuses ``sobel``, ``gabor``, ``dog`` and ``denoised``, which need a square neighbourhood.
+    The hexagonal lattice refuses ``gabor`` and ``denoised``, which still need a square neighbourhood.
 
     Every AOV renders under every lens; G-buffer ``depth`` is the distance along the primary ray, the one depth a fisheye past
     90 degrees or the lat-long still defines.
