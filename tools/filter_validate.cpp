@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <complex>
 #include <limits>
 #include <cstddef>
 #include <numbers>
@@ -11,6 +12,8 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#include <glm/glm.hpp>
 
 #include "check.h"
 #include "pathtracer/debug/aov_filters.h"
@@ -289,6 +292,103 @@ PT_CHECK(dog_matches_the_analytic_transfer, Fast, Exact) {
         }
         PT_EXPECT(ctx, worst <= 1e-6,
                       "f=" + std::to_string(cyclesPerPixel) + " cyc/px deviates by " + std::to_string(worst));
+    }
+}
+
+// A grating is two plane waves, eigenfunctions of every pass, so each bank channel and so the envelope have a closed form per texel.
+PT_CHECK(gabor_matches_the_analytic_morlet_response, Fast, Exact) {
+    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    constexpr int kSize = 96;
+    constexpr double kMean = 0.5;
+    constexpr double kAmplitude = 0.25;
+    const float variance = pathtracer::debug::innerScaleVariance();
+    const std::vector<float> kernel = pathtracer::debug::discreteGaussianKernel(variance);
+    const int radius = static_cast<int>(kernel.size()) - 1;
+    const double carrier = static_cast<double>(pathtracer::debug::morletCarrier(variance));
+    const int orientations = pathtracer::debug::morletOrientations();
+    const double gain = static_cast<double>(greyLuminanceGain());
+
+    // diffuse's centre-relative pass applies 1 + sum 2 w_n (cos nw - 1), the exact transfer of its float taps.
+    const auto passTransfer = [&](double omega) {
+        double sum = 1.0;
+        for (int n = 1; n <= radius; ++n) {
+            sum += 2.0 * static_cast<double>(kernel[static_cast<std::size_t>(n)]) * (std::cos(n * omega) - 1.0);
+        }
+        return sum;
+    };
+    const auto transfer = [&](const glm::dvec2& k) { return passTransfer(k.x) * passTransfer(k.y); };
+    const auto bankCarrier = [&](int index) {
+        const double theta = (std::numbers::pi * index) / orientations;
+        return carrier * glm::dvec2(std::cos(theta), std::sin(theta));
+    };
+
+    struct Grating {
+        double omega;
+        double angle;
+        bool halfResponse;  // a point the bank's design claims at half response or better
+    };
+    std::vector<Grating> gratings;
+    for (int i = 0; i < orientations; ++i) {
+        const double theta = (std::numbers::pi * i) / orientations;
+        gratings.push_back({carrier, theta, false});
+        gratings.push_back({carrier, theta + (std::numbers::pi / (2.0 * orientations)), true});
+    }
+    // The Gaussian envelope halves at sqrt(2 ln2)/sigma from the carrier, the radial edges of kMorletOctaves' band.
+    const double radialHalfWidth = std::sqrt(2.0 * std::numbers::ln2 / static_cast<double>(variance));
+    gratings.push_back({carrier - radialHalfWidth, 0.0, true});
+    gratings.push_back({carrier + radialHalfWidth, 0.0, true});
+    const auto halfResponses = std::count_if(gratings.begin(), gratings.end(), [](const Grating& g) { return g.halfResponse; });
+    ctx.plan(static_cast<int>(gratings.size() + static_cast<std::size_t>(halfResponses)));
+
+    // Higham 3.1: the longest rounding chain is the admissibility product, a 1-D table blur times the 2-D lowpass, 3R+16, +4 to the root.
+    const double chain = (3.0 * radius) + 20.0;
+    const double gammaChain = (chain * pathtracer::debug::kFloat32Roundoff) / (1.0 - (chain * pathtracer::debug::kFloat32Roundoff));
+    // Each part is two terms of absolute mass 9M (3 per centre-relative pass), so 18 sqrt2 + 1 per orientation, doubled for the envelope.
+    const double bound = 2.0 * ((18.0 * std::numbers::sqrt2) + 1.0) * gammaChain * gain * (kMean + kAmplitude);
+
+    for (const Grating& grating : gratings) {
+        const glm::dvec2 k = grating.omega * glm::dvec2(std::cos(grating.angle), std::sin(grating.angle));
+        std::vector<float> plane(static_cast<std::size_t>(kSize) * kSize);
+        for (int y = 0; y < kSize; ++y) {
+            for (int x = 0; x < kSize; ++x) {
+                plane[(static_cast<std::size_t>(y) * kSize) + static_cast<std::size_t>(x)] =
+                    static_cast<float>(kMean + (kAmplitude * std::cos(glm::dot(k, glm::dvec2(x, y)))));
+            }
+        }
+        const HdrImage gabor = pathtracer::debug::gaborAov(greyImage(kSize, kSize, plane), pool);
+        // Per orientation the sidebands k-q and -(k+q) pass H(k-+q) less the admissibility term H(q)H(k); the mean cancels exactly.
+        std::vector<std::array<double, 2>> sidebands;
+        for (int i = 0; i < orientations; ++i) {
+            const glm::dvec2 q = bankCarrier(i);
+            const double admissibility = transfer(q) * transfer(k);
+            sidebands.push_back({transfer(k - q) - admissibility, transfer(k + q) - admissibility});
+        }
+        double worst = 0.0;
+        double weakest = std::numeric_limits<double>::infinity();
+        // Interior only: R from every edge no tap reaches the mirror, where the plane waves stop being eigenfunctions.
+        for (int y = radius; y < kSize - radius; ++y) {
+            for (int x = radius; x < kSize - radius; ++x) {
+                const glm::dvec2 r(x, y);
+                double peak = 0.0;
+                for (int i = 0; i < orientations; ++i) {
+                    const glm::dvec2 q = bankCarrier(i);
+                    const std::array<double, 2>& h = sidebands[static_cast<std::size_t>(i)];
+                    peak = std::max(peak, std::abs((h[0] * std::polar(1.0, glm::dot(k - q, r))) +
+                                                   (h[1] * std::polar(1.0, -glm::dot(k + q, r)))));
+                }
+                // 2 max|c_i| with c_i = (A/2)(...): the envelope is A times the peak sideband sum.
+                const double expected = gain * kAmplitude * peak;
+                const double measured = static_cast<double>(texelAt(gabor, x, y, 0));
+                worst = std::max(worst, std::abs(measured - expected));
+                weakest = std::min(weakest, measured);
+            }
+        }
+        const std::string label = "w=" + std::to_string(grating.omega) + " angle=" + std::to_string(grating.angle);
+        PT_EXPECT(ctx, worst <= bound, label + " deviates by " + std::to_string(worst) + ", bound " + std::to_string(bound));
+        if (grating.halfResponse) {
+            PT_EXPECT(ctx, weakest >= 0.5 * gain * kAmplitude,
+                      label + " reads " + std::to_string(weakest / (gain * kAmplitude)) + " of its amplitude, under half");
+        }
     }
 }
 
@@ -591,9 +691,9 @@ PT_CHECK(wrapped_filters_commute_with_a_cyclic_column_shift, Fast, Exact) {
     PT_EXPECT(ctx, sobel == 0.0F, "Sobel moved by " + std::to_string(sobel) + " under a cyclic shift");
     const float dog = worstShiftError(pathtracer::debug::dogAov(image, pool, true), pathtracer::debug::dogAov(rolled, pool, true));
     PT_EXPECT(ctx, dog == 0.0F, "DoG moved by " + std::to_string(dog) + " under a cyclic shift");
-    // The roll moves the carrier's phase origin, so demodulation, both blur passes and the baseband each round anew: 2R+1 ulps apiece.
+    // The roll moves the carrier's phase, so demodulation, both blurs and the baseband round anew: 2R+1 ulps apiece, x2 envelope.
     const auto radius = static_cast<double>(pathtracer::debug::discreteGaussianKernel(pathtracer::debug::innerScaleVariance()).size() - 1);
-    const double bound = 4.0 * ((2.0 * radius) + 1.0) * static_cast<double>(kFloatEpsilon * greyLuminanceGain());
+    const double bound = 2.0 * 4.0 * ((2.0 * radius) + 1.0) * static_cast<double>(kFloatEpsilon * greyLuminanceGain());
     const float gabor = worstShiftError(pathtracer::debug::gaborAov(image, pool, true), pathtracer::debug::gaborAov(rolled, pool, true));
     PT_EXPECT(ctx, gabor <= bound, "Gabor moved by " + std::to_string(gabor) + " under a cyclic shift, bound " + std::to_string(bound));
 }

@@ -153,8 +153,8 @@ PT_CHECK(filters_are_zero_on_a_constant_field, Fast, Exact) {
             worstGabor = std::max(worstGabor, texelR(gabor, x, y));
         }
     }
-    // Two epsilons for the separability gap the filter suite bounds, plus one each for scaling that term by the field and differencing.
-    const double bound = static_cast<double>(0.375F) * 4.0 * static_cast<double>(FLT_EPSILON);
+    // Two epsilons for the separability gap, one each for scaling it by the field and differencing, doubled by the envelope's factor 2.
+    const double bound = static_cast<double>(0.375F) * 8.0 * static_cast<double>(FLT_EPSILON);
     PT_EXPECT(ctx, static_cast<double>(worstGabor) <= bound,
                   "peak Morlet response " + std::to_string(worstGabor) + " over the cancellation bound " + std::to_string(bound));
 }
