@@ -3,6 +3,23 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Disk, sphere and mesh lights
+
+Three area-light types join the quad, each visible to the camera, sampled by NEE and MIS-weighted where a BSDF ray hits it.
+- **Disk** (`"type": "disk"`, `radius`): exact solid-angle sampling by Guillén et al.'s (2017) radial spherical-ellipse map,
+  inverted by Newton's method on Boost.Math's elliptic integral of the third kind; the solid angle matches a Gauss-Kronrod area
+  integral to float rounding at every pose. One- or two-sided, emitting along local -Z as the quad does.
+- **Sphere** (`"type": "sphere"`, `radius`): uniform cone sampling (PBR 4e 6.2.4) with 1 - cos written cancellation-free, so it
+  needs no small-angle branch. Emits outward only, so it takes no `twoSided`.
+- **Mesh** (`"type": "mesh"`, `gltfPath`, optional `scale`): any glTF's triangles at constant radiance, faces picked by area and
+  sampled uniformly (Heitz 2019). It pivots on its bounding-box centre, so `position` places that centre. One- or two-sided.
+- **Native surfaces:** disks and spheres are Embree's own discs and spheres, so the surface a ray hits is the one NEE samples.
+- **glTF:** primitives without NORMAL or TEXCOORD_0 now load, with flat normals (glTF 2.0 3.7.2.1) and uv 0.
+- **Scenes:** `cornell_mesh_light`, `cornell_disk_light` and `cornell_sphere_light` light the empty Cornell box with one light each,
+  at `cornell.json`'s temperature and intensity and within 1% of its quad's area (0.091 against 0.09 m^2).
+- **Image:** scenes without a mesh light render bit-identically; the quad's sampling and pdfs are unchanged.
+- **Unchanged:** material emission is still reached by BSDF sampling only, and lights are still picked uniformly (README roadmap).
+
 ## GL display tests
 
 The viewer's GPU display path is now tested against the CPU, in a hidden OpenGL context.

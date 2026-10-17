@@ -335,7 +335,8 @@ std::filesystem::path writeJson(const char* name, const std::string& text) {
 
 // Every shipped scene must load under the closed key sets: without this, each rejection row below could pass by rejecting everything.
 PT_CHECK(scene_config_accepts_the_shipped_scenes, Fast, Exact) {
-    const std::vector<const char*> shipped = {"cornell.json", "cornell_checker.json", "macbeth.json", "stump.json"};
+    const std::vector<const char*> shipped = {"cornell.json",           "cornell_checker.json", "cornell_disk_light.json", "cornell_mesh_light.json",
+                                              "cornell_sphere_light.json", "macbeth.json",         "stump.json"};
     ctx.plan(static_cast<int>(shipped.size()) + 2);
     for (const char* name : shipped) {
         const std::filesystem::path scene = std::filesystem::path(ASSET_ROOT_DIR) / "scenes" / name;

@@ -1,6 +1,6 @@
 # PBR Pathtracer
 
-*A physically-based unidirectional Monte Carlo path tracer with progressive sampling: Embree-accelerated, stochastic BSDF combined with environment-map NEE via MIS, behind a thin OpenGL display/HUD layer.*
+*A physically-based unidirectional Monte Carlo path tracer with progressive sampling: Embree-accelerated, stochastic BSDF combined with environment and area-light NEE via MIS, behind a thin OpenGL display/HUD layer.*
 
 ![Sample render](sample.png)
 
@@ -9,7 +9,7 @@
 C++20, built with CMake. Currently developed against macOS only.
 
 ```
-brew install cmake glfw glew glm imath openexr opencolorio openimageio embree open-image-denoise openvdb
+brew install cmake glfw glew glm imath openexr opencolorio openimageio embree open-image-denoise openvdb boost
 ```
 ```
 git submodule update --init --recursive
@@ -86,6 +86,7 @@ Capability the renderer lacks, most valuable first.
 | Area | Item | Detail | Complexity | Status |
 | --- | --- | --- | --- | --- |
 | Transport | Bounded media | Light scattering inside closed objects such as frosted glass, milk or skin. Needs tracking which object a ray is inside when they nest. | high | ready |
+| Sampling | Many-light sampling | Lights are picked uniformly, so a small dim light gets as many shadow rays as a large bright one. A light tree would pick by power and orientation, and ReSTIR would reuse picks across pixels. | high | ready |
 | Sampling | Adaptive sampling | Spend more samples on noisy pixels and fewer on clean ones. The per-pixel noise estimate it needs already exists. | medium | ready |
 | Camera | Scene graph and instancing | Every copy of an object is stored separately. Keeping objects in a hierarchy would let copies share memory and enable motion blur. | high | ready |
 | Colour | Photometric calibration | Link the renderer's light values to real units (lux, candela), so exposure can be checked against a real light meter. | medium | ready |

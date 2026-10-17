@@ -1,0 +1,23 @@
+{
+    "model": {
+        "gltfPath": "geometry/cornell/cornellEmpty_v001.gltf",
+        "position": [0.0, 0.0, 0.0],
+        "rotation": [0.0, 0.0, 0.0]
+    },
+    "environment": {
+        "hdriPath": "textures/republiqueHDR_2k.exr",
+        "lightEnabled": false
+    },
+    "materialPath": "materials/clay.json",
+    "lights": [
+        {
+            "type": "disk",
+            "position": [0.0, 0.49, 0.0],
+            "rotation": [-90.0, 0.0, 0.0],
+            "radius": 0.17,
+            "temperature": 4000,
+            "intensity": 15.0,
+            "twoSided": false
+        }
+    ]
+}
