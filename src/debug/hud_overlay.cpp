@@ -17,6 +17,7 @@
 #include "pathtracer/debug/aov.h"
 #include "pathtracer/debug/frame_stats.h"
 #include "pathtracer/debug/histogram.h"
+#include "pathtracer/debug/histogram_curve.h"
 #include "pathtracer/debug/system_info.h"
 #include "pathtracer/scene/camera.h"
 
@@ -32,78 +33,9 @@ constexpr ImVec4 kCyan(0.0F, 0.85F, 0.85F, 1.0F);
 
 constexpr float kHistogramHeight = 72.0F;
 
-// 9-tap triangular smoother (radius 4) over bins in [1, 254]. Bins 0 and 255 are never read, so clipping spikes do not bleed in.
-void smoothChannel(const std::array<std::uint32_t, 256>& channelBins, std::uint32_t peak,
-                    std::array<float, 256>& out) {
-    for (int bin = 0; bin < 256; ++bin) {
-        float sum = 0.0F;
-        float weightSum = 0.0F;
-        for (int offset = -4; offset <= 4; ++offset) {
-            const int neighbor = bin + offset;
-            if (neighbor < 1 || neighbor > 254) {
-                continue;
-            }
-            const int distance = offset < 0 ? -offset : offset;
-            const float weight = 5.0F - static_cast<float>(distance);
-            const float value = static_cast<float>(
-                std::min(channelBins[static_cast<std::size_t>(neighbor)], peak));
-            sum += weight * std::sqrt(value / static_cast<float>(peak));
-            weightSum += weight;
-        }
-        out[static_cast<std::size_t>(bin)] = weightSum > 0.0F ? sum / weightSum : 0.0F;
-    }
-}
-
-// Rescales a smoothed curve so its own maximum reaches 1.0: smoothing can only pull values down from the raw peak, never up.
-void rescaleToUnitPeak(std::array<float, 256>& curve) {
-    float maxValue = 0.0F;
-    for (const float value : curve) {
-        maxValue = std::max(maxValue, value);
-    }
-    if (maxValue < 1e-6F) {
-        return;
-    }
-    for (float& value : curve) {
-        value /= maxValue;
-    }
-}
-
-// The same across every active channel at once, so the tallest reaches full height and the others keep their relative height.
-void rescaleToUnitPeak(std::array<std::array<float, 256>, 3>& curves, const std::array<bool, 3>& active) {
-    float maxValue = 0.0F;
-    for (int c = 0; c < 3; ++c) {
-        if (!active[static_cast<std::size_t>(c)]) {
-            continue;
-        }
-        for (const float value : curves[static_cast<std::size_t>(c)]) {
-            maxValue = std::max(maxValue, value);
-        }
-    }
-    if (maxValue < 1e-6F) {
-        return;
-    }
-    for (int c = 0; c < 3; ++c) {
-        if (active[static_cast<std::size_t>(c)]) {
-            for (float& value : curves[static_cast<std::size_t>(c)]) {
-                value /= maxValue;
-            }
-        }
-    }
-}
-
-bool isGrayscale(const std::array<std::array<std::uint32_t, 256>, 3>& bins) {
-    for (int bin = 0; bin < 256; ++bin) {
-        if (bins[0][static_cast<std::size_t>(bin)] != bins[1][static_cast<std::size_t>(bin)] ||
-            bins[1][static_cast<std::size_t>(bin)] != bins[2][static_cast<std::size_t>(bin)]) {
-            return false;
-        }
-    }
-    return true;
-}
-
 // One continuous filled and outlined curve rather than 256 rectangles: what gives a smooth silhouette instead of a comb.
 void drawHistogramCurve(ImDrawList* drawList, ImVec2 origin, float histogramWidth,
-                         const std::array<float, 256>& vals, ImU32 fillColor, ImU32 lineColor) {
+                         const HistogramCurve& vals, ImU32 fillColor, ImU32 lineColor) {
     const float binWidth = histogramWidth / 256.0F;
     std::array<ImVec2, 256> edge{};
     for (int bin = 0; bin < 256; ++bin) {
@@ -127,82 +59,15 @@ void drawHistogramCurve(ImDrawList* drawList, ImVec2 origin, float histogramWidt
 }
 
 // Grayscale AOVs, R==G==B, collapse to one curve on a full-range unsmoothed scale so 0/255 clipping spikes stay where they are.
-void drawGrayscaleHistogram(ImDrawList* drawList, ImVec2 origin, float histogramWidth,
-                             const std::array<std::array<std::uint32_t, 256>, 3>& bins) {
-    std::uint64_t interiorTotal = 0;
-    for (int bin = 1; bin <= 254; ++bin) {
-        interiorTotal += bins[0][static_cast<std::size_t>(bin)];
-    }
-    // Under ~1% of pixels in the interior means near-binary content, an alpha or depth mask: full-range peak, raw sqrt, no smoothing.
-    const bool nearBinary = interiorTotal < static_cast<std::uint64_t>(256 * 144 / 100);
-    std::array<float, 256> heights{};
-    if (nearBinary) {
-        std::uint32_t peak = 1;
-        for (const std::uint32_t count : bins[0]) {
-            peak = std::max(peak, count);
-        }
-        for (int bin = 0; bin < 256; ++bin) {
-            heights[static_cast<std::size_t>(bin)] =
-                std::sqrt(static_cast<float>(bins[0][static_cast<std::size_t>(bin)]) /
-                          static_cast<float>(peak));
-        }
-    } else {
-        std::uint32_t peak = 1;
-        for (int bin = 1; bin <= 254; ++bin) {
-            peak = std::max(peak, bins[0][static_cast<std::size_t>(bin)]);
-        }
-        smoothChannel(bins[0], peak, heights);
-        rescaleToUnitPeak(heights);
-    }
-    drawHistogramCurve(drawList, origin, histogramWidth, heights, IM_COL32(180, 180, 180, 130),
+void drawGrayscaleHistogram(ImDrawList* drawList, ImVec2 origin, float histogramWidth, const HistogramBins& bins) {
+    drawHistogramCurve(drawList, origin, histogramWidth, grayscaleHeights(bins), IM_COL32(180, 180, 180, 130),
                         IM_COL32(220, 220, 220, 220));
 }
 
-// A structurally unused channel has every pixel at bin 0. Checked over bins 1-255 so a background-dominated channel is not mistaken for it.
-std::array<bool, 3> activeChannels(const std::array<std::array<std::uint32_t, 256>, 3>& bins) {
-    std::array<bool, 3> active{};
-    for (int c = 0; c < 3; ++c) {
-        bool empty = true;
-        for (int bin = 1; bin < 256; ++bin) {
-            if (bins[static_cast<std::size_t>(c)][static_cast<std::size_t>(bin)] > 0) {
-                empty = false;
-                break;
-            }
-        }
-        active[static_cast<std::size_t>(c)] = !empty;
-    }
-    return active;
-}
-
-// One peak shared across active channels, not per channel, so a channel with more signal reads taller rather than all filling the same.
-std::uint32_t sharedPeak(const std::array<std::array<std::uint32_t, 256>, 3>& bins,
-                          const std::array<bool, 3>& active) {
-    std::uint32_t peak = 1;
-    for (int c = 0; c < 3; ++c) {
-        if (!active[static_cast<std::size_t>(c)]) {
-            continue;
-        }
-        for (int bin = 1; bin <= 254; ++bin) {
-            peak = std::max(peak, bins[static_cast<std::size_t>(c)][static_cast<std::size_t>(bin)]);
-        }
-    }
-    return peak;
-}
-
 // Each channel one smooth curve, layered back to front B/G/R, then a floor curve -- the min across active channels -- where they overlap.
-void drawRgbHistogram(ImDrawList* drawList, ImVec2 origin, float histogramWidth,
-                       const std::array<std::array<std::uint32_t, 256>, 3>& bins) {
-    const std::array<bool, 3> active = activeChannels(bins);
-    const std::uint32_t peak = sharedPeak(bins, active);
-
-    std::array<std::array<float, 256>, 3> heights{};
-    for (int c = 0; c < 3; ++c) {
-        if (active[static_cast<std::size_t>(c)]) {
-            smoothChannel(bins[static_cast<std::size_t>(c)], peak,
-                          heights[static_cast<std::size_t>(c)]);
-        }
-    }
-    rescaleToUnitPeak(heights, active);
+void drawRgbHistogram(ImDrawList* drawList, ImVec2 origin, float histogramWidth, const HistogramBins& bins) {
+    const HistogramActive active = activeChannels(bins);
+    const std::array<HistogramCurve, 3> heights = rgbHeights(bins, active);
 
     // B, G, R -- R topmost -- then the shared overlap curve last.
     if (active[2]) {
@@ -222,27 +87,15 @@ void drawRgbHistogram(ImDrawList* drawList, ImVec2 origin, float histogramWidth,
     if (activeCount < 2) {
         return;
     }
-    std::array<float, 256> overlap{};
-    float overlapMax = 0.0F;
-    for (int bin = 0; bin < 256; ++bin) {
-        float value = 1.0F;
-        for (int c = 0; c < 3; ++c) {
-            if (active[static_cast<std::size_t>(c)]) {
-                value = std::min(value, heights[static_cast<std::size_t>(c)][static_cast<std::size_t>(bin)]);
-            }
-        }
-        overlap[static_cast<std::size_t>(bin)] = value;
-        overlapMax = std::max(overlapMax, value);
-    }
-    if (overlapMax > 0.02F) {
+    const HistogramCurve overlap = overlapHeights(heights, active);
+    if (*std::max_element(overlap.begin(), overlap.end()) > 0.02F) {
         drawHistogramCurve(drawList, origin, histogramWidth, overlap, IM_COL32(180, 180, 180, 160),
                             IM_COL32(255, 255, 255, 220));
     }
 }
 
 // Renders the current AOV's per-channel histogram, at the panel's content width so it lines up with every other section.
-void drawHistogramPanel(const std::array<std::array<std::uint32_t, 256>, 3>& bins,
-                         float overRangeFraction, float overRangePeakMultiple) {
+void drawHistogramPanel(const HistogramBins& bins, float overRangeFraction, float overRangePeakMultiple) {
     ImGui::TextColored(kCyan, "Histogram");
 
     const float histogramWidth = ImGui::GetContentRegionAvail().x;

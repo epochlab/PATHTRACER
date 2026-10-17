@@ -6,7 +6,7 @@ namespace pathtracer::gfx {
 
 class ShaderProgram;
 
-// Draws a fullscreen triangle (the gl_VertexID trick, no VBO) into the default framebuffer, sampling an HDR colour texture.
+// Draws a fullscreen triangle (the gl_VertexID trick, no VBO) into a framebuffer, sampling an HDR colour texture.
 class PostProcessPass {
 public:
     PostProcessPass();
@@ -17,8 +17,8 @@ public:
     PostProcessPass(PostProcessPass&& other) noexcept;
     PostProcessPass& operator=(PostProcessPass&& other) noexcept;
 
-    // Binds framebuffer 0, sets the viewport to imageRect, binds displayShader and hdrColorTexture on unit 0, draws. Never clears.
-    void draw(unsigned int hdrColorTexture, const ShaderProgram& displayShader, ViewportRect imageRect) const;
+    // Binds framebuffer (the viewer's default, 0), viewports imageRect, binds displayShader and hdrColorTexture on unit 0. Never clears.
+    void draw(unsigned int hdrColorTexture, const ShaderProgram& displayShader, ViewportRect imageRect, unsigned int framebuffer) const;
 
 private:
     unsigned int vao_ = 0;

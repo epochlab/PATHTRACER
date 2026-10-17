@@ -3,6 +3,21 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## GL display tests
+
+The viewer's GPU display path is now tested against the CPU, in a hidden OpenGL context.
+- **Fix:** at 1:1 the chromatic-aberration fringe's red and blue were blurred by the GPU's texture minification while green was
+  not (458 values differed from the CPU). The square lattice fetch now uses the image coordinate's own footprint (`textureGrad`),
+  so all three channels sample the nearest cell as `applyDisplayOptics` does.
+- **Tests** (`display_gl_validate`, Not Run without a GL context):
+  - Texture upload round-trips bit-exactly for 1-4 channels in half and float, on re-upload and on resize.
+  - The OCIO display, gain, channel views, invert and dither match the CPU within a bound from the GLSL precision rules; the worst
+    case uses 0.4-0.8 of it. 8-bit output matches the CPU's codes.
+  - Bloom (0.0013 of its bound) and the fringe on square and hexagonal films match `applyDisplayOptics`.
+  - The HUD histogram's counts equal a CPU count of the drawn frame.
+- **Histogram:** binning and curve shaping moved from the HUD into `histogram_curve.h`, with five CPU tests. The clipping
+  threshold now derives from the histogram's size instead of a copied constant.
+
 ## Statistical bands and calibration
 
 Statistical tests now fail by chance no more often than the suite states, and an opt-in run measures it.

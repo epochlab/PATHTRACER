@@ -1,9 +1,11 @@
 #include "pathtracer/debug/histogram.h"
 
+#include <span>
 #include <utility>
 
 #include <GL/glew.h>
 
+#include "pathtracer/debug/histogram_curve.h"
 #include "pathtracer/debug/memory_tracker.h"
 #include "pathtracer/gfx/gl_debug.h"
 
@@ -88,14 +90,14 @@ Histogram& Histogram::operator=(Histogram&& other) noexcept {
     return *this;
 }
 
-void Histogram::update(pathtracer::gfx::ViewportRect imageRect) {
+void Histogram::update(pathtracer::gfx::ViewportRect imageRect, unsigned int readFramebuffer) {
     ++frameCounter_;
     if (frameCounter_ % kCaptureIntervalFrames != 0) {
         return;
     }
 
     // Downsample the just-composited image into the fixed small FBO. Read from imageRect alone, so letterbox bars never reach the bins.
-    GL_CALL(glBindFramebuffer(GL_READ_FRAMEBUFFER, 0));
+    GL_CALL(glBindFramebuffer(GL_READ_FRAMEBUFFER, readFramebuffer));
     GL_CALL(glBindFramebuffer(GL_DRAW_FRAMEBUFFER, downsampleFbo_));
     GL_CALL(glBlitFramebuffer(imageRect.x, imageRect.y, imageRect.x + imageRect.width,
                               imageRect.y + imageRect.height, 0, 0, kWidth, kHeight,
@@ -114,14 +116,7 @@ void Histogram::update(pathtracer::gfx::ViewportRect imageRect) {
             GL_PIXEL_PACK_BUFFER, 0, static_cast<GLsizeiptr>(kWidth) * kHeight * 3,
             GL_MAP_READ_BIT));
         if (pixels != nullptr) {
-            for (auto& channel : bins_) {
-                channel.fill(0);
-            }
-            for (int i = 0; i < kWidth * kHeight; ++i) {
-                ++bins_[0][pixels[(i * 3) + 0]];
-                ++bins_[1][pixels[(i * 3) + 1]];
-                ++bins_[2][pixels[(i * 3) + 2]];
-            }
+            binPixels(std::span<const unsigned char>(pixels, static_cast<std::size_t>(kWidth) * kHeight * 3), bins_);
             GL_CALL(glUnmapBuffer(GL_PIXEL_PACK_BUFFER));
             hasData_ = true;
         }
