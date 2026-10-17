@@ -335,8 +335,8 @@ std::filesystem::path writeJson(const char* name, const std::string& text) {
 
 // Every shipped scene must load under the closed key sets: without this, each rejection row below could pass by rejecting everything.
 PT_CHECK(scene_config_accepts_the_shipped_scenes, Fast, Exact) {
-    const std::vector<const char*> shipped = {"cornell.json", "macbeth.json", "stump.json"};
-    ctx.plan(static_cast<int>(shipped.size()) + 1);
+    const std::vector<const char*> shipped = {"cornell.json", "cornell_checker.json", "macbeth.json", "stump.json"};
+    ctx.plan(static_cast<int>(shipped.size()) + 2);
     for (const char* name : shipped) {
         const std::filesystem::path scene = std::filesystem::path(ASSET_ROOT_DIR) / "scenes" / name;
         char detail[256];
@@ -347,6 +347,12 @@ PT_CHECK(scene_config_accepts_the_shipped_scenes, Fast, Exact) {
     const std::optional<pathtracer::config::SceneConfig> macbeth =
         pathtracer::config::loadSceneConfig((std::filesystem::path(ASSET_ROOT_DIR) / "scenes" / "macbeth.json").string());
     PT_EXPECT(ctx, macbeth && macbeth->textures.size() == 2, "macbeth.json's textures did not parse to its two grids");
+    // Anti-vacuity for model.vertexColor: glTF's tint by default, and cornell_checker.json's opt-out.
+    const auto vertexColorOf = [](const char* name) {
+        return pathtracer::config::loadSceneConfig((std::filesystem::path(ASSET_ROOT_DIR) / "scenes" / name).string()).value().model.vertexColor;
+    };
+    PT_EXPECT(ctx, vertexColorOf("cornell.json") && !vertexColorOf("cornell_checker.json"),
+              "model.vertexColor did not default to true, or cornell_checker.json's false did not parse");
 }
 
 // A binding is a path string or {path, colorSpace, channel, bump}, and the environment may name its colour space: all reach SceneConfig.
@@ -471,6 +477,11 @@ PT_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
         // Retired keys, well-formed otherwise: an ignored textureOverrides would render the scene untextured with no diagnostic.
         {"the retired textureOverrides key", "engine_io_scene_textureoverrides.json",
          scene(",\"textureOverrides\":{\"sphere01\":{\"base_color\":\"textures/macbeth.exr\"}}")},
+        // A uniform bool, as lightEnabled: a number is a type error, not a truthy switch.
+        {"model.vertexColor as a number", "engine_io_scene_vertexcolor.json",
+         "{\"model\":{\"gltfPath\":\"geometry/cornell/cornell_v001.gltf\",\"vertexColor\":0,"
+         "\"position\":[0,0,0],\"rotation\":[0,0,0]},\"environment\":{\"hdriPath\":\"textures/republiqueHDR_2k.exr\"},"
+         "\"materialPath\":\"materials/clay.json\"}"},
         {"the retired model.texturePath key", "engine_io_scene_texturepath.json",
          "{\"model\":{\"gltfPath\":\"geometry/cornell/cornell_v001.gltf\",\"texturePath\":\"\","
          "\"position\":[0,0,0],\"rotation\":[0,0,0]},\"environment\":{\"hdriPath\":\"textures/republiqueHDR_2k.exr\"},"
@@ -526,7 +537,8 @@ PT_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
 
 // Anti-vacuity for the rejection rows below: every material the repo ships must still load once loadMaterialConfig validates.
 PT_CHECK(material_config_accepts_the_shipped_materials, Fast, Exact) {
-    const std::vector<const char*> shipped = {"chrome.json", "clay.json", "emission.json", "glass.json", "gold.json", "principled.json"};
+    const std::vector<const char*> shipped = {"checker.json", "chrome.json", "clay.json",       "emission.json",
+                                              "glass.json",   "gold.json",   "principled.json"};
     ctx.plan(static_cast<int>(shipped.size()));
     for (const char* name : shipped) {
         const std::filesystem::path path = std::filesystem::path(ASSET_ROOT_DIR) / "materials" / name;
@@ -545,6 +557,24 @@ PT_CHECK(material_config_thin_walled, Fast, Exact) {
     ctx.plan(1);
     PT_EXPECT(ctx, material && material->geometryThinWalled && material->subsurfaceWeight == 0.5F && material->geometryOpacity == 0.25F,
               "a thin-walled material with subsurface and opacity did not load as written");
+}
+
+// A {"randomChecker": {...}} object replaces one input's constant: it reaches materialOf as that input's pattern, seed 0 when omitted.
+PT_CHECK(material_config_reads_random_checkers, Fast, Exact) {
+    const std::filesystem::path path = writeJson("engine_io_material_checker.json",
+                                                 "{\"base_color\":{\"randomChecker\":{\"cellSize\":0.01,\"seed\":7}},"
+                                                 "\"specular_roughness\":{\"randomChecker\":{\"cellSize\":0.3}},\"base_weight\":0.5}");
+    const std::optional<pathtracer::config::MaterialConfig> material = pathtracer::config::loadMaterialConfig(path.string());
+    std::filesystem::remove(path);
+    const pathtracer::scene::Material bound =
+        material ? pathtracer::scene::materialOf(*material, material->randomCheckers) : pathtracer::scene::Material{};
+    const auto* colour = std::get_if<pathtracer::scene::RandomChecker>(&bound.baseColor);
+    const auto* roughness = std::get_if<pathtracer::scene::RandomChecker>(&bound.specularRoughness);
+    const auto* weight = std::get_if<float>(&bound.baseWeight);
+    ctx.plan(3);
+    PT_EXPECT(ctx, colour && colour->cellSize == 0.01F && colour->seed == 7U, "a colour input's random checker did not bind as written");
+    PT_EXPECT(ctx, roughness && roughness->cellSize == 0.3F && roughness->seed == 0U, "a scalar input's checker did not default seed 0");
+    PT_EXPECT(ctx, weight && *weight == 0.5F, "a constant beside the checkers did not load as written");
 }
 
 // Each row names the BSDF failure it prevents; without the loader's bounds these reach the integrator as NaN or negative energy.
@@ -592,6 +622,23 @@ PT_CHECK(material_config_rejects_malformed_input, Fast, Exact) {
         {"geometry_opacity above 1", "engine_io_material_opacity.json", material(",\"geometry_opacity\":1.5")},
         // A uniform bool: a number is a type error, not a truthy switch.
         {"geometry_thin_walled as a number", "engine_io_material_thinnumber.json", material(",\"geometry_thin_walled\":1")},
+        // A random checker's 0 is a constant 0 at half the cells: refused where the constant would be, as for an ior.
+        {"a random checker on specular_ior", "engine_io_material_checkerior.json",
+         material(",\"specular_ior\":{\"randomChecker\":{\"cellSize\":0.1}}")},
+        {"a random checker on subsurface_weight", "engine_io_material_checkersss.json",
+         material(",\"subsurface_weight\":{\"randomChecker\":{\"cellSize\":0.1}}")},
+        // A zero cell size divides by nothing; a negative one has no meaning as a width.
+        {"zero cellSize", "engine_io_material_checkerzero.json", material(",\"base_weight\":{\"randomChecker\":{\"cellSize\":0}}")},
+        {"negative cellSize", "engine_io_material_checkerneg.json",
+         material(",\"base_weight\":{\"randomChecker\":{\"cellSize\":-0.01}}")},
+        {"a missing cellSize", "engine_io_material_checkermissing.json", material(",\"base_weight\":{\"randomChecker\":{\"seed\":1}}")},
+        {"a negative seed", "engine_io_material_checkerseed.json",
+         material(",\"base_weight\":{\"randomChecker\":{\"cellSize\":0.1,\"seed\":-1}}")},
+        // Closed key sets: a misspelt parameter would load at its default, a stray sibling would be ignored.
+        {"a misspelt randomChecker key", "engine_io_material_checkerkey.json",
+         material(",\"base_weight\":{\"randomChecker\":{\"cellsize\":0.1}}")},
+        {"a key beside randomChecker", "engine_io_material_checkersibling.json",
+         material(",\"base_weight\":{\"randomChecker\":{\"cellSize\":0.1},\"seed\":1}")},
     };
 
     const std::filesystem::path basePath = writeJson("engine_io_material_base.json", material(""));
@@ -1406,14 +1453,16 @@ GltfPrimitive makeQuad() {
                          {0, 1, 2, 0, 2, 3}};
 }
 
-// glTF COLOR_0 is linear BT.709 (glTF 2.0 3.7.2.1); the loader gives the scene space OCIO's conversion, and an absent one stays white.
+// glTF COLOR_0 is linear BT.709 (glTF 2.0 3.7.2.1), converted by OCIO to the scene space; absent, or vertexColor false, it is white.
 PT_CHECK(gltf_vertex_colours_convert_to_the_scene_space, Fast, Exact) {
     GltfPrimitive quad = makeQuad();
     quad.colours = {{0.8F, 0.1F, 0.05F}, {0.1F, 0.6F, 0.2F}, {0.2F, 0.3F, 0.9F}, {1.0F, 1.0F, 1.0F}};
-    const std::optional<pathtracer::scene::LoadedModel> tinted = pathtracer::scene::loadGltf(writeGltf("engine_io_validate_tint", {quad}, {glm::vec3(1.0F)}).string());
+    const std::string tintedPath = writeGltf("engine_io_validate_tint", {quad}, {glm::vec3(1.0F)}).string();
+    const std::optional<pathtracer::scene::LoadedModel> tinted = pathtracer::scene::loadGltf(tintedPath);
+    const std::optional<pathtracer::scene::LoadedModel> untinted = pathtracer::scene::loadGltf(tintedPath, glm::mat4(1.0F), false);
     const std::optional<pathtracer::scene::LoadedModel> plain =
         pathtracer::scene::loadGltf(writeGltf("engine_io_validate_plain", {makeQuad()}, {glm::vec3(1.0F)}).string());
-    ctx.plan(2);
+    ctx.plan(3);
     // Triangle 0 of the quad is vertices 0, 1, 2 and its second is 0, 2, 3, so v0 of triangle 1 is vertex 0 again.
     std::vector<float> expected = {0.8F, 0.1F, 0.05F, 0.1F, 0.6F, 0.2F, 0.2F, 0.3F, 0.9F};
     pathtracer::gfx::convertToSceneSpace(expected, pathtracer::gfx::kOcioLinearRec709);
@@ -1422,6 +1471,10 @@ PT_CHECK(gltf_vertex_colours_convert_to_the_scene_space, Fast, Exact) {
                            glm::vec3(expected[6], expected[7], expected[8]) == tinted->shadingTriangles[0].v2.colour;
     PT_EXPECT(ctx, converted, "COLOR_0 did not arrive as OCIO's linear Rec.709 to the scene space");
     PT_EXPECT(ctx, plain && plain->shadingTriangles[0].v0.colour == glm::vec3(1.0F), "a primitive with no COLOR_0 is not white");
+    const bool white = untinted && std::ranges::all_of(untinted->shadingTriangles, [](const pathtracer::scene::ShadingTriangle& t) {
+        return t.v0.colour == glm::vec3(1.0F) && t.v1.colour == glm::vec3(1.0F) && t.v2.colour == glm::vec3(1.0F);
+    });
+    PT_EXPECT(ctx, white, "vertexColor false still read COLOR_0");
 }
 
 // glTF 2.0 3.7.2.1: winding follows the determinant, so a mirrored node must keep its face normal on the shading normal's side.

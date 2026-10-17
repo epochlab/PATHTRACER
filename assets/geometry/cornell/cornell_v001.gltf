@@ -3,122 +3,98 @@
     {
       "bufferView": 0,
       "componentType": 5126,
-      "count": 510,
-      "type": "VEC3"
+      "type": "VEC3",
+      "count": 510
     },
     {
       "bufferView": 1,
       "componentType": 5126,
-      "count": 510,
-      "type": "VEC2"
+      "type": "VEC2",
+      "count": 510
     },
     {
       "bufferView": 2,
       "componentType": 5126,
-      "count": 510,
-      "type": "VEC3"
+      "type": "VEC3",
+      "count": 510
     },
     {
       "bufferView": 3,
       "componentType": 5126,
+      "type": "VEC3",
       "count": 510,
-      "max": [
-        0.359531194,
-        -0.1006459,
-        0.150000006
-      ],
-      "min": [
-        0.0604687929,
-        -0.3993541,
-        -0.150000006
-      ],
-      "type": "VEC3"
+      "min": [0.0604687929, -0.3993541, -0.150000006],
+      "max": [0.359531194, -0.1006459, 0.150000006]
     },
     {
       "bufferView": 4,
       "componentType": 5126,
-      "count": 20,
-      "type": "VEC3"
+      "type": "VEC3",
+      "count": 20
     },
     {
       "bufferView": 5,
       "componentType": 5126,
+      "type": "VEC3",
       "count": 20,
-      "max": [
-        0.5,
-        0.5,
-        0.5
-      ],
-      "min": [
-        -0.5,
-        -0.5,
-        -0.5
-      ],
-      "type": "VEC3"
+      "min": [-0.5, -0.5, -0.5],
+      "max": [0.5, 0.5, 0.5]
     },
     {
       "bufferView": 6,
       "componentType": 5126,
-      "count": 510,
-      "type": "VEC2"
+      "type": "VEC2",
+      "count": 510
     },
     {
       "bufferView": 7,
       "componentType": 5126,
-      "count": 510,
-      "type": "VEC3"
+      "type": "VEC3",
+      "count": 510
     },
     {
       "bufferView": 8,
       "componentType": 5126,
-      "count": 20,
-      "type": "VEC2"
+      "type": "VEC2",
+      "count": 20
     },
     {
       "bufferView": 9,
       "componentType": 5126,
-      "count": 510,
-      "type": "VEC3"
+      "type": "VEC3",
+      "count": 510
     },
     {
       "bufferView": 10,
       "componentType": 5126,
-      "count": 20,
-      "type": "VEC3"
+      "type": "VEC3",
+      "count": 20
     },
     {
       "bufferView": 11,
       "componentType": 5126,
+      "type": "VEC3",
       "count": 510,
-      "max": [
-        -0.0604687929,
-        -0.1006459,
-        0.150000006
-      ],
-      "min": [
-        -0.359531194,
-        -0.3993541,
-        -0.150000006
-      ],
-      "type": "VEC3"
+      "min": [-0.359531194, -0.3993541, -0.150000006],
+      "max": [-0.0604687929, -0.1006459, 0.150000006]
     },
     {
       "bufferView": 12,
       "componentType": 5125,
-      "count": 2940,
-      "type": "SCALAR"
+      "type": "SCALAR",
+      "count": 2940
     },
     {
       "bufferView": 13,
       "componentType": 5125,
-      "count": 2940,
-      "type": "SCALAR"
+      "type": "SCALAR",
+      "count": 2940
     },
     {
       "bufferView": 14,
       "componentType": 5125,
-      "count": 30,
-      "type": "SCALAR"
+      "type": "SCALAR",
+      "count": 30
     }
   ],
   "asset": {
@@ -203,47 +179,47 @@
   ],
   "buffers": [
     {
-      "byteLength": 73560,
-      "uri": "cornell_v001_data.bin"
+      "uri": "cornell_v001_data.bin",
+      "byteLength": 73560
     }
   ],
   "meshes": [
     {
       "primitives": [
         {
+          "indices": 14,
           "attributes": {
             "COLOR_0": 4,
-            "NORMAL": 10,
             "POSITION": 5,
-            "TEXCOORD_0": 8
-          },
-          "indices": 14
+            "TEXCOORD_0": 8,
+            "NORMAL": 10
+          }
         }
       ]
     },
     {
       "primitives": [
         {
+          "indices": 13,
           "attributes": {
             "COLOR_0": 0,
+            "TEXCOORD_0": 6,
             "NORMAL": 7,
-            "POSITION": 11,
-            "TEXCOORD_0": 6
-          },
-          "indices": 13
+            "POSITION": 11
+          }
         }
       ]
     },
     {
       "primitives": [
         {
+          "indices": 12,
           "attributes": {
-            "COLOR_0": 9,
+            "TEXCOORD_0": 1,
             "NORMAL": 2,
             "POSITION": 3,
-            "TEXCOORD_0": 1
-          },
-          "indices": 12
+            "COLOR_0": 9
+          }
         }
       ]
     }
@@ -266,11 +242,7 @@
   "scenes": [
     {
       "name": "cornell",
-      "nodes": [
-        0,
-        1,
-        2
-      ]
+      "nodes": [ 0, 1, 2 ]
     }
   ]
 }

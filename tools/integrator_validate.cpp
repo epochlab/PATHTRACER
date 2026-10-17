@@ -965,8 +965,8 @@ PT_CHECK(material_binding_resolution, Fast, Exact) {
     if (!clay.has_value() || !glass.has_value()) {
         return;
     }
-    const Material clayMaterial = pathtracer::scene::materialOf(*clay);
-    const Material glassMaterial = pathtracer::scene::materialOf(*glass);
+    const Material clayMaterial = pathtracer::scene::materialOf(*clay, clay->randomCheckers);
+    const Material glassMaterial = pathtracer::scene::materialOf(*glass, glass->randomCheckers);
     // Non-vacuity: two shipped materials that resolved alike would let a dropped override pass unseen.
     PT_EXPECT(ctx, !sameMaterial(clayMaterial, glassMaterial), "clay.json and glass.json resolve to the same inputs");
 

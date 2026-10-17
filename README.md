@@ -73,7 +73,7 @@ Output that is wrong, lossy or unverified, most serious first.
 | Area | Item | Detail | Complexity | Status |
 | --- | --- | --- | --- | --- |
 | Validation | Curved transmissive epsilons | Removing the offset that stops rays re-hitting curved glass still passes every test. Needs a test against a long reference render. | medium | ready |
-| Texture | Minification filtering | Distant textures still shimmer after a bounce. Normal, bump and roughness maps also need filtering that keeps surfaces from shading flat. | high | ready |
+| Texture | Minification filtering | Distant textures still shimmer after a bounce, and the random checker is never filtered (`cornell_checker.json` shows both). Normal, bump and roughness maps also need filtering that keeps surfaces from shading flat. | high | ready |
 | Validation | Untested paths | No tests yet for the Gabor filter's strength, GPU and CPU display matching, screen upload, the HUD histogram, or false tolerance failures. | medium | ready |
 
 ### Features
@@ -96,7 +96,6 @@ Refinements, speculative or blocked; not scheduled.
 | --- | --- | --- | --- | --- |
 | BSDF | Smith-exact transmission | Light that passes through rough glass after bouncing between tiny surface facets uses an approximate, physically lopsided shape. | high | ready |
 | Texture | Lookup cost | A filtered texture read costs about twice a direct one (12.2 ms against 5.6 ms); filtering after bounces would cut the cost. | medium | ready |
-| Texture | Aliasing test asset | A finely noisy material that makes texture shimmer easy to see, to compare before and after filtering. | low | ready |
 | Sampling | Blue noise beyond one dimension | Blue noise makes noise look finer, but the mask spreads error well in one dimension only; a multi-dimensional mask would fix it. | medium | ready |
 | Colour | HDRI white balance | An HDRI keeps the colour cast of the light it was shot under; white balancing from its colour temperature to daylight would fix it. | medium | ready |
 | Colour | Measured-observer cones | Model colour vision from measured human eye response. Needs light tracked by wavelength, so it waits for spectral rendering. | high | blocked |

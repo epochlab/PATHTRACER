@@ -233,12 +233,15 @@ bool isSurface(cgltf_primitive_type type) {
 
 // Builds one MeshInstance from a triangle-topology primitive, failing with nullopt rather than defaulting geometry it cannot read.
 std::optional<MeshInstance> loadPrimitive(const cgltf_primitive& prim, const glm::mat4& transform, int instanceIndex,
-                                           const std::string& name,
+                                           const std::string& name, bool vertexColor,
                                            std::vector<Triangle>& outWorldTriangles,
                                            std::vector<ShadingTriangle>& outShadingTriangles) {
-    const std::optional<RequiredAccessors> acc = findAttributeAccessors(prim);
+    std::optional<RequiredAccessors> acc = findAttributeAccessors(prim);
     if (!acc.has_value()) {
         return std::nullopt;
+    }
+    if (!vertexColor) {
+        acc->color = nullptr;
     }
     std::optional<std::vector<unsigned int>> stream = readIndices(prim.indices, acc->position->count);
     if (!stream.has_value()) {
@@ -274,7 +277,7 @@ constexpr int kMaxNodeDepth = 256;
 // A node hierarchy is a tree, so recursion is its structure; the depth cap above is what makes it safe on untrusted input.
 
 // NOLINTNEXTLINE(misc-no-recursion)
-bool walkNodes(cgltf_node* const* nodes, cgltf_size count, const glm::mat4& parentTransform,
+bool walkNodes(cgltf_node* const* nodes, cgltf_size count, const glm::mat4& parentTransform, bool vertexColor,
                std::vector<MeshInstance>& instances, std::vector<Triangle>& worldTriangles,
                std::vector<ShadingTriangle>& shadingTriangles, int depth = 0) {
     if (depth >= kMaxNodeDepth) {
@@ -296,7 +299,7 @@ bool walkNodes(cgltf_node* const* nodes, cgltf_size count, const glm::mat4& pare
                 }
                 const int instanceIndex = static_cast<int>(instances.size());  // index this primitive's MeshInstance will get
                 std::optional<MeshInstance> instance =
-                    loadPrimitive(prim, world, instanceIndex, name, worldTriangles, shadingTriangles);
+                    loadPrimitive(prim, world, instanceIndex, name, vertexColor, worldTriangles, shadingTriangles);
                 if (!instance.has_value()) {
                     return false;
                 }
@@ -304,7 +307,7 @@ bool walkNodes(cgltf_node* const* nodes, cgltf_size count, const glm::mat4& pare
             }
         }
 
-        if (!walkNodes(node->children, node->children_count, world, instances, worldTriangles, shadingTriangles,
+        if (!walkNodes(node->children, node->children_count, world, vertexColor, instances, worldTriangles, shadingTriangles,
                        depth + 1)) {
             return false;
         }
@@ -314,7 +317,7 @@ bool walkNodes(cgltf_node* const* nodes, cgltf_size count, const glm::mat4& pare
 
 }  // namespace
 
-std::optional<LoadedModel> loadGltf(const std::string& path, const glm::mat4& rootTransform) {
+std::optional<LoadedModel> loadGltf(const std::string& path, const glm::mat4& rootTransform, bool vertexColor) {
     const cgltf_options options{};
     cgltf_data* data = nullptr;
 
@@ -335,7 +338,7 @@ std::optional<LoadedModel> loadGltf(const std::string& path, const glm::mat4& ro
 
     LoadedModel model;
     const bool ok = data->scene != nullptr &&
-                    walkNodes(data->scene->nodes, data->scene->nodes_count, rootTransform, model.instances,
+                    walkNodes(data->scene->nodes, data->scene->nodes_count, rootTransform, vertexColor, model.instances,
                               model.worldTriangles, model.shadingTriangles);
 
     cgltf_free(data);

@@ -28,8 +28,9 @@ struct LoadedModel {
     std::vector<ShadingTriangle> shadingTriangles;
 };
 
-// Parses path's geometry via cgltf, ignoring its materials: each instance gets the neutral Material{}. rootTransform seeds the walk.
-std::optional<LoadedModel> loadGltf(const std::string& path, const glm::mat4& rootTransform = glm::mat4(1.0F));
+// Parses path's geometry via cgltf, ignoring its materials, into neutral Material{}s; vertexColor false reads COLOR_0 as absent (white).
+std::optional<LoadedModel> loadGltf(const std::string& path, const glm::mat4& rootTransform = glm::mat4(1.0F),
+                                    bool vertexColor = true);
 
 // Appends each light's emitting geometry to `model`, plus one entry per light to `instanceLightIndex`, pre-sized to instances, all -1.
 void appendQuadLights(LoadedModel& model, const std::vector<QuadLight>& lights,

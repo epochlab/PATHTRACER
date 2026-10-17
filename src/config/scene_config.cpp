@@ -3,10 +3,12 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <fstream>
 #include <initializer_list>
 #include <iostream>
 #include <limits>
+#include <string>
 #include <string_view>
 #include <type_traits>
 #include <utility>
@@ -48,6 +50,15 @@ int channelIndex(const nlohmann::json& value) {
         throw nlohmann::json::type_error::create(302, "texture channel '" + name + "' is not one of r, g, b", &value);
     }
     return static_cast<int>(index);
+}
+
+// A JSON unsigned integer in [0, 2^32 - 1]; a float, negative or wider value is a json error, never truncated.
+std::uint32_t uint32Of(const nlohmann::json& value) {
+    const std::uint64_t integer = value.is_number_unsigned() ? value.get<std::uint64_t>() : 0U;
+    if (!value.is_number_unsigned() || integer > std::numeric_limits<std::uint32_t>::max()) {
+        throw nlohmann::json::type_error::create(302, value.dump() + " is not an integer in [0, 2^32 - 1]", &value);
+    }
+    return static_cast<std::uint32_t>(integer);
 }
 
 // One binding: a path string, or {path, colorSpace, channel, bump: {path, height}} under a closed key set.
@@ -205,6 +216,33 @@ bool validInput(const pathtracer::scene::InputSpec& spec, const T& value, const 
     return true;
 }
 
+// {"randomChecker": {"cellSize", "seed"}} in place of spec's constant; false, logged, where a constant 0 would be refused too.
+bool addRandomChecker(const pathtracer::scene::InputSpec& spec, const nlohmann::json& binding, MaterialConfig& material,
+                      const std::string& path) {
+    if (!onlyKnownKeys(binding, {"randomChecker"}, path, "material input") ||
+        !onlyKnownKeys(binding.at("randomChecker"), {"cellSize", "seed"}, path, "randomChecker")) {
+        return false;
+    }
+    const nlohmann::json& checker = binding.at("randomChecker");
+    const float cellSize = toFloat(checker.at("cellSize"));
+    if (!(cellSize > 0.0F) || !std::isfinite(cellSize)) {
+        std::cerr << "loadMaterialConfig: " << path << ": " << spec.name << " random checker cellSize must be positive and finite\n";
+        return false;
+    }
+    // 1 lies in every OpenPBR range, so the pattern's 0 alone decides: a Positive input (an ior) cannot take it.
+    if (!pathtracer::scene::inRange(0.0F, spec.range)) {
+        std::cerr << "loadMaterialConfig: " << path << ": " << spec.name << " cannot take a random checker's 0\n";
+        return false;
+    }
+    if (spec.requiresVolumes && !material.geometryThinWalled) {
+        std::cerr << "loadMaterialConfig: " << path << ": " << spec.name << " requires volumetric transport or geometry_thin_walled\n";
+        return false;
+    }
+    const auto seed = checker.find("seed");
+    material.randomCheckers.emplace(spec.name, pathtracer::scene::RandomChecker{cellSize, seed == checker.end() ? 0U : uint32Of(*seed)});
+    return true;
+}
+
 }  // namespace
 
 std::optional<SceneConfig> loadSceneConfig(const std::string& path) {
@@ -227,11 +265,11 @@ std::optional<SceneConfig> loadSceneConfig(const std::string& path) {
         // No model is a scene of lights and volumes alone; the surface keys all name the model's nodes, so they come with it.
         ModelConfig model{std::nullopt, glm::vec3(0.0F), glm::vec3(0.0F)};
         if (const auto it = j.find("model"); it != j.end()) {
-            if (!onlyKnownKeys(*it, {"gltfPath", "position", "rotation"}, path, "model")) {
+            if (!onlyKnownKeys(*it, {"gltfPath", "position", "rotation", "vertexColor"}, path, "model")) {
                 return std::nullopt;
             }
             model = ModelConfig{it->at("gltfPath").get<std::string>(), it->at("position").get<glm::vec3>(),
-                                it->at("rotation").get<glm::vec3>()};
+                                it->at("rotation").get<glm::vec3>(), it->value("vertexColor", true)};
         } else if (j.contains("materialPath") || j.contains("materialOverrides") || j.contains("textures")) {
             std::cerr << "loadSceneConfig: " << path << ": materialPath, materialOverrides and textures need a model\n";
             return std::nullopt;
@@ -361,6 +399,10 @@ std::optional<MaterialConfig> loadMaterialConfig(const std::string& path) {
             [&](const pathtracer::scene::InputSpec& spec, auto& value, const auto& fallback) {
                 const auto it = j.find(spec.name);
                 if (it == j.end()) {
+                    return;
+                }
+                if (it->is_object()) {
+                    ok = addRandomChecker(spec, *it, material, path) && ok;
                     return;
                 }
                 if constexpr (std::is_same_v<std::decay_t<decltype(value)>, float>) {

@@ -3,6 +3,34 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Random checker
+
+A procedural random binary checker, the aliasing test asset: fair, independent black/white square cells `cellSize` wide in UV, after the
+random checkerboards of Bertrand, Lindemann & Egelhaaf 2015 (PLoS Comput Biol 11(11) e1004339).
+- **Pattern:** cell (i, j) = floor(uv / cellSize), wrapped mod 2^32, reads the top bit of pcg3d(i, j, seed) (Jarzynski & Olano 2020).
+  Cells are independent, so a UV seam is invisible exactly when it spans a whole number of cells. It is point-sampled: no footprint
+  filter, so it shimmers until samples average it, which is its purpose.
+- **Material files:** any value input may be `{"randomChecker": {"cellSize": S, "seed": N}}` in place of its constant (cellSize positive
+  and finite, in UV units, so metres where UVs are metric; seed optional, default 0). Inputs refuse it where they would refuse a constant
+  0 (an ior), and volume-only inputs need `geometry_thin_walled`. `MaterialInput` gains the `RandomChecker` alternative; a scene texture
+  bound over the same input still replaces it.
+- **Vertex colour:** `model.vertexColor` (default true) reads glTF COLOR_0 as the base-colour tint it is. When false, every vertex reads
+  white, so `base_color` reaches the surface untinted.
+- **Assets:** `materials/checker.json` sets only `base_color` to the checker at cellSize 0.01; every other input keeps its OpenPBR
+  default. `scenes/cornell_checker.json` is cornell.json with that material on every node and `vertexColor: false`.
+- **Geometry:** `cornell_v001` is re-exported with the spheres' v halved (v' = v/2 + 1/2), so their lat-long UV cells are square (9.4
+  x 9.4 mm at the equator) where they were squashed 2:1. Only the sphere UVs change, and nothing in the shipped scenes reads them, so
+  cornell renders bit-identical. The box's UVs are 1 m per unit, so its cells are 10 x 10 mm.
+- **Measured:** cornell, macbeth and stump render bit-identical with identical ray counts. Albedo is R = G = B everywhere, and 99.3% of
+  pixels read exactly 0 or 1. Seed 0 fills 0.510 of its 10⁴ cells over one UV square (z = +2.0), and run lengths follow geometric(1/2)
+  (mean 1.97). The checker scene's pass time is 15.1-16.3 ms against cornell's 20.5-21.3 ms: half its cells absorb, so paths end sooner.
+- **Tests:** `gbuffer_validate` checks pcg3d against a reference transcription, each cell's bit against its index's hash (negative cells
+  too), per-cell constancy in shading with the footprint ignored, and fair, independent bits within 5 sigma. `io_validate` checks
+  material parsing and eight refusals, the vertexColor default, opt-out and type, and the untinted loader. `image.random_checker` renders
+  the scene end to end.
+
+Evidence is in `results/random_checker`.
+
 ## Display optics in the API
 
 Bloom and colour fringing are no longer viewer-only. `render(..., bloom_strength=k, aberration=a)`, `PtRenderRequest.bloom_strength`
