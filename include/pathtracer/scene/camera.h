@@ -30,7 +30,7 @@ public:
     Camera(const glm::vec3& position, const glm::vec3& rotationDegrees, FilmBack filmBack,
            float focalLengthMm, float nearClip, float farClip, float aperture,
            float shutterSeconds, float iso, Lens lens = Lens{},
-           pathtracer::gfx::PixelLattice pixelLattice = pathtracer::gfx::PixelLattice::Square);
+           pathtracer::gfx::PixelLattice pixelLattice = pathtracer::gfx::PixelLattice::Square, float acceptanceAngleDegrees = 0.0F);
 
     // Every invariant the projections and exposure divide by or take trig of; false names the first violation. Run at each boundary.
     [[nodiscard]] bool validate(std::string& error) const;
@@ -54,6 +54,8 @@ public:
     [[nodiscard]] float iso() const { return iso_; }
     [[nodiscard]] Lens lens() const { return lens_; }
     [[nodiscard]] pathtracer::gfx::PixelLattice pixelLattice() const { return pixelLattice_; }
+    // A compound-eye facet's angular sensitivity, its full width at half maximum in degrees; 0 is a camera, whose pixels filter on film.
+    [[nodiscard]] float acceptanceAngleDegrees() const { return acceptanceAngleDegrees_; }
 
     // Paraxial vertical FOV from focal length and film-back height, which viewBasis's half-extents are; other lenses' is below.
     [[nodiscard]] float verticalFovRadians() const;
@@ -131,6 +133,10 @@ private:
     float iso_;
     Lens lens_;
     pathtracer::gfx::PixelLattice pixelLattice_;
+    float acceptanceAngleDegrees_;
 };
+
+// von Mises-Fisher concentration whose density halves at half the acceptance angle: ln2 / (1 - cos(rho/2)), as ln2 / (2 sin^2(rho/4)).
+[[nodiscard]] float acceptanceConcentration(float acceptanceAngleDegrees);
 
 }  // namespace pathtracer::scene

@@ -105,20 +105,34 @@ float sampleFilterOffset(float u) {
     return std::copysign(kFilterRadius * radiusFraction, signedU);
 }
 
-// Radial offset: Shirley-Chiu's concentric map (1997) keeps u's strata and leaves |rho|^2 uniform, which inverts the radial CDF.
-glm::vec2 sampleRadialFilterOffset(glm::vec2 u) {
+// Shirley-Chiu's concentric map (1997) as a signed radius and an angle: u's strata hold and rho^2 is uniform on [0, 1].
+struct ConcentricPolar {
+    float rho;
+    float phi;
+};
+
+// Nullopt at the map's centre, where its angle is undefined and every radial sample is the axis itself.
+std::optional<ConcentricPolar> concentricPolar(glm::vec2 u) {
     const glm::vec2 s = (2.0F * u) - 1.0F;
-    // The map's centre, where its angle is undefined, is the zero offset.
     if (s.x == 0.0F && s.y == 0.0F) {
-        return glm::vec2(0.0F);
+        return std::nullopt;
     }
     const bool xMajor = std::abs(s.x) > std::abs(s.y);
     const float rho = xMajor ? s.x : s.y;
     const float phi = xMajor ? 0.25F * std::numbers::pi_v<float> * (s.y / s.x)
                              : (0.5F * std::numbers::pi_v<float>) - (0.25F * std::numbers::pi_v<float> * (s.x / s.y));
-    const CdfSample bin = invertCdf(kRadialFilterCdf.data(), kFilterCdfKnots - 1, rho * rho);
+    return ConcentricPolar{rho, phi};
+}
+
+// Radial offset: the concentric map's uniform rho^2 inverts the radial CDF.
+glm::vec2 sampleRadialFilterOffset(glm::vec2 u) {
+    const std::optional<ConcentricPolar> polar = concentricPolar(u);
+    if (!polar) {
+        return glm::vec2(0.0F);
+    }
+    const CdfSample bin = invertCdf(kRadialFilterCdf.data(), kFilterCdfKnots - 1, polar->rho * polar->rho);
     const float radius = kFilterRadius * (static_cast<float>(bin.index) + bin.fraction) / static_cast<float>(kFilterCdfKnots - 1);
-    return std::copysign(radius, rho) * glm::vec2(std::cos(phi), std::sin(phi));
+    return std::copysign(radius, polar->rho) * glm::vec2(std::cos(polar->phi), std::sin(polar->phi));
 }
 
 // The square lattice's separable filter keeps its per-axis strata; the hexagonal lattice's six equidistant neighbours need it radial.
@@ -130,6 +144,25 @@ glm::vec2 sampleFilmOffset(pathtracer::gfx::PixelLattice lattice, glm::vec2 u) {
 }
 
 }  // namespace
+
+AcceptanceSample sampleAcceptance(const glm::vec3& axis, float kappa, glm::vec2 u) {
+    // 1 - e^-2k, the lobe's mass over the sphere, without cancellation at small kappa; peak is the density on the axis.
+    const float mass = -std::expm1(-2.0F * kappa);
+    const float peak = kappa / (2.0F * std::numbers::pi_v<float> * mass);
+    const std::optional<ConcentricPolar> polar = concentricPolar(u);
+    if (!polar) {
+        return {axis, peak};
+    }
+    // CDF (1 - e^-kv) / mass of v = 1 - cos(theta) set to rho^2; capped at the antipode v = 2, where rounding of log1p(-1) overshoots.
+    const float v = std::min(2.0F, -std::log1p(-(polar->rho * polar->rho) * mass) / kappa);
+    const float sinTheta = std::copysign(std::sqrt(v * (2.0F - v)), polar->rho);
+    const glm::vec3 local(sinTheta * std::cos(polar->phi), sinTheta * std::sin(polar->phi), 1.0F - v);
+    return {glm::transpose(toFrameAbout(axis)) * local, peak * std::exp(-kappa * v)};
+}
+
+float acceptanceSolidAngle(float kappa) {
+    return 2.0F * std::numbers::pi_v<float> * -std::expm1(-2.0F * kappa) / kappa;
+}
 
 // Largest tile at or below kPathTraceTileSize still giving the pool kTilesPerThread each: at interactive scale 96 leaves most workers idle.
 int pathTraceTileSize(int width, int height, unsigned int threadCount) {
@@ -776,12 +809,20 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
     out.wrapsHorizontally = wrapsHorizontally(basis.lens.projection);
     out.pixelLattice = lattice;
     const float pixelSide = pathtracer::gfx::pixelSide(lattice);
-    // Sample spacing pixelSide/sqrt(N) (pbrt-v4's differential scale), so prefilter blur vanishes as N grows; unbounded N as Sampler's.
-    const float strataPerAxis = std::sqrt(static_cast<float>(std::max(sampleCount, sampleBase + settings.samplesPerPixel))) / pixelSide;
+    // Samples in a pixel's estimate; unbounded N as Sampler's.
+    const auto estimateSamples = static_cast<float>(std::max(sampleCount, sampleBase + settings.samplesPerPixel));
+    // Sample spacing pixelSide/sqrt(N) (pbrt-v4's differential scale), so prefilter blur vanishes as N grows.
+    const float strataPerAxis = std::sqrt(estimateSamples) / pixelSide;
     // d(ndc) across that spacing: two NDC units span the film, and +Y flips because row 0 is the top.
     const glm::mat2 ndcPerStratum(2.0F / (frame.x * strataPerAxis), 0.0F, 0.0F, -2.0F / (frame.y * strataPerAxis));
     // d(ndc) across a pixel side, a square of the cell's area: its image on the unit sphere is the solid angle a mirror lobe must undercut.
     const glm::mat2 ndcPerPixel((2.0F * pixelSide) / frame.x, 0.0F, 0.0F, (-2.0F * pixelSide) / frame.y);
+    // A compound-eye facet's angular sensitivity replaces the film filter: each sample is drawn from its lobe about the pixel's axis.
+    const float acceptance = camera.acceptanceAngleDegrees();
+    const float kappa = acceptance > 0.0F ? acceptanceConcentration(acceptance) : 0.0F;
+    const float lobeSolidAngle = kappa > 0.0F ? acceptanceSolidAngle(kappa) : 0.0F;
+    // Film point to NDC: two units span the film, and +Y flips because HdrImage row 0 is the top (EXR/glTF convention).
+    const auto ndcOf = [&frame](glm::vec2 film) { return glm::vec2(((film.x / frame.x) * 2.0F) - 1.0F, 1.0F - ((film.y / frame.y) * 2.0F)); };
     // Replicated RQMC: pass p draws from replicate p mod K at its position p div K, so each replicate is a prefix of its own sequence.
     const int pass = sampleBase / settings.samplesPerPixel;
     const std::uint32_t seed = replicateSeed(scrambleSeed, pass % settings.replicates);
@@ -810,17 +851,35 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
         for (int y = tileY0; y < tileY1; ++y) {
             for (int x = tileX0; x < tileX1; ++x) {
                 const glm::vec2 centre = pathtracer::gfx::pixelCentre(lattice, x, y);
+                // The facet's optical axis, once per pixel; nullopt past a fisheye's image circle, where the facet sees nothing.
+                const glm::vec2 centreNdc = ndcOf(centre);
+                const std::optional<Camera::RayDifferential> axis =
+                    kappa > 0.0F ? camera.primaryRayDifferential(basis, centreNdc.x, centreNdc.y) : std::nullopt;
                 std::array<float, kSampleLanes> sum{};
                 for (int s = 0; s < settings.samplesPerPixel; ++s) {
                     // replicateBase + s is this sample's position in its replicate's sequence: it must advance across passes to stratify.
                     const int sampleIndex = replicateBase + s;
                     Sampler sampler(x, y, sampleIndex, replicateCount, seed, lattice);
-                    // Reaches past the frame: rectilinear extrapolates, fisheye is rayless past its circle, lat-long wraps seam, pole.
-                    const glm::vec2 film = centre + sampleFilmOffset(lattice, sampler.next2D());
-                    const float ndcX = ((film.x / frame.x) * 2.0F) - 1.0F;
-                    // HdrImage row 0 is the top (EXR/glTF convention); NDC +Y is up -- flip.
-                    const float ndcY = 1.0F - ((film.y / frame.y) * 2.0F);
-                    const std::optional<Camera::RayDifferential> primary = camera.primaryRayDifferential(basis, ndcX, ndcY);
+                    // Dimension set 0 places the sample: on film through the filter, or on the sphere through the facet's lobe.
+                    const glm::vec2 placement = sampler.next2D();
+                    std::optional<Camera::RayDifferential> primary;
+                    glm::mat2x3 dirFootprint(0.0F);
+                    if (kappa > 0.0F) {
+                        if (axis) {
+                            const AcceptanceSample facet = sampleAcceptance(axis->ray.dir, kappa, placement);
+                            primary = axis;
+                            primary->ray.dir = facet.dir;
+                            // Each sample's share of the lobe, 1 / (N pdf) sr (Suykens & Willems 2001), at most the whole sphere.
+                            const float spread = std::sqrt(std::min(4.0F * std::numbers::pi_v<float>, 1.0F / (estimateSamples * facet.pdf)));
+                            const glm::mat3 tangents = glm::transpose(toFrameAbout(facet.dir));
+                            dirFootprint = glm::mat2x3(tangents[0] * spread, tangents[1] * spread);
+                        }
+                    } else {
+                        // Reaches past the frame: rectilinear extrapolates, fisheye is rayless past its circle, lat-long wraps seam, pole.
+                        const glm::vec2 ndc = ndcOf(centre + sampleFilmOffset(lattice, placement));
+                        primary = camera.primaryRayDifferential(basis, ndc.x, ndc.y);
+                        dirFootprint = primary ? primary->dirPerNdc * ndcPerStratum : glm::mat2x3(0.0F);
+                    }
                     // AO and Fresnel draw from their own stream: taking dimensions from `sampler` would shift every later dimension.
                     Sampler aoSampler(x, y, sampleIndex, replicateCount, seed ^ kAoSeedOffset, lattice);
                     const glm::vec2 aoSample = aoSampler.next2D();
@@ -828,14 +887,17 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                     const glm::vec2 fresnelSample = fresnelSampler.next2D();
                     Sampler volumeSampler(x, y, sampleIndex, replicateCount, seed ^ kVolumeSeedOffset, lattice);
                     Sampler walkSampler(x, y, sampleIndex, replicateCount, seed ^ kWalkSeedOffset, lattice);
-                    // The pixel's footprint on the unit sphere, read only by the feature chain and only where a ray exists.
+                    // The pixel's footprint on the unit sphere, read only by the feature chain where a ray exists; a facet's is its lobe's.
                     const auto pixelSolidAngle = [&] {
+                        if (kappa > 0.0F) {
+                            return lobeSolidAngle;
+                        }
                         const glm::mat2x3 dirPerPixel = primary->dirPerNdc * ndcPerPixel;
                         return glm::length(glm::cross(dirPerPixel[0], dirPerPixel[1]));
                     };
                     // Nullopt is a fisheye sample outside the image circle: no ray exists, so every lane reads zero for it.
                     const TraceResult trace =
-                        primary ? tracePath(primary->ray, primary->dirPerNdc * ndcPerStratum,
+                        primary ? tracePath(primary->ray, dirFootprint,
                                             settings.denoiseFeatures ? pixelSolidAngle() : 0.0F, scene, instanceLightIndex, lights,
                                             showSky, settings, sampler, volumeSampler, walkSampler, aoSample, fresnelSample, tileRays)
                                 : TraceResult{};

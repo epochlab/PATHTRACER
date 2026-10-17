@@ -271,7 +271,7 @@ PT_CHECK(render_rejects_invalid_requests_without_writing, Slow, Exact) {
     static const std::array<float, 1> kOutOfGamutKelvin{500.0F};
     // Denoised in Beauty's three-channel slot, so the request's buffers fit it: refused for its square-trained network before any write.
     static const std::array<int, 2> kDenoisedAovs{pt_aov_id("denoised"), pt_aov_id("depth")};
-    const std::array<Case, 16> cases{{
+    const std::array<Case, 18> cases{{
         {"aov_count 0", "no AOVs", [](PtRenderRequest& r, std::vector<float*>&) { r.aov_count = 0; }},
         {"null aovs", "no AOVs", [](PtRenderRequest& r, std::vector<float*>&) { r.aovs = nullptr; }},
         {"show_sky 2", "show_sky", [](PtRenderRequest& r, std::vector<float*>&) { r.show_sky = 2; }},
@@ -280,6 +280,8 @@ PT_CHECK(render_rejects_invalid_requests_without_writing, Slow, Exact) {
         {"lens_projection one past the last", "lens_projection",
          [](PtRenderRequest& r, std::vector<float*>&) { r.camera.lens_projection = PT_LENS_OMNIDIRECTIONAL + 1; }},
         {"pixel_lattice 2", "pixel_lattice", [](PtRenderRequest& r, std::vector<float*>&) { r.camera.pixel_lattice = 2; }},
+        {"acceptance_angle_degrees -1", "acceptance angle", [](PtRenderRequest& r, std::vector<float*>&) { r.camera.acceptance_angle_degrees = -1.0F; }},
+        {"acceptance_angle_degrees 361", "acceptance angle", [](PtRenderRequest& r, std::vector<float*>&) { r.camera.acceptance_angle_degrees = 361.0F; }},
         {"hexagonal denoised", "trained on square images",
          [](PtRenderRequest& r, std::vector<float*>&) {
              r.camera.pixel_lattice = PT_LATTICE_HEXAGONAL;

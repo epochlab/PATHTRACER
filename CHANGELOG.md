@@ -3,6 +3,43 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Compound-eye optics
+
+A camera can now model an insect's compound eye. Each pixel becomes a facet that sees a soft cone of directions, whose half-maximum
+width is the acceptance angle. Set it with `camera.acceptanceAngleDegrees` in profile.json, the HUD's Acceptance slider (logarithmic,
+0 to 360 degrees), `render_beauty --acceptance-angle DEG`, `PtCamera.acceptance_angle_degrees` (ABI 10) or Python's
+`Camera.acceptance_angle_degrees`. At 0 it is a camera, and renders are bit-identical.
+- **The lobe:** a von Mises-Fisher distribution about the pixel centre's ray (Fisher 1953). Its concentration is
+  ln2 / (2 sin^2(rho/4)), so the density halves exactly at half the acceptance angle (Snyder 1977's full width at half maximum).
+  Writing it with sin^2 avoids cancellation at the degree-scale angles of real facets.
+- **Precedent:** CompoundRay (Millward, Maddock and Mangan 2022, eLife 11:e73893) samples each ommatidium the same way, with
+  equal-weight rays drawn from a Gaussian whose FWHM is the acceptance angle. Here the lobe is that Gaussian's form on the sphere,
+  matched exactly at any width. Facet axes come from the lens over the pixel lattice, all from one viewpoint and sharing one angle;
+  CompoundRay also places each ommatidium on its own eye surface; the README roadmap parks that as "Multi-viewpoint compound
+  eyes".
+- **It replaces the film filter:** a facet's angular sensitivity is its whole pixel response. Dimension set 0, which placed the
+  film offset, now draws the lobe through Shirley and Chiu's concentric map and Jakob 2012's stable inverse
+  v = -log1p(-rho^2 (1 - e^-2k)) / k, so strata and blue noise carry over and later dimensions stay aligned. Samples have weight 1.
+- **Footprints:** each sample's texture and environment footprint is its share of the lobe, 1 / (N pdf) steradians (Suykens and
+  Willems 2001). The feature chain's pixel solid angle is the lobe's equivalent solid angle 2 pi (1 - e^-2k) / k, which tends to
+  Snyder's pi rho^2 / (4 ln2).
+- **G-buffer:** unchanged; its AOVs stay on the centre ray. In the viewer the angle re-traces Beauty only, not the G-buffer.
+- **Range:** [0, 360]. At 360 the density halves at the antipode. An angle whose concentration overflows float is refused by name.
+- **Measured** (cornell, 256x128 at 16 passes, 3 runs, median pass time):
+
+  | Lattice | 0 degrees | 5 degrees |
+  | --- | --- | --- |
+  | Square | 22.0 ms | 20.1 ms |
+  | Hexagonal | 19.9 ms | 19.1 ms |
+
+  The difference is within run-to-run spread.
+- **Tests:**
+  - `camera_validate`: the validation rows; half density at half the angle from 0.5 to 360 degrees; the lobe's v and azimuth
+    against the von Mises-Fisher CDF by chi-square, with its returned pdf; the equivalent solid angle against 1 / peak and Snyder.
+  - `integrator_validate`: on both lattices, each pixel's coverage of a half-plane edge matches the lobe's analytic mass past it.
+    A 10% concentration error fails it by 18 standard errors or more.
+  - C ABI rejection rows; pytest checks that Beauty blurs while depth keeps every float, on both lattices.
+
 ## Hexagonal bloom
 
 Bloom now runs on hexagonal pixels: in the viewer (the HUD slider is no longer greyed out), `render_beauty --hexagonal --bloom`,

@@ -84,7 +84,8 @@ void writeError(char* err, int errCap, const std::string& message) {
         camera.shutter_seconds,
         camera.iso,
         lens,
-        lattice};
+        lattice,
+        camera.acceptance_angle_degrees};
 }
 
 // NULL keeps the authored lights, so it decodes to nullopt; otherwise one XYZ triple per scene light, in scene order.
@@ -255,6 +256,7 @@ void pt_renderer_default_camera(const PtRenderer* renderer, PtCamera* out) {
                       static_cast<int>(pathtracer::gfx::PixelLattice::Hexagonal) == PT_LATTICE_HEXAGONAL,
                   "PT_LATTICE_* must stay index-parallel with PixelLattice");
     out->pixel_lattice = static_cast<int>(camera.pixelLattice());
+    out->acceptance_angle_degrees = camera.acceptanceAngleDegrees();
 }
 
 int pt_abi_version(void) {

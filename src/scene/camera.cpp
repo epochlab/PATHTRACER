@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numbers>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -122,7 +123,7 @@ std::optional<glm::vec2> omnidirectionalProjection(const Camera::ViewBasis& basi
 
 Camera::Camera(const glm::vec3& position, const glm::vec3& rotationDegrees, FilmBack filmBack,
                float focalLengthMm, float nearClip, float farClip, float aperture,
-               float shutterSeconds, float iso, Lens lens, pathtracer::gfx::PixelLattice pixelLattice)
+               float shutterSeconds, float iso, Lens lens, pathtracer::gfx::PixelLattice pixelLattice, float acceptanceAngleDegrees)
     : position_(position),
       rotationDegrees_(rotationDegrees),
       filmBack_(filmBack),
@@ -133,7 +134,8 @@ Camera::Camera(const glm::vec3& position, const glm::vec3& rotationDegrees, Film
       shutterSeconds_(shutterSeconds),
       iso_(iso),
       lens_(lens),
-      pixelLattice_(pixelLattice) {}
+      pixelLattice_(pixelLattice),
+      acceptanceAngleDegrees_(acceptanceAngleDegrees) {}
 
 bool Camera::validate(std::string& error) const {
     std::ostringstream reason;
@@ -168,12 +170,23 @@ bool Camera::validate(std::string& error) const {
         reason << "fisheye field of view " << lens_.maxFieldOfViewDegrees << " degrees is outside (0, 360]";
     } else if (!kannalaBrandtIsInvertible(lens_.radialCoefficients, maxThetaRadians(lens_))) {
         reason << "fisheye coefficients give an r(theta) that is not provably monotone over the field of view";
+    // A full width at half maximum on the sphere: at 360 the density halves at the antipode, the widest lobe with a half maximum.
+    } else if (!(acceptanceAngleDegrees_ >= 0.0F && acceptanceAngleDegrees_ <= 360.0F)) {
+        reason << "acceptance angle " << acceptanceAngleDegrees_ << " degrees is outside [0, 360]";
+    } else if (acceptanceAngleDegrees_ > 0.0F && !std::isfinite(acceptanceConcentration(acceptanceAngleDegrees_))) {
+        reason << "acceptance angle " << acceptanceAngleDegrees_ << " degrees leaves no finite concentration";
     }
     if (reason.tellp() == 0) {
         return true;
     }
     error = reason.str();
     return false;
+}
+
+float acceptanceConcentration(float acceptanceAngleDegrees) {
+    // sin^2 of a quarter angle, not 1 - cos of a half one, so the small acceptance angles of real facets lose no digits to cancellation.
+    const double quarter = std::sin(static_cast<double>(acceptanceAngleDegrees) * (std::numbers::pi / 720.0));
+    return static_cast<float>(std::numbers::ln2 / (2.0 * quarter * quarter));
 }
 
 bool Camera::validFilmBack(FilmBack filmBack) {

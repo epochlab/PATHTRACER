@@ -81,7 +81,7 @@ public:
     void draw(const HudFrameData& frame, int& aov, float& focalLengthMm, float& aperture,
               float& shutterSeconds, float& iso, int& filmBackPresetIndex,
               const std::vector<const char*>& filmBackPresetNames, int& lensProjection, int& pixelLattice,
-              bool& showSky, bool& envLightEnabled, int& envRotationDegrees, float& envExposureStops,
+              float& acceptanceAngleDegrees, bool& showSky, bool& envLightEnabled, int& envRotationDegrees, float& envExposureStops,
               float& aberrationStrength, float& bloomStrength, const FramingOverlayState& framing,
               const PixelProbeSample& pixelProbe) const;
 

@@ -2757,6 +2757,97 @@ PT_CHECK(hexagonal_film_offsets_follow_the_radial_filter, Fast, Statistical) {
     }
 }
 
+namespace {
+
+// The von Mises-Fisher lobe's mass past a plane through the eye, c = n . axis: Simpson over its CDF, the azimuth fraction per theta.
+double lobeCoverage(double kappa, double c) {
+    constexpr int kIntervals = 4096;
+    const double mass = -std::expm1(-2.0 * kappa);
+    const double s = std::sqrt(std::max(0.0, 1.0 - (c * c)));
+    // At polar angle theta the covered azimuth is acos(-c cos(theta) / (s sin(theta))) / pi, s = sqrt(1 - c^2).
+    const auto covered = [&](double probability) {
+        const double v = std::min(2.0, -std::log1p(-probability * mass) / kappa);
+        const double sinTheta = std::sqrt(v * (2.0 - v));
+        if (sinTheta == 0.0) {
+            return c > 0.0 ? 1.0 : 0.0;
+        }
+        return std::acos(std::clamp(-c * (1.0 - v) / (s * sinTheta), -1.0, 1.0)) / std::numbers::pi;
+    };
+    double sum = covered(0.0) + covered(1.0);
+    for (int i = 1; i < kIntervals; ++i) {
+        sum += (i % 2 == 1 ? 4.0 : 2.0) * covered(static_cast<double>(i) / kIntervals);
+    }
+    return sum / (3.0 * kIntervals);
+}
+
+}  // namespace
+
+// A facet's lobe replaces the film filter: each pixel's coverage of a half-plane edge is the lobe's mass past it, on both lattices.
+PT_CHECK(acceptance_coverage_follows_the_lobe, Fast, Statistical) {
+    constexpr int kSeeds = 16;
+    TestScene scene = makeTwoInstanceScene(1.0F);
+    scene.worldTriangles.resize(2);
+    scene.shadingTriangles.resize(2);
+    scene.instances.resize(1);
+    std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+    const EnvironmentMap env = makeUniformEnvironment();
+    PathTraceSettings settings = makeSettings(0, 1);
+    settings.samplesPerPixel = 64;
+    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    const Camera base = makeCamera();
+    struct Case {
+        pathtracer::gfx::PixelLattice lattice;
+        float acceptanceDegrees;
+    };
+    // A pixel spans 0.64 degrees here, so these facets reach about one and five pixels past the edge.
+    constexpr std::array<Case, 4> kCases{{{pathtracer::gfx::PixelLattice::Square, 1.0F},
+                                          {pathtracer::gfx::PixelLattice::Square, 3.0F},
+                                          {pathtracer::gfx::PixelLattice::Hexagonal, 1.0F},
+                                          {pathtracer::gfx::PixelLattice::Hexagonal, 3.0F}}};
+    const double threshold = tools::stats::studentTTwoSided(tools::stats::sidak(tools::check::kFamilyAlpha, kCases.size()), kSeeds - 1);
+    ctx.plan(static_cast<int>(kCases.size()));
+    for (const Case& testCase : kCases) {
+        const Camera camera(base.position(), base.rotationDegrees(), base.filmBack(), base.focalLengthMm(), base.nearClip(), base.farClip(),
+                            base.aperture(), base.shutterSeconds(), base.iso(), pathtracer::scene::Lens{}, testCase.lattice,
+                            testCase.acceptanceDegrees);
+        const double kappa = pathtracer::scene::acceptanceConcentration(testCase.acceptanceDegrees);
+        const glm::vec2 frame = pathtracer::gfx::frameExtent(testCase.lattice, kImageSize, kImageSize);
+        const Camera::ViewBasis basis = camera.viewBasis(frame.x / frame.y);
+        // The plane x < 0 at z = 0 seen from (0, 0, 5): its edge plane x = 0 holds the eye, so coverage is the lobe's mass with x < 0.
+        std::vector<double> oracle(static_cast<std::size_t>(kImageSize) * kImageSize);
+        for (int y = 0; y < kImageSize; ++y) {
+            for (int x = 0; x < kImageSize; ++x) {
+                const glm::vec2 centre = pathtracer::gfx::pixelCentre(testCase.lattice, x, y);
+                const std::optional<Camera::RayDifferential> axis =
+                    camera.primaryRayDifferential(basis, ((centre.x / frame.x) * 2.0F) - 1.0F, 1.0F - ((centre.y / frame.y) * 2.0F));
+                oracle[(static_cast<std::size_t>(y) * kImageSize) + static_cast<std::size_t>(x)] = lobeCoverage(kappa, -axis->ray.dir.x);
+            }
+        }
+        tools::stats::Welford residuals;
+        for (int seed = 0; seed < kSeeds; ++seed) {
+            const pathtracer::scene::PathTraceResult traced =
+                renderPass(scene, env, settings, *accel, pool, /*showSky=*/false, 200U + static_cast<std::uint32_t>(seed), camera);
+            double sum = 0.0;
+            int cut = 0;
+            for (std::size_t pixel = 0; pixel < oracle.size(); ++pixel) {
+                // Only pixels the edge actually splits: elsewhere both the estimate and the oracle are 0 or 1 to within float.
+                if (oracle[pixel] > 1e-3 && oracle[pixel] < 1.0 - 1e-3) {
+                    // Folded to the minority side's mass, so a lobe too wide or narrow errs the same way on both sides of the edge.
+                    const double alpha = traced.alpha.texels[pixel];
+                    sum += oracle[pixel] < 0.5 ? alpha - oracle[pixel] : oracle[pixel] - alpha;
+                    ++cut;
+                }
+            }
+            residuals.add(sum / cut);
+        }
+        char detail[192];
+        std::snprintf(detail, sizeof(detail), "%s %.1f degrees: mean coverage residual %.3g over %d scrambles, %.3g standard errors against %.3g",
+                      pathtracer::gfx::kPixelLatticeNames[static_cast<int>(testCase.lattice)], static_cast<double>(testCase.acceptanceDegrees),
+                      residuals.mean(), kSeeds, residuals.mean() / residuals.standardError(), threshold);
+        PT_EXPECT(ctx, std::abs(residuals.mean()) <= threshold * residuals.standardError(), detail);
+    }
+}
+
 // A checker minified 64:1 reads its mean wherever bounce 0 filters: Beauty by each sample's stratum, the G-buffer's Albedo by its pixel.
 PT_CHECK(primary_hits_filter_minified_textures, Fast, Exact) {
     constexpr int kChecker = 64;
