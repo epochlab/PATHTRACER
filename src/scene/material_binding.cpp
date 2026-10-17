@@ -224,7 +224,7 @@ bool applySceneMaterials(std::vector<MeshInstance>& instances, const std::string
             std::cerr << "applySceneMaterials: material '" << path << "' failed to load\n";
             return false;
         }
-        byPath.emplace(path, materialOf(*constants));
+        byPath.emplace(path, materialOf(*constants, constants->randomCheckers));
         return true;
     };
     if (!load(materialPath) ||

@@ -12,11 +12,14 @@ namespace pathtracer::scene {
 
 namespace {
 
-// A constant input is its own value at every uv, validated at load; a texel is clamped into the input's specification range.
+// A constant input is its own value at every uv, validated at load; a texel or pattern bit is clamped into the input's range.
 template <typename T>
 T evaluate(const MaterialInput<T>& input, glm::vec2 uv, const pathtracer::gfx::TextureFootprint& footprint, InputRange range) {
     if (const T* constant = std::get_if<T>(&input)) {
         return *constant;
+    }
+    if (const RandomChecker* checker = std::get_if<RandomChecker>(&input)) {
+        return T(clampToRange(randomCheckerAt(*checker, uv), range));
     }
     const glm::vec3 texel = pathtracer::gfx::sampleTexture(**std::get_if<TextureHandle>(&input), uv, footprint);
     if constexpr (std::is_same_v<T, float>) {

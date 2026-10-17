@@ -352,7 +352,8 @@ std::optional<AppScene> loadAppScene(const pathtracer::config::SceneConfig& scen
     // No glTF is an empty model: the scene's lights are then its only triangles.
     std::optional<pathtracer::scene::LoadedModel> model =
         sceneConfig.model.gltfPath
-            ? pathtracer::scene::loadGltf(std::string(ASSET_ROOT_DIR) + "/" + *sceneConfig.model.gltfPath, sceneTransform)
+            ? pathtracer::scene::loadGltf(std::string(ASSET_ROOT_DIR) + "/" + *sceneConfig.model.gltfPath, sceneTransform,
+                                          sceneConfig.model.vertexColor)
             : pathtracer::scene::LoadedModel{};
     // Materials, then the scene's textures over them, before anything reads a material; each call logs the reason it fails.
     if (model && sceneConfig.materialPath &&

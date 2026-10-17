@@ -17,6 +17,7 @@ struct ModelConfig {
     std::optional<std::string> gltfPath;  // relative to ASSET_ROOT_DIR, as every asset path is; nullopt when the scene has no model
     glm::vec3 position;         // model root, composed on top of the glTF's own node transforms
     glm::vec3 rotation;  // degrees; the root rotation is Rz*Ry*Rx, so X applies first
+    bool vertexColor = true;  // glTF COLOR_0 multiplies base_color; false reads every vertex as white. Optional, default true
 };
 
 // What lights the scene, IBL half.
@@ -77,7 +78,9 @@ struct VolumeConfig {
 };
 
 // A material file: OpenPBR Surface v1.1.1 constants under their specification names, every omitted input at its default.
-using MaterialConfig = pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant>;
+struct MaterialConfig : pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant> {
+    pathtracer::scene::RandomCheckerInputs randomCheckers;  // inputs a {"randomChecker": {...}} object drives; their constants stay default
+};
 
 // The asset to load and how to shade and light it: what is specific to this scene, as against ProfileConfig's session-wide defaults.
 struct SceneConfig {

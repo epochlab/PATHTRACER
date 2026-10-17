@@ -245,7 +245,8 @@ std::optional<HeadlessRenderer::Geometry> HeadlessRenderer::buildGeometry(
     const glm::mat4 rootTransform = pathtracer::scene::rootTransformOf(model);
     // No glTF is an empty model: the lights below are then the only triangles.
     std::optional<pathtracer::scene::LoadedModel> loaded =
-        model.gltfPath ? pathtracer::scene::loadGltf(assetRoot + "/" + *model.gltfPath, rootTransform) : pathtracer::scene::LoadedModel{};
+        model.gltfPath ? pathtracer::scene::loadGltf(assetRoot + "/" + *model.gltfPath, rootTransform, model.vertexColor)
+                       : pathtracer::scene::LoadedModel{};
     if (!loaded) {
         error = "failed to load glTF " + assetRoot + "/" + *model.gltfPath;
         return std::nullopt;

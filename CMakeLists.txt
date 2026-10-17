@@ -406,6 +406,11 @@ add_test(NAME image.gbuffer_aov_omnidirectional
                  --aov depth --omnidirectional --out gbuffer_aov_omnidirectional.png)
 set_tests_properties(image.gbuffer_aov_omnidirectional PROPERTIES LABELS "image;fast;exact" TIMEOUT 300)
 
+# The random checker through the whole stack: material file, untinted glTF, and every surface shading a pattern bit.
+add_test(NAME image.random_checker
+         COMMAND render_beauty --scene scenes/cornell_checker.json --width 48 --height 36 --passes 4 --out random_checker.png)
+set_tests_properties(image.random_checker PROPERTIES LABELS "image;fast;exact" TIMEOUT 300)
+
 add_test(NAME image.convergence
          COMMAND render_beauty --scene scenes/cornell.json --width 48 --height 36 --passes 64
                  --assert-converged)

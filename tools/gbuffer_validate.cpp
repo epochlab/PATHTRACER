@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
@@ -25,6 +27,7 @@
 #include "pathtracer/scene/gbuffer.h"
 #include "pathtracer/scene/gbuffer_shading.h"
 #include "pathtracer/scene/gltf_loader.h"
+#include "pathtracer/scene/random_checker.h"
 #include "check.h"
 #include "fixtures.h"
 #include "pathtracer/scene/ray_types.h"
@@ -1008,6 +1011,90 @@ PT_CHECK(constant_inputs_match_unit_textures, Fast, Exact) {
     PT_EXPECT(ctx, frameMismatches == 0, "a flat-encoded 1x1 normal map tilted the shading normal past rounding");
     PT_EXPECT(ctx, bumpMismatches == 0, "a constant bump texture's slope exceeds the rounding of its exactly-zero derivative weights");
     PT_EXPECT(ctx, tangentMismatches == 0, "a tangent map did not keep the mesh tangent at grey or turn it onto the bitangent at (1/2, 1)");
+}
+
+// pcg3d against an independent Python transcription of Jarzynski & Olano's GLSL: a typo in any of its six mixes changes every row.
+PT_CHECK(random_checker_pcg3d_reference, Fast, Exact) {
+    const std::array<std::pair<glm::uvec3, glm::uvec3>, 4> rows = {{
+        {{0U, 0U, 0U}, {0x9BAFD7C6U, 0xA8E88A6BU, 0x3F15482CU}},
+        {{1U, 2U, 3U}, {0xFA9F79A6U, 0x48F2F44CU, 0x596F5AB1U}},
+        {{99U, 0U, 7U}, {0x78A8071FU, 0x36D3943DU, 0xF98B771BU}},
+        {{0xFFFFFFFFU, 12345U, 0x9E3779B9U}, {0x2D64A185U, 0xCD21050CU, 0x8C73CEEFU}},
+    }};
+    ctx.plan(static_cast<int>(rows.size()));
+    for (const auto& [input, expected] : rows) {
+        PT_EXPECT(ctx, pcg3d(input) == expected, "pcg3d disagrees with the reference transcription");
+    }
+}
+
+// One bit per cell, pcg3d of floor(uv / cellSize) wrapped to uint32, negative cells too; shading reads it with the footprint ignored.
+PT_CHECK(random_checker_is_cellwise, Fast, Exact) {
+    constexpr int kCases = 4096;
+    std::mt19937 rng(static_cast<std::mt19937::result_type>(ctx.seed()));
+    std::uniform_real_distribution<float> sizes(1e-3F, 1.0F);
+    std::uniform_int_distribution<int> cells(-1000, 1000);
+    std::uniform_real_distribution<float> inCell(0.05F, 0.95F);
+    int definitionMismatches = 0;
+    int cellMismatches = 0;
+    int shadingMismatches = 0;
+    for (int i = 0; i < kCases; ++i) {
+        const RandomChecker checker{sizes(rng), static_cast<std::uint32_t>(rng())};
+        const glm::ivec2 cell(cells(rng), cells(rng));
+        // Centre and points 5% inside a cell: (cell + f) * size / size rounds by far less than that margin, so each stays in its cell.
+        const glm::vec2 centre = (glm::vec2(cell) + 0.5F) * checker.cellSize;
+        const float value = randomCheckerAt(checker, centre);
+        const glm::uvec3 index(static_cast<std::uint32_t>(cell.x), static_cast<std::uint32_t>(cell.y), checker.seed);
+        definitionMismatches += value == static_cast<float>(pcg3d(index).x >> 31U) ? 0 : 1;
+        cellMismatches += randomCheckerAt(checker, (glm::vec2(cell) + glm::vec2(inCell(rng), inCell(rng))) * checker.cellSize) == value ? 0 : 1;
+        Material material;
+        material.baseColor = checker;
+        material.baseWeight = checker;
+        const pathtracer::gfx::TextureFootprint wide{glm::vec2(4.0F * checker.cellSize, 0.0F), glm::vec2(0.0F, 4.0F * checker.cellSize)};
+        const OpenPbrInputs<Constant> inputs = resolveInputs(material, centre, wide, glm::vec3(1.0F));
+        shadingMismatches += inputs.baseColor == glm::vec3(value) && inputs.baseWeight == value ? 0 : 1;
+    }
+    std::cout << "gbuffer_validate: random checker over " << kCases << " cases -- " << definitionMismatches << " definition, " << cellMismatches
+              << " cell, " << shadingMismatches << " shading mismatches\n";
+    ctx.plan(3);
+    PT_EXPECT(ctx, definitionMismatches == 0, "a random checker cell did not read its index's pcg3d bit, negative cells wrapped to uint32");
+    PT_EXPECT(ctx, cellMismatches == 0, "a random checker varied within one cell");
+    PT_EXPECT(ctx, shadingMismatches == 0, "resolveInputs did not read the checker's bit, or a footprint changed it");
+}
+
+// Fair, independent bits: fill, horizontal and vertical neighbour agreement, and next-seed agreement each sit at 1/2 within 5 sigma.
+PT_CHECK(random_checker_bits_are_fair_and_independent, Fast, Statistical) {
+    // The paper's 10 mm cells over a 1 m UV square: n = 10^4 indicators per statistic, each with standard error 1 / (2 sqrt(n)).
+    constexpr std::uint32_t kCells = 100U;
+    constexpr float kCellSize = 0.01F;
+    constexpr double kSigmaBand = 5.0;
+    const RandomChecker checker{kCellSize, static_cast<std::uint32_t>(ctx.subSeed("random-checker"))};
+    const RandomChecker next{kCellSize, checker.seed + 1U};
+    const auto bit = [](const RandomChecker& c, std::uint32_t i, std::uint32_t j) {
+        return randomCheckerAt(c, (glm::vec2(static_cast<float>(i), static_cast<float>(j)) + 0.5F) * c.cellSize);
+    };
+    double ones = 0.0;
+    double horizontal = 0.0;
+    double vertical = 0.0;
+    double acrossSeeds = 0.0;
+    for (std::uint32_t j = 0; j < kCells; ++j) {
+        for (std::uint32_t i = 0; i < kCells; ++i) {
+            const float b = bit(checker, i, j);
+            ones += b;
+            horizontal += b == bit(checker, i + 1U, j) ? 1.0 : 0.0;
+            vertical += b == bit(checker, i, j + 1U) ? 1.0 : 0.0;
+            acrossSeeds += b == bit(next, i, j) ? 1.0 : 0.0;
+        }
+    }
+    const double n = static_cast<double>(kCells) * kCells;
+    const double band = kSigmaBand * 0.5 / std::sqrt(n);
+    const std::array<std::pair<const char*, double>, 4> statistics = {
+        {{"fill", ones / n}, {"horizontal agreement", horizontal / n}, {"vertical agreement", vertical / n}, {"seed agreement", acrossSeeds / n}}};
+    ctx.plan(static_cast<int>(statistics.size()));
+    for (const auto& [name, fraction] : statistics) {
+        char detail[160];
+        std::snprintf(detail, sizeof(detail), "random checker %s %.4f is outside 1/2 +- %.4f (5 sigma, n = %.0f)", name, fraction, band, n);
+        PT_EXPECT(ctx, std::abs(fraction - 0.5) <= band, detail);
+    }
 }
 
 // H = a*u + b*v is linear, so bilinear taps reproduce it and the true surface gradient of h = heightMetres*H is a 3x3 solve per triangle.
