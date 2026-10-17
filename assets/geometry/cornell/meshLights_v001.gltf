@@ -1,0 +1,64 @@
+{
+  "accessors": [
+    {
+      "bufferView": 0,
+      "componentType": 5126,
+      "type": "VEC3",
+      "count": 1104,
+      "min": [-0.426742077, -0.423994511, -0.461471587],
+      "max": [0.340292931, 0.444810778, 0.461637259]
+    },
+    {
+      "bufferView": 1,
+      "componentType": 5125,
+      "type": "SCALAR",
+      "count": 6480
+    }
+  ],
+  "asset": {
+    "generator": "SideFX Houdini",
+    "version": "2.0"
+  },
+  "bufferViews": [
+    {
+      "buffer": 0,
+      "byteLength": 13248
+    },
+    {
+      "buffer": 0,
+      "byteLength": 25920,
+      "byteOffset": 13248
+    }
+  ],
+  "buffers": [
+    {
+      "uri": "meshLights_v001_data.bin",
+      "byteLength": 39168
+    }
+  ],
+  "meshes": [
+    {
+      "primitives": [
+        {
+          "indices": 1,
+          "attributes": {
+            "POSITION": 0
+          }
+        }
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "mesh": 0,
+      "name": "meshLight01"
+    }
+  ],
+  "scene": 0,
+  "scenes": [
+    {
+      "name": "cornell",
+      "nodes": [ 0 ]
+    }
+  ]
+}

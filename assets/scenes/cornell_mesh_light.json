@@ -1,0 +1,24 @@
+{
+    "model": {
+        "gltfPath": "geometry/cornell/cornellEmpty_v001.gltf",
+        "position": [0.0, 0.0, 0.0],
+        "rotation": [0.0, 0.0, 0.0]
+    },
+    "environment": {
+        "hdriPath": "textures/republiqueHDR_2k.exr",
+        "lightEnabled": false
+    },
+    "materialPath": "materials/clay.json",
+    "lights": [
+        {
+            "type": "mesh",
+            "position": [0.0, 0.0, 0.0],
+            "rotation": [0.0, 0.0, 0.0],
+            "gltfPath": "geometry/cornell/meshLights_v001.gltf",
+            "scale": 0.5,
+            "temperature": 4000,
+            "intensity": 15.0,
+            "twoSided": false
+        }
+    ]
+}
