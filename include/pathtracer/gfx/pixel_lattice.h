@@ -38,6 +38,34 @@ static_assert(sizeof(kPixelLatticeNames) / sizeof(kPixelLatticeNames[0]) == stat
     return {static_cast<float>(width), static_cast<float>(height) * rowPitch(lattice)};
 }
 
+// Reflection about the end samples of a line of `extent` without repeating them, any offset: the whole-sample mirror.
+[[nodiscard]] inline int mirrorIndex(int i, int extent) {
+    if (extent <= 1) {
+        return 0;
+    }
+    const int period = (2 * extent) - 2;
+    int folded = i % period;
+    if (folded < 0) {
+        folded += period;
+    }
+    return folded < extent ? folded : period - folded;
+}
+
+// Index on a cycle of `extent` samples, any offset: the periodic boundary.
+[[nodiscard]] inline int wrapIndex(int i, int extent) {
+    return ((i % extent) + extent) % extent;
+}
+
+// Hexagonal cell (x, y) folded into the frame by the lattice's own mirror lines: rows whole-sample, columns about x=1/4 and x=w-1/4.
+[[nodiscard]] inline glm::ivec2 hexagonalReflection(int x, int y, int width, int height, bool wrapsHorizontally) {
+    const int row = mirrorIndex(y, height);
+    // Half-pitch column index j = 2x + parity puts both mirror lines on samples, j=0 and j=2w-1, so the fold is whole-sample in j.
+    const int column = (2 * x) + (y & 1);
+    const int folded = wrapsHorizontally ? wrapIndex(column, 2 * width) : mirrorIndex(column, 2 * width);
+    // Both folds have even period, so parity survives and the shift is exact; a single row has no lattice mirror and floors instead.
+    return {(folded - (row & 1)) >> 1, row};
+}
+
 // The cell nearest film point p, its Voronoi cell, so a display shows each cell crisp; columns wrap or clamp at the frame's edges.
 [[nodiscard]] inline glm::ivec2 nearestPixel(PixelLattice lattice, glm::vec2 film, int width, int height, bool wrapsHorizontally) {
     // A cell reaches less than a row pitch above or below its centre, so only the two rows bracketing p can hold it.

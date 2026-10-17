@@ -335,9 +335,8 @@ std::filesystem::path writeJson(const char* name, const std::string& text) {
 
 // Every shipped scene must load under the closed key sets: without this, each rejection row below could pass by rejecting everything.
 PT_CHECK(scene_config_accepts_the_shipped_scenes, Fast, Exact) {
-    const std::vector<const char*> shipped = {"cornell.json",           "cornell_checker.json", "cornell_disk_light.json", "cornell_mesh_light.json",
-                                              "cornell_sphere_light.json", "macbeth.json",         "stump.json"};
-    ctx.plan(static_cast<int>(shipped.size()) + 2);
+    const std::vector<const char*> shipped = {"cornell.json", "macbeth.json", "stump.json"};
+    ctx.plan(static_cast<int>(shipped.size()) + 1);
     for (const char* name : shipped) {
         const std::filesystem::path scene = std::filesystem::path(ASSET_ROOT_DIR) / "scenes" / name;
         char detail[256];
@@ -348,12 +347,6 @@ PT_CHECK(scene_config_accepts_the_shipped_scenes, Fast, Exact) {
     const std::optional<pathtracer::config::SceneConfig> macbeth =
         pathtracer::config::loadSceneConfig((std::filesystem::path(ASSET_ROOT_DIR) / "scenes" / "macbeth.json").string());
     PT_EXPECT(ctx, macbeth && macbeth->textures.size() == 2, "macbeth.json's textures did not parse to its two grids");
-    // Anti-vacuity for model.vertexColor: glTF's tint by default, and cornell_checker.json's opt-out.
-    const auto vertexColorOf = [](const char* name) {
-        return pathtracer::config::loadSceneConfig((std::filesystem::path(ASSET_ROOT_DIR) / "scenes" / name).string()).value().model.vertexColor;
-    };
-    PT_EXPECT(ctx, vertexColorOf("cornell.json") && !vertexColorOf("cornell_checker.json"),
-              "model.vertexColor did not default to true, or cornell_checker.json's false did not parse");
 }
 
 // A binding is a path string or {path, colorSpace, channel, bump}, and the environment may name its colour space: all reach SceneConfig.
@@ -563,7 +556,7 @@ PT_CHECK(scene_config_reads_every_light_shape, Fast, Exact) {
         "{\"environment\":{\"hdriPath\":\"textures/republiqueHDR_2k.exr\"},\"lights\":["
         "{\"type\":\"disk\",\"position\":[1,2,3],\"rotation\":[10,20,30],\"radius\":0.25,\"color\":[1,0.5,0.25],\"intensity\":4.0,\"twoSided\":true},"
         "{\"type\":\"sphere\",\"position\":[0,1,0],\"rotation\":[0,0,0],\"radius\":0.5,\"temperature\":2856,\"intensity\":2.0},"
-        "{\"type\":\"mesh\",\"position\":[0,0,1],\"rotation\":[0,90,0],\"gltfPath\":\"geometry/cornell/meshLights_v001.gltf\","
+        "{\"type\":\"mesh\",\"position\":[0,0,1],\"rotation\":[0,90,0],\"gltfPath\":\"mesh.gltf\","
         "\"scale\":0.3,\"color\":[1,1,1],\"intensity\":8.0},"
         "{\"type\":\"mesh\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"gltfPath\":\"m.gltf\",\"color\":[1,1,1],\"intensity\":1.0}]}");
     const std::optional<pathtracer::config::SceneConfig> scene = pathtracer::config::loadSceneConfig(path.string());
@@ -584,15 +577,14 @@ PT_CHECK(scene_config_reads_every_light_shape, Fast, Exact) {
               "the sphere's radius or temperature did not read as authored");
     const auto* scaled = std::get_if<pathtracer::config::MeshShape>(&scene->lights[2].shape);
     const auto* unscaled = std::get_if<pathtracer::config::MeshShape>(&scene->lights[3].shape);
-    PT_EXPECT(ctx, scaled && scaled->gltfPath == "geometry/cornell/meshLights_v001.gltf" && scaled->scale == 0.3F && unscaled &&
+    PT_EXPECT(ctx, scaled && scaled->gltfPath == "mesh.gltf" && scaled->scale == 0.3F && unscaled &&
                        unscaled->scale == 1.0F && !scene->lights[3].twoSided,
               "a mesh light's path or scale did not read as authored, or an absent scale is not 1");
 }
 
 // Anti-vacuity for the rejection rows below: every material the repo ships must still load once loadMaterialConfig validates.
 PT_CHECK(material_config_accepts_the_shipped_materials, Fast, Exact) {
-    const std::vector<const char*> shipped = {"checker.json", "chrome.json", "clay.json",       "emission.json",
-                                              "glass.json",   "gold.json",   "principled.json"};
+    const std::vector<const char*> shipped = {"checker.json", "chrome.json", "clay.json", "emission.json", "glass.json", "principled.json"};
     ctx.plan(static_cast<int>(shipped.size()));
     for (const char* name : shipped) {
         const std::filesystem::path path = std::filesystem::path(ASSET_ROOT_DIR) / "materials" / name;

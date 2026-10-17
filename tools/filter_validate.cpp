@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <numbers>
 #include <random>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -26,6 +27,7 @@
 namespace {
 
 using pathtracer::gfx::HdrImage;
+using pathtracer::gfx::PixelLattice;
 using pathtracer::scene::ThreadPool;
 
 constexpr float kFloatEpsilon = 0x1p-23F;  // distance from 1 to the next float, the unit in the last place, twice the unit roundoff
@@ -84,6 +86,52 @@ constexpr float kFloatEpsilon = 0x1p-23F;  // distance from 1 to the next float,
     return image.texels[(((static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width)) +
                           static_cast<std::size_t>(x)) * static_cast<std::size_t>(image.channels)) +
                         static_cast<std::size_t>(channel)];
+}
+
+// The hexagonal lattice's three axes, 0, 60 and 120 degrees, each one column pitch long: the directions diffuse's passes run along.
+constexpr std::array<glm::dvec2, 3> kHexagonalAxes{{{1.0, 0.0}, {0.5, std::numbers::sqrt3 / 2.0}, {-0.5, std::numbers::sqrt3 / 2.0}}};
+
+// Hexagonal transfer at wavevector k: the product of the three axis passes' T(.;2t/3) transfers, each at its axis phase k.u.
+[[nodiscard]] double hexagonalTransfer(const std::vector<float>& axisKernel, glm::dvec2 k) {
+    double transfer = 1.0;
+    for (const glm::dvec2& axis : kHexagonalAxes) {
+        transfer *= measuredTransfer(axisKernel, glm::dot(k, axis));
+    }
+    return transfer;
+}
+
+// Film centre of hexagonal cell (x, y) in double, from pixel_lattice.h's formula, so a phase is not rounded through float first.
+[[nodiscard]] glm::dvec2 hexagonalCentre(int x, int y) {
+    return {static_cast<double>(x) + 0.25 + (0.5 * static_cast<double>(y & 1)), (static_cast<double>(y) + 0.5) * (std::numbers::sqrt3 / 2.0)};
+}
+
+// Axial coordinates (q, r) of offset cell (x, y): the lattice basis (1,0), (1/2, sqrt3/2), in which every lattice translation is integer.
+[[nodiscard]] glm::ivec2 axialOf(int x, int y) {
+    return {x - ((y - (y & 1)) / 2), y};
+}
+
+// Offset cell of axial (q, r), the inverse of axialOf.
+[[nodiscard]] glm::ivec2 offsetOf(glm::ivec2 axial) {
+    return {axial.x + ((axial.y - (axial.y & 1)) / 2), axial.y};
+}
+
+[[nodiscard]] std::vector<float> uniformPlane(int width, int height, std::mt19937& rng) {
+    std::uniform_real_distribution<float> unit(0.0F, 1.0F);
+    std::vector<float> plane(static_cast<std::size_t>(width) * static_cast<std::size_t>(height));
+    for (float& value : plane) {
+        value = unit(rng);
+    }
+    return plane;
+}
+
+// Per-axis radius of hexagonal diffusion at variance t: each pass carries T(.;2t/3).
+[[nodiscard]] int hexagonalAxisRadius(float t) {
+    return static_cast<int>(pathtracer::debug::discreteGaussianKernel(static_cast<float>((2.0 * static_cast<double>(t)) / 3.0)).size()) - 1;
+}
+
+// Rounding of three float passes of 2r+1 taps each over a field bounded by one: gamma_n per pass, summed.
+[[nodiscard]] double hexagonalRoundingBound(float t) {
+    return 3.0 * static_cast<double>((2 * hexagonalAxisRadius(t)) + 1) * static_cast<double>(kFloatEpsilon);
 }
 
 }  // namespace
@@ -190,6 +238,276 @@ PT_CHECK(diffusion_reproduces_affine_fields, Fast, Exact) {
         }
     }
     PT_EXPECT(ctx, identical, "diffusion must leave an affine field bit-identical in the interior");
+}
+
+// The hexagonal inner scale is the same 2^-24 criterion on the lattice's own Nyquist boundary, whose least-attenuated point is M, not K.
+PT_CHECK(hexagonal_inner_scale_meets_the_roundoff_on_the_zone_boundary, Fast, Exact) {
+    ctx.plan(3);
+    const float t = pathtracer::debug::innerScaleVariance(PixelLattice::Hexagonal);
+    const double expected = 9.0 * std::numbers::ln2;
+    PT_EXPECT(ctx, std::abs(static_cast<double>(t) - expected) <= expected * static_cast<double>(kFloatEpsilon),
+              "hexagonal inner scale " + std::to_string(t) + " is not 9 ln2");
+    // The zone edge from M (0, 2pi/sqrt3) to K (2pi/3, 2pi/sqrt3); by the lattice's symmetry it stands for the whole boundary.
+    const auto analytic = [t](double along) {
+        const glm::dvec2 k(along * 2.0 * std::numbers::pi / 3.0, 2.0 * std::numbers::pi / std::numbers::sqrt3);
+        double exponent = 0.0;
+        for (const glm::dvec2& axis : kHexagonalAxes) {
+            exponent += std::cos(glm::dot(k, axis)) - 1.0;
+        }
+        return std::exp((2.0 * static_cast<double>(t) / 3.0) * exponent);
+    };
+    double edgePeak = 0.0;
+    for (int step = 0; step <= 64; ++step) {
+        edgePeak = std::max(edgePeak, analytic(static_cast<double>(step) / 64.0));
+    }
+    // t is rounded to float, which moves exp(-8t/3) by (8/3) t of its relative ulp.
+    const double transferUlps = (8.0 / 3.0) * static_cast<double>(t) * static_cast<double>(kFloatEpsilon);
+    PT_EXPECT(ctx, edgePeak == analytic(0.0) && std::abs((edgePeak / pathtracer::debug::kFloat32Roundoff) - 1.0) <= transferUlps,
+              "the zone boundary peaks at " + std::to_string(edgePeak / pathtracer::debug::kFloat32Roundoff) + " x 2^-24, not at M");
+    // The shipped kernel's transfer at M: each axis carries truncation 2^-24 plus an ulp, as discrete_gaussian_transfer_is_exact bounds.
+    const std::vector<float> axis = pathtracer::debug::discreteGaussianKernel(static_cast<float>((2.0 * static_cast<double>(t)) / 3.0));
+    const double measured = hexagonalTransfer(axis, glm::dvec2(0.0, 2.0 * std::numbers::pi / std::numbers::sqrt3));
+    const double bound = pathtracer::debug::kFloat32Roundoff + (3.0 * (pathtracer::debug::kFloat32Roundoff + static_cast<double>(kFloatEpsilon)));
+    PT_EXPECT(ctx, std::abs(measured) <= bound, "measured transfer at M " + std::to_string(measured) + " exceeds " + std::to_string(bound));
+}
+
+// Plane waves are the lattice's eigenfunctions: inside the reach, hexagonal diffusion scales each by the three axis transfers' product.
+PT_CHECK(hexagonal_diffusion_transfer_is_the_three_axis_product, Fast, Exact) {
+    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    constexpr int kWidth = 112;
+    constexpr int kHeight = 96;
+    const std::vector<double> anglesDegrees{0.0, 15.0, 30.0, 90.0};
+    const std::vector<double> fractionsOfM{0.2, 0.5, 0.9};
+    ctx.plan(static_cast<int>(anglesDegrees.size() * fractionsOfM.size()));
+    const float t = pathtracer::debug::innerScaleVariance(PixelLattice::Hexagonal);
+    const std::vector<float> axis = pathtracer::debug::discreteGaussianKernel(static_cast<float>((2.0 * static_cast<double>(t)) / 3.0));
+    const glm::ivec2 reach = pathtracer::debug::diffusionReach(t, PixelLattice::Hexagonal);
+    // Against the shipped kernel's own transfer, so truncation cancels; what is left is rounding of the stored wave and the passes.
+    const double bound = hexagonalRoundingBound(t) + static_cast<double>(kFloatEpsilon);
+    for (const double degrees : anglesDegrees) {
+        for (const double fraction : fractionsOfM) {
+            const double magnitude = fraction * 2.0 * std::numbers::pi / std::numbers::sqrt3;
+            const glm::dvec2 k = magnitude * glm::dvec2(std::cos(degrees * std::numbers::pi / 180.0), std::sin(degrees * std::numbers::pi / 180.0));
+            std::vector<float> plane(static_cast<std::size_t>(kWidth) * kHeight);
+            for (int y = 0; y < kHeight; ++y) {
+                for (int x = 0; x < kWidth; ++x) {
+                    plane[(static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x)] =
+                        static_cast<float>(std::cos(glm::dot(k, hexagonalCentre(x, y)) + 0.3));
+                }
+            }
+            pathtracer::debug::diffuse(plane, kWidth, kHeight, t, pool, false, PixelLattice::Hexagonal);
+            const double transfer = hexagonalTransfer(axis, k);
+            double worst = 0.0;
+            for (int y = reach.y; y < kHeight - reach.y; ++y) {
+                for (int x = reach.x; x < kWidth - reach.x; ++x) {
+                    const double expected = transfer * std::cos(glm::dot(k, hexagonalCentre(x, y)) + 0.3);
+                    worst = std::max(worst, std::abs(static_cast<double>(plane[(static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x)]) - expected));
+                }
+            }
+            PT_EXPECT(ctx, worst <= bound,
+                      std::to_string(degrees) + " deg, " + std::to_string(fraction) + " M: deviates by " + std::to_string(worst) + " bound " +
+                          std::to_string(bound));
+        }
+    }
+}
+
+// Every axis line of an axial-affine field is affine, so each centre-relative pass cancels exactly and the interior is untouched.
+PT_CHECK(hexagonal_diffusion_reproduces_affine_fields, Fast, Exact) {
+    ctx.plan(1);
+    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    constexpr int kWidth = 112;
+    constexpr int kHeight = 96;
+    std::vector<float> reference(static_cast<std::size_t>(kWidth) * kHeight);
+    for (int y = 0; y < kHeight; ++y) {
+        for (int x = 0; x < kWidth; ++x) {
+            const glm::ivec2 axial = axialOf(x, y);
+            reference[(static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x)] = static_cast<float>(8 + (2 * axial.x) + (3 * axial.y));
+        }
+    }
+    std::vector<float> plane = reference;
+    const float t = pathtracer::debug::innerScaleVariance(PixelLattice::Hexagonal);
+    const glm::ivec2 reach = pathtracer::debug::diffusionReach(t, PixelLattice::Hexagonal);
+    pathtracer::debug::diffuse(plane, kWidth, kHeight, t, pool, false, PixelLattice::Hexagonal);
+    bool identical = reach.y < kHeight - reach.y && reach.x < kWidth - reach.x;
+    for (int y = reach.y; y < kHeight - reach.y; ++y) {
+        for (int x = reach.x; x < kWidth - reach.x; ++x) {
+            const std::size_t pixel = (static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x);
+            identical = identical && plane[pixel] == reference[pixel];
+        }
+    }
+    PT_EXPECT(ctx, identical, "hexagonal diffusion must leave an affine field bit-identical in the interior");
+}
+
+// The lattice fold extends the frame by its own symmetry, which diffusion keeps, so t then 3t equals 4t right up to the border.
+PT_CHECK(hexagonal_diffusion_semigroup_holds_to_the_border, Fast, Exact) {
+    ctx.plan(2);
+    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    constexpr int kWidth = 41;
+    constexpr int kHeight = 30;
+    std::mt19937 rng(static_cast<std::uint32_t>(ctx.subSeed("hexagonal-semigroup")));
+    const std::vector<float> source = uniformPlane(kWidth, kHeight, rng);
+    const float t = pathtracer::debug::innerScaleVariance(PixelLattice::Hexagonal);
+    // Rounding of nine passes, plus each axis' composed truncation (2 x 2^-24 + an ulp, as discrete_gaussian_semigroup_is_exact bounds).
+    const double bound = hexagonalRoundingBound(t) + hexagonalRoundingBound(3.0F * t) + hexagonalRoundingBound(4.0F * t) +
+                         (3.0 * ((2.0 * pathtracer::debug::kFloat32Roundoff) + static_cast<double>(kFloatEpsilon)));
+    for (const bool wraps : {false, true}) {
+        std::vector<float> stepped = source;
+        pathtracer::debug::diffuse(stepped, kWidth, kHeight, t, pool, wraps, PixelLattice::Hexagonal);
+        pathtracer::debug::diffuse(stepped, kWidth, kHeight, 3.0F * t, pool, wraps, PixelLattice::Hexagonal);
+        std::vector<float> direct = source;
+        pathtracer::debug::diffuse(direct, kWidth, kHeight, 4.0F * t, pool, wraps, PixelLattice::Hexagonal);
+        double worst = 0.0;
+        for (std::size_t pixel = 0; pixel < source.size(); ++pixel) {
+            worst = std::max(worst, std::abs(static_cast<double>(stepped[pixel]) - static_cast<double>(direct[pixel])));
+        }
+        PT_EXPECT(ctx, worst <= bound,
+                  std::string(wraps ? "wrapped" : "mirrored") + ": t then 3t differs from 4t by " + std::to_string(worst) + " bound " +
+                      std::to_string(bound));
+    }
+}
+
+// Frame symmetries that are lattice symmetries commute with diffusion: 180 degree turns and cyclic rolls bitwise, a row flip to rounding.
+PT_CHECK(hexagonal_diffusion_commutes_with_the_frame_symmetries, Fast, Exact) {
+    ctx.plan(3);
+    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    const float t = pathtracer::debug::innerScaleVariance(PixelLattice::Hexagonal);
+    std::mt19937 rng(static_cast<std::uint32_t>(ctx.subSeed("hexagonal-symmetry")));
+    const auto at = [](const std::vector<float>& plane, int width, int x, int y) {
+        return plane[(static_cast<std::size_t>(y) * static_cast<std::size_t>(width)) + static_cast<std::size_t>(x)];
+    };
+    // Returns the worst |f(S(I)) - S(f(I))| for the index map S over a width x height frame.
+    const auto worstError = [&](int width, int height, bool wraps, const auto& map) {
+        const std::vector<float> source = uniformPlane(width, height, rng);
+        std::vector<float> mapped(source.size());
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                const glm::ivec2 to = map(x, y);
+                mapped[(static_cast<std::size_t>(to.y) * static_cast<std::size_t>(width)) + static_cast<std::size_t>(to.x)] = at(source, width, x, y);
+            }
+        }
+        std::vector<float> diffused = source;
+        pathtracer::debug::diffuse(diffused, width, height, t, pool, wraps, PixelLattice::Hexagonal);
+        pathtracer::debug::diffuse(mapped, width, height, t, pool, wraps, PixelLattice::Hexagonal);
+        double worst = 0.0;
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                const glm::ivec2 to = map(x, y);
+                worst = std::max(worst, std::abs(static_cast<double>(at(mapped, width, to.x, to.y)) - static_cast<double>(at(diffused, width, x, y))));
+            }
+        }
+        return worst;
+    };
+    // An even row count makes the index turn (w-1-x, h-1-y) the frame's half turn, which maps every axis onto itself.
+    const double turn = worstError(37, 24, false, [](int x, int y) { return glm::ivec2(36 - x, 23 - y); });
+    PT_EXPECT(ctx, turn == 0.0, "a half turn moved hexagonal diffusion by " + std::to_string(turn));
+    const double roll = worstError(40, 24, true, [](int x, int y) { return glm::ivec2((x + 13) % 40, y); });
+    PT_EXPECT(ctx, roll == 0.0, "a cyclic roll moved wrapped hexagonal diffusion by " + std::to_string(roll));
+    // An odd row count makes y -> h-1-y a lattice mirror; it swaps the 60 and 120 degree passes, so their order rounds differently.
+    const double flip = worstError(37, 25, false, [](int x, int y) { return glm::ivec2(x, 24 - y); });
+    const double bound = 2.0 * hexagonalRoundingBound(t);
+    PT_EXPECT(ctx, flip <= bound, "a row flip moved hexagonal diffusion by " + std::to_string(flip) + " bound " + std::to_string(bound));
+}
+
+// Far from any border an impulse spreads isotropically: six-fold symmetric, unit mass and covariance t I in film units.
+PT_CHECK(hexagonal_impulse_response_is_six_fold_symmetric, Fast, Exact) {
+    ctx.plan(3);
+    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    const float t = 4.0F * pathtracer::debug::innerScaleVariance(PixelLattice::Hexagonal);
+    const glm::ivec2 reach = pathtracer::debug::diffusionReach(t, PixelLattice::Hexagonal);
+    const int width = (4 * reach.x) + 1;
+    const int height = (4 * reach.y) + 2;
+    const glm::ivec2 centre(width / 2, height / 2);
+    std::vector<float> plane(static_cast<std::size_t>(width) * static_cast<std::size_t>(height), 0.0F);
+    plane[(static_cast<std::size_t>(centre.y) * static_cast<std::size_t>(width)) + static_cast<std::size_t>(centre.x)] = 1.0F;
+    pathtracer::debug::diffuse(plane, width, height, t, pool, false, PixelLattice::Hexagonal);
+    const glm::ivec2 origin = axialOf(centre.x, centre.y);
+    const auto response = [&](glm::ivec2 offset) {
+        const glm::ivec2 cell = offsetOf(origin + offset);
+        return static_cast<double>(plane[(static_cast<std::size_t>(cell.y) * static_cast<std::size_t>(width)) + static_cast<std::size_t>(cell.x)]);
+    };
+    const int radius = hexagonalAxisRadius(t);
+    double asymmetry = 0.0;
+    double mass = 0.0;
+    glm::dmat2 covariance(0.0);
+    for (int r = -2 * radius; r <= 2 * radius; ++r) {
+        for (int q = -2 * radius; q <= 2 * radius; ++q) {
+            const glm::ivec2 offset(q, r);
+            // A sixth of a turn in axial coordinates: (q, r) -> (-r, q + r).
+            asymmetry = std::max(asymmetry, std::abs(response(glm::ivec2(-r, q + r)) - response(offset)));
+            const double weight = response(offset);
+            const glm::dvec2 film = (static_cast<double>(q) * kHexagonalAxes[0]) + (static_cast<double>(r) * kHexagonalAxes[1]);
+            mass += weight;
+            covariance += weight * glm::outerProduct(film, film);
+        }
+    }
+    const double rounding = 2.0 * hexagonalRoundingBound(t);
+    PT_EXPECT(ctx, asymmetry <= rounding, "a sixth turn moves the impulse response by " + std::to_string(asymmetry));
+    PT_EXPECT(ctx, std::abs(mass - 1.0) <= 3.0 * static_cast<double>(kFloatEpsilon), "impulse mass is " + std::to_string(mass));
+    // Each axis' discarded second moment, as discrete_gaussian_variance_is_t bounds it, scaled to the pass' variance 2t/3.
+    const double axisVariance = (2.0 * static_cast<double>(t)) / 3.0;
+    const double bound = 3.0 * ((pathtracer::debug::kFloat32Roundoff * (radius + 1.0) * (radius + 1.0) / axisVariance) + static_cast<double>(kFloatEpsilon));
+    const double error = std::max({std::abs((covariance[0][0] / static_cast<double>(t)) - 1.0), std::abs((covariance[1][1] / static_cast<double>(t)) - 1.0),
+                                   std::abs(covariance[0][1] / static_cast<double>(t))});
+    PT_EXPECT(ctx, error <= bound, "covariance deviates from t I by " + std::to_string(error) + " bound " + std::to_string(bound));
+}
+
+// The boundary oracle without the padding code: a frame's response is the free-space kernel summed over the impulse's reflection orbit.
+PT_CHECK(hexagonal_diffusion_matches_the_method_of_images, Fast, Exact) {
+    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    constexpr int kWidth = 9;
+    constexpr int kHeight = 7;
+    const std::vector<glm::ivec2> sources{{0, 0}, {1, 1}, {8, 6}, {4, 3}};
+    ctx.plan(2 * static_cast<int>(sources.size()));
+    const float t = pathtracer::debug::innerScaleVariance(PixelLattice::Hexagonal);
+    const glm::ivec2 reach = pathtracer::debug::diffusionReach(t, PixelLattice::Hexagonal);
+    // Free-space kernel on a canvas whose every border is twice the reach from the impulse, so no image of it reaches the centre's support.
+    const int canvasWidth = (4 * reach.x) + 1;
+    const int canvasHeight = (4 * reach.y) + 2;
+    const glm::ivec2 canvasCentre(canvasWidth / 2, canvasHeight / 2);
+    std::vector<float> kernel(static_cast<std::size_t>(canvasWidth) * static_cast<std::size_t>(canvasHeight), 0.0F);
+    kernel[(static_cast<std::size_t>(canvasCentre.y) * static_cast<std::size_t>(canvasWidth)) + static_cast<std::size_t>(canvasCentre.x)] = 1.0F;
+    pathtracer::debug::diffuse(kernel, canvasWidth, canvasHeight, t, pool, false, PixelLattice::Hexagonal);
+    const glm::ivec2 origin = axialOf(canvasCentre.x, canvasCentre.y);
+    const auto free = [&](glm::ivec2 axialOffset) {
+        const glm::ivec2 cell = offsetOf(origin + axialOffset);
+        const bool inside = cell.x >= 0 && cell.x < canvasWidth && cell.y >= 0 && cell.y < canvasHeight;
+        return inside ? static_cast<double>(kernel[(static_cast<std::size_t>(cell.y) * static_cast<std::size_t>(canvasWidth)) + static_cast<std::size_t>(cell.x)]) : 0.0;
+    };
+    const double bound = 2.0 * hexagonalRoundingBound(t);
+    for (const bool wraps : {false, true}) {
+        for (const glm::ivec2 source : sources) {
+            // The orbit, in half-pitch column j = 2x + parity and row: rows mirror with period 2h-2, j mirrors with 4w-2 or wraps with 2w.
+            const int rowPeriod = (2 * kHeight) - 2;
+            const int columnPeriod = wraps ? 2 * kWidth : (4 * kWidth) - 2;
+            const int column = (2 * source.x) + (source.y & 1);
+            std::set<std::pair<int, int>> orbit;
+            for (int k = -2 * ((reach.y / rowPeriod) + 2); k <= 2 * ((reach.y / rowPeriod) + 2); ++k) {
+                for (int m = -2 * ((reach.x / columnPeriod) + 2); m <= 2 * ((reach.x / columnPeriod) + 2); ++m) {
+                    for (const int row : {source.y + (k * rowPeriod), -source.y + (k * rowPeriod)}) {
+                        for (const int j : {column + (m * columnPeriod), (wraps ? column : -column) + (m * columnPeriod)}) {
+                            orbit.emplace(j, row);
+                        }
+                    }
+                }
+            }
+            std::vector<float> plane(static_cast<std::size_t>(kWidth) * kHeight, 0.0F);
+            plane[(static_cast<std::size_t>(source.y) * kWidth) + static_cast<std::size_t>(source.x)] = 1.0F;
+            pathtracer::debug::diffuse(plane, kWidth, kHeight, t, pool, wraps, PixelLattice::Hexagonal);
+            double worst = 0.0;
+            for (int y = 0; y < kHeight; ++y) {
+                for (int x = 0; x < kWidth; ++x) {
+                    double expected = 0.0;
+                    for (const auto& [j, row] : orbit) {
+                        expected += free(axialOf(x, y) - axialOf((j - (row & 1)) / 2, row));
+                    }
+                    worst = std::max(worst, std::abs(static_cast<double>(plane[(static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x)]) - expected));
+                }
+            }
+            PT_EXPECT(ctx, worst <= bound,
+                      std::string(wraps ? "wrapped" : "mirrored") + " impulse at " + std::to_string(source.x) + "," + std::to_string(source.y) +
+                          " misses its images by " + std::to_string(worst) + " bound " + std::to_string(bound));
+        }
+    }
 }
 
 // A constant field survives the mirror exactly, so DoG must read zero at every pixel, border included.

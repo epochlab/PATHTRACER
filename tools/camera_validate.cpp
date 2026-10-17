@@ -1099,3 +1099,42 @@ PT_CHECK(nearest_pixel_is_the_nearest_centre, Fast, Exact) {
 }
 
 PT_CHECK_MAIN("camera_validate")
+
+// The hexagonal fold is the lattice's own reflection group: each cell lands in frame, keeps its parity and sits on the reflected point.
+PT_CHECK(hexagonal_reflection_is_a_lattice_symmetry, Fast, Exact) {
+    using pathtracer::gfx::PixelLattice;
+    ctx.plan(2);
+    int misplaced = 0;
+    int singleRowOutside = 0;
+    for (const bool wraps : {false, true}) {
+        for (const int width : {1, 2, 5, 6}) {
+            for (const int height : {1, 2, 3, 4, 7}) {
+                for (int y = -3 * height; y < 4 * height; ++y) {
+                    for (int x = -3 * width; x < 4 * width; ++x) {
+                        const glm::ivec2 cell = pathtracer::gfx::hexagonalReflection(x, y, width, height, wraps);
+                        const bool inFrame = cell.x >= 0 && cell.x < width && cell.y >= 0 && cell.y < height;
+                        if (height == 1) {
+                            singleRowOutside += inFrame ? 0 : 1;
+                            continue;
+                        }
+                        // Quarter-pitch film x reflected about x=1/4 and x=w-1/4 (period 2w-1) or wrapped (period w): exact in float.
+                        const float film = pathtracer::gfx::pixelCentre(PixelLattice::Hexagonal, x, y).x;
+                        float expected = 0.0F;
+                        if (wraps) {
+                            expected = std::fmod(std::fmod(film, static_cast<float>(width)) + static_cast<float>(width), static_cast<float>(width));
+                        } else {
+                            const auto period = static_cast<float>((2 * width) - 1);
+                            const float offset = std::fmod(std::fmod(film - 0.25F, period) + period, period);
+                            expected = 0.25F + (offset > static_cast<float>(width) - 0.5F ? period - offset : offset);
+                        }
+                        const bool reflected = (cell.y & 1) == (y & 1) && cell.y == pathtracer::gfx::mirrorIndex(y, height) &&
+                                               pathtracer::gfx::pixelCentre(PixelLattice::Hexagonal, cell.x, cell.y).x == expected;
+                        misplaced += inFrame && reflected ? 0 : 1;
+                    }
+                }
+            }
+        }
+    }
+    PT_EXPECT(ctx, misplaced == 0, std::to_string(misplaced) + " folded cells left the frame, changed parity or missed the reflected point");
+    PT_EXPECT(ctx, singleRowOutside == 0, std::to_string(singleRowOutside) + " single-row folds left the frame");
+}
