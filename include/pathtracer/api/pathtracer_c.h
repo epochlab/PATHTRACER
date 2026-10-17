@@ -59,7 +59,7 @@ typedef struct {
     float fisheye_coefficients[4];
     /* Full angle across the image circle; half it is the polynomial's domain. Must lie in (0, 360] whichever projection is selected. */
     float fisheye_field_of_view_degrees;
-    /* PT_LATTICE_*. Hexagonal refuses sobel, gabor, dog and denoised, whose stencils need a square neighbourhood. */
+    /* PT_LATTICE_*. Hexagonal refuses gabor and denoised, which still need a square neighbourhood. */
     int pixel_lattice;
 } PtCamera;
 

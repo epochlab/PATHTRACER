@@ -510,22 +510,24 @@ PT_CHECK(hexagonal_diffusion_matches_the_method_of_images, Fast, Exact) {
     }
 }
 
-// A constant field survives the mirror exactly, so DoG must read zero at every pixel, border included.
+// A constant field survives the mirror and the lattice fold exactly, so DoG must read zero at every pixel, border included.
 PT_CHECK(dog_is_zero_on_a_constant_field, Fast, Exact) {
-    ctx.plan(1);
+    ctx.plan(2);
     ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
     constexpr int kWidth = 128;
     constexpr int kHeight = 96;
     const HdrImage flat = greyImage(kWidth, kHeight, std::vector<float>(static_cast<std::size_t>(kWidth) * kHeight, 0.375F));
-
-    const HdrImage dog = pathtracer::debug::dogAov(flat, pool);
-    float worstDog = 0.0F;
-    for (int y = 0; y < kHeight; ++y) {
-        for (int x = 0; x < kWidth; ++x) {
-            worstDog = std::max(worstDog, std::fabs(texelAt(dog, x, y, 0)));
+    for (const PixelLattice lattice : {PixelLattice::Square, PixelLattice::Hexagonal}) {
+        const HdrImage dog = pathtracer::debug::dogAov(flat, pool, false, lattice);
+        float worstDog = 0.0F;
+        for (int y = 0; y < kHeight; ++y) {
+            for (int x = 0; x < kWidth; ++x) {
+                worstDog = std::max(worstDog, std::fabs(texelAt(dog, x, y, 0)));
+            }
         }
+        PT_EXPECT(ctx, worstDog == 0.0F,
+                  std::string(pathtracer::gfx::kPixelLatticeNames[static_cast<int>(lattice)]) + ": peak DoG response " + std::to_string(worstDog));
     }
-    PT_EXPECT(ctx, worstDog == 0.0F, "peak DoG response " + std::to_string(worstDog));
 }
 
 // Both diffusions reproduce an affine field, so DoG may not fire on a smooth gradient anywhere its support avoids the mirror.
@@ -557,24 +559,27 @@ PT_CHECK(dog_is_flat_on_an_affine_field, Fast, Exact) {
 
 // The band exists exactly when the coarse step's kernel fits the frame: one row short is empty, the fitting frame is not.
 PT_CHECK(dog_is_empty_exactly_below_its_coarse_support, Fast, Exact) {
-    ctx.plan(2);
+    ctx.plan(4);
     ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    const float fine = pathtracer::debug::innerScaleVariance();
-    const int support = (2 * (static_cast<int>(pathtracer::debug::discreteGaussianKernel((4.0F * fine) - fine).size()) - 1)) + 1;
     constexpr int kWidth = 128;
-    const auto peakResponse = [&pool](int height) {
-        std::vector<float> plane(static_cast<std::size_t>(kWidth) * static_cast<std::size_t>(height), 0.0F);
-        // A unit impulse at the centre, which every non-empty DoG answers with a nonzero centre tap.
-        plane[(static_cast<std::size_t>(height / 2) * kWidth) + (kWidth / 2)] = 1.0F;
-        const HdrImage dog = pathtracer::debug::dogAov(greyImage(kWidth, height, plane), pool);
-        float peak = 0.0F;
-        for (const float response : dog.texels) {
-            peak = std::max(peak, std::fabs(response));
-        }
-        return peak;
-    };
-    PT_EXPECT(ctx, peakResponse(support - 1) == 0.0F, "a frame one row short of the coarse support must yield an empty band");
-    PT_EXPECT(ctx, peakResponse(support) > 0.0F, "a frame exactly the coarse support must yield a band");
+    for (const PixelLattice lattice : {PixelLattice::Square, PixelLattice::Hexagonal}) {
+        const float fine = pathtracer::debug::innerScaleVariance(lattice);
+        const int support = (2 * pathtracer::debug::diffusionReach((4.0F * fine) - fine, lattice).y) + 1;
+        const auto peakResponse = [&pool, lattice](int height) {
+            std::vector<float> plane(static_cast<std::size_t>(kWidth) * static_cast<std::size_t>(height), 0.0F);
+            // A unit impulse at the centre, which every non-empty DoG answers with a nonzero centre tap.
+            plane[(static_cast<std::size_t>(height / 2) * kWidth) + (kWidth / 2)] = 1.0F;
+            const HdrImage dog = pathtracer::debug::dogAov(greyImage(kWidth, height, plane), pool, false, lattice);
+            float peak = 0.0F;
+            for (const float response : dog.texels) {
+                peak = std::max(peak, std::fabs(response));
+            }
+            return peak;
+        };
+        const std::string name = pathtracer::gfx::kPixelLatticeNames[static_cast<int>(lattice)];
+        PT_EXPECT(ctx, peakResponse(support - 1) == 0.0F, name + ": a frame one row short of the coarse support must yield an empty band");
+        PT_EXPECT(ctx, peakResponse(support) > 0.0F, name + ": a frame exactly the coarse support must yield a band");
+    }
 }
 
 // On a cosine the two octaves are eigenfunctions, so DoG must equal the analytic difference of transfers -- amplitude and sign both.
@@ -712,7 +717,7 @@ PT_CHECK(gabor_matches_the_analytic_morlet_response, Fast, Exact) {
 
 // Fine minus coarse is the centre-surround sign: a bright blob reads positive and a dark one negative, the convention the preview shows.
 PT_CHECK(dog_polarity_follows_the_blob, Fast, Exact) {
-    ctx.plan(2);
+    ctx.plan(4);
     ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
     constexpr int kWidth = 96;
     constexpr int kHeight = 96;
@@ -720,18 +725,21 @@ PT_CHECK(dog_polarity_follows_the_blob, Fast, Exact) {
     const int centreX = kWidth / 2;
     const int centreY = kHeight / 2;
     const std::size_t centre = (static_cast<std::size_t>(centreY) * kWidth) + static_cast<std::size_t>(centreX);
+    for (const PixelLattice lattice : {PixelLattice::Square, PixelLattice::Hexagonal}) {
+        const std::string name = pathtracer::gfx::kPixelLatticeNames[static_cast<int>(lattice)];
+        const float t = pathtracer::debug::innerScaleVariance(lattice);
+        std::vector<float> bright(pixels, 0.25F);
+        bright[centre] += 1.0F;
+        pathtracer::debug::diffuse(bright, kWidth, kHeight, t, pool, false, lattice);
+        const float brightDog = texelAt(pathtracer::debug::dogAov(greyImage(kWidth, kHeight, bright), pool, false, lattice), centreX, centreY, 0);
+        PT_EXPECT(ctx, brightDog > 0.0F, name + ": bright-on-dark DoG read " + std::to_string(brightDog));
 
-    std::vector<float> bright(pixels, 0.25F);
-    bright[centre] += 1.0F;
-    pathtracer::debug::diffuse(bright, kWidth, kHeight, pathtracer::debug::innerScaleVariance(), pool);
-    const float brightDog = texelAt(pathtracer::debug::dogAov(greyImage(kWidth, kHeight, bright), pool), centreX, centreY, 0);
-    PT_EXPECT(ctx, brightDog > 0.0F, "bright-on-dark DoG read " + std::to_string(brightDog));
-
-    std::vector<float> dark(pixels, 1.25F);
-    dark[centre] -= 1.0F;
-    pathtracer::debug::diffuse(dark, kWidth, kHeight, pathtracer::debug::innerScaleVariance(), pool);
-    const float darkDog = texelAt(pathtracer::debug::dogAov(greyImage(kWidth, kHeight, dark), pool), centreX, centreY, 0);
-    PT_EXPECT(ctx, darkDog < 0.0F, "dark-on-bright DoG read " + std::to_string(darkDog));
+        std::vector<float> dark(pixels, 1.25F);
+        dark[centre] -= 1.0F;
+        pathtracer::debug::diffuse(dark, kWidth, kHeight, t, pool, false, lattice);
+        const float darkDog = texelAt(pathtracer::debug::dogAov(greyImage(kWidth, kHeight, dark), pool, false, lattice), centreX, centreY, 0);
+        PT_EXPECT(ctx, darkDog < 0.0F, name + ": dark-on-bright DoG read " + std::to_string(darkDog));
+    }
 }
 
 // A cone chromaticity is a ratio of two linear forms, and writing the numerators on (R-G, B-G) makes the achromatic axis exactly zero.
@@ -973,12 +981,156 @@ PT_CHECK(periodic_diffusion_keeps_lattice_harmonics_as_eigenfunctions, Fast, Exa
     PT_EXPECT(ctx, worst <= bound, "worst harmonic deviation " + std::to_string(worst) + " bound " + std::to_string(bound));
 }
 
+// Six differences of one constant are exact zeros, interior and fold alike, so hexagonal Sobel reads zero everywhere.
+PT_CHECK(hexagonal_sobel_is_zero_on_a_constant_field, Fast, Exact) {
+    ctx.plan(2);
+    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    constexpr int kWidth = 37;
+    constexpr int kHeight = 24;
+    const HdrImage flat = greyImage(kWidth, kHeight, std::vector<float>(static_cast<std::size_t>(kWidth) * kHeight, 0.375F));
+    for (const bool wraps : {false, true}) {
+        const HdrImage sobel = pathtracer::debug::sobelAov(flat, pool, wraps, PixelLattice::Hexagonal);
+        const float peak = *std::max_element(sobel.texels.begin(), sobel.texels.end());
+        PT_EXPECT(ctx, peak == 0.0F, std::string(wraps ? "wrapped" : "mirrored") + ": peak hexagonal Sobel " + std::to_string(peak));
+    }
+}
+
+// On any affine field hexagonal Sobel reads 8 |grad f|, Sobel's own gain: the square operator's 8s on an x ramp, and so on both lattices.
+PT_CHECK(hexagonal_sobel_reads_eight_times_the_affine_slope, Fast, Exact) {
+    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    constexpr int kWidth = 40;
+    constexpr int kHeight = 30;
+    const double rowPitch = std::numbers::sqrt3 / 2.0;
+    // Axial slopes (b, c) of f = 8 + b q + c r; (1, 1/2) is the pure film-x ramp of slope 1, the square operator's 8 reference.
+    const std::vector<glm::dvec2> slopes{{1.0, 0.5}, {2.0, 3.0}, {0.0, 1.0}, {-1.5, 0.25}};
+    ctx.plan(static_cast<int>(slopes.size()) + 1);
+    for (const glm::dvec2 slope : slopes) {
+        std::vector<float> plane(static_cast<std::size_t>(kWidth) * kHeight);
+        float peak = 0.0F;
+        for (int y = 0; y < kHeight; ++y) {
+            for (int x = 0; x < kWidth; ++x) {
+                const glm::ivec2 axial = axialOf(x, y);
+                const auto value = static_cast<float>(8.0 + (slope.x * axial.x) + (slope.y * axial.y));
+                plane[(static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x)] = value;
+                peak = std::max(peak, std::fabs(value));
+            }
+        }
+        const HdrImage sobel = pathtracer::debug::sobelAov(greyImage(kWidth, kHeight, plane), pool, false, PixelLattice::Hexagonal);
+        // grad q = (1, -1/(2 rowPitch)) and grad r = (0, 1/rowPitch) in film units, from x = q + r/2 + 1/4 and y = (r + 1/2) rowPitch.
+        const double expected = 8.0 * static_cast<double>(greyLuminanceGain()) *
+                                std::hypot(slope.x, (slope.y - (0.5 * slope.x)) / rowPitch);
+        // Each tap's luminance rounds by peak eps; the stencil's absolute weights sum below 8, times the 8/3 gain.
+        const double bound = 8.0 * (8.0 / 3.0) * static_cast<double>(peak * kFloatEpsilon);
+        double worst = 0.0;
+        for (int y = 1; y < kHeight - 1; ++y) {
+            for (int x = 1; x < kWidth - 1; ++x) {
+                worst = std::max(worst, std::abs(static_cast<double>(texelAt(sobel, x, y, 0)) - expected));
+            }
+        }
+        PT_EXPECT(ctx, worst <= bound,
+                  "slope (" + std::to_string(slope.x) + ", " + std::to_string(slope.y) + ") reads off 8|grad f| by " + std::to_string(worst));
+    }
+    std::vector<float> ramp(static_cast<std::size_t>(kWidth) * kHeight);
+    for (int y = 0; y < kHeight; ++y) {
+        for (int x = 0; x < kWidth; ++x) {
+            ramp[(static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x)] = static_cast<float>(x);
+        }
+    }
+    const float square = texelAt(pathtracer::debug::sobelAov(greyImage(kWidth, kHeight, ramp), pool), kWidth / 2, kHeight / 2, 0);
+    PT_EXPECT(ctx, std::abs(static_cast<double>(square) - (8.0 * static_cast<double>(greyLuminanceGain()))) <= 8.0 * kWidth * kFloatEpsilon,
+              "square Sobel reads " + std::to_string(square) + " on a unit x ramp, not 8");
+}
+
+// A half turn maps each neighbour onto its opposite, negating both gradient components exactly, so the magnitude is bit-identical.
+PT_CHECK(hexagonal_sobel_commutes_with_a_half_turn, Fast, Exact) {
+    ctx.plan(1);
+    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    constexpr int kWidth = 37;
+    constexpr int kHeight = 24;
+    std::mt19937 rng(static_cast<std::uint32_t>(ctx.subSeed("hexagonal-sobel-turn")));
+    const std::vector<float> plane = uniformPlane(kWidth, kHeight, rng);
+    std::vector<float> turned(plane.size());
+    for (std::size_t pixel = 0; pixel < plane.size(); ++pixel) {
+        turned[plane.size() - 1 - pixel] = plane[pixel];
+    }
+    const HdrImage sobel = pathtracer::debug::sobelAov(greyImage(kWidth, kHeight, plane), pool, false, PixelLattice::Hexagonal);
+    const HdrImage turnedSobel = pathtracer::debug::sobelAov(greyImage(kWidth, kHeight, turned), pool, false, PixelLattice::Hexagonal);
+    bool identical = true;
+    for (std::size_t pixel = 0; pixel < plane.size(); ++pixel) {
+        identical = identical && turnedSobel.texels[plane.size() - 1 - pixel] == sobel.texels[pixel];
+    }
+    PT_EXPECT(ctx, identical, "a half turn of an even-row hexagonal frame changed its Sobel");
+}
+
+// Both hexagonal diffusions keep an axial-affine field, so DoG may not fire on a smooth gradient anywhere its support avoids the fold.
+PT_CHECK(hexagonal_dog_is_flat_on_an_affine_field, Fast, Exact) {
+    ctx.plan(1);
+    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    constexpr int kWidth = 256;
+    constexpr int kHeight = 192;
+    std::vector<float> plane(static_cast<std::size_t>(kWidth) * kHeight);
+    float peak = 0.0F;
+    for (int y = 0; y < kHeight; ++y) {
+        for (int x = 0; x < kWidth; ++x) {
+            const glm::ivec2 axial = axialOf(x, y);
+            plane[(static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x)] = static_cast<float>(8 + (2 * axial.x) + (3 * axial.y));
+            peak = std::max(peak, std::fabs(plane[(static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x)]));
+        }
+    }
+    const HdrImage dog = pathtracer::debug::dogAov(greyImage(kWidth, kHeight, plane), pool, false, PixelLattice::Hexagonal);
+    const float fine = pathtracer::debug::innerScaleVariance(PixelLattice::Hexagonal);
+    const glm::ivec2 reach = pathtracer::debug::diffusionReach(fine, PixelLattice::Hexagonal) +
+                             pathtracer::debug::diffusionReach(3.0F * fine, PixelLattice::Hexagonal);
+    float worst = 0.0F;
+    for (int y = reach.y; y < kHeight - reach.y; ++y) {
+        for (int x = reach.x; x < kWidth - reach.x; ++x) {
+            worst = std::max(worst, std::fabs(texelAt(dog, x, y, 0)));
+        }
+    }
+    // The Rec.709 reduction rounds, so the plane is affine only to an ulp; carried through the coarse step's three passes.
+    const double bound = hexagonalRoundingBound(3.0F * fine) * static_cast<double>(greyLuminanceGain() * peak);
+    PT_EXPECT(ctx, static_cast<double>(worst) <= bound, "interior hexagonal DoG " + std::to_string(worst) + " bound " + std::to_string(bound));
+}
+
+// Hexagonal plane waves are eigenfunctions of both octaves, so DoG is the difference of the three-axis transfers, oblique waves included.
+PT_CHECK(hexagonal_dog_matches_the_analytic_transfer, Fast, Exact) {
+    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    constexpr int kWidth = 160;
+    constexpr int kHeight = 128;
+    const std::vector<glm::dvec2> waves{{0.3, 0.0}, {0.6, 0.4}, {0.0, 0.9}, {-1.1, 0.7}};
+    ctx.plan(static_cast<int>(waves.size()));
+    const float fine = pathtracer::debug::innerScaleVariance(PixelLattice::Hexagonal);
+    const std::vector<float> fineAxis = pathtracer::debug::discreteGaussianKernel(static_cast<float>((2.0 * static_cast<double>(fine)) / 3.0));
+    const std::vector<float> stepAxis = pathtracer::debug::discreteGaussianKernel(static_cast<float>(2.0 * static_cast<double>(fine)));
+    const glm::ivec2 reach = pathtracer::debug::diffusionReach(fine, PixelLattice::Hexagonal) +
+                             pathtracer::debug::diffusionReach(3.0F * fine, PixelLattice::Hexagonal);
+    for (const glm::dvec2 k : waves) {
+        std::vector<float> plane(static_cast<std::size_t>(kWidth) * kHeight);
+        for (int y = 0; y < kHeight; ++y) {
+            for (int x = 0; x < kWidth; ++x) {
+                plane[(static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x)] = static_cast<float>(std::cos(glm::dot(k, hexagonalCentre(x, y))));
+            }
+        }
+        const HdrImage dog = pathtracer::debug::dogAov(greyImage(kWidth, kHeight, plane), pool, false, PixelLattice::Hexagonal);
+        const double fineTransfer = hexagonalTransfer(fineAxis, k);
+        const double gain = static_cast<double>(greyLuminanceGain()) * (fineTransfer - (fineTransfer * hexagonalTransfer(stepAxis, k)));
+        double worst = 0.0;
+        for (int y = reach.y; y < kHeight - reach.y; ++y) {
+            for (int x = reach.x; x < kWidth - reach.x; ++x) {
+                worst = std::max(worst, std::abs(static_cast<double>(texelAt(dog, x, y, 0)) - (gain * std::cos(glm::dot(k, hexagonalCentre(x, y))))));
+            }
+        }
+        PT_EXPECT(ctx, worst <= 1e-6, "k=(" + std::to_string(k.x) + ", " + std::to_string(k.y) + ") deviates by " + std::to_string(worst));
+    }
+}
+
 // A wrapping image has no seam to the filters: rolling its columns rolls Sobel and DoG bit for bit, and Gabor to its own rounding.
 PT_CHECK(wrapped_filters_commute_with_a_cyclic_column_shift, Fast, Exact) {
-    ctx.plan(3);
+    ctx.plan(5);
     ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
     constexpr int kWidth = 64;
-    constexpr int kHeight = 48;
+    // Tall enough for both lattices' coarse DoG support, so the band under test is not the empty one.
+    constexpr int kHeight = 96;
     constexpr int kShift = 23;
     std::mt19937 rng(static_cast<std::uint32_t>(ctx.subSeed("cyclic-shift")));
     std::uniform_real_distribution<float> unit(0.0F, 1.0F);
@@ -1005,10 +1157,16 @@ PT_CHECK(wrapped_filters_commute_with_a_cyclic_column_shift, Fast, Exact) {
         }
         return worst;
     };
-    const float sobel = worstShiftError(pathtracer::debug::sobelAov(image, pool, true), pathtracer::debug::sobelAov(rolled, pool, true));
-    PT_EXPECT(ctx, sobel == 0.0F, "Sobel moved by " + std::to_string(sobel) + " under a cyclic shift");
-    const float dog = worstShiftError(pathtracer::debug::dogAov(image, pool, true), pathtracer::debug::dogAov(rolled, pool, true));
-    PT_EXPECT(ctx, dog == 0.0F, "DoG moved by " + std::to_string(dog) + " under a cyclic shift");
+    for (const PixelLattice lattice : {PixelLattice::Square, PixelLattice::Hexagonal}) {
+        const std::string name = pathtracer::gfx::kPixelLatticeNames[static_cast<int>(lattice)];
+        const float sobel = worstShiftError(pathtracer::debug::sobelAov(image, pool, true, lattice),
+                                            pathtracer::debug::sobelAov(rolled, pool, true, lattice));
+        PT_EXPECT(ctx, sobel == 0.0F, name + ": Sobel moved by " + std::to_string(sobel) + " under a cyclic shift");
+        const HdrImage dogImage = pathtracer::debug::dogAov(image, pool, true, lattice);
+        const float dog = worstShiftError(dogImage, pathtracer::debug::dogAov(rolled, pool, true, lattice));
+        const bool banded = std::any_of(dogImage.texels.begin(), dogImage.texels.end(), [](float value) { return value != 0.0F; });
+        PT_EXPECT(ctx, banded && dog == 0.0F, name + ": DoG moved by " + std::to_string(dog) + " under a cyclic shift, or its band is empty");
+    }
     // The roll moves the carrier's phase, so demodulation, both blurs and the baseband round anew: 2R+1 ulps apiece, x2 envelope.
     const auto radius = static_cast<double>(pathtracer::debug::discreteGaussianKernel(pathtracer::debug::innerScaleVariance()).size() - 1);
     const double bound = 2.0 * 4.0 * ((2.0 * radius) + 1.0) * static_cast<double>(kFloatEpsilon * greyLuminanceGain());

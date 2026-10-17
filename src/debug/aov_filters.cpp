@@ -17,7 +17,13 @@ namespace pathtracer::debug {
 namespace {
 
 using pathtracer::gfx::HdrImage;
+using pathtracer::gfx::PixelLattice;
 using pathtracer::scene::ThreadPool;
+
+// Sobel's response to the ramp f = s x: its (1, 2, 1) column weights times the central difference 2s.
+constexpr float kSobelAffineGain = 2.0F * (1.0F + 2.0F + 1.0F);
+// sum_k f_k u_k.x over the six unit neighbours on f = s x: the row pair's 2s and four diagonals at (1/2)^2 each, so 3s.
+constexpr float kHexagonalAffineGain = 2.0F + (4.0F * 0.25F);
 
 // Scene luminance, materialised once (Sobel reads 8 neighbours); `pad` wrapped columns each side extend a periodic image past its seam.
 [[nodiscard]] std::vector<float> luminancePlane(const HdrImage& beauty, ThreadPool& threadPool, int pad = 0) {
@@ -44,6 +50,36 @@ using pathtracer::scene::ThreadPool;
     return plane[(static_cast<std::size_t>(cy) * static_cast<std::size_t>(width)) + static_cast<std::size_t>(cx)];
 }
 
+// Least-squares gradient over the six unit neighbours (Staunton 1989), at Sobel's affine gain; the frame's edge folds by its mirrors.
+void hexagonalSobel(const std::vector<float>& plane, HdrImage& out, bool wrapsHorizontally, ThreadPool& threadPool) {
+    const int width = out.width;
+    const int height = out.height;
+    const float gain = kSobelAffineGain / kHexagonalAffineGain;
+    const float rowPitch = pathtracer::gfx::rowPitch(PixelLattice::Hexagonal);
+    threadPool.parallelFor(height, [&](int y) {
+        // A row's up and down neighbours sit at columns x-1+p and x+p, p its parity, half a pitch either side of x.
+        const int parity = y & 1;
+        for (int x = 0; x < width; ++x) {
+            const bool interior = y > 0 && y < height - 1 && x > 0 && x < width - 1;
+            const auto at = [&](int column, int row) {
+                const glm::ivec2 cell =
+                    interior ? glm::ivec2(column, row) : pathtracer::gfx::hexagonalReflection(column, row, width, height, wrapsHorizontally);
+                return plane[(static_cast<std::size_t>(cell.y) * static_cast<std::size_t>(width)) + static_cast<std::size_t>(cell.x)];
+            };
+            const float l = at(x - 1, y);
+            const float r = at(x + 1, y);
+            const float ul = at(x - 1 + parity, y - 1);
+            const float ur = at(x + parity, y - 1);
+            const float dl = at(x - 1 + parity, y + 1);
+            const float dr = at(x + parity, y + 1);
+            // Differences first, so a constant field cancels exactly; the diagonals carry u.x = 1/2 and u.y = rowPitch.
+            const float gx = (r - l) + (0.5F * ((ur - ul) + (dr - dl)));
+            const float gy = rowPitch * ((dl + dr) - (ul + ur));
+            writeTexel(out, x, y, gain * std::sqrt((gx * gx) + (gy * gy)));
+        }
+    });
+}
+
 // The filter's output image, zeroed at the channel count aovChannels declares for it.
 [[nodiscard]] HdrImage makeAovImage(AovId aov, int width, int height) {
     return pathtracer::gfx::makeImage(width, height, aovChannels(aov));
@@ -55,9 +91,13 @@ HdrImage luminanceAov(const HdrImage& beauty, ThreadPool& threadPool) {
     return {beauty.width, beauty.height, pathtracer::gfx::kScalarChannels, luminancePlane(beauty, threadPool)};
 }
 
-HdrImage sobelAov(const HdrImage& beauty, ThreadPool& threadPool, bool wrapsHorizontally) {
+HdrImage sobelAov(const HdrImage& beauty, ThreadPool& threadPool, bool wrapsHorizontally, PixelLattice lattice) {
     const std::vector<float> plane = luminancePlane(beauty, threadPool);
     HdrImage out = makeAovImage(AovId::Sobel, beauty.width, beauty.height);
+    if (lattice == PixelLattice::Hexagonal) {
+        hexagonalSobel(plane, out, wrapsHorizontally, threadPool);
+        return out;
+    }
     const int width = beauty.width;
     const int height = beauty.height;
     threadPool.parallelFor(height, [&](int y) {
@@ -222,20 +262,20 @@ HdrImage hsvAov(const HdrImage& beauty, ThreadPool& threadPool) {
     return out;
 }
 
-HdrImage dogAov(const HdrImage& beauty, ThreadPool& threadPool, bool wrapsHorizontally) {
+HdrImage dogAov(const HdrImage& beauty, ThreadPool& threadPool, bool wrapsHorizontally, PixelLattice lattice) {
     HdrImage out = makeAovImage(AovId::DoG, beauty.width, beauty.height);
-    const float fineVariance = innerScaleVariance();
+    const float fineVariance = innerScaleVariance(lattice);
     // One octave up, sigma doubled: variance 4t, reached from the fine level by the semigroup's step 3t.
     const float coarseStep = (4.0F * fineVariance) - fineVariance;
     // A frame narrower than the coarse step's kernel support would report the mirror, not the image; a periodic width has no mirror.
-    const int mirroredExtent = wrapsHorizontally ? beauty.height : std::min(beauty.width, beauty.height);
-    if ((2 * (static_cast<int>(discreteGaussianKernel(coarseStep).size()) - 1)) + 1 > mirroredExtent) {
+    const glm::ivec2 reach = diffusionReach(coarseStep, lattice);
+    if ((2 * reach.y) + 1 > beauty.height || (!wrapsHorizontally && (2 * reach.x) + 1 > beauty.width)) {
         return out;
     }
     std::vector<float> fine = luminancePlane(beauty, threadPool);
-    diffuse(fine, beauty.width, beauty.height, fineVariance, threadPool, wrapsHorizontally);
+    diffuse(fine, beauty.width, beauty.height, fineVariance, threadPool, wrapsHorizontally, lattice);
     std::vector<float> coarse = fine;
-    diffuse(coarse, beauty.width, beauty.height, coarseStep, threadPool, wrapsHorizontally);
+    diffuse(coarse, beauty.width, beauty.height, coarseStep, threadPool, wrapsHorizontally, lattice);
     threadPool.parallelFor(beauty.height, [&](int y) {
         const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(beauty.width);
         for (int x = 0; x < beauty.width; ++x) {
@@ -315,9 +355,9 @@ HdrImage evaluateFilterAov(AovId aov, const FilterInput& input, ThreadPool& thre
     switch (aov) {
         case AovId::HSV:       return hsvAov(input.beauty, threadPool);
         case AovId::Luminance: return luminanceAov(input.beauty, threadPool);
-        case AovId::Sobel:     return sobelAov(input.beauty, threadPool, input.wrapsHorizontally);
+        case AovId::Sobel:     return sobelAov(input.beauty, threadPool, input.wrapsHorizontally, input.lattice);
         case AovId::Gabor:     return gaborAov(input.beauty, threadPool, input.wrapsHorizontally);
-        case AovId::DoG:       return dogAov(input.beauty, threadPool, input.wrapsHorizontally);
+        case AovId::DoG:       return dogAov(input.beauty, threadPool, input.wrapsHorizontally, input.lattice);
         case AovId::ColourOpponent:  return colourOpponentAov(input.beauty, threadPool);
         case AovId::SNR:
             return snrAov(input.beauty.width, input.beauty.height, input.replicateLuminance, input.replicates, input.samples, threadPool);

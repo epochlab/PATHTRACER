@@ -13,7 +13,7 @@
 
 namespace pathtracer::debug {
 
-// CPU implementations of the nine derived AOVs. Sobel clamps at the edge, DoG and Gabor mirror; all three wrap a periodic x.
+// CPU implementations of the derived AOVs. Sobel clamps at the edge, DoG and Gabor mirror, hexagonal folds by its mirrors; x may wrap.
 
 // Radial half-response bandwidth of the Morlet bank, in octaves: DoG's fine-to-coarse spacing, so both operators resolve one band.
 inline constexpr float kMorletOctaves = 1.0F;
@@ -58,9 +58,10 @@ void demodulate(std::span<const float> plane, const MorletPlaneWave& wave, int w
 [[nodiscard]] pathtracer::gfx::HdrImage luminanceAov(const pathtracer::gfx::HdrImage& beauty,
                                                   pathtracer::scene::ThreadPool& threadPool);
 
-// Gradient magnitude of Luminance under the fixed 3x3 Sobel operator (Sobel & Feldman 1968), one channel.
+// Gradient magnitude of Luminance under 3x3 Sobel (Sobel & Feldman 1968), or its six-neighbour gain-matched peer on hexagonal; one channel.
 [[nodiscard]] pathtracer::gfx::HdrImage sobelAov(const pathtracer::gfx::HdrImage& beauty,
-                                              pathtracer::scene::ThreadPool& threadPool, bool wrapsHorizontally = false);
+                                              pathtracer::scene::ThreadPool& threadPool, bool wrapsHorizontally = false,
+                                              pathtracer::gfx::PixelLattice lattice = pathtracer::gfx::PixelLattice::Square);
 
 // Peak envelope of the 2-D Morlet bank over Luminance (Morlet 1982; Antoine & Murenzi 1996): a tuned grating's amplitude, one channel.
 [[nodiscard]] pathtracer::gfx::HdrImage gaborAov(const pathtracer::gfx::HdrImage& beauty,
@@ -72,7 +73,8 @@ void demodulate(std::span<const float> plane, const MorletPlaneWave& wave, int w
 
 // Signed first band of the Laplacian pyramid (Burt & Adelson 1983), finest octave minus the next, one channel. Zero if it cannot fit.
 [[nodiscard]] pathtracer::gfx::HdrImage dogAov(const pathtracer::gfx::HdrImage& beauty,
-                                            pathtracer::scene::ThreadPool& threadPool, bool wrapsHorizontally = false);
+                                            pathtracer::scene::ThreadPool& threadPool, bool wrapsHorizontally = false,
+                                            pathtracer::gfx::PixelLattice lattice = pathtracer::gfx::PixelLattice::Square);
 
 // Cone-opponent displacement from scene white (cone_space.h): (l - l_white, s - s_white), two channels, invariant to a positive gain.
 [[nodiscard]] pathtracer::gfx::HdrImage colourOpponentAov(const pathtracer::gfx::HdrImage& beauty,
@@ -94,6 +96,7 @@ struct FilterInput {
     int replicates = 1;
     int samples = 0;
     bool wrapsHorizontally = false;  // the lens joins the image's left and right edges, so neighbourhood filters wrap in x
+    pathtracer::gfx::PixelLattice lattice = pathtracer::gfx::PixelLattice::Square;  // where the texels sit, so a stencil finds neighbours
     // Denoised's auxiliary features from Beauty's own samples, and the OIDN filter state reused across calls; Denoised needs all three.
     const pathtracer::gfx::HdrImage* denoiseAlbedo = nullptr;
     const pathtracer::gfx::HdrImage* denoiseNormal = nullptr;

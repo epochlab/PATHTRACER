@@ -864,7 +864,8 @@ PT_CHECK(profile_config_camera_pixel_lattice, Fast, Exact) {
         {"square", "square", pathtracer::debug::AovId::Sobel, PixelLattice::Square},
         {"hexagonal", "hexagonal", pathtracer::debug::AovId::Beauty, PixelLattice::Hexagonal},
         {"hexagonal opening on a per-texel filter", "hexagonal", pathtracer::debug::AovId::Luminance, PixelLattice::Hexagonal},
-        {"hexagonal opening on sobel", "hexagonal", pathtracer::debug::AovId::Sobel, std::nullopt},
+        {"hexagonal opening on sobel", "hexagonal", pathtracer::debug::AovId::Sobel, PixelLattice::Hexagonal},
+        {"hexagonal opening on gabor", "hexagonal", pathtracer::debug::AovId::Gabor, std::nullopt},
         {"an unknown lattice name", "triangular", pathtracer::debug::AovId::Beauty, std::nullopt},
         {"no lattice at all", nlohmann::json(nullptr), pathtracer::debug::AovId::Beauty, std::nullopt},
     };

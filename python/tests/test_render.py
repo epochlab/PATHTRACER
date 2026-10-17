@@ -240,7 +240,7 @@ def test_hexagonal_pixels_are_the_documented_centres(renderer: Renderer) -> None
     assert (np.abs(colatitude - math.pi * centre_y / (height * row_pitch)) <= angular).all()
 
 
-@pytest.mark.parametrize("aov", ["sobel", "gabor", "dog", "denoised"])
+@pytest.mark.parametrize("aov", ["gabor", "denoised"])
 def test_hexagonal_lattice_refuses_square_stencils_by_name(renderer: Renderer, aov: str) -> None:
     camera = dataclasses.replace(renderer.default_camera, pixel_lattice="hexagonal")
     with pytest.raises(RuntimeError, match=f"{aov} reads a square neighbourhood"):
