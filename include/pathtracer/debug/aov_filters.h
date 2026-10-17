@@ -62,7 +62,7 @@ void demodulate(std::span<const float> plane, const MorletPlaneWave& wave, int w
 [[nodiscard]] pathtracer::gfx::HdrImage sobelAov(const pathtracer::gfx::HdrImage& beauty,
                                               pathtracer::scene::ThreadPool& threadPool, bool wrapsHorizontally = false);
 
-// Peak quadrature magnitude of the 2-D Morlet wavelet bank over Luminance (Morlet 1982; Antoine & Murenzi 1996), one channel.
+// Peak envelope of the 2-D Morlet bank over Luminance (Morlet 1982; Antoine & Murenzi 1996): a tuned grating's amplitude, one channel.
 [[nodiscard]] pathtracer::gfx::HdrImage gaborAov(const pathtracer::gfx::HdrImage& beauty,
                                               pathtracer::scene::ThreadPool& threadPool, bool wrapsHorizontally = false);
 

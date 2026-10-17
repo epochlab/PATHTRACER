@@ -181,7 +181,8 @@ HdrImage gaborAov(const HdrImage& beauty, ThreadPool& threadPool, bool wrapsHori
     threadPool.parallelFor(height, [&](int y) {
         const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
         for (int x = 0; x < beauty.width; ++x) {
-            writeTexel(out, x, y, std::sqrt(peak[row + static_cast<std::size_t>(x + pad)]));
+            // One sideband is half a real grating; twice it is the analytic signal's envelope (Gabor 1946), the grating's amplitude.
+            writeTexel(out, x, y, 2.0F * std::sqrt(peak[row + static_cast<std::size_t>(x + pad)]));
         }
     });
     return out;

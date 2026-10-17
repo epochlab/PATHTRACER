@@ -3,6 +3,18 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Gabor envelope amplitude
+
+The Gabor AOV now reads a tuned grating's amplitude, twice its old value.
+- **Change:** `gaborAov` writes 2 sqrt(peak). The Morlet response keeps one sideband, half a real grating; twice it is the
+  analytic signal's envelope (Gabor 1946), the grating's amplitude in luminance units.
+- **Measured** (cornell, 256x128, 16 passes): every non-zero texel is exactly 2x main, zeros unchanged; filter time 5.8 ms
+  against 5.9 ms, within noise.
+- **Tests:** `filter_validate.gabor_matches_the_analytic_morlet_response` predicts each interior texel in closed form from the
+  shipped taps' own transfer, for gratings tuned to every bank angle, midway between angles (at least half amplitude) and at the
+  radial half-response frequencies. Its Higham bound is 1.7e-4; the worst measured error is 1.8e-7. Scaling by 1 or 4, dropping an
+  orientation or a 10% variance error each fail it.
+
 ## Curved transmissive epsilons
 
 Surface rays now start just past the hit's own rounding error instead of a tuned distance. The fixed 1e-4 offset and the
