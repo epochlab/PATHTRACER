@@ -3,6 +3,26 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Hexagonal scale space
+
+The shared Gaussian diffusion now runs on hexagonal pixels too. This is groundwork for the hexagonal Sobel, DoG and Gabor; no
+output changes yet.
+- **Diffusion:** the six-neighbour heat equation splits into three commuting 1-D second differences along 0, 60 and 120 degrees,
+  so diffusing to variance t is three passes of Lindeberg's discrete Gaussian T(n; 2t/3). Their covariance is t I, so the
+  kernel is isotropic.
+- **Inner scale:** the hexagonal lattice's least-attenuated Nyquist frequency is the zone's M point, where the transfer is
+  exp(-8t/3). The 2^-24 criterion then gives t = 9 ln2, against 12 ln2 on square.
+- **Boundary:** `hexagonalReflection` folds a cell into the frame by the lattice's own mirror lines (rows whole-sample, columns
+  about x = 1/4 and x = w - 1/4) or wraps a lat-long's columns. The frame mirrors swap the 60 and 120 degree axes, so the
+  diffusion pads by its reach through this fold rather than folding per line.
+- **Square:** bit-identical. `mirrorIndex` and `wrapIndex` moved from the scale space into `pixel_lattice.h` unchanged.
+- **Tests:**
+  - `filter_validate`: the inner scale on the zone boundary, plane-wave transfer as the three-axis product, affine fields kept
+    bit-exactly, the semigroup to the border (mirrored and wrapped), the frame symmetries, six-fold isotropy with covariance t I,
+    and a method-of-images boundary oracle.
+  - `camera_validate`: the fold is a lattice symmetry.
+  - Replacing the fold with an index clamp fails the semigroup and method-of-images checks.
+
 ## Demo scenes removed
 
 `cornell_checker`, `cornell_disk_light`, `cornell_mesh_light` and `cornell_sphere_light` and their glTFs (`cornellEmpty_v001`,

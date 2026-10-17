@@ -11,20 +11,10 @@ namespace pathtracer::debug {
 
 namespace {
 
+using pathtracer::gfx::mirrorIndex;
+using pathtracer::gfx::PixelLattice;
+using pathtracer::gfx::wrapIndex;
 using pathtracer::scene::ThreadPool;
-
-// Reflection about the edge samples without repeating them, so every tap lands on real data. Valid for any offset and any extent.
-[[nodiscard]] int mirror(int i, int extent) {
-    if (extent <= 1) {
-        return 0;
-    }
-    const int period = (2 * extent) - 2;
-    int folded = i % period;
-    if (folded < 0) {
-        folded += period;
-    }
-    return folded < extent ? folded : period - folded;
-}
 
 // T(n;t) = exp(-t) I_n(t) via the ascending series for I_n, whose terms are all positive, so the sum carries no cancellation at all.
 [[nodiscard]] double discreteGaussianTap(int n, double t) {
@@ -47,16 +37,11 @@ using pathtracer::scene::ThreadPool;
     return std::exp(logScale + std::log(sum));
 }
 
-// Index on a cycle of `extent` samples, any offset: the periodic boundary, under which the kernel is the heat kernel on that cycle.
-[[nodiscard]] int wrap(int i, int extent) {
-    return ((i % extent) + extent) % extent;
-}
-
 // Folded indices for one line, built once per pass: the row loop would otherwise pay a modulo per boundary tap per row.
 [[nodiscard]] std::vector<int> foldTable(int extent, int radius, bool periodic) {
     std::vector<int> table(static_cast<std::size_t>(extent + (2 * radius)));
     for (int i = 0; i < extent + (2 * radius); ++i) {
-        table[static_cast<std::size_t>(i)] = periodic ? wrap(i - radius, extent) : mirror(i - radius, extent);
+        table[static_cast<std::size_t>(i)] = periodic ? wrapIndex(i - radius, extent) : mirrorIndex(i - radius, extent);
     }
     return table;
 }
@@ -145,11 +130,107 @@ void diffuseColumns(const float* __restrict src, float* __restrict dst, const st
     });
 }
 
+// Half-pitch column reach of n rows along a 60 or 120 degree axis, ceil(n/2): odd rows sit half a pitch right of even ones.
+[[nodiscard]] int diagonalReach(int rows) {
+    return (rows + 1) >> 1;
+}
+
+// Two diagonal passes reach 2r rows and 2 ceil(r/2) columns on top of the row pass' r, for per-axis radius r.
+[[nodiscard]] glm::ivec2 hexagonalReach(int radius) {
+    return {radius + (2 * diagonalReach(radius)), 2 * radius};
+}
+
+// One hexagonal 60 or 120 degree pass over rows [firstRow, lastRow) of a padded plane, columns inside the axis' reach of the edge.
+void diffuseDiagonal(const float* __restrict src, float* __restrict dst, const std::vector<float>& kernel, int width,
+                     int firstRow, int lastRow, bool sixtyDegrees, ThreadPool& threadPool) {
+    const int radius = static_cast<int>(kernel.size()) - 1;
+    const int margin = diagonalReach(radius);
+    threadPool.parallelFor(lastRow - firstRow, [&](int index) {
+        const int y = firstRow + index;
+        const int parity = y & 1;
+        const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
+        const float* __restrict centre = src + row;
+        float* __restrict out = dst + row;
+        for (int x0 = margin; x0 < width - margin; x0 += kConvolutionBlock) {
+            const int span = std::min(kConvolutionBlock, width - margin - x0);
+            std::array<float, kConvolutionBlock> value{};
+            std::array<float, kConvolutionBlock> accumulator{};
+            for (int j = 0; j < span; ++j) {
+                value[static_cast<std::size_t>(j)] = centre[x0 + j];
+                accumulator[static_cast<std::size_t>(j)] = value[static_cast<std::size_t>(j)];
+            }
+            for (int n = 1; n <= radius; ++n) {
+                const float weight = kernel[static_cast<std::size_t>(n)];
+                // n rows along the axis move n/2 pitches: right by (n+p)>>1 or left by (n+1-p)>>1 columns from a row of parity p.
+                const int right = (n + parity) >> 1;
+                const int left = -((n + 1 - parity) >> 1);
+                const int belowShift = sixtyDegrees ? right : left;
+                const int aboveShift = sixtyDegrees ? left : right;
+                const float* __restrict below =
+                    src + (static_cast<std::ptrdiff_t>(y + n) * width) + belowShift;
+                const float* __restrict above =
+                    src + (static_cast<std::ptrdiff_t>(y - n) * width) + aboveShift;
+                for (int j = 0; j < span; ++j) {
+                    accumulator[static_cast<std::size_t>(j)] +=
+                        weight * ((above[x0 + j] + below[x0 + j]) - (2.0F * value[static_cast<std::size_t>(j)]));
+                }
+            }
+            for (int j = 0; j < span; ++j) {
+                out[x0 + j] = accumulator[static_cast<std::size_t>(j)];
+            }
+        }
+    });
+}
+
+// Six-neighbour generator (2/3) sum D_a over commuting 0/60/120 degree axes: three T(.;2t/3) passes, covariance t I (Lindeberg 1994).
+void diffuseHexagonal(std::span<float> plane, int width, int height, float t, bool wrapsHorizontally, ThreadPool& threadPool) {
+    const std::vector<float> kernel = discreteGaussianKernel(static_cast<float>((2.0 * static_cast<double>(t)) / 3.0));
+    if (kernel.size() == 1) {
+        return;
+    }
+    // The frame mirrors swap the 60 and 120 degree axes, so no per-line fold is exact: pad by the cascade's reach through the lattice fold.
+    const int radius = static_cast<int>(kernel.size()) - 1;
+    const glm::ivec2 pad = hexagonalReach(radius);
+    const int paddedWidth = width + (2 * pad.x);
+    const int paddedHeight = height + (2 * pad.y);
+    std::vector<float> padded(static_cast<std::size_t>(paddedWidth) * static_cast<std::size_t>(paddedHeight));
+    threadPool.parallelFor(paddedHeight, [&](int y) {
+        float* out = padded.data() + (static_cast<std::size_t>(y) * static_cast<std::size_t>(paddedWidth));
+        // The row pad is even, so padded row y has the parity of frame row y - pad.y and the lattice geometry carries over unchanged.
+        for (int x = 0; x < paddedWidth; ++x) {
+            const glm::ivec2 cell =
+                pathtracer::gfx::hexagonalReflection(x - pad.x, y - pad.y, width, height, wrapsHorizontally);
+            out[x] = plane[(static_cast<std::size_t>(cell.y) * static_cast<std::size_t>(width)) + static_cast<std::size_t>(cell.x)];
+        }
+    });
+    std::vector<float> scratch(padded.size());
+    // Each pass only needs rows and columns the later passes read; the 0 degree pass's own edge fold lands in margins never cropped.
+    diffuseRows(padded.data(), scratch.data(), kernel, paddedWidth, paddedHeight, false, threadPool);
+    diffuseDiagonal(scratch.data(), padded.data(), kernel, paddedWidth, radius, paddedHeight - radius, true, threadPool);
+    diffuseDiagonal(padded.data(), scratch.data(), kernel, paddedWidth, pad.y, pad.y + height, false, threadPool);
+    threadPool.parallelFor(height, [&](int y) {
+        const float* in = scratch.data() + (static_cast<std::size_t>(y + pad.y) * static_cast<std::size_t>(paddedWidth)) + pad.x;
+        std::copy_n(in, width, plane.begin() + (static_cast<std::ptrdiff_t>(y) * width));
+    });
+}
+
 }  // namespace
 
-float innerScaleVariance() {
+float innerScaleVariance(PixelLattice lattice) {
+    if (lattice == PixelLattice::Hexagonal) {
+        // Three-axis transfer exp(-(2t/3) sum(1-cos k.u)) peaks on the zone boundary at the M point, sum 4: exp(-8t/3) <= 2^-24, t = 9 ln2.
+        return static_cast<float>(-0.375 * std::log(kFloat32Roundoff));
+    }
     // exp(-t(1-cos w)) at w = pi gives exp(-2t), so the criterion exp(-2t) <= 2^-24 gives t = 12 ln2.
     return static_cast<float>(-0.5 * std::log(kFloat32Roundoff));
+}
+
+glm::ivec2 diffusionReach(float t, PixelLattice lattice) {
+    if (lattice == PixelLattice::Hexagonal) {
+        return hexagonalReach(static_cast<int>(discreteGaussianKernel(static_cast<float>((2.0 * static_cast<double>(t)) / 3.0)).size()) - 1);
+    }
+    const int radius = static_cast<int>(discreteGaussianKernel(t).size()) - 1;
+    return {radius, radius};
 }
 
 std::vector<float> discreteGaussianKernel(float t) {
@@ -174,8 +255,13 @@ std::vector<float> discreteGaussianKernel(float t) {
     return kernel;
 }
 
-void diffuse(std::span<float> plane, int width, int height, float t, ThreadPool& threadPool, bool wrapsHorizontally) {
+void diffuse(std::span<float> plane, int width, int height, float t, ThreadPool& threadPool, bool wrapsHorizontally,
+             PixelLattice lattice) {
     if (!(t > 0.0F) || width <= 0 || height <= 0) {
+        return;
+    }
+    if (lattice == PixelLattice::Hexagonal) {
+        diffuseHexagonal(plane, width, height, t, wrapsHorizontally, threadPool);
         return;
     }
     const std::vector<float> kernel = discreteGaussianKernel(t);
