@@ -9,13 +9,18 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <numbers>
 #include <optional>
 #include <random>
 #include <string>
 #include <tuple>
+#include <type_traits>
+#include <utility>
+#include <variant>
 #include <vector>
 
 #include <OpenImageIO/imageio.h>
+#include <boost/math/quadrature/gauss_kronrod.hpp>
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/epsilon.hpp>
@@ -35,14 +40,19 @@
 
 namespace {
 
+using pathtracer::scene::AreaLight;
 using pathtracer::scene::Constant;
+using pathtracer::scene::DiskLight;
 using pathtracer::scene::EnvironmentMap;
 using pathtracer::scene::LightSample;
 using pathtracer::scene::LightSet;
 using pathtracer::scene::LobeType;
+using pathtracer::scene::MeshLight;
 using pathtracer::scene::OpenPbrInputs;
 using pathtracer::scene::QuadLight;
 using pathtracer::scene::Sampler;
+using pathtracer::scene::SphereLight;
+using pathtracer::scene::Triangle;
 
 using tools::fixtures::kPi;
 using tools::fixtures::makeUniformEnvironment;
@@ -292,8 +302,8 @@ PT_CHECK(omnidirectional_camera_reads_the_environment_texel_for_texel, Fast, Exa
 // MIS weights sum to 1, so both strategies must evaluate ONE Le. Structured, not uniform: on a uniform map every lookup agrees.
 PT_CHECK(environment_nee_and_miss_share_one_radiance, Fast, Exact) {
     const EnvironmentMap env = makeStructuredEnvironment();
-    const std::vector<QuadLight> noQuads;
-    const LightSet lights(&env, /*envRotationDegrees=*/glm::vec3(0.0F), /*envExposure=*/1.0F, noQuads);
+    const std::vector<AreaLight> noLights;
+    const LightSet lights(&env, /*envRotationDegrees=*/glm::vec3(0.0F), /*envExposure=*/1.0F, noLights);
 
     constexpr int kSamples = 4096;
     int drawn = 0;
@@ -378,24 +388,116 @@ glm::vec3 sampleUniformSphere(std::mt19937& rng) {
     return {r * std::cos(phi), r * std::sin(phi), z};
 }
 
+// Where a ray from p along unit dir first meets an area light, from its geometry alone: no code shared with the samplers under test.
+struct LightHit {
+    glm::vec3 point;
+    glm::vec3 normal;  // geometric: the emitting side's for a quad, disk or mesh face, outward for a sphere
+};
+
 // Re-derives ray/rectangle from world geometry (edge0 perpendicular to edge1), so a buildSphericalRectangle frame bug cannot repeat.
-bool directionHitsQuad(const QuadLight& quad, const glm::vec3& p, const glm::vec3& dir) {
+std::optional<LightHit> hitQuad(const QuadLight& quad, const glm::vec3& p, const glm::vec3& dir) {
     const glm::vec3 normal = glm::normalize(glm::cross(quad.edge0, quad.edge1));
     const float denom = glm::dot(dir, normal);
     if (std::fabs(denom) < 1e-8F) {
-        return false;  // parallel to the plane
+        return std::nullopt;  // parallel to the plane
     }
     const float t = glm::dot(quad.origin - p, normal) / denom;
     if (t <= 0.0F) {
-        return false;  // plane is behind p
+        return std::nullopt;  // plane is behind p
     }
-    const glm::vec3 hit = (p + (t * dir)) - quad.origin;
+    const glm::vec3 point = p + (t * dir);
+    const glm::vec3 hit = point - quad.origin;
     const float u = glm::dot(hit, quad.edge0) / glm::dot(quad.edge0, quad.edge0);
     const float v = glm::dot(hit, quad.edge1) / glm::dot(quad.edge1, quad.edge1);
-    return u >= 0.0F && u <= 1.0F && v >= 0.0F && v <= 1.0F;
+    if (u < 0.0F || u > 1.0F || v < 0.0F || v > 1.0F) {
+        return std::nullopt;
+    }
+    return LightHit{point, normal};
 }
 
-// Girard solid angle against a uniform-sphere + directionHitsQuad oracle sharing no code, and every sample() direction against it too.
+std::optional<LightHit> hitDisk(const DiskLight& disk, const glm::vec3& p, const glm::vec3& dir) {
+    const glm::vec3 normal = disk.frame[2];
+    const float t = glm::dot(disk.centre - p, normal) / glm::dot(dir, normal);
+    const glm::vec3 point = p + (t * dir);
+    if (!(t > 0.0F) || glm::length(point - disk.centre) > disk.radius) {
+        return std::nullopt;
+    }
+    return LightHit{point, normal};
+}
+
+// The nearer positive root of |p + t dir - c| = r, so a ray from inside meets the far wall.
+std::optional<LightHit> hitSphere(const SphereLight& sphere, const glm::vec3& p, const glm::vec3& dir) {
+    const glm::vec3 fromCentre = p - sphere.centre;
+    const float b = glm::dot(dir, fromCentre);
+    const float discriminant = (b * b) - (glm::dot(fromCentre, fromCentre) - (sphere.radius * sphere.radius));
+    if (discriminant < 0.0F) {
+        return std::nullopt;
+    }
+    const float root = std::sqrt(discriminant);
+    const float t = -b - root > 0.0F ? -b - root : -b + root;
+    if (!(t > 0.0F)) {
+        return std::nullopt;
+    }
+    const glm::vec3 point = p + (t * dir);
+    return LightHit{point, glm::normalize(point - sphere.centre)};
+}
+
+// The closest face by plain Moller-Trumbore, its normal cross(v1 - v0, v2 - v0) as glTF's front.
+std::optional<LightHit> hitMesh(const MeshLight& mesh, const glm::vec3& p, const glm::vec3& dir) {
+    std::optional<LightHit> closest;
+    float closestT = std::numeric_limits<float>::infinity();
+    for (const Triangle& tri : mesh.triangles) {
+        const glm::vec3 e1 = tri.v1 - tri.v0;
+        const glm::vec3 e2 = tri.v2 - tri.v0;
+        const glm::vec3 pvec = glm::cross(dir, e2);
+        const float det = glm::dot(e1, pvec);
+        if (det == 0.0F) {
+            continue;
+        }
+        const glm::vec3 tvec = p - tri.v0;
+        const float u = glm::dot(tvec, pvec) / det;
+        const glm::vec3 qvec = glm::cross(tvec, e1);
+        const float v = glm::dot(dir, qvec) / det;
+        const float t = glm::dot(e2, qvec) / det;
+        if (u >= 0.0F && v >= 0.0F && u + v <= 1.0F && t > 0.0F && t < closestT) {
+            closestT = t;
+            closest = LightHit{p + (t * dir), glm::normalize(glm::cross(e1, e2))};
+        }
+    }
+    return closest;
+}
+
+std::optional<LightHit> hitLight(const AreaLight& light, const glm::vec3& p, const glm::vec3& dir) {
+    return std::visit(
+        [&](const auto& shape) {
+            using Shape = std::decay_t<decltype(shape)>;
+            if constexpr (std::is_same_v<Shape, QuadLight>) {
+                return hitQuad(shape, p, dir);
+            } else if constexpr (std::is_same_v<Shape, DiskLight>) {
+                return hitDisk(shape, p, dir);
+            } else if constexpr (std::is_same_v<Shape, SphereLight>) {
+                return hitSphere(shape, p, dir);
+            } else {
+                return hitMesh(shape, p, dir);
+            }
+        },
+        light);
+}
+
+// Le arriving along dir off a hit, re-derived: the front face only, unless two-sided; a sphere's outward face is all it shows.
+glm::vec3 emittedAlong(const AreaLight& light, const glm::vec3& dir, const glm::vec3& normal) {
+    return std::visit(
+        [&](const auto& shape) {
+            bool twoSided = false;
+            if constexpr (!std::is_same_v<std::decay_t<decltype(shape)>, SphereLight>) {
+                twoSided = shape.twoSided;
+            }
+            return twoSided || glm::dot(dir, normal) < 0.0F ? shape.radiance : glm::vec3(0.0F);
+        },
+        light);
+}
+
+// Girard solid angle against a uniform-sphere + hitQuad oracle sharing no code, and every sample() direction against it too.
 PT_CHECK(quad_light_solid_angle, Slow, Statistical) {
     const QuadLight quad{glm::vec3(-0.5F, 1.0F, -0.5F), glm::vec3(1.0F, 0.0F, 0.0F),
                           glm::vec3(0.0F, 0.0F, 1.0F), glm::vec3(1.0F), false};
@@ -413,7 +515,7 @@ PT_CHECK(quad_light_solid_angle, Slow, Statistical) {
     std::mt19937 rng(static_cast<std::mt19937::result_type>(ctx.seed()));
     long long hits = 0;
     for (int i = 0; i < kSampleCount; ++i) {
-        hits += directionHitsQuad(quad, p, sampleUniformSphere(rng)) ? 1 : 0;
+        hits += hitQuad(quad, p, sampleUniformSphere(rng)).has_value() ? 1 : 0;
     }
     // Clopper-Pearson, not Wald: Wald's width collapses near 0 or 1, where a small light lands. Scaled to solid angle by the same 4*pi.
     const tools::stats::Band fraction = tools::stats::clopperPearsonBand(hits, kSampleCount, ctx.alpha());
@@ -431,7 +533,7 @@ PT_CHECK(quad_light_solid_angle, Slow, Statistical) {
     for (int i = 0; i < kDrawCount; ++i) {
         const glm::vec2 u(unit(rng), unit(rng));
         const glm::vec3 dir = glm::normalize(rect->sample(u) - p);
-        if (!directionHitsQuad(quad, p, dir)) {
+        if (!hitQuad(quad, p, dir)) {
             if (misses == 0) {
                 firstMiss = u;
             }
@@ -445,69 +547,292 @@ PT_CHECK(quad_light_solid_angle, Slow, Statistical) {
     PT_EXPECT(ctx, rect->solidAngle > 0.0F, "a valid rectangle must subtend positive solid angle");
 }
 
-// referenceLo's method over the directions the quad subtends: Lo = integral of the cosine-weighted evaluateBsdf * Le, Le constant.
-float referenceLoQuad(const OpenPbrInputs<Constant>& params, const glm::vec3& wo, const QuadLight& quad,
-                       const glm::vec3& p, int sampleCount, std::mt19937& rng) {
+// A disk light facing -z at `centre`, frame (+x, -y, -z) as buildLights places an unrotated one.
+DiskLight makeDisk(const glm::vec3& centre, float radius, bool twoSided = false) {
+    return DiskLight{centre, glm::mat3(glm::vec3(1.0F, 0.0F, 0.0F), glm::vec3(0.0F, -1.0F, 0.0F), glm::vec3(0.0F, 0.0F, -1.0F)), radius,
+                     glm::vec3(3.0F), twoSided};
+}
+
+// A disk tilted 35 degrees about x, so no symmetry plane is a coordinate plane and the ellipse frame is fully exercised.
+DiskLight makeTiltedDisk(const glm::vec3& centre, float radius) {
+    const glm::mat3 tilt = pathtracer::scene::rotationXyz(glm::vec3(35.0F, 0.0F, 0.0F));
+    const DiskLight flat = makeDisk(centre, radius);
+    return DiskLight{centre, tilt * flat.frame, radius, flat.radiance, false};
+}
+
+// Omega = the integral over the disk of h / d^3 dA, in polar coordinates about its centre, by nested adaptive Gauss-Kronrod in double.
+template <typename Weight>
+double integrateOverDisk(const DiskLight& disk, const glm::dvec3& p, Weight weight) {
+    const glm::dvec3 centre(disk.centre);
+    const glm::dvec3 tangent(disk.frame[0]);
+    const glm::dvec3 bitangent(disk.frame[1]);
+    const double height = std::abs(glm::dot(centre - p, glm::dvec3(disk.frame[2])));
+    constexpr unsigned kMaxDepth = 20;
+    constexpr double kTolerance = 1e-12;
+    const auto ring = [&](double s) {
+        const auto around = [&](double phi) {
+            const glm::dvec3 toPoint = centre + (s * ((std::cos(phi) * tangent) + (std::sin(phi) * bitangent))) - p;
+            const double distance = glm::length(toPoint);
+            return weight(toPoint / distance) * height * s / (distance * distance * distance);
+        };
+        return boost::math::quadrature::gauss_kronrod<double, 61>::integrate(around, 0.0, 2.0 * std::numbers::pi, kMaxDepth, kTolerance);
+    };
+    return boost::math::quadrature::gauss_kronrod<double, 61>::integrate(ring, 0.0, static_cast<double>(disk.radius), kMaxDepth, kTolerance);
+}
+
+// Axis-aligned, with every coordinate dyadic and the offset along x: height, offset and radius reach the ellipse unrounded.
+struct DiskPose {
+    const char* label;
+    glm::vec3 p;
+};
+const std::array<DiskPose, 6> kDiskPoses = {{{"on axis", {0.0F, 0.0F, 0.0F}},
+                                             {"oblique", {1.5F, 0.0F, 0.0F}},
+                                             {"far", {0.25F, 0.0F, -62.0F}},
+                                             {"near the rim, across major", {0.75F, 0.0F, 1.875F}},
+                                             {"over the face, in-plane major", {0.25F, 0.0F, 1.9375F}},
+                                             {"almost touching", {0.125F, 0.0F, 1.9990234375F}}}};
+
+// Eq. 19's closed form against the area integral: inputs exact, so the bound is the float result's rounding plus the oracle's own.
+PT_CHECK(disk_light_solid_angle, Fast, Exact) {
+    const DiskLight disk = makeDisk(glm::vec3(0.0F, 0.0F, 2.0F), 0.5F);
+    ctx.plan(static_cast<int>(kDiskPoses.size()));
+    for (const DiskPose& pose : kDiskPoses) {
+        const std::optional<pathtracer::scene::SphericalEllipse> ellipse = pathtracer::scene::buildSphericalEllipse(disk, pose.p);
+        const double oracle = integrateOverDisk(disk, glm::dvec3(pose.p), [](const glm::dvec3&) { return 1.0; });
+        const double bound = oracle * (std::numeric_limits<float>::epsilon() + 1e-10);
+        const double analytic = ellipse ? static_cast<double>(ellipse->solidAngle) : -1.0;
+        char detail[192];
+        std::snprintf(detail, sizeof(detail), "%s: closed form %.9g sr, quadrature %.9g sr, |difference| %.3g > bound %.3g", pose.label, analytic,
+                      oracle, std::abs(analytic - oracle), bound);
+        PT_EXPECT(ctx, std::abs(analytic - oracle) <= bound, detail);
+    }
+}
+
+// Every sample lands on the disk: in its plane and within its radius, to a few float roundings of the coordinates that place it.
+PT_CHECK(disk_light_samples_land_on_the_disk, Fast, Exact) {
+    const std::array<DiskLight, 2> disks = {makeDisk(glm::vec3(0.0F, 0.0F, 2.0F), 0.5F), makeTiltedDisk(glm::vec3(0.1F, 0.2F, 2.0F), 0.7F)};
+    constexpr int kDraws = 4096;
+    // Float error scales with the magnitudes summed, |p| + |q - p| + |c|: 8 roundings, one per float operation between u and the offset.
+    constexpr float kRoundings = 8.0F * std::numeric_limits<float>::epsilon();
+    std::mt19937 rng(static_cast<std::mt19937::result_type>(ctx.seed()));
+    std::uniform_real_distribution<float> unit(0.0F, 1.0F);
+    ctx.plan(static_cast<int>(disks.size() * kDiskPoses.size()));
+    for (const DiskLight& disk : disks) {
+        for (const DiskPose& pose : kDiskPoses) {
+            const std::optional<pathtracer::scene::SphericalEllipse> ellipse = pathtracer::scene::buildSphericalEllipse(disk, pose.p);
+            int off = 0;
+            for (int i = 0; ellipse && i < kDraws; ++i) {
+                const glm::vec3 q = ellipse->sample(glm::vec2(unit(rng), unit(rng)));
+                const float slack = kRoundings * (glm::length(pose.p) + glm::length(q - pose.p) + glm::length(disk.centre));
+                const glm::vec3 offset = q - disk.centre;
+                off += std::abs(glm::dot(offset, disk.frame[2])) <= slack && glm::length(offset) <= disk.radius + slack ? 0 : 1;
+            }
+            PT_EXPECT(ctx, ellipse && off == 0, std::string(pose.label) + ": " + std::to_string(off) + " samples off the disk");
+        }
+    }
+}
+
+// The two-sided t band about a replicated estimator's mean: its replicate means are iid, so their standard error carries it.
+tools::stats::Band meanBand(const tools::stats::Welford& estimate, double alpha) {
+    const double half = tools::stats::studentTTwoSided(alpha, static_cast<double>(estimate.count() - 1)) * estimate.standardError();
+    return {estimate.mean() - half, estimate.mean() + half};
+}
+
+// A smooth, asymmetric test function of direction: uniform sampling's mean of it must equal its solid-angle average.
+double probe(const glm::dvec3& dir) {
+    const glm::dvec3 e1 = glm::normalize(glm::dvec3(0.3, -0.5, 0.81));
+    const glm::dvec3 e2 = glm::normalize(glm::dvec3(0.7, 0.2, -0.68));
+    const double along = glm::dot(dir, e2);
+    return glm::dot(dir, e1) + (along * along);
+}
+
+// Replicated means of probe over draws of `draw`, against the oracle average: a non-uniform map biases the mean whatever the support.
+template <typename Draw>
+void expectUniform(tools::check::Context& ctx, const char* label, double oracle, Draw draw) {
+    constexpr int kPerReplicate = 8192;
+    const std::uint64_t seed = ctx.subSeed(label);
+    tools::stats::Welford replicates;
+    // Owen-scrambled replicates are iid (Owen 1997), so the t band over their means is exact in distribution.
+    for (int r = 0; r < tools::stats::kReplicates; ++r) {
+        double sum = 0.0;
+        for (int i = 0; i < kPerReplicate; ++i) {
+            Sampler sampler(0, 0, i, kPerReplicate, static_cast<std::uint32_t>(seed + static_cast<std::uint64_t>(r)));
+            sum += probe(glm::dvec3(draw(sampler)));
+        }
+        replicates.add(sum / kPerReplicate);
+    }
+    const tools::stats::Band band = meanBand(replicates, ctx.alpha());
+    char detail[192];
+    std::snprintf(detail, sizeof(detail), "%s: sampled mean %.6f, band [%.6f, %.6f], solid-angle average %.6f", label, replicates.mean(), band.lo,
+                  band.hi, oracle);
+    PT_EXPECT(ctx, band.contains(oracle), detail);
+}
+
+// The radial map is area-preserving: E[g] over its directions is g's solid-angle average over the disk, from the quadrature oracle.
+PT_CHECK(disk_light_sampling_is_uniform_in_solid_angle, Slow, Statistical) {
+    const DiskLight disk = makeTiltedDisk(glm::vec3(0.1F, 0.2F, 2.0F), 0.7F);
+    ctx.plan(static_cast<int>(kDiskPoses.size()));
+    for (const DiskPose& pose : kDiskPoses) {
+        const std::optional<pathtracer::scene::SphericalEllipse> ellipse = pathtracer::scene::buildSphericalEllipse(disk, pose.p);
+        if (!ellipse) {
+            PT_EXPECT(ctx, false, std::string(pose.label) + ": no ellipse for a disk off its plane");
+            continue;
+        }
+        const glm::dvec3 p(pose.p);
+        const double oracle = integrateOverDisk(disk, p, probe) / integrateOverDisk(disk, p, [](const glm::dvec3&) { return 1.0; });
+        expectUniform(ctx, pose.label, oracle, [&](Sampler& sampler) { return glm::normalize(ellipse->sample(sampler.next2D()) - pose.p); });
+    }
+}
+
+// Cone sampling against g's average over the cap, integrated in the cone's own frame: the samples' law-of-cosines step is not reused.
+PT_CHECK(sphere_light_sampling_is_uniform_in_solid_angle, Slow, Statistical) {
+    const SphereLight sphere{glm::vec3(0.3F, -0.2F, 2.0F), glm::mat3(1.0F), 0.6F, glm::vec3(3.0F)};
+    const std::array<DiskPose, 3> poses = {{{"distant", {0.0F, 0.0F, -6.0F}}, {"near", {0.0F, 0.0F, 0.0F}}, {"grazing", {1.0F, -0.2F, 2.0F}}}};
+    const std::vector<AreaLight> lights{sphere};
+    const LightSet set(nullptr, glm::vec3(0.0F), 1.0F, lights);
+    ctx.plan(static_cast<int>(poses.size()) * 2);
+    for (const DiskPose& pose : poses) {
+        const glm::dvec3 axis = glm::normalize(glm::dvec3(sphere.centre - pose.p));
+        const double sinMax = static_cast<double>(sphere.radius) / glm::length(glm::dvec3(sphere.centre - pose.p));
+        const double thetaMax = std::asin(sinMax);
+        const glm::dvec3 a = glm::normalize(glm::cross(axis, std::abs(axis.x) < 0.9 ? glm::dvec3(1.0, 0.0, 0.0) : glm::dvec3(0.0, 1.0, 0.0)));
+        const glm::dvec3 b = glm::cross(axis, a);
+        const auto ring = [&](double theta) {
+            const auto around = [&](double phi) {
+                return probe((std::cos(theta) * axis) + (std::sin(theta) * ((std::cos(phi) * a) + (std::sin(phi) * b)))) * std::sin(theta);
+            };
+            return boost::math::quadrature::gauss_kronrod<double, 61>::integrate(around, 0.0, 2.0 * std::numbers::pi, 20, 1e-12);
+        };
+        const double capArea = 2.0 * std::numbers::pi * (1.0 - std::cos(thetaMax));
+        const double oracle = boost::math::quadrature::gauss_kronrod<double, 61>::integrate(ring, 0.0, thetaMax, 20, 1e-12) / capArea;
+        // The pdf is 1/Omega exactly: the cap's solid angle, here in double from the oracle's own angle.
+        Sampler pdfSampler(0, 0, 0, 1, 1U);
+        const std::optional<LightSample> one = set.sample(pose.p, pdfSampler);
+        const double relative = one ? std::abs((1.0 / static_cast<double>(one->pdf)) - capArea) / capArea : 1.0;
+        // Eight float roundings separate it from the exact cap: d^2 (3), r^2, the ratio, the root, the sum and the 2 pi product.
+        PT_EXPECT(ctx, relative <= 8.0 * std::numeric_limits<float>::epsilon(),
+                  std::string(pose.label) + ": pdf is not 1 / the cap's solid angle, relative error " + std::to_string(relative));
+        expectUniform(ctx, pose.label, oracle, [&](Sampler& sampler) { return set.sample(pose.p, sampler)->direction; });
+    }
+}
+
+
+// A closed tetrahedron above the origin, faces wound outward: its lower faces show their fronts to p, its upper ones their backs.
+MeshLight makeTetrahedronLight() {
+    const std::array<glm::vec3, 4> v = {glm::vec3(0.0F, 0.0F, 1.5F), glm::vec3(0.6F, 0.0F, 2.4F), glm::vec3(-0.3F, 0.52F, 2.4F),
+                                        glm::vec3(-0.3F, -0.52F, 2.4F)};
+    const glm::vec3 centroid = 0.25F * (v[0] + v[1] + v[2] + v[3]);
+    std::vector<Triangle> faces;
+    for (const auto& [a, b, c] : {std::tuple{0, 1, 2}, std::tuple{0, 2, 3}, std::tuple{0, 3, 1}, std::tuple{1, 3, 2}}) {
+        Triangle face{v[static_cast<std::size_t>(a)], v[static_cast<std::size_t>(b)], v[static_cast<std::size_t>(c)]};
+        if (glm::dot(glm::cross(face.v1 - face.v0, face.v2 - face.v0), face.v0 - centroid) < 0.0F) {
+            std::swap(face.v1, face.v2);
+        }
+        faces.push_back(face);
+    }
+    return MeshLight(std::move(faces), glm::vec3(3.0F), false);
+}
+
+// One light of each shape above the origin, each subtending enough for BSDF sampling alone to converge: the MIS rows' fixtures.
+std::vector<std::pair<const char*, AreaLight>> areaLightCases() {
+    return {{"quad", QuadLight{glm::vec3(-0.5F, -0.5F, 2.0F), glm::vec3(0.0F, 1.0F, 0.0F), glm::vec3(1.0F, 0.0F, 0.0F), glm::vec3(3.0F), false}},
+            {"disk", makeTiltedDisk(glm::vec3(0.2F, -0.1F, 1.8F), 0.6F)},
+            {"sphere", SphereLight{glm::vec3(0.3F, 0.0F, 2.0F), glm::mat3(1.0F), 0.5F, glm::vec3(3.0F)}},
+            {"mesh", makeTetrahedronLight()}};
+}
+
+// The pdf NEE draws a direction with is the pdf the emitter-hit branch recomputes there: MIS weights sum to 1 only if both agree.
+PT_CHECK(area_light_sample_and_hit_pdfs_agree, Fast, Exact) {
+    const std::vector<std::pair<const char*, AreaLight>> cases = areaLightCases();
+    const std::array<glm::vec3, 3> points = {glm::vec3(0.0F), glm::vec3(1.25F, 0.5F, 0.25F), glm::vec3(-0.75F, 0.25F, 1.0F)};
+    constexpr int kDraws = 2048;
+    ctx.plan(static_cast<int>(cases.size() * points.size()));
+    for (const auto& [label, light] : cases) {
+        const std::vector<AreaLight> lights{light};
+        const LightSet set(nullptr, glm::vec3(0.0F), 1.0F, lights);
+        for (const glm::vec3& p : points) {
+            int disagreements = 0;
+            for (int i = 0; i < kDraws; ++i) {
+                Sampler sampler(0, 0, i, kDraws, static_cast<std::uint32_t>(ctx.subSeed(label)));
+                const std::optional<LightSample> drawn = set.sample(p, sampler);
+                if (!drawn) {
+                    continue;
+                }
+                const std::optional<LightHit> hit = hitLight(light, p, drawn->direction);
+                // A mesh pdf rereads the point through p + t dir, roundings of the path that cos_l amplifies; the rest reread p alone.
+                const float roundings = 16.0F * std::numeric_limits<float>::epsilon();
+                const float cosLight = hit ? std::abs(glm::dot(drawn->direction, hit->normal)) : 0.0F;
+                const bool mesh = std::holds_alternative<MeshLight>(light);
+                // A closed mesh's far face is drawn too, behind its near one: a different point, its NEE sample self-occluded in a render.
+                if (mesh && hit && std::abs(glm::length(hit->point - p) - drawn->distance) > roundings * drawn->distance / cosLight) {
+                    continue;
+                }
+                const float slack = mesh ? roundings / cosLight : 0.0F;
+                const float recomputed = hit ? set.pdfArea(0, p, hit->point, hit->normal) : 0.0F;
+                disagreements += hit && std::abs(recomputed - drawn->pdf) <= slack * drawn->pdf ? 0 : 1;
+            }
+            PT_EXPECT(ctx, disagreements == 0, std::string(label) + ": " + std::to_string(disagreements) + " draws whose hit pdf differs");
+        }
+    }
+}
+
+// referenceLo's method over the directions the light subtends: Lo = integral of the cosine-weighted evaluateBsdf * Le.
+float referenceLoArea(const OpenPbrInputs<Constant>& params, const glm::vec3& wo, const AreaLight& light, const glm::vec3& p,
+                      int sampleCount, std::mt19937& rng) {
     constexpr float kUniformPdf = 1.0F / (2.0F * kPi);
     glm::vec3 accum(0.0F);
     for (int i = 0; i < sampleCount; ++i) {
         const glm::vec3 wi = sampleUniformHemisphere(rng);
-        if (directionHitsQuad(quad, p, wi)) {
-            accum += pathtracer::scene::evaluateBsdf(params, wo, wi) * quad.radiance / kUniformPdf;
+        if (const std::optional<LightHit> hit = hitLight(light, p, wi)) {
+            accum += pathtracer::scene::evaluateBsdf(params, wo, wi) * emittedAlong(light, wi, hit->normal) / kUniformPdf;
         }
     }
     return std::max({accum.x, accum.y, accum.z}) / static_cast<float>(sampleCount);
 }
 
-// Mirrors misCombinedLo with LightSet({quad}) and directionHitsQuad for "always reaches it": a BSDF ray can miss a finite rectangle.
-float misCombinedLoQuad(const OpenPbrInputs<Constant>& params, const glm::vec3& wo, const QuadLight& quad,
-                         const glm::vec3& p, int sampleCount, std::uint32_t seed) {
-    const std::vector<QuadLight> quads{quad};
-    const LightSet lights(nullptr, glm::vec3(0.0F), 1.0F, quads);
+// Mirrors misCombinedLo with LightSet({light}) and hitLight for "always reaches it": a BSDF ray can miss a finite light.
+float misCombinedLoArea(const OpenPbrInputs<Constant>& params, const glm::vec3& wo, const AreaLight& light, const glm::vec3& p,
+                        int sampleCount, std::uint32_t seed) {
+    const std::vector<AreaLight> lights{light};
+    const LightSet set(nullptr, glm::vec3(0.0F), 1.0F, lights);
     glm::vec3 accum(0.0F);
     for (int i = 0; i < sampleCount; ++i) {
         Sampler sampler(0, 0, i, sampleCount, seed);
 
         // NEE.
-        const std::optional<LightSample> lightSample = lights.sample(p, sampler);
+        const std::optional<LightSample> lightSample = set.sample(p, sampler);
         if (lightSample.has_value() && lightSample->direction.z > 0.0F) {
             const glm::vec3 bsdfValue = pathtracer::scene::evaluateBsdf(params, wo, lightSample->direction);
             const float bsdfPdf = pathtracer::scene::pdfBsdf(params, wo, lightSample->direction);
             if (bsdfPdf > 0.0F && (bsdfValue.x > 0.0F || bsdfValue.y > 0.0F || bsdfValue.z > 0.0F)) {
                 const float lightPdf2 = lightSample->pdf * lightSample->pdf;
-                const float bsdfPdf2 = bsdfPdf * bsdfPdf;
-                const float misWeight = lightPdf2 / (lightPdf2 + bsdfPdf2);
+                const float misWeight = lightPdf2 / (lightPdf2 + (bsdfPdf * bsdfPdf));
                 accum += bsdfValue * misWeight * lightSample->radiance / lightSample->pdf;
             }
         }
 
         // BSDF-sampled.
-        const std::optional<pathtracer::scene::BsdfSample> sample =
-            pathtracer::scene::sampleBsdf(params, wo, sampler);
-        if (sample.has_value() && sample->type != LobeType::Transmission &&
-            directionHitsQuad(quad, p, sample->wiLocal)) {
-            const float bsdfPdf = pathtracer::scene::pdfBsdf(params, wo, sample->wiLocal);
-            const float lightPdf = lights.pdfQuad(0, p);
-            const float bsdfPdf2 = bsdfPdf * bsdfPdf;
-            const float lightPdf2 = lightPdf * lightPdf;
-            const float misWeight = bsdfPdf2 / (bsdfPdf2 + lightPdf2);
-            accum += sample->throughputWeight * lights.quadRadianceToward(0, sample->wiLocal) * misWeight;
+        const std::optional<pathtracer::scene::BsdfSample> sample = pathtracer::scene::sampleBsdf(params, wo, sampler);
+        if (sample.has_value() && sample->type != LobeType::Transmission) {
+            if (const std::optional<LightHit> hit = hitLight(light, p, sample->wiLocal)) {
+                const float bsdfPdf = pathtracer::scene::pdfBsdf(params, wo, sample->wiLocal);
+                const float lightPdf = set.pdfArea(0, p, hit->point, hit->normal);
+                const float bsdfPdf2 = bsdfPdf * bsdfPdf;
+                const float misWeight = bsdfPdf2 / (bsdfPdf2 + (lightPdf * lightPdf));
+                accum += sample->throughputWeight * set.radianceToward(0, sample->wiLocal, hit->normal) * misWeight;
+            }
         }
     }
     return std::max({accum.x, accum.y, accum.z}) / static_cast<float>(sampleCount);
 }
 
-// mis_agreement_environment's identity against an area light, converted the same way and for the same reason: both sides are estimators.
-PT_CHECK(mis_agreement_quad_light, Slow, Statistical) {
+// mis_agreement_environment's identity against one area light, converted the same way and for the same reason: both sides are estimators.
+void expectMisAgreement(tools::check::Context& ctx, const char* shape, const AreaLight& light) {
     constexpr int kTotalSamples = 200000;
     constexpr int kPerReplicate = kTotalSamples / tools::stats::kReplicates;
     const std::array<float, 3> roughnesses = {0.25F, 0.5F, 1.0F};
     const std::array<float, 2> metallics = {0.0F, 1.0F};
     const std::array<float, 3> ndotVs = {0.2F, 0.6F, 1.0F};
-
-    // A 1x1 rectangle at height 2: big enough for BSDF sampling alone to converge, small enough that light sampling matters at grazing wo.
-    const QuadLight quad{glm::vec3(-0.5F, -0.5F, 2.0F), glm::vec3(0.0F, 1.0F, 0.0F),
-                          glm::vec3(1.0F, 0.0F, 0.0F), glm::vec3(3.0F), false};
     const glm::vec3 p(0.0F);
 
     ctx.plan(static_cast<int>(roughnesses.size() * metallics.size() * ndotVs.size()));
@@ -515,8 +840,8 @@ PT_CHECK(mis_agreement_quad_light, Slow, Statistical) {
         for (float metallic : metallics) {
             for (float ndotV : ndotVs) {
                 char label[96];
-                std::snprintf(label, sizeof(label), "quad r=%g m=%g n=%g", static_cast<double>(roughness),
-                              static_cast<double>(metallic), static_cast<double>(ndotV));
+                std::snprintf(label, sizeof(label), "%s r=%g m=%g n=%g", shape, static_cast<double>(roughness), static_cast<double>(metallic),
+                              static_cast<double>(ndotV));
                 const OpenPbrInputs<Constant> params = makeParams(roughness, metallic);
                 const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
 
@@ -525,21 +850,35 @@ PT_CHECK(mis_agreement_quad_light, Slow, Statistical) {
                 tools::stats::Welford reference;
                 tools::stats::Welford combined;
                 for (int r = 0; r < tools::stats::kReplicates; ++r) {
-                    reference.add(referenceLoQuad(params, wo, quad, p, kPerReplicate, referenceRng));
-                    combined.add(misCombinedLoQuad(params, wo, quad, p, kPerReplicate,
-                                                    static_cast<std::uint32_t>(rowSeed + r)));
+                    reference.add(referenceLoArea(params, wo, light, p, kPerReplicate, referenceRng));
+                    combined.add(misCombinedLoArea(params, wo, light, p, kPerReplicate, static_cast<std::uint32_t>(rowSeed + r)));
                 }
 
                 const double difference = combined.mean() - reference.mean();
                 const tools::stats::Band band = tools::stats::differenceBand(reference, combined, ctx.alpha());
                 char detail[256];
-                std::snprintf(detail, sizeof(detail),
-                              "%s: reference %.5f, MIS %.5f, difference %+.3e vs +/-%.3e", label,
-                              reference.mean(), combined.mean(), difference, band.halfWidth());
+                std::snprintf(detail, sizeof(detail), "%s: reference %.5f, MIS %.5f, difference %+.3e vs +/-%.3e", label, reference.mean(),
+                              combined.mean(), difference, band.halfWidth());
                 PT_EXPECT(ctx, band.contains(difference), detail);
             }
         }
     }
+}
+
+PT_CHECK(mis_agreement_quad_light, Slow, Statistical) {
+    expectMisAgreement(ctx, "quad", areaLightCases()[0].second);
+}
+
+PT_CHECK(mis_agreement_disk_light, Slow, Statistical) {
+    expectMisAgreement(ctx, "disk", areaLightCases()[1].second);
+}
+
+PT_CHECK(mis_agreement_sphere_light, Slow, Statistical) {
+    expectMisAgreement(ctx, "sphere", areaLightCases()[2].second);
+}
+
+PT_CHECK(mis_agreement_mesh_light, Slow, Statistical) {
+    expectMisAgreement(ctx, "mesh", areaLightCases()[3].second);
 }
 
 }  // namespace

@@ -285,7 +285,7 @@ void pt_renderer_default_light_rotations(const PtRenderer* renderer, float* out)
     if (renderer == nullptr || out == nullptr) {
         return;
     }
-    for (const pathtracer::config::QuadLightConfig& light : reinterpret_cast<const HeadlessRenderer*>(renderer)->scene().lights) {
+    for (const pathtracer::config::LightConfig& light : reinterpret_cast<const HeadlessRenderer*>(renderer)->scene().lights) {
         out = std::copy_n(glm::value_ptr(light.rotation), 3, out);
     }
 }

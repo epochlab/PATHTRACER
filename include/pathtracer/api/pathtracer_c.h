@@ -68,7 +68,7 @@ void pt_renderer_default_camera(const PtRenderer* renderer, PtCamera* out);
 int pt_renderer_default_width(const PtRenderer* renderer);
 int pt_renderer_default_height(const PtRenderer* renderer);
 
-/* Quad lights in the scene, 3 floats each in light_rotation_degrees. Every rotation is XYZ degrees as Rz*Ry*Rx, X first. */
+/* Every light in the scene, any shape, 3 floats each in light_rotation_degrees. Every rotation is XYZ degrees as Rz*Ry*Rx, X first. */
 int pt_renderer_light_count(const PtRenderer* renderer);
 /* scene.json's authored model.rotation into out[3], the root pose a NULL root_rotation_degrees keeps. */
 void pt_renderer_default_root_rotation(const PtRenderer* renderer, float* out);

@@ -24,6 +24,8 @@ find_package(embree 4 CONFIG REQUIRED)
 find_package(OpenImageDenoise 2 CONFIG REQUIRED)
 # bench_log's floatCrc32 only. Not a new dependency: OpenImageIO already links zlib, so naming it makes the direct use explicit.
 find_package(ZLIB REQUIRED)
+# Boost.Math, header-only: ellint_3 for the disk light's spherical-ellipse sampler; nee_validate's Gauss-Kronrod oracle reuses it.
+find_package(Boost 1.66 CONFIG REQUIRED COMPONENTS headers)
 # OpenVDB installs a Find module beside its library, not a package config; finding libopenvdb first rules out Houdini's _sesi build.
 find_library(OPENVDB_LIBRARY_FILE openvdb REQUIRED)
 get_filename_component(OPENVDB_LIBRARY_DIR ${OPENVDB_LIBRARY_FILE} DIRECTORY)
@@ -191,7 +193,7 @@ target_compile_definitions(pathtracer_core PRIVATE ${PATHTRACER_PROVENANCE_DEFIN
 target_compile_definitions(pathtracer_core PUBLIC GLM_ENABLE_EXPERIMENTAL)
 pathtracer_target_defaults(pathtracer_core NATIVE IPO TIDY)
 target_link_libraries(pathtracer_core PUBLIC glm::glm embree OpenColorIO::OpenColorIO OpenImageIO::OpenImageIO ZLIB::ZLIB)
-target_link_libraries(pathtracer_core PRIVATE OpenImageDenoise)
+target_link_libraries(pathtracer_core PRIVATE OpenImageDenoise Boost::headers)
 # VDB density grids, read with OpenVDB and traced as NanoVDB; private like OIDN, behind volume.h's opaque VolumeSet.
 target_link_libraries(pathtracer_core PRIVATE OpenVDB::openvdb OpenVDB::nanovdb)
 # Enables NanoVDB's OpenVDB source-grid adaptor, which createNanoGrid needs to convert an openvdb::FloatGrid.
@@ -310,6 +312,7 @@ target_include_directories(display_gl_validate PRIVATE tools)
 pathtracer_target_defaults(display_gl_validate NATIVE IPO)
 target_link_libraries(display_gl_validate PRIVATE pathtracer_gl)
 
+target_link_libraries(nee_validate PRIVATE Boost::headers)
 # integrator_validate and io_validate resolve real assets/ files against named instances -- the materialOverrides path.
 target_compile_definitions(integrator_validate PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
 target_compile_definitions(io_validate PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")

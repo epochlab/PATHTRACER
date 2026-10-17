@@ -9,7 +9,9 @@
 #include <numeric>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <glm/gtc/matrix_inverse.hpp>
@@ -383,28 +385,46 @@ std::optional<LoadedModel> loadGltf(const std::string& path, const glm::mat4& ro
     return model;
 }
 
-void appendQuadLights(LoadedModel& model, const std::vector<QuadLight>& lights,
-                       std::vector<int>& instanceLightIndex) {
+void appendLightGeometry(LoadedModel& model, const std::vector<AreaLight>& lights, std::vector<int>& instanceLightIndex) {
     for (std::size_t i = 0; i < lights.size(); ++i) {
-        const QuadLight& light = lights[i];
-        const glm::vec3& normal = light.normal;
-        const glm::vec4 tangent(glm::normalize(light.edge0), 1.0F);
-        const auto vertex = [&](const glm::vec3& position, glm::vec2 uv) {
-            return ShadingVertex{position, normal, uv, tangent};
-        };
-        // Corners p00/p10/p01/p11 split along the p00-p11 diagonal, both wound so cross(v1-v0, v2-v0) reproduces `normal`.
-        const ShadingVertex p00 = vertex(light.origin, glm::vec2(0.0F, 0.0F));
-        const ShadingVertex p10 = vertex(light.origin + light.edge0, glm::vec2(1.0F, 0.0F));
-        const ShadingVertex p01 = vertex(light.origin + light.edge1, glm::vec2(0.0F, 1.0F));
-        const ShadingVertex p11 = vertex(light.origin + light.edge0 + light.edge1, glm::vec2(1.0F, 1.0F));
-
         const int instanceIndex = static_cast<int>(model.instances.size());
-        model.worldTriangles.push_back(Triangle{p00.position, p10.position, p11.position});
-        model.worldTriangles.push_back(Triangle{p00.position, p11.position, p01.position});
-        model.shadingTriangles.push_back(ShadingTriangle{p00, p10, p11, instanceIndex});
-        model.shadingTriangles.push_back(ShadingTriangle{p00, p11, p01, instanceIndex});
-        model.instances.push_back(MeshInstance{Material{}, glm::mat4(1.0F),
-                                                 "__quadLight" + std::to_string(i)});
+        // The surface an emitter shades with is its emitting one: flat, and of no material, as an emitter has no BSDF.
+        const auto appendTriangle = [&](const Triangle& tri, const glm::vec3& normal, const glm::vec4& tangent, glm::vec2 uv0, glm::vec2 uv1,
+                                        glm::vec2 uv2) {
+            model.worldTriangles.push_back(tri);
+            model.shadingTriangles.push_back(ShadingTriangle{ShadingVertex{tri.v0, normal, uv0, tangent}, ShadingVertex{tri.v1, normal, uv1, tangent},
+                                                             ShadingVertex{tri.v2, normal, uv2, tangent}, instanceIndex});
+        };
+        const char* kind = std::visit(
+            [&](const auto& light) {
+                using Light = std::decay_t<decltype(light)>;
+                if constexpr (std::is_same_v<Light, QuadLight>) {
+                    const glm::vec4 tangent(glm::normalize(light.edge0), 1.0F);
+                    // Corners p00/p10/p01/p11 split along the p00-p11 diagonal, both wound so cross(v1-v0, v2-v0) reproduces `normal`.
+                    const glm::vec3 p00 = light.origin;
+                    const glm::vec3 p10 = light.origin + light.edge0;
+                    const glm::vec3 p01 = light.origin + light.edge1;
+                    const glm::vec3 p11 = light.origin + light.edge0 + light.edge1;
+                    appendTriangle(Triangle{p00, p10, p11}, light.normal, tangent, glm::vec2(0.0F, 0.0F), glm::vec2(1.0F, 0.0F), glm::vec2(1.0F, 1.0F));
+                    appendTriangle(Triangle{p00, p11, p01}, light.normal, tangent, glm::vec2(0.0F, 0.0F), glm::vec2(1.0F, 1.0F), glm::vec2(0.0F, 1.0F));
+                    return "__quadLight";
+                } else if constexpr (std::is_same_v<Light, MeshLight>) {
+                    for (const Triangle& tri : light.triangles) {
+                        const glm::vec3 normal = glm::normalize(glm::cross(tri.v1 - tri.v0, tri.v2 - tri.v0));
+                        // No authored uv to follow, so any basis about the face normal serves, as the loader's own fallback.
+                        const glm::vec4 tangent(glm::transpose(toFrameAbout(normal))[0], 1.0F);
+                        appendTriangle(tri, normal, tangent, glm::vec2(0.0F), glm::vec2(0.0F), glm::vec2(0.0F));
+                    }
+                    return "__meshLight";
+                } else {
+                    constexpr bool kDisc = std::is_same_v<Light, DiskLight>;
+                    model.shapes.push_back(AnalyticShape{kDisc ? AnalyticShape::Kind::Disc : AnalyticShape::Kind::Sphere, light.centre, light.radius,
+                                                         light.frame, instanceIndex});
+                    return kDisc ? "__diskLight" : "__sphereLight";
+                }
+            },
+            lights[i]);
+        model.instances.push_back(MeshInstance{Material{}, glm::mat4(1.0F), kind + std::to_string(i)});
         instanceLightIndex.push_back(static_cast<int>(i));
     }
 }

@@ -226,6 +226,10 @@ glm::vec3 transmittanceAlong(Ray ray, const PassThroughScene& scene, std::option
     glm::vec3 transmittance(1.0F);
     // Closest hit first, so each surface is met in order along the same ray: exact for presence and for an undeviated sheet.
     while (const std::optional<Hit> hit = scene.accel.intersect(ray)) {
+        // A disk or sphere is a light's own surface, as opaque as any emitter.
+        if (hit->shape >= 0) {
+            return glm::vec3(0.0F);
+        }
         const ShadingTriangle& triangle = scene.shadingTriangles[static_cast<std::size_t>(hit->triangleIndex)];
         const auto instance = static_cast<std::size_t>(triangle.instanceIndex);
         if (!scene.mayPassThrough[instance]) {
@@ -260,11 +264,15 @@ float obscuranceAlong(Ray ray, const PassThroughScene& scene, float maxDistance)
     float ao = 0.0F;
     float transmittance = 1.0F;
     while (const std::optional<Hit> hit = scene.accel.intersect(ray)) {
-        const ShadingTriangle& triangle = scene.shadingTriangles[static_cast<std::size_t>(hit->triangleIndex)];
-        const auto instance = static_cast<std::size_t>(triangle.instanceIndex);
-        const float opacity = scene.mayPassThrough[instance]
-                                  ? opacityAt(scene.instances[instance].material, interpolateShading(triangle, hit->u, hit->v).uv, {})
-                                  : 1.0F;
+        // A disk or sphere is a light's own surface, as opaque as any emitter.
+        float opacity = 1.0F;
+        if (hit->shape < 0) {
+            const ShadingTriangle& triangle = scene.shadingTriangles[static_cast<std::size_t>(hit->triangleIndex)];
+            const auto instance = static_cast<std::size_t>(triangle.instanceIndex);
+            if (scene.mayPassThrough[instance]) {
+                opacity = opacityAt(scene.instances[instance].material, interpolateShading(triangle, hit->u, hit->v).uv, {});
+            }
+        }
         ao += transmittance * opacity * rho(hit->t);
         transmittance *= 1.0F - opacity;
         if (transmittance == 0.0F) {
@@ -477,20 +485,22 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
             break;
         }
 
-        const ShadingTriangle& triangle =
-            scene.shadingTriangles[static_cast<std::size_t>(hit->triangleIndex)];
-
-        // An emitter hit, a quad light's triangles being in the BVH: Le, MIS-weighted like a miss, then terminate. Before the depth cap.
-        const int lightIndex = instanceLightIndex[static_cast<std::size_t>(triangle.instanceIndex)];
+        // An emitter hit, every light's surface in the BVH: Le MIS-weighted like a miss, then terminate. Only lights have shapes.
+        const int hitInstance = hit->shape >= 0 ? accel.shapes()[static_cast<std::size_t>(hit->shape)].instanceIndex
+                                                : scene.shadingTriangles[static_cast<std::size_t>(hit->triangleIndex)].instanceIndex;
+        const int lightIndex = instanceLightIndex[static_cast<std::size_t>(hitInstance)];
         if (lightIndex >= 0) {
+            const glm::vec3 point = ray.origin + (hit->t * ray.dir);
+            const glm::vec3 lightNormal = hit->shape >= 0 ? shadingAt(accel.shapes()[static_cast<std::size_t>(hit->shape)], point).normal
+                                                          : geometricNormalOf(scene.shadingTriangles[static_cast<std::size_t>(hit->triangleIndex)]);
             // An emitter is a surface with no BSDF: its normal, and no albedo.
             if (featurePending) {
-                recordFeatures(glm::vec3(0.0F), geometricNormalOf(triangle));
+                recordFeatures(glm::vec3(0.0F), lightNormal);
             }
-            const glm::vec3 emitted = lights.quadRadianceToward(lightIndex, ray.dir);
+            const glm::vec3 emitted = lights.radianceToward(lightIndex, ray.dir, lightNormal);
             float misWeight = 1.0F;
             if (!lastSampleWasDelta) {
-                const float lightPdf = lights.pdfQuad(lightIndex, lastShadingPosition);
+                const float lightPdf = lights.pdfArea(lightIndex, lastShadingPosition, point, lightNormal);
                 const float bsdfPdf2 = lastBsdfPdf * lastBsdfPdf;
                 misWeight = bsdfPdf2 / (bsdfPdf2 + (lightPdf * lightPdf));
             }
@@ -500,6 +510,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
             break;
         }
 
+        const ShadingTriangle& triangle = scene.shadingTriangles[static_cast<std::size_t>(hit->triangleIndex)];
         const auto instance = static_cast<std::size_t>(triangle.instanceIndex);
         const Material& material = scene.instances[instance].material;
         // Secondary vertices lack propagated differentials (Igehy's BSDF transfer), so they read level 0 as a zero footprint does.

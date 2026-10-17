@@ -26,14 +26,15 @@ struct LoadedModel {
     std::vector<Triangle> worldTriangles;
     // Per-vertex normal/uv/tangent, parallel-indexed with worldTriangles -- Hit::triangleIndex resolves directly into this.
     std::vector<ShadingTriangle> shadingTriangles;
+    // Disk and sphere lights' native surfaces, for EmbreeAccel::build; a glTF contributes none.
+    std::vector<AnalyticShape> shapes;
 };
 
 // Parses path's geometry via cgltf, ignoring its materials, into neutral Material{}s; vertexColor false reads COLOR_0 as absent (white).
 std::optional<LoadedModel> loadGltf(const std::string& path, const glm::mat4& rootTransform = glm::mat4(1.0F),
                                     bool vertexColor = true);
 
-// Appends each light's emitting geometry to `model`, plus one entry per light to `instanceLightIndex`, pre-sized to instances, all -1.
-void appendQuadLights(LoadedModel& model, const std::vector<QuadLight>& lights,
-                       std::vector<int>& instanceLightIndex);
+// Appends each light's emitting surface and one instance to `model`, and its index to `instanceLightIndex`, pre-sized to instances, all -1.
+void appendLightGeometry(LoadedModel& model, const std::vector<AreaLight>& lights, std::vector<int>& instanceLightIndex);
 
 }  // namespace pathtracer::scene

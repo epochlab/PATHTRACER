@@ -17,6 +17,7 @@
 #include <optional>
 #include <random>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -42,6 +43,7 @@
 #include "pathtracer/scene/light.h"
 #include "pathtracer/scene/material_binding.h"
 #include "pathtracer/scene/path_tracer.h"
+#include "pathtracer/scene/rotation.h"
 #include "pathtracer/scene/shading_scene.h"
 #include "pathtracer/scene/thread_pool.h"
 
@@ -286,8 +288,8 @@ pathtracer::scene::PathTraceResult renderPass(const TestScene& scene, const Envi
     pathtracer::scene::PathTraceResult result = pathtracer::scene::makePathTraceResult(width, height, settings.replicates);
     // No test scene here authors an emitter -- every instance is ordinary geometry.
     const std::vector<int> instanceLightIndex(scene.instances.size(), -1);
-    const std::vector<pathtracer::scene::QuadLight> noQuads;
-    const pathtracer::scene::LightSet lights(&env, /*envRotationDegrees=*/glm::vec3(0.0F), /*envExposure=*/1.0F, noQuads);
+    const std::vector<pathtracer::scene::AreaLight> noLights;
+    const pathtracer::scene::LightSet lights(&env, /*envRotationDegrees=*/glm::vec3(0.0F), /*envExposure=*/1.0F, noLights);
     pathtracer::debug::PassStats stats;  // required by renderPathTraced; this tool checks radiance, not throughput
     pathtracer::scene::renderPathTraced(camera, accel, scene.shadingTriangles, scene.instances,
                                      instanceLightIndex, lights, pathtracer::scene::VolumeSet{}, width, height, showSky,
@@ -1034,16 +1036,16 @@ PT_CHECK(material_binding_resolution, Fast, Exact) {
               "an unloadable materialPath was accepted, or a rejected scene still changed an instance");
 }
 
-// buildQuadLights places a centred quad emitting local -Z by sceneTransform * T * Rz * Ry * Rx, its edges w and h, perpendicular.
+// buildLights places a centred quad emitting local -Z by sceneTransform * T * Rz * Ry * Rx, its edges w and h, perpendicular.
 PT_CHECK(quad_light_placement, Fast, Exact) {
     struct Case {
         const char* name;
-        pathtracer::config::QuadLightConfig light;
+        pathtracer::config::LightConfig light;
         glm::mat4 sceneTransform;
         glm::vec3 expectedNormal;
     };
     const auto light = [](glm::vec3 position, glm::vec3 rotation, glm::vec2 size) {
-        return pathtracer::config::QuadLightConfig{position, rotation, size, glm::vec3(1.0F), 1.0F};
+        return pathtracer::config::LightConfig{position, rotation, pathtracer::config::QuadShape{size}, glm::vec3(1.0F), 1.0F};
     };
     const glm::mat4 identity(1.0F);
     const glm::mat4 sceneMoved = glm::translate(identity, glm::vec3(1.0F, 2.0F, 3.0F)) *
@@ -1059,16 +1061,20 @@ PT_CHECK(quad_light_placement, Fast, Exact) {
     };
     // Higham's gamma_n, n = 8 chained 4-term products, at coordinate magnitude <= 4; eps, not u = eps/2, also covers sin/cos's ulp.
     constexpr float kTolerance = 8.0F * 4.0F * std::numeric_limits<float>::epsilon() * 4.0F;
+    const auto placeQuad = [](const pathtracer::config::LightConfig& config, const glm::mat4& sceneTransform) {
+        return std::get<pathtracer::scene::QuadLight>(pathtracer::scene::buildLights({config}, sceneTransform, "")->front());
+    };
 
     ctx.plan(static_cast<int>(cases.size()) + 1);
     for (const Case& testCase : cases) {
-        const pathtracer::scene::QuadLight quad = pathtracer::scene::buildQuadLights({testCase.light}, testCase.sceneTransform)[0];
+        const pathtracer::scene::QuadLight quad = placeQuad(testCase.light, testCase.sceneTransform);
+        const glm::vec2 size = std::get<pathtracer::config::QuadShape>(testCase.light.shape).size;
         const glm::vec3 centre = quad.origin + (0.5F * quad.edge0) + (0.5F * quad.edge1);
         const glm::vec3 expectedCentre = glm::vec3(testCase.sceneTransform * glm::vec4(testCase.light.position, 1.0F));
         const float centreError = glm::length(centre - expectedCentre);
         const float normalError = glm::length(quad.normal - testCase.expectedNormal);
-        const float widthError = std::fabs(glm::length(quad.edge0) - testCase.light.size.x);
-        const float heightError = std::fabs(glm::length(quad.edge1) - testCase.light.size.y);
+        const float widthError = std::fabs(glm::length(quad.edge0) - size.x);
+        const float heightError = std::fabs(glm::length(quad.edge1) - size.y);
         const float skew = std::fabs(glm::dot(quad.edge0, quad.edge1));
         const float maxError = std::max({centreError, normalError, widthError, heightError, skew});
         char detail[288];
@@ -1082,7 +1088,7 @@ PT_CHECK(quad_light_placement, Fast, Exact) {
     }
 
     // The shipped cornell light must reproduce the retired corner-authored quad it replaced, corner and both edges.
-    const pathtracer::scene::QuadLight ceiling = pathtracer::scene::buildQuadLights({cases[1].light}, identity)[0];
+    const pathtracer::scene::QuadLight ceiling = placeQuad(cases[1].light, identity);
     const float migrationError = std::max({glm::length(ceiling.origin - glm::vec3(-0.15F, 0.49F, -0.15F)),
                                            glm::length(ceiling.edge0 - glm::vec3(0.3F, 0.0F, 0.0F)),
                                            glm::length(ceiling.edge1 - glm::vec3(0.0F, 0.0F, 0.3F))});
@@ -1091,6 +1097,82 @@ PT_CHECK(quad_light_placement, Fast, Exact) {
                   migrationError, kTolerance);
     std::cout << "  " << detail << '\n';
     PT_EXPECT(ctx, migrationError <= kTolerance, detail);
+}
+
+// Disk and sphere centre on sceneTransform * position with the quad's frame: the disk emits along local -Z, its tangents +X and -Y.
+PT_CHECK(disk_and_sphere_light_placement, Fast, Exact) {
+    const glm::mat4 sceneMoved = glm::translate(glm::mat4(1.0F), glm::vec3(1.0F, 2.0F, 3.0F)) *
+                                 glm::rotate(glm::mat4(1.0F), glm::radians(90.0F), glm::vec3(0.0F, 1.0F, 0.0F));
+    const glm::vec3 position(0.25F, -0.5F, 0.75F);
+    const glm::vec3 rotation(-90.0F, 30.0F, 0.0F);
+    const std::vector<pathtracer::config::LightConfig> configs = {
+        {position, rotation, pathtracer::config::DiskShape{0.4F}, glm::vec3(1.0F), 2.0F, true},
+        {position, rotation, pathtracer::config::SphereShape{0.3F}, glm::vec3(1.0F), 2.0F},
+    };
+    const std::optional<std::vector<pathtracer::scene::AreaLight>> lights = pathtracer::scene::buildLights(configs, sceneMoved, "");
+    const glm::mat4 lightToWorld = sceneMoved * glm::translate(glm::mat4(1.0F), position) * glm::mat4(pathtracer::scene::rotationXyz(rotation));
+    const glm::vec3 centre(lightToWorld * glm::vec4(0.0F, 0.0F, 0.0F, 1.0F));
+    const glm::mat3 frame(glm::vec3(lightToWorld * glm::vec4(1.0F, 0.0F, 0.0F, 0.0F)), glm::vec3(lightToWorld * glm::vec4(0.0F, -1.0F, 0.0F, 0.0F)),
+                          glm::vec3(lightToWorld * glm::vec4(0.0F, 0.0F, -1.0F, 0.0F)));
+    // The same products in the same order: the placement is exact against them, so the bound is zero.
+    ctx.plan(2);
+    const auto* disk = lights ? std::get_if<pathtracer::scene::DiskLight>(&(*lights)[0]) : nullptr;
+    const auto* sphere = lights ? std::get_if<pathtracer::scene::SphereLight>(&(*lights)[1]) : nullptr;
+    PT_EXPECT(ctx, disk && disk->centre == centre && disk->frame == frame && disk->radius == 0.4F && disk->twoSided && disk->radiance == glm::vec3(2.0F),
+              "the disk is not centred on its placed origin with frame (+X, -Y, -Z), its radius, side and radiance authored");
+    PT_EXPECT(ctx, sphere && sphere->centre == centre && sphere->radius == 0.3F && sphere->radiance == glm::vec3(2.0F),
+              "the sphere is not centred on its placed origin with its authored radius and radiance");
+}
+
+// A mesh light pivots on its bounding-box centre: that point lands on position, scaled about it, under root and light rotation.
+PT_CHECK(mesh_light_pivots_on_its_bounding_box_centre, Fast, Exact) {
+    const std::string assetRoot = ASSET_ROOT_DIR;
+    const std::string gltfPath = "geometry/cornell/meshLights_v001.gltf";
+    const glm::mat4 sceneMoved = glm::translate(glm::mat4(1.0F), glm::vec3(1.0F, 2.0F, 3.0F)) *
+                                 glm::rotate(glm::mat4(1.0F), glm::radians(90.0F), glm::vec3(0.0F, 1.0F, 0.0F));
+    const glm::vec3 position(0.25F, -0.5F, 0.75F);
+    const glm::vec3 rotation(20.0F, -40.0F, 65.0F);
+    constexpr float kScale = 0.25F;
+    const std::optional<pathtracer::scene::LoadedModel> source = pathtracer::scene::loadGltf(assetRoot + "/" + gltfPath, glm::mat4(1.0F), false);
+    const std::optional<std::vector<pathtracer::scene::AreaLight>> lights = pathtracer::scene::buildLights(
+        {{position, rotation, pathtracer::config::MeshShape{gltfPath, kScale}, glm::vec3(1.0F), 1.0F}}, sceneMoved, assetRoot);
+    ctx.plan(3);
+    const auto* mesh = lights ? std::get_if<pathtracer::scene::MeshLight>(&lights->front()) : nullptr;
+    PT_EXPECT(ctx, source && mesh && mesh->triangles.size() == source->worldTriangles.size(), "the mesh light lost or gained faces");
+    if (!source || !mesh || mesh->triangles.size() != source->worldTriangles.size()) {
+        return;
+    }
+    const auto bounds = [](const std::vector<pathtracer::scene::Triangle>& triangles) {
+        glm::vec3 lo(std::numeric_limits<float>::infinity());
+        glm::vec3 hi(-std::numeric_limits<float>::infinity());
+        float area = 0.0F;
+        for (const pathtracer::scene::Triangle& tri : triangles) {
+            lo = glm::min(lo, glm::min(tri.v0, glm::min(tri.v1, tri.v2)));
+            hi = glm::max(hi, glm::max(tri.v0, glm::max(tri.v1, tri.v2)));
+            area += 0.5F * glm::length(glm::cross(tri.v1 - tri.v0, tri.v2 - tri.v0));
+        }
+        return std::tuple{lo, hi, area};
+    };
+    const auto [lo, hi, sourceArea] = bounds(source->worldTriangles);
+    // The source's box centre, mapped by the placement, must reach the placed origin; and every point is the source scaled about it.
+    const glm::mat4 lightToWorld = sceneMoved * glm::translate(glm::mat4(1.0F), position) * glm::mat4(pathtracer::scene::rotationXyz(rotation));
+    const glm::vec3 expectedPivot(lightToWorld * glm::vec4(0.0F, 0.0F, 0.0F, 1.0F));
+    const glm::vec3 pivot = 0.5F * (lo + hi);
+    float worst = 0.0F;
+    for (std::size_t i = 0; i < mesh->triangles.size(); ++i) {
+        const glm::vec3 expected(lightToWorld * glm::vec4(kScale * (source->worldTriangles[i].v0 - pivot), 1.0F));
+        worst = std::max(worst, glm::length(mesh->triangles[i].v0 - expected));
+    }
+    // Higham's gamma_n over the 4x4 products and the pivot's subtraction, at coordinate magnitude <= 4: as quad_light_placement's bound.
+    constexpr float kTolerance = 8.0F * 4.0F * std::numeric_limits<float>::epsilon() * 4.0F;
+    PT_EXPECT(ctx, worst <= kTolerance,
+              "a placed vertex is " + std::to_string(worst) + " from the source scaled about its box centre and moved to " +
+                  std::to_string(expectedPivot.x) + ", " + std::to_string(expectedPivot.y) + ", " + std::to_string(expectedPivot.z));
+    // Area scales by s^2 under a similarity; the source's float sum of n faces errs by at most n eps of it (Higham 4.2).
+    const float expectedArea = kScale * kScale * sourceArea;
+    const float sumBound = static_cast<float>(mesh->triangles.size()) * std::numeric_limits<float>::epsilon() * expectedArea;
+    PT_EXPECT(ctx, std::abs(mesh->area - expectedArea) <= sumBound,
+              "mesh area " + std::to_string(mesh->area) + " is not scale^2 x the source's " + std::to_string(expectedArea));
 }
 
 // Texture binding: bindSceneTextures fills exactly the named nodes' named inputs, atomically, and rejects every bad entry.
@@ -1320,8 +1402,8 @@ PT_CHECK(transport_aov_partition, Slow, Exact) {
     return;
 }
 
-// Appends a QuadLight's two emitting triangles as appendQuadLights does, so these checks meet a real scene's self-occlusion regime.
-void appendLightGeometry(TestScene& scene, const pathtracer::scene::QuadLight& light, int quadIndex,
+// Appends a QuadLight's two emitting triangles as appendLightGeometry does, so these checks meet a real scene's self-occlusion regime.
+void appendQuadEmitter(TestScene& scene, const pathtracer::scene::QuadLight& light, int quadIndex,
                           std::vector<int>& instanceLightIndex) {
     const glm::vec3& normal = light.normal;
     const glm::vec4 tangent(glm::normalize(light.edge0), 1.0F);
@@ -1342,10 +1424,10 @@ void appendLightGeometry(TestScene& scene, const pathtracer::scene::QuadLight& l
     instanceLightIndex.push_back(quadIndex);
 }
 
-// Like renderPass, but for scenes carrying real light-set state: an explicit environment pointer and emitter instances/quads.
+// Like renderPass, but for scenes carrying real light-set state: an explicit environment pointer and emitter instances/lights.
 pathtracer::scene::PathTraceResult renderPassWithLights(const TestScene& scene,
                                                      const std::vector<int>& instanceLightIndex,
-                                                     const std::vector<pathtracer::scene::QuadLight>& quads,
+                                                     const std::vector<pathtracer::scene::AreaLight>& quads,
                                                      const EnvironmentMap* env,
                                                      const PathTraceSettings& settings,
                                                      EmbreeAccel& accel, pathtracer::scene::ThreadPool& pool,
@@ -1500,7 +1582,7 @@ std::pair<TestScene, pathtracer::scene::QuadLight> makeGlassStage(float scale, s
     // Above and behind the sphere, facing down, out of frame: refracted paths' exit vertices see it across the glass, NEE's far side.
     const pathtracer::scene::QuadLight light{glm::vec3(-1.5F, 2.5F, -3.0F) * scale, glm::vec3(3.0F, 0.0F, 0.0F) * scale,
                                               glm::vec3(0.0F, 0.0F, 2.0F) * scale, glm::vec3(4.0F), false};
-    appendLightGeometry(scene, light, /*quadIndex=*/0, instanceLightIndex);
+    appendQuadEmitter(scene, light, /*quadIndex=*/0, instanceLightIndex);
     return {scene, light};
 }
 
@@ -1566,7 +1648,7 @@ PT_CHECK(rough_transmission_tint, Slow, Exact) {
     // Behind the interface, emitting face pointing back at it, so the only way to the camera is through; the quad hides it from the camera.
     const pathtracer::scene::QuadLight light{glm::vec3(-0.5F, -0.5F, -1.5F), glm::vec3(1.0F, 0.0F, 0.0F),
                                           glm::vec3(0.0F, 1.0F, 0.0F), glm::vec3(3.0F)};
-    const std::vector<pathtracer::scene::QuadLight> quads{light};
+    const std::vector<pathtracer::scene::AreaLight> quads{light};
 
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     bool ok = true;
@@ -1576,7 +1658,7 @@ PT_CHECK(rough_transmission_tint, Slow, Exact) {
     for (float roughness : roughnesses) {
         TestScene scene = withSurface(makeQuadScene(roughness), transmissive);
         std::vector<int> instanceLightIndex(scene.instances.size(), -1);
-        appendLightGeometry(scene, light, /*quadIndex=*/0, instanceLightIndex);
+        appendQuadEmitter(scene, light, /*quadIndex=*/0, instanceLightIndex);
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         if (!accel.has_value()) {
             std::cerr << "integrator_validate: FAILED to build Embree scene at roughness " << roughness
@@ -1709,14 +1791,14 @@ PT_CHECK(quad_light_irradiance_and_occlusion, Slow, Statistical) {
     for (const LightCase& testCase : cases) {
         TestScene scene = makeLambertianFloor();
         std::vector<int> instanceLightIndex(scene.instances.size(), -1);
-        appendLightGeometry(scene, testCase.light, /*quadIndex=*/0, instanceLightIndex);
+        appendQuadEmitter(scene, testCase.light, /*quadIndex=*/0, instanceLightIndex);
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         if (!accel.has_value()) {
             std::cerr << "integrator_validate: FAILED to build Embree scene for " << testCase.name << '\n';
             finish(ctx, false, "quad_light_irradiance_and_occlusion failed; see the rows above");
             return;
         }
-        const std::vector<pathtracer::scene::QuadLight> quads{testCase.light};
+        const std::vector<pathtracer::scene::AreaLight> quads{testCase.light};
         const glm::vec3 lo = centreMean(renderPassWithLights(scene, instanceLightIndex, quads,
                                                               /*env=*/nullptr,
                                                               makeSettings(0, 999), *accel, pool,
@@ -1741,20 +1823,20 @@ PT_CHECK(quad_light_irradiance_and_occlusion, Slow, Statistical) {
         }
     }
 
-    // The same position with edge0/edge1 swapped, so only quadRadianceToward's front/back-face test stands between this and nonzero.
+    // The same position with edge0/edge1 swapped, so only radianceToward's front/back-face test stands between this and nonzero.
     {
         TestScene scene = makeLambertianFloor();
         std::vector<int> instanceLightIndex(scene.instances.size(), -1);
         const pathtracer::scene::QuadLight light{glm::vec3(0.5F, -0.5F, 1.5F), glm::vec3(1.0F, 0.0F, 0.0F),
                                               glm::vec3(0.0F, 1.0F, 0.0F), glm::vec3(3.0F), false};
-        appendLightGeometry(scene, light, /*quadIndex=*/0, instanceLightIndex);
+        appendQuadEmitter(scene, light, /*quadIndex=*/0, instanceLightIndex);
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         if (!accel.has_value()) {
             std::cerr << "integrator_validate: FAILED to build Embree scene for one-sided check\n";
             finish(ctx, false, "quad_light_irradiance_and_occlusion failed; see the rows above");
             return;
         }
-        const std::vector<pathtracer::scene::QuadLight> quads{light};
+        const std::vector<pathtracer::scene::AreaLight> quads{light};
         const glm::vec3 lo = centreMean(renderPassWithLights(scene, instanceLightIndex, quads,
                                                               /*env=*/nullptr, makeSettings(0, 999),
                                                               *accel, pool, /*showSky=*/false)
@@ -1774,7 +1856,7 @@ PT_CHECK(quad_light_irradiance_and_occlusion, Slow, Statistical) {
         TestScene scene = makeLambertianFloor();
         std::vector<int> instanceLightIndex(scene.instances.size(), -1);
         const pathtracer::scene::QuadLight light = makeOverheadLight();
-        appendLightGeometry(scene, light, /*quadIndex=*/0, instanceLightIndex);
+        appendQuadEmitter(scene, light, /*quadIndex=*/0, instanceLightIndex);
         appendWall(scene, makeLambertianFloor().instances[0].material, instanceLightIndex);
 
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
@@ -1783,7 +1865,7 @@ PT_CHECK(quad_light_irradiance_and_occlusion, Slow, Statistical) {
             finish(ctx, false, "quad_light_irradiance_and_occlusion failed; see the rows above");
             return;
         }
-        const std::vector<pathtracer::scene::QuadLight> quads{light};
+        const std::vector<pathtracer::scene::AreaLight> quads{light};
         const glm::vec3 lo = centreMean(renderPassWithLights(scene, instanceLightIndex, quads,
                                                               /*env=*/nullptr, makeSettings(0, 999),
                                                               *accel, pool, /*showSky=*/false)
@@ -1855,7 +1937,7 @@ PT_CHECK(presence_and_window_transmission, Slow, Statistical) {
     for (const Case& c : cases) {
         TestScene scene = makeLambertianFloor();
         std::vector<int> instanceLightIndex(scene.instances.size(), -1);
-        appendLightGeometry(scene, light, /*quadIndex=*/0, instanceLightIndex);
+        appendQuadEmitter(scene, light, /*quadIndex=*/0, instanceLightIndex);
         Material wall = c.window ? window : makeLambertianFloor().instances[0].material;
         wall.geometryOpacity = c.opacity;
         appendWall(scene, wall, instanceLightIndex);
@@ -1864,7 +1946,7 @@ PT_CHECK(presence_and_window_transmission, Slow, Statistical) {
             finish(ctx, false, "failed to build the Embree wall scene");
             return;
         }
-        const std::vector<pathtracer::scene::QuadLight> quads{light};
+        const std::vector<pathtracer::scene::AreaLight> quads{light};
         const PathTraceSettings settings = makeSettings(c.maxBounces, 999);
         const glm::vec3 lo =
             centreMean(renderPassWithLights(scene, instanceLightIndex, quads, /*env=*/nullptr, settings, *accel, pool, false).beauty);
@@ -1954,6 +2036,139 @@ PT_CHECK(emission_sidedness, Fast, Exact) {
     PT_EXPECT(ctx, std::abs(both.x - 2.0F) <= 1e-5F, "a thin-walled emitter's back face must emit its luminance");
 }
 
+// `lights` added to `scene` by the library's own appendLightGeometry, so a check traces the surfaces, shapes and instances a scene does.
+struct LitScene {
+    TestScene scene;
+    std::vector<pathtracer::scene::AnalyticShape> shapes;
+    std::vector<int> instanceLightIndex;
+};
+
+LitScene withLights(TestScene scene, const std::vector<pathtracer::scene::AreaLight>& lights) {
+    pathtracer::scene::LoadedModel model{std::move(scene.instances), std::move(scene.worldTriangles), std::move(scene.shadingTriangles), {}};
+    std::vector<int> instanceLightIndex(model.instances.size(), -1);
+    pathtracer::scene::appendLightGeometry(model, lights, instanceLightIndex);
+    return LitScene{TestScene{std::move(model.worldTriangles), std::move(model.shadingTriangles), std::move(model.instances)},
+                    std::move(model.shapes), std::move(instanceLightIndex)};
+}
+
+// A disk of radius r about centre emitting along unit `normal`, any tangent: a disk's emission and hit are independent of its tangent.
+pathtracer::scene::DiskLight makeDiskLight(const glm::vec3& centre, const glm::vec3& normal, float radius, bool twoSided) {
+    const glm::vec3 tangent = glm::normalize(glm::cross(std::abs(normal.x) < 0.9F ? glm::vec3(1.0F, 0.0F, 0.0F) : glm::vec3(0.0F, 1.0F, 0.0F), normal));
+    return pathtracer::scene::DiskLight{centre, glm::mat3(tangent, glm::cross(normal, tangent), normal), radius, glm::vec3(3.0F), twoSided};
+}
+
+// Two triangles spanning [-h, h]^2 at height z facing `normalZ` (+1 or -1) along z, wound so cross(e1, e2) is that normal.
+pathtracer::scene::MeshLight makeSquareMeshLight(float h, float z, float normalZ, bool twoSided) {
+    const glm::vec3 a(-h, -h, z);
+    const glm::vec3 b(h, -h, z);
+    const glm::vec3 c(h, h, z);
+    const glm::vec3 d(-h, h, z);
+    std::vector<Triangle> faces = normalZ > 0.0F ? std::vector<Triangle>{{a, b, c}, {a, c, d}} : std::vector<Triangle>{{a, c, b}, {a, d, c}};
+    return pathtracer::scene::MeshLight(std::move(faces), glm::vec3(3.0F), twoSided);
+}
+
+// A camera ray reaching a light returns its Le whole, delta-sampled so MIS-free; a one-sided back face returns 0, a two-sided one Le.
+PT_CHECK(area_lights_show_le_to_the_camera, Fast, Exact) {
+    const glm::vec3 towardCamera(0.0F, 0.0F, 1.0F);
+    struct Row {
+        const char* name;
+        pathtracer::scene::AreaLight light;
+        float expected;
+    };
+    const std::vector<Row> rows = {
+        {"disk front", makeDiskLight(glm::vec3(0.0F, 0.0F, 2.0F), towardCamera, 0.5F, false), 3.0F},
+        {"disk back", makeDiskLight(glm::vec3(0.0F, 0.0F, 2.0F), -towardCamera, 0.5F, false), 0.0F},
+        {"disk back, two-sided", makeDiskLight(glm::vec3(0.0F, 0.0F, 2.0F), -towardCamera, 0.5F, true), 3.0F},
+        {"sphere", pathtracer::scene::SphereLight{glm::vec3(0.0F, 0.0F, 2.0F), glm::mat3(1.0F), 0.5F, glm::vec3(3.0F)}, 3.0F},
+        {"mesh front", makeSquareMeshLight(0.5F, 2.0F, 1.0F, false), 3.0F},
+        {"mesh back", makeSquareMeshLight(0.5F, 2.0F, -1.0F, false), 0.0F},
+        {"mesh back, two-sided", makeSquareMeshLight(0.5F, 2.0F, -1.0F, true), 3.0F},
+    };
+    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    PathTraceSettings settings = makeSettings(0, 999);
+    settings.samplesPerPixel = 4;
+    ctx.plan(static_cast<int>(rows.size()));
+    for (const Row& row : rows) {
+        const std::vector<pathtracer::scene::AreaLight> lights{row.light};
+        const LitScene lit = withLights(TestScene{}, lights);
+        std::optional<EmbreeAccel> accel = EmbreeAccel::build(lit.scene.worldTriangles, lit.shapes);
+        const glm::vec3 seen = accel ? centreMean(renderPassWithLights(lit.scene, lit.instanceLightIndex, lights, nullptr, settings, *accel, pool,
+                                                                       /*showSky=*/false)
+                                                      .beauty)
+                                     : glm::vec3(-1.0F);
+        // A mean of identical samples rounds at most once per accumulation: a few float ulps of Le, 0 exactly where nothing emits.
+        const float bound = 8.0F * std::numeric_limits<float>::epsilon() * row.expected;
+        PT_EXPECT(ctx, std::abs(seen.x - row.expected) <= bound,
+                  std::string(row.name) + ": camera saw " + std::to_string(seen.x) + ", expected " + std::to_string(row.expected));
+    }
+}
+
+// Direct light on a white Lambertian floor from each shape against its closed-form irradiance, banded over iid scrambles.
+PT_CHECK(area_light_irradiance, Slow, Statistical) {
+    const glm::vec3 floorNormal(0.0F, 0.0F, 1.0F);
+    const glm::vec3 centre(1.0F, 0.0F, 1.5F);  // clear of the camera's view of the floor's centre, as makeOverheadLight
+    constexpr float kRadius = 0.4F;
+    constexpr float kRadiance = 3.0F;
+    // A parallel disk off its axis by rho at height h (Howell's catalogue, B-12): F = (1 - (h^2 + rho^2 - r^2) / sqrt(...)) / 2.
+    const float h2 = centre.z * centre.z;
+    const float rho2 = centre.x * centre.x;
+    const float r2 = kRadius * kRadius;
+    const float diskFactor = 0.5F * (1.0F - ((h2 + rho2 - r2) / std::sqrt(((h2 + rho2 + r2) * (h2 + rho2 + r2)) - (4.0F * rho2 * r2))));
+    // A sphere wholly above the receiver's horizon: E = pi L (r/d)^2 cos(theta) to its centre, exact.
+    const float d2 = glm::dot(centre, centre);
+    const float sphereFactor = (r2 / d2) * (centre.z / std::sqrt(d2));
+    // A closed tetrahedron, faces wound outward: the faces turned to the receiver are the polygons Lambert's formula sums.
+    const std::array<glm::vec3, 4> v = {centre + glm::vec3(0.0F, 0.0F, -0.35F), centre + glm::vec3(0.35F, 0.0F, 0.2F),
+                                        centre + glm::vec3(-0.18F, 0.3F, 0.2F), centre + glm::vec3(-0.18F, -0.3F, 0.2F)};
+    std::vector<Triangle> faces;
+    float meshIrradiance = 0.0F;
+    for (const auto& [a, b, c] : {std::tuple{0, 1, 2}, std::tuple{0, 2, 3}, std::tuple{0, 3, 1}, std::tuple{1, 3, 2}}) {
+        Triangle face{v[static_cast<std::size_t>(a)], v[static_cast<std::size_t>(b)], v[static_cast<std::size_t>(c)]};
+        if (glm::dot(glm::cross(face.v1 - face.v0, face.v2 - face.v0), face.v0 - centre) < 0.0F) {
+            std::swap(face.v1, face.v2);
+        }
+        if (glm::dot(glm::cross(face.v1 - face.v0, face.v2 - face.v0), -face.v0) > 0.0F) {
+            meshIrradiance += std::abs(lambertPolygonIrradiance({face.v0, face.v1, face.v2, face.v2}, glm::vec3(0.0F), floorNormal, kRadiance));
+        }
+        faces.push_back(face);
+    }
+    struct Row {
+        const char* name;
+        pathtracer::scene::AreaLight light;
+        float reference;  // Lo = E / pi off the white Lambertian floor
+    };
+    const std::vector<Row> rows = {
+        {"disk", makeDiskLight(centre, -floorNormal, kRadius, false), kRadiance * diskFactor},
+        {"sphere", pathtracer::scene::SphereLight{centre, glm::mat3(1.0F), kRadius, glm::vec3(kRadiance)}, kRadiance * sphereFactor},
+        {"mesh", pathtracer::scene::MeshLight(faces, glm::vec3(kRadiance), false), meshIrradiance / kPi},
+    };
+    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    // The references are point values at the origin; a pixel block averages a footprint whose curvature biases at second order, so 1/64th.
+    const Camera camera(glm::vec3(0.0F, 0.0F, 5.0F), glm::vec3(0.0F), Camera::FilmBack{36.0F, 24.0F}, 64.0F * kFocalLengthMm, 0.01F, 1000.0F, 2.8F,
+                        1.0F / 125.0F, 100.0F);
+    ctx.plan(static_cast<int>(rows.size()));
+    for (const Row& row : rows) {
+        const std::vector<pathtracer::scene::AreaLight> lights{row.light};
+        const LitScene lit = withLights(makeLambertianFloor(), lights);
+        std::optional<EmbreeAccel> accel = EmbreeAccel::build(lit.scene.worldTriangles, lit.shapes);
+        tools::stats::Welford replicates;
+        const std::uint64_t seed = ctx.subSeed(row.name);
+        for (int r = 0; accel && r < tools::stats::kReplicates; ++r) {
+            const auto scramble = static_cast<std::uint32_t>(seed + static_cast<std::uint64_t>(r));
+            replicates.add(centreMean(renderPassWithLights(lit.scene, lit.instanceLightIndex, lights, nullptr, makeSettings(0, 999), *accel, pool,
+                                                           /*showSky=*/false, scramble, camera)
+                                          .beauty)
+                               .x);
+        }
+        const double half = tools::stats::studentTTwoSided(ctx.alpha(), static_cast<double>(replicates.count() - 1)) * replicates.standardError();
+        char detail[192];
+        std::snprintf(detail, sizeof(detail), "%s: rendered %.6f +/- %.2e, closed form %.6f", row.name, replicates.mean(), half,
+                      static_cast<double>(row.reference));
+        std::cout << "  " << detail << '\n';
+        PT_EXPECT(ctx, accel && std::abs(replicates.mean() - static_cast<double>(row.reference)) <= half, detail);
+    }
+}
+
 // A convex receiver cannot occlude itself from a light it faces, so Shadow is exactly 0 however coarsely the sphere is tessellated.
 PT_CHECK(quad_light_visibility_on_curved_receiver, Slow, Exact) {
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
@@ -1975,7 +2190,7 @@ PT_CHECK(quad_light_visibility_on_curved_receiver, Slow, Exact) {
     for (const Row& row : rows) {
         TestScene scene = withSurface(makeSphereScene(/*roughness=*/1.0F, row.slices, row.stacks), indexMatched);
         std::vector<int> instanceLightIndex(scene.instances.size(), -1);
-        appendLightGeometry(scene, light, /*quadIndex=*/0, instanceLightIndex);
+        appendQuadEmitter(scene, light, /*quadIndex=*/0, instanceLightIndex);
 
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         if (!accel.has_value()) {
@@ -1983,7 +2198,7 @@ PT_CHECK(quad_light_visibility_on_curved_receiver, Slow, Exact) {
             finish(ctx, false, "quad_light_visibility_on_curved_receiver failed; see the rows above");
             return;
         }
-        const std::vector<pathtracer::scene::QuadLight> quads{light};
+        const std::vector<pathtracer::scene::AreaLight> quads{light};
         // Whole frame, not centreMean: (0,0,1) is a vertex, where the terminator offset vanishes and the failure is weakest.
         const pathtracer::scene::PathTraceResult result = renderPassWithLights(
             scene, instanceLightIndex, quads, /*env=*/nullptr, makeSettings(0, 999), *accel, pool,
@@ -2037,7 +2252,7 @@ PT_CHECK(shadow_matte, Slow, Exact) {
         TestScene scene = floor;
         std::vector<int> instanceLightIndex(scene.instances.size(), -1);
         for (std::size_t i = 0; i < quads.size(); ++i) {
-            appendLightGeometry(scene, quads[i], static_cast<int>(i), instanceLightIndex);
+            appendQuadEmitter(scene, quads[i], static_cast<int>(i), instanceLightIndex);
         }
         if (wall != nullptr) {
             appendWall(scene, *wall, instanceLightIndex);
@@ -2047,7 +2262,9 @@ PT_CHECK(shadow_matte, Slow, Exact) {
             return std::nullopt;
         }
         const pathtracer::scene::PathTraceResult result =
-            renderPassWithLights(scene, instanceLightIndex, quads, /*env=*/nullptr, makeSettings(0, 999), *accel, pool, false);
+            renderPassWithLights(scene, instanceLightIndex, std::vector<pathtracer::scene::AreaLight>(quads.begin(), quads.end()),
+                                 /*env=*/nullptr,
+                                 makeSettings(0, 999), *accel, pool, false);
         pathtracer::debug::FilterInput input{result.beauty};
         input.shadowLost = &result.shadowLost;
         input.shadowUnoccluded = &result.shadowUnoccluded;
@@ -2143,7 +2360,7 @@ PT_CHECK(shadow_matte_penumbra, Slow, Statistical) {
         const pathtracer::scene::QuadLight& light = row.light;
         TestScene scene = makeLambertianFloor();
         std::vector<int> instanceLightIndex(scene.instances.size(), -1);
-        appendLightGeometry(scene, light, /*quadIndex=*/0, instanceLightIndex);
+        appendQuadEmitter(scene, light, /*quadIndex=*/0, instanceLightIndex);
         const float reach = glm::length(light.edge0);  // past the light's own y extent on both sides
         const auto vertex = [&](float x, float y) {
             return ShadingVertex{glm::vec3(x, y, row.blockerHeight), normal, glm::vec2(0.5F, 0.5F), tangent};
@@ -2164,9 +2381,11 @@ PT_CHECK(shadow_matte_penumbra, Slow, Statistical) {
             PT_EXPECT(ctx, false, "failed to build the Embree penumbra scene");
             return;
         }
-        const std::vector<pathtracer::scene::QuadLight> quads{light};
+        const std::vector<pathtracer::scene::AreaLight> quads{light};
         const pathtracer::scene::PathTraceResult result =
-            renderPassWithLights(scene, instanceLightIndex, quads, /*env=*/nullptr, makeSettings(0, 999), *accel, pool, false);
+            renderPassWithLights(scene, instanceLightIndex, std::vector<pathtracer::scene::AreaLight>(quads.begin(), quads.end()),
+                                 /*env=*/nullptr,
+                                 makeSettings(0, 999), *accel, pool, false);
         pathtracer::debug::FilterInput input{result.beauty};
         input.shadowLost = &result.shadowLost;
         input.shadowUnoccluded = &result.shadowUnoccluded;
@@ -2229,14 +2448,14 @@ PT_CHECK(quad_light_inverse_square, Slow, Statistical) {
     for (const Row& row : rows) {
         TestScene scene = makeLambertianFloor();
         std::vector<int> instanceLightIndex(scene.instances.size(), -1);
-        appendLightGeometry(scene, row.light, /*quadIndex=*/0, instanceLightIndex);
+        appendQuadEmitter(scene, row.light, /*quadIndex=*/0, instanceLightIndex);
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         if (!accel.has_value()) {
             std::cerr << "integrator_validate: FAILED to build Embree scene for " << row.name << '\n';
             finish(ctx, false, "quad_light_inverse_square failed; see the rows above");
             return;
         }
-        const std::vector<pathtracer::scene::QuadLight> quads{row.light};
+        const std::vector<pathtracer::scene::AreaLight> quads{row.light};
         const glm::vec3 lo = centreMean(renderPassWithLights(scene, instanceLightIndex, quads,
                                                               /*env=*/nullptr,
                                                               makeSettings(0, 999), *accel, pool,
@@ -2685,7 +2904,8 @@ PT_CHECK(omnidirectional_film_filter_reaches_across_the_seam, Fast, Exact) {
     constexpr int kEnvHeight = 4;
     std::optional<EmbreeAccel> accel = EmbreeAccel::build({});
     pathtracer::scene::ThreadPool pool;
-    PathTraceSettings settings;
+    // Value-initialized: maxBounces 0 traces the primary ray alone, and no field is left indeterminate for the path loop to read.
+    PathTraceSettings settings{};
     // N shifted strata put a sample in any u-interval of length 2/N: 32 covers the 6.8% of filter mass that reaches the band.
     settings.samplesPerPixel = 32;
     // Yaw 180 faces +Z with -X on the right, the map's own frame, so the image's u is the map's u.
@@ -2703,8 +2923,8 @@ PT_CHECK(omnidirectional_film_filter_reaches_across_the_seam, Fast, Exact) {
         const EnvironmentMap env = tools::fixtures::makeEnvironment(kEnvWidth, kEnvHeight, rgb);
         const std::atomic<std::uint64_t> generation{1};
         pathtracer::scene::PathTraceResult result = pathtracer::scene::makePathTraceResult(kWidth, kHeight, settings.replicates);
-        const std::vector<pathtracer::scene::QuadLight> noQuads;
-        const pathtracer::scene::LightSet lights(&env, /*envRotationDegrees=*/glm::vec3(0.0F), /*envExposure=*/1.0F, noQuads);
+        const std::vector<pathtracer::scene::AreaLight> noLights;
+        const pathtracer::scene::LightSet lights(&env, /*envRotationDegrees=*/glm::vec3(0.0F), /*envExposure=*/1.0F, noLights);
         pathtracer::debug::PassStats stats;
         pathtracer::scene::renderPathTraced(camera, *accel, {}, {}, {}, lights, pathtracer::scene::VolumeSet{}, kWidth, kHeight,
                                             /*showSky=*/true, settings, 7U, /*sampleBase=*/0, settings.samplesPerPixel, generation,

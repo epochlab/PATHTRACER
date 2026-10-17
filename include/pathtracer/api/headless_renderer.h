@@ -107,10 +107,10 @@ public:
     [[nodiscard]] const pathtracer::config::SceneConfig& scene() const { return scene_; }
 
 private:
-    // Everything the root and light rotations are baked into: the triangle soup, its BVH, the quads and the per-instance bounds.
+    // Everything the root and light rotations are baked into: the triangle soup, its BVH, the lights and the per-instance bounds.
     struct Geometry {
         pathtracer::scene::LoadedModel model;
-        std::vector<pathtracer::scene::QuadLight> quadLights;
+        std::vector<pathtracer::scene::AreaLight> lights;
         std::vector<int> instanceLightIndex;  // parallel to model.instances, -1 where the instance emits nothing
         std::vector<pathtracer::scene::AabbBounds> instanceBounds;
         pathtracer::scene::EmbreeAccel accel;
@@ -125,7 +125,7 @@ private:
     // Loads the glTF under model's root, places lights under it and builds the BVH: open() and every pose change share it.
     [[nodiscard]] static std::optional<Geometry> buildGeometry(const std::string& assetRoot,
                                                                const pathtracer::config::ModelConfig& model,
-                                                               const std::vector<pathtracer::config::QuadLightConfig>& lights,
+                                                               const std::vector<pathtracer::config::LightConfig>& lights,
                                                                std::string& error);
     // Rebuilds geometry_ for the request's root and light rotations unless already built for them; false leaves it untouched.
     [[nodiscard]] bool applyPose(const Request& request, std::string& error);

@@ -5,14 +5,16 @@
 #include <cstdint>
 #include <limits>
 
+#include "pathtracer/scene/lat_long.h"
+
 namespace pathtracer::scene {
 
 bool isEmpty(const AabbBounds& box) {
     return box.min.x > box.max.x || box.min.y > box.max.y || box.min.z > box.max.z;
 }
 
-std::vector<AabbBounds> computeInstanceBounds(const std::vector<ShadingTriangle>& triangles,
-                                               int instanceCount) {
+std::vector<AabbBounds> computeInstanceBounds(const std::vector<ShadingTriangle>& triangles, int instanceCount,
+                                               const std::vector<AnalyticShape>& shapes) {
     constexpr float kInf = std::numeric_limits<float>::infinity();
     std::vector<AabbBounds> bounds(static_cast<std::size_t>(instanceCount),
                                     AabbBounds{glm::vec3(kInf), glm::vec3(-kInf)});
@@ -26,7 +28,29 @@ std::vector<AabbBounds> computeInstanceBounds(const std::vector<ShadingTriangle>
         expand(tri.v1.position);
         expand(tri.v2.position);
     }
+    for (const AnalyticShape& shape : shapes) {
+        AabbBounds& box = bounds[static_cast<std::size_t>(shape.instanceIndex)];
+        // A disc of normal n spans r sqrt(1 - n_i^2) along each axis i, the exact extent of a circle; a sphere spans r.
+        const glm::vec3 extent = shape.kind == AnalyticShape::Kind::Disc
+                                     ? shape.radius * glm::sqrt(glm::max(glm::vec3(0.0F), 1.0F - (shape.frame[2] * shape.frame[2])))
+                                     : glm::vec3(shape.radius);
+        box.min = glm::min(box.min, shape.centre - extent);
+        box.max = glm::max(box.max, shape.centre + extent);
+    }
     return bounds;
+}
+
+ShadingVertex shadingAt(const AnalyticShape& shape, const glm::vec3& point) {
+    const glm::vec3 offset = point - shape.centre;
+    if (shape.kind == AnalyticShape::Kind::Disc) {
+        const glm::vec2 uv = 0.5F + (0.5F * glm::vec2(glm::dot(offset, shape.frame[0]), glm::dot(offset, shape.frame[1])) / shape.radius);
+        return ShadingVertex{point, shape.frame[2], uv, glm::vec4(shape.frame[0], 1.0F)};
+    }
+    const glm::vec3 normal = glm::normalize(offset);
+    const glm::vec3 local = glm::transpose(shape.frame) * normal;
+    // The tangent runs along increasing longitude, atan2(x, z): (z, 0, -x) in the frame, cross(n, t) toward its +y pole.
+    const glm::vec3 tangent = shape.frame * glm::normalize(glm::vec3(local.z, 0.0F, -local.x));
+    return ShadingVertex{point, normal, latLongUv(local), glm::vec4(tangent, 1.0F)};
 }
 
 ShadingVertex interpolateShading(const ShadingTriangle& tri, float u, float v) {

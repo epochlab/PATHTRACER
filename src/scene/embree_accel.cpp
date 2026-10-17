@@ -1,5 +1,6 @@
 #include "pathtracer/scene/embree_accel.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstring>
@@ -25,6 +26,38 @@ bool embreeMemoryMonitor(void* /*userPtr*/, ssize_t bytes, bool /*post*/) {
     return true;
 }
 
+// Every shape of one kind as one point geometry, centre and radius as FLOAT4 and a disc's normal beside it; its geomID and members.
+std::pair<unsigned int, std::vector<int>> attachShapes(RTCDevice device, RTCScene scene, const std::vector<AnalyticShape>& shapes,
+                                                       AnalyticShape::Kind kind) {
+    std::vector<int> members;
+    for (std::size_t i = 0; i < shapes.size(); ++i) {
+        if (shapes[i].kind == kind) {
+            members.push_back(static_cast<int>(i));
+        }
+    }
+    if (members.empty()) {
+        return {RTC_INVALID_GEOMETRY_ID, std::move(members)};
+    }
+    const bool disc = kind == AnalyticShape::Kind::Disc;
+    RTCGeometry geometry = rtcNewGeometry(device, disc ? RTC_GEOMETRY_TYPE_ORIENTED_DISC_POINT : RTC_GEOMETRY_TYPE_SPHERE_POINT);
+    auto* points = static_cast<glm::vec4*>(
+        rtcSetNewGeometryBuffer(geometry, RTC_BUFFER_TYPE_VERTEX, 0, RTC_FORMAT_FLOAT4, sizeof(glm::vec4), members.size()));
+    glm::vec3* normals =
+        disc ? static_cast<glm::vec3*>(rtcSetNewGeometryBuffer(geometry, RTC_BUFFER_TYPE_NORMAL, 0, RTC_FORMAT_FLOAT3, sizeof(glm::vec3), members.size()))
+             : nullptr;
+    for (std::size_t i = 0; i < members.size(); ++i) {
+        const AnalyticShape& shape = shapes[static_cast<std::size_t>(members[i])];
+        points[i] = glm::vec4(shape.centre, shape.radius);
+        if (disc) {
+            normals[i] = shape.frame[2];
+        }
+    }
+    rtcCommitGeometry(geometry);
+    const unsigned int geomID = rtcAttachGeometry(scene, geometry);
+    rtcReleaseGeometry(geometry);
+    return {geomID, std::move(members)};
+}
+
 }  // namespace
 
 std::size_t embreeAllocatedBytes() {
@@ -32,14 +65,18 @@ std::size_t embreeAllocatedBytes() {
     return bytes > 0 ? static_cast<std::size_t>(bytes) : 0;
 }
 
-EmbreeAccel::EmbreeAccel(RTCDeviceTy* device, RTCSceneTy* scene, std::vector<Triangle> triangles)
-    : device_(device), scene_(scene), triangles_(std::move(triangles)),
-      triangleCount_(static_cast<int>(triangles_.size())) {}
+EmbreeAccel::EmbreeAccel(RTCDeviceTy* device, RTCSceneTy* scene, std::vector<Triangle> triangles, std::vector<AnalyticShape> shapes,
+                         unsigned int triangleGeometry, std::vector<std::vector<int>> shapeOfPrimitive)
+    : device_(device), scene_(scene), triangles_(std::move(triangles)), shapes_(std::move(shapes)), triangleGeometry_(triangleGeometry),
+      shapeOfPrimitive_(std::move(shapeOfPrimitive)), triangleCount_(static_cast<int>(triangles_.size())) {}
 
 EmbreeAccel::EmbreeAccel(EmbreeAccel&& other) noexcept
     : device_(std::exchange(other.device_, nullptr)),
       scene_(std::exchange(other.scene_, nullptr)),
       triangles_(std::move(other.triangles_)),
+      shapes_(std::move(other.shapes_)),
+      triangleGeometry_(other.triangleGeometry_),
+      shapeOfPrimitive_(std::move(other.shapeOfPrimitive_)),
       triangleCount_(std::exchange(other.triangleCount_, 0)) {}
 
 EmbreeAccel& EmbreeAccel::operator=(EmbreeAccel&& other) noexcept {
@@ -48,6 +85,9 @@ EmbreeAccel& EmbreeAccel::operator=(EmbreeAccel&& other) noexcept {
         device_ = std::exchange(other.device_, nullptr);
         scene_ = std::exchange(other.scene_, nullptr);
         triangles_ = std::move(other.triangles_);
+        shapes_ = std::move(other.shapes_);
+        triangleGeometry_ = other.triangleGeometry_;
+        shapeOfPrimitive_ = std::move(other.shapeOfPrimitive_);
         triangleCount_ = std::exchange(other.triangleCount_, 0);
     }
     return *this;
@@ -66,7 +106,7 @@ void EmbreeAccel::release() {
     }
 }
 
-std::optional<EmbreeAccel> EmbreeAccel::build(std::vector<Triangle> triangles) {
+std::optional<EmbreeAccel> EmbreeAccel::build(std::vector<Triangle> triangles, std::vector<AnalyticShape> shapes) {
     RTCDevice device = rtcNewDevice(nullptr);
     if (device == nullptr) {
         std::cerr << "EmbreeAccel::build: rtcNewDevice failed\n";
@@ -77,6 +117,8 @@ std::optional<EmbreeAccel> EmbreeAccel::build(std::vector<Triangle> triangles) {
 
     RTCScene scene = rtcNewScene(device);
     const int triangleCount = static_cast<int>(triangles.size());
+    unsigned int triangleGeometry = RTC_INVALID_GEOMETRY_ID;
+    std::vector<std::vector<int>> shapeOfPrimitive;
 
     if (triangleCount > 0) {
         RTCGeometry geometry = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_TRIANGLE);
@@ -101,8 +143,15 @@ std::optional<EmbreeAccel> EmbreeAccel::build(std::vector<Triangle> triangles) {
         }
 
         rtcCommitGeometry(geometry);
-        rtcAttachGeometry(scene, geometry);
+        triangleGeometry = rtcAttachGeometry(scene, geometry);
         rtcReleaseGeometry(geometry);
+    }
+
+    for (const AnalyticShape::Kind kind : {AnalyticShape::Kind::Sphere, AnalyticShape::Kind::Disc}) {
+        if (auto [geomID, members] = attachShapes(device, scene, shapes, kind); !members.empty()) {
+            shapeOfPrimitive.resize(std::max<std::size_t>(shapeOfPrimitive.size(), geomID + 1));
+            shapeOfPrimitive[geomID] = std::move(members);
+        }
     }
 
     rtcCommitScene(scene);
@@ -113,7 +162,7 @@ std::optional<EmbreeAccel> EmbreeAccel::build(std::vector<Triangle> triangles) {
         return std::nullopt;
     }
 
-    return EmbreeAccel(device, scene, std::move(triangles));
+    return EmbreeAccel(device, scene, std::move(triangles), std::move(shapes), triangleGeometry, std::move(shapeOfPrimitive));
 }
 
 std::optional<Hit> EmbreeAccel::intersect(const Ray& ray) const {
@@ -135,7 +184,10 @@ std::optional<Hit> EmbreeAccel::intersect(const Ray& ray) const {
     if (rayHit.hit.geomID == RTC_INVALID_GEOMETRY_ID) {
         return std::nullopt;
     }
-    return Hit{rayHit.ray.tfar, static_cast<int>(rayHit.hit.primID), rayHit.hit.u, rayHit.hit.v};
+    if (rayHit.hit.geomID == triangleGeometry_) {
+        return Hit{rayHit.ray.tfar, static_cast<int>(rayHit.hit.primID), rayHit.hit.u, rayHit.hit.v};
+    }
+    return Hit{rayHit.ray.tfar, -1, 0.0F, 0.0F, shapeOfPrimitive_[rayHit.hit.geomID][rayHit.hit.primID]};
 }
 
 bool EmbreeAccel::occluded(const Ray& ray) const {

@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "pathtracer/debug/aov_filters.h"
@@ -91,10 +92,10 @@ struct SceneInputs {
     return std::any_of(aovs.begin(), aovs.end(), [source](AovId aov) { return pathtracer::debug::aovSource(aov) == source; });
 }
 
-[[nodiscard]] std::vector<glm::vec3> rotationsOf(const std::vector<pathtracer::config::QuadLightConfig>& lights) {
+[[nodiscard]] std::vector<glm::vec3> rotationsOf(const std::vector<pathtracer::config::LightConfig>& lights) {
     std::vector<glm::vec3> rotations;
     rotations.reserve(lights.size());
-    for (const pathtracer::config::QuadLightConfig& light : lights) {
+    for (const pathtracer::config::LightConfig& light : lights) {
         rotations.push_back(light.rotation);
     }
     return rotations;
@@ -106,7 +107,7 @@ struct SceneInputs {
 
 // Each light's colour for this request: its kelvin override resolved on the Planckian locus, else the authored colour.
 [[nodiscard]] std::optional<std::vector<glm::vec3>> lightColours(const HeadlessRenderer::Request& request,
-                                                                 const std::vector<pathtracer::config::QuadLightConfig>& lights,
+                                                                 const std::vector<pathtracer::config::LightConfig>& lights,
                                                                  std::string& error) {
     std::vector<glm::vec3> colours;
     colours.reserve(lights.size());
@@ -241,7 +242,7 @@ struct SceneInputs {
 
 std::optional<HeadlessRenderer::Geometry> HeadlessRenderer::buildGeometry(
     const std::string& assetRoot, const pathtracer::config::ModelConfig& model,
-    const std::vector<pathtracer::config::QuadLightConfig>& lights, std::string& error) {
+    const std::vector<pathtracer::config::LightConfig>& lights, std::string& error) {
     const glm::mat4 rootTransform = pathtracer::scene::rootTransformOf(model);
     // No glTF is an empty model: the lights below are then the only triangles.
     std::optional<pathtracer::scene::LoadedModel> loaded =
@@ -252,17 +253,22 @@ std::optional<HeadlessRenderer::Geometry> HeadlessRenderer::buildGeometry(
         return std::nullopt;
     }
     std::vector<int> instanceLightIndex(loaded->instances.size(), -1);
-    std::vector<pathtracer::scene::QuadLight> quadLights = pathtracer::scene::buildQuadLights(lights, rootTransform);
-    pathtracer::scene::appendQuadLights(*loaded, quadLights, instanceLightIndex);
-    // After appendQuadLights, so the light panels' own instances are bounded too.
+    std::optional<std::vector<pathtracer::scene::AreaLight>> areaLights = pathtracer::scene::buildLights(lights, rootTransform, assetRoot);
+    if (!areaLights) {
+        error = "failed to build the scene's lights";
+        return std::nullopt;
+    }
+    pathtracer::scene::appendLightGeometry(*loaded, *areaLights, instanceLightIndex);
+    // After appendLightGeometry, so the lights' own instances are bounded too.
     std::vector<pathtracer::scene::AabbBounds> instanceBounds =
-        pathtracer::scene::computeInstanceBounds(loaded->shadingTriangles, static_cast<int>(loaded->instances.size()));
-    std::optional<pathtracer::scene::EmbreeAccel> accel = pathtracer::scene::EmbreeAccel::build(std::move(loaded->worldTriangles));
+        pathtracer::scene::computeInstanceBounds(loaded->shadingTriangles, static_cast<int>(loaded->instances.size()), loaded->shapes);
+    std::optional<pathtracer::scene::EmbreeAccel> accel =
+        pathtracer::scene::EmbreeAccel::build(std::move(loaded->worldTriangles), std::move(loaded->shapes));
     if (!accel) {
         error = "Embree scene build failed";
         return std::nullopt;
     }
-    return Geometry{std::move(*loaded), std::move(quadLights), std::move(instanceLightIndex), std::move(instanceBounds),
+    return Geometry{std::move(*loaded), std::move(*areaLights), std::move(instanceLightIndex), std::move(instanceBounds),
                     std::move(*accel)};
 }
 
@@ -330,7 +336,7 @@ bool HeadlessRenderer::applyPose(const Request& request, std::string& error) {
     }
     pathtracer::config::ModelConfig model = scene_.model;
     model.rotation = rootRotation;
-    std::vector<pathtracer::config::QuadLightConfig> lights = scene_.lights;
+    std::vector<pathtracer::config::LightConfig> lights = scene_.lights;
     for (std::size_t i = 0; i < lights.size(); ++i) {
         lights[i].rotation = lightRotations[i];
     }
@@ -409,7 +415,7 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
     }
     // Radiance is all a light's colour reaches and selection is uniform, so a new colour rewrites it here and never the BVH.
     for (std::size_t i = 0; i < colours->size(); ++i) {
-        geometry_.quadLights[i].radiance = (*colours)[i] * scene_.lights[i].intensity;
+        std::visit([&](auto& light) { light.radiance = (*colours)[i] * scene_.lights[i].intensity; }, geometry_.lights[i]);
     }
     const bool wantsFilter = requestsSource(request.aovs, AovSource::BeautyFilter);
     resizeBuffers(request.width, request.height);
@@ -446,7 +452,7 @@ void HeadlessRenderer::accumulatePathTraced(const Request& request) {
     // Built per request, as the driver builds one per pass: LightSet holds a pointer and a reference, so it costs one matrix.
     const bool envLightEnabled = request.envLightEnabled.value_or(scene_.environment.lightEnabled);
     const pathtracer::scene::LightSet lights(envLightEnabled ? &environmentMap_ : nullptr, request.envRotationDegrees,
-                                             /*envExposure=*/1.0F, geometry_.quadLights);
+                                             /*envExposure=*/1.0F, geometry_.lights);
     // Loop-invariant like `lights` above it: the background is a property of the request, not of the pass index.
     const bool showSky = request.showSky.value_or(pathtracer::scene::kDefaultShowSky);
     stats_.passMilliseconds.reserve(static_cast<std::size_t>(request.samples));
