@@ -31,9 +31,8 @@ struct ShadingTriangle {
 // Barycentric interpolation (u/v = Hit's Moller-Trumbore convention, w=1-u-v on v0); normal/tangent renormalized after blending.
 [[nodiscard]] ShadingVertex interpolateShading(const ShadingTriangle& tri, float u, float v);
 
-// Chiang/Li/Burley 2019 shadow-terminator fix, barycentric-blended tangent-plane projection. normalSide: which side the ray leaves on.
-[[nodiscard]] glm::vec3 shadowTerminatorOffset(const ShadingTriangle& tri, float u, float v,
-                                               bool normalSide);
+// Ray origin past the hit's rounding-error bound along unit geoNormal (PBR 4e 6.8.6), then Chiang's terminator lift; tMin 0 suffices.
+[[nodiscard]] glm::vec3 spawnOrigin(const ShadingTriangle& tri, float u, float v, const glm::vec3& geoNormal, bool normalSide);
 
 // True for the inverted box computeInstanceBounds leaves on an instance with no triangles: a min/max identity, not a sentinel.
 [[nodiscard]] bool isEmpty(const AabbBounds& box);

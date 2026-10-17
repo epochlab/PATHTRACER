@@ -1,5 +1,8 @@
 #include "pathtracer/scene/shading_scene.h"
 
+#include <bit>
+#include <cmath>
+#include <cstdint>
 #include <limits>
 
 namespace pathtracer::scene {
@@ -40,23 +43,54 @@ ShadingVertex interpolateShading(const ShadingTriangle& tri, float u, float v) {
     return result;
 }
 
-glm::vec3 shadowTerminatorOffset(const ShadingTriangle& tri, float u, float v, bool normalSide) {
-    const float w = 1.0F - u - v;
-    const glm::vec3 flatPosition =
-        (w * tri.v0.position) + (u * tri.v1.position) + (v * tri.v2.position);
+namespace {
 
-    const auto pulledOntoTangentPlane = [&](const glm::vec3& vertexPos,
-                                              const glm::vec3& vertexNormal) {
-        const glm::vec3 toHit = flatPosition - vertexPos;
-        const float d = glm::dot(toHit, vertexNormal);
+// Higham's gamma_n = n u / (1 - n u), u = eps/2: n chained float roundings move a value by at most this fraction (PBR 4e 6.8.1).
+constexpr float gamma(int n) {
+    constexpr float kUnitRoundoff = std::numeric_limits<float>::epsilon() * 0.5F;
+    return (static_cast<float>(n) * kUnitRoundoff) / (1.0F - (static_cast<float>(n) * kUnitRoundoff));
+}
+
+// pbrt's NextFloatUp (PBR 4e 6.8.2): positive floats order as their bit patterns, so one ulp is one integer step; -0 steps as +0.
+float nextFloatUp(float v) {
+    const auto bits = std::bit_cast<std::uint32_t>(v == 0.0F ? 0.0F : v);
+    return std::bit_cast<float>(v >= 0.0F ? bits + 1U : bits - 1U);
+}
+
+// One float further along each component's sign in dir, so the rounded sum before it can never sit nearer the plane than the exact one.
+glm::vec3 roundAway(glm::vec3 p, const glm::vec3& dir) {
+    for (int i = 0; i < 3; ++i) {
+        if (dir[i] > 0.0F) {
+            p[i] = nextFloatUp(p[i]);
+        } else if (dir[i] < 0.0F) {
+            p[i] = -nextFloatUp(-p[i]);
+        }
+    }
+    return p;
+}
+
+// Chiang/Li/Burley 2019 as a displacement: each vertex's tangent-plane projection of a hit below it, along +-n_i, so never toward the face.
+glm::vec3 terminatorLift(const ShadingTriangle& tri, float w, float u, float v, const glm::vec3& flatPosition, bool normalSide) {
+    const auto lift = [&](const ShadingVertex& vertex) {
+        const float d = glm::dot(flatPosition - vertex.position, vertex.normal);
         const bool below = normalSide ? (d < 0.0F) : (d > 0.0F);
-        return vertexPos + (below ? toHit - (d * vertexNormal) : toHit);
+        return below ? -d * vertex.normal : glm::vec3(0.0F);
     };
+    return (w * lift(tri.v0)) + (u * lift(tri.v1)) + (v * lift(tri.v2));
+}
 
-    const glm::vec3 p0 = pulledOntoTangentPlane(tri.v0.position, tri.v0.normal);
-    const glm::vec3 p1 = pulledOntoTangentPlane(tri.v1.position, tri.v1.normal);
-    const glm::vec3 p2 = pulledOntoTangentPlane(tri.v2.position, tri.v2.normal);
-    return (w * p0) + (u * p1) + (v * p2);
+}  // namespace
+
+glm::vec3 spawnOrigin(const ShadingTriangle& tri, float u, float v, const glm::vec3& geoNormal, bool normalSide) {
+    const float w = 1.0F - u - v;
+    const glm::vec3 flatPosition = (w * tri.v0.position) + (u * tri.v1.position) + (v * tri.v2.position);
+    // A 3-term dot product's gamma_3 (Higham 3.1), plus w's two roundings |1-u| u + |w| u carried by p0 since w + u + v drifts off 1.
+    const glm::vec3 error = (gamma(3) * (glm::abs(w * tri.v0.position) + glm::abs(u * tri.v1.position) + glm::abs(v * tri.v2.position))) +
+                            (gamma(1) * (std::abs(1.0F - u) + std::abs(w)) * glm::abs(tri.v0.position));
+    const glm::vec3 side = normalSide ? geoNormal : -geoNormal;
+    // The lift projects non-negatively on side, its rounding a sliver of that: offset plus lift clears the bound; a round-away seats it.
+    const glm::vec3 displacement = (glm::dot(glm::abs(geoNormal), error) * side) + terminatorLift(tri, w, u, v, flatPosition, normalSide);
+    return roundAway(flatPosition + displacement, side);
 }
 
 }  // namespace pathtracer::scene

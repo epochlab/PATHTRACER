@@ -27,6 +27,9 @@ inline constexpr int kPathTraceTileSize = 96;
 // Tiles per worker the split aims for: two leaves no worker idle and bounds the straggler tail at half a worker's share.
 inline constexpr int kTilesPerThread = 2;
 
+// Blackman-Harris (Harris 1978) at Arnold's default 1.5 px radius, importance-sampled (Ernst et al. 2006): pdf proportional to f, weight 1.
+inline constexpr float kFilterRadius = 1.5F;
+
 // Tile edge renderPathTraced splits `width` x `height` into for `threadCount` workers: kPathTraceTileSize unless that leaves the pool idle.
 [[nodiscard]] int pathTraceTileSize(int width, int height, unsigned int threadCount);
 

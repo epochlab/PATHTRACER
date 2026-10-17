@@ -3,6 +3,52 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Curved transmissive epsilons
+
+Surface rays now start just past the hit's own rounding error instead of a tuned distance. The fixed 1e-4 offset and the
+curvature-scaled offset on transmission are gone, and the README row is closed.
+- **Origin:** `spawnOrigin` (`shading_scene.h`) moves the hit, rebuilt from its barycentrics, along the face normal by a bound on that
+  rebuild's float error: gamma_3 sum|b_i p_i| plus the rounding of w = 1 - u - v (Higham 2002 3.1; Pharr, Jakob & Humphreys, PBR 4e
+  6.8). It adds Chiang, Li & Burley's 2019 terminator lift, which only moves away from the face, then steps each coordinate one float
+  outward (PBR 4e's NextFloatUp). Continuation, NEE shadow and AO rays all use it with tMin 0. Before, reflection took 1e-4 and
+  transmission up to 1.93e-2 on the test sphere.
+- **Why:** a fixed length is larger than small objects and smaller than the rounding error far from the origin. The curvature term
+  (longest edge x vertex-normal spread) stepped over real neighbouring facets inside curved glass and shortened every chord. No test
+  saw it, because the furnaces measure how much light arrives, not where it went.
+- **Measured** (256x128, 16 passes, seeds 1-3, against main):
+  - The rough glass sphere reads 2.98% darker (per seed -2.94%, -3.37%, -2.64%; seed-to-seed noise 0.61%): light that skipped a
+    facet now meets it.
+  - Smooth glass in cornell moves -0.56%, inside its 2.47% noise. Stump moves -0.05%. Macbeth and cloud are bit-identical.
+  - Over about 247,000 glass entries, no ray now escapes while inside the medium or meets a glass face from the side the medium stack
+    contradicts. The old code had 7 such wrong-side hits.
+- **Tests:** a test now fails when the offset is removed or tuned. Mutations of the offset and which checks fail:
+
+  | Mutation | Fails |
+  | --- | --- |
+  | offset removed | `spawn_origin_clears_its_plane`, `beer_lambert_absorption`, both sphere furnaces |
+  | fixed 1e-4 | `spawn_origin_clears_its_plane`, `curved_glass_scale_invariance` |
+  | the old offsets | `curved_glass_scale_invariance`, `beer_lambert_absorption` |
+  | curvature term alone | `beer_lambert_absorption` |
+  | shadow-ray offset removed | both sphere furnaces, `quad_light_visibility_on_curved_receiver` |
+
+  - `spawn_origin_clears_its_plane` (exact): 788,640 origins over two sphere tessellations and a sliver, at scales 2^-20 to 2^20 and
+    off-origin translations. Every origin is strictly on its side of the face in double precision, and none stands further off than
+    the derived bound.
+  - `curved_glass_scale_invariance` (exact): rough glass over a floor renders the same 98,304 floats at 2^-16 and 2^16 as at unit
+    scale. Power-of-two scaling is exact in float, so any fixed length breaks it.
+  - `beer_lambert_absorption`: the 3% tolerance becomes a bracket from geometry, the closed-form reference.
+    - A telephoto keeps the centre block's filter footprint within 0.004 rad of the axis.
+    - Slab chords lie in [t, t/cos theta]. Sphere chords lie in [2 sqrt(r_in^2 - rho^2), 2R], less the spawn's stand-off: the mesh is
+      inscribed in the sphere and holds the ball of its inradius.
+    - The sphere now reads 0.250130 in [0.25, 0.250895]; the old offsets read 0.253453.
+  - `kFilterRadius` moves to `path_tracer.h` so the test can bound the footprint.
+  - Comparing NEE against emission found by BSDF rays alone was tried and dropped. Both estimators share the continuation rays, so it
+    caught only the shadow-ray mutation, which three checks already catch.
+- **Cost:** a spawn takes 28 ns against 13.8 ns. CPU time per cornell render is +2.4% (2.00 to 2.05 s). The pass-time ratio is 1.05
+  on cornell and 1.04 on rough glass over 3 paired rounds, too few rounds to give an interval.
+
+Evidence is in `results/curved_transmissive_epsilons`.
+
 ## Random checker
 
 A procedural random binary checker, the aliasing test asset: fair, independent black/white square cells `cellSize` wide in UV, after the

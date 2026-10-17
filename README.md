@@ -72,7 +72,6 @@ Output that is wrong, lossy or unverified, most serious first.
 
 | Area | Item | Detail | Complexity | Status |
 | --- | --- | --- | --- | --- |
-| Validation | Curved transmissive epsilons | Removing the offset that stops rays re-hitting curved glass still passes every test. Needs a test against a long reference render. | medium | ready |
 | Texture | Minification filtering | Distant textures still shimmer after a bounce, and the random checker is never filtered (`cornell_checker.json` shows both). Normal, bump and roughness maps also need filtering that keeps surfaces from shading flat. | high | ready |
 | Validation | Untested paths | No tests yet for the Gabor filter's strength, GPU and CPU display matching, screen upload, the HUD histogram, or false tolerance failures. | medium | ready |
 
