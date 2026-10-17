@@ -1551,6 +1551,49 @@ PT_CHECK(gltf_strip_and_fan_triangulate_with_consistent_winding, Fast, Exact) {
               "the non-indexed quad's faces differ from the indexed quad's");
 }
 
+// glTF 2.0 3.7.2.1: no NORMAL is flat normals per face, even across a welded vertex; no TEXCOORD_0 is uv 0, tangent about n.
+PT_CHECK(gltf_missing_normals_and_uvs_follow_the_spec, Fast, Exact) {
+    // Two faces folded 90 degrees about the shared x axis, welded: one in z=0 facing +z, one in y=0 facing +y.
+    GltfPrimitive folded;
+    folded.positions = {{0.0F, 0.0F, 0.0F}, {1.0F, 0.0F, 0.0F}, {0.0F, 1.0F, 0.0F}, {0.0F, 0.0F, 1.0F}};
+    folded.indices = {0, 1, 2, 0, 3, 1};
+    GltfPrimitive normalsOnly = folded;
+    normalsOnly.normals = std::vector<glm::vec3>(4, glm::normalize(glm::vec3(0.0F, -1.0F, 1.0F)));
+    // Identity and a mirrored node: flat normals are taken in object space and must survive the re-wind like authored ones.
+    const std::vector<glm::vec3> scales = {{1.0F, 1.0F, 1.0F}, {-1.0F, 1.0F, 1.0F}};
+    const std::optional<pathtracer::scene::LoadedModel> flat =
+        pathtracer::scene::loadGltf(writeGltf("engine_io_validate_positions_only", {folded}, scales).string());
+    const std::optional<pathtracer::scene::LoadedModel> authored =
+        pathtracer::scene::loadGltf(writeGltf("engine_io_validate_normals_only", {normalsOnly}, {glm::vec3(1.0F)}).string());
+    ctx.plan(4);
+    PT_EXPECT(ctx, flat && flat->shadingTriangles.size() == 4 && authored && authored->shadingTriangles.size() == 2,
+              "a primitive without NORMAL or TEXCOORD_0 did not load");
+    if (!flat || !authored) {
+        return;
+    }
+    const auto orthonormal = [](const pathtracer::scene::ShadingVertex& v) {
+        return std::abs(glm::dot(v.normal, glm::vec3(v.tangent))) < 1e-6F && std::abs(glm::length(glm::vec3(v.tangent)) - 1.0F) < 1e-6F &&
+               std::abs(v.tangent.w) == 1.0F;
+    };
+    bool faceNormals = true;
+    bool basis = true;
+    bool zeroUv = true;
+    for (const pathtracer::scene::ShadingTriangle& tri : flat->shadingTriangles) {
+        const glm::vec3 face = pathtracer::scene::geometricNormalOf(tri);
+        for (const pathtracer::scene::ShadingVertex* v : {&tri.v0, &tri.v1, &tri.v2}) {
+            faceNormals = faceNormals && glm::length(v->normal - face) < 1e-6F;
+            basis = basis && orthonormal(*v);
+            zeroUv = zeroUv && v->uv == glm::vec2(0.0F);
+        }
+    }
+    PT_EXPECT(ctx, faceNormals, "a missing NORMAL did not give each corner its own face's geometric normal");
+    PT_EXPECT(ctx, basis && zeroUv, "a missing TEXCOORD_0 did not give uv 0 and a unit tangent orthogonal to the normal");
+    const bool keptNormals = std::ranges::all_of(authored->shadingTriangles, [&](const pathtracer::scene::ShadingTriangle& tri) {
+        return glm::length(tri.v0.normal - normalsOnly.normals[0]) < 1e-6F && orthonormal(tri.v0) && orthonormal(tri.v1) && orthonormal(tri.v2);
+    });
+    PT_EXPECT(ctx, keptNormals, "an authored NORMAL without TEXCOORD_0 was replaced, or its tangent left off the normal's plane");
+}
+
 // Points and lines have no area: they are skipped with the rest of the file kept, and a file holding nothing else still fails.
 PT_CHECK(gltf_points_and_lines_are_skipped_not_fatal, Fast, Exact) {
     ctx.plan(3);

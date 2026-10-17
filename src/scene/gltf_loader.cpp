@@ -16,6 +16,7 @@
 #include <glm/gtc/type_ptr.hpp>
 
 #include "pathtracer/gfx/ocio_cpu_transform.h"
+#include "shading_math.h"
 
 namespace pathtracer::scene {
 
@@ -79,17 +80,18 @@ void appendShadingTriangles(const std::vector<Vertex>& vertices,
     }
 }
 
-struct RequiredAccessors {
+// POSITION is the one attribute glTF 2.0 requires; every other accessor is nullptr when the primitive omits it.
+struct AttributeAccessors {
     const cgltf_accessor* position;
-    const cgltf_accessor* normal;
-    const cgltf_accessor* uv;
-    const cgltf_accessor* tangent;  // optional -- nullptr means "generate MikkTSpace tangents"
-    const cgltf_accessor* color;    // COLOR_0, optional -- nullptr means "no vertex colour"
+    const cgltf_accessor* normal;   // nullptr means flat normals, which glTF 2.0 3.7.2.1 says clients MUST compute
+    const cgltf_accessor* uv;       // TEXCOORD_0; nullptr means uv 0, so textures read one texel and MikkTSpace has no chart
+    const cgltf_accessor* tangent;  // nullptr means generated: MikkTSpace with uv, else a basis about the normal
+    const cgltf_accessor* color;    // COLOR_0; nullptr means "no vertex colour"
 };
 
-// Locates the required accessors plus optional TANGENT and COLOR_0; nullopt for a missing or sparse one, which cgltf cannot report failing.
-std::optional<RequiredAccessors> findAttributeAccessors(const cgltf_primitive& prim) {
-    RequiredAccessors acc{nullptr, nullptr, nullptr, nullptr, nullptr};
+// Locates POSITION plus the optional NORMAL, TEXCOORD_0, TANGENT and COLOR_0; nullopt for no POSITION or a sparse accessor.
+std::optional<AttributeAccessors> findAttributeAccessors(const cgltf_primitive& prim) {
+    AttributeAccessors acc{nullptr, nullptr, nullptr, nullptr, nullptr};
     for (cgltf_size ai = 0; ai < prim.attributes_count; ++ai) {
         const cgltf_attribute& attr = prim.attributes[ai];
         if (attr.type == cgltf_attribute_type_position) {
@@ -104,26 +106,30 @@ std::optional<RequiredAccessors> findAttributeAccessors(const cgltf_primitive& p
             acc.color = attr.data;
         }
     }
-    if (acc.position == nullptr || acc.normal == nullptr || acc.uv == nullptr) {
-        std::cerr << "loadGltf: primitive missing position/normal/uv\n";
+    if (acc.position == nullptr) {
+        std::cerr << "loadGltf: primitive missing POSITION\n";
         return std::nullopt;
     }
-    if (acc.position->is_sparse || acc.normal->is_sparse || acc.uv->is_sparse ||
-        (acc.tangent != nullptr && acc.tangent->is_sparse) || (acc.color != nullptr && acc.color->is_sparse)) {
+    const auto sparse = [](const cgltf_accessor* accessor) { return accessor != nullptr && accessor->is_sparse; };
+    if (sparse(acc.position) || sparse(acc.normal) || sparse(acc.uv) || sparse(acc.tangent) || sparse(acc.color)) {
         std::cerr << "loadGltf: sparse accessors are not supported\n";
         return std::nullopt;
     }
     return acc;
 }
 
-std::vector<Vertex> readVertices(const RequiredAccessors& acc) {
+std::vector<Vertex> readVertices(const AttributeAccessors& acc) {
     std::vector<Vertex> vertices(acc.position->count);
     for (cgltf_size vi = 0; vi < acc.position->count; ++vi) {
         Vertex& v = vertices[vi];
         cgltf_accessor_read_float(acc.position, vi, &v.position.x, 3);
-        cgltf_accessor_read_float(acc.normal, vi, &v.normal.x, 3);
+        if (acc.normal != nullptr) {
+            cgltf_accessor_read_float(acc.normal, vi, &v.normal.x, 3);
+        }
         // No V flip: glTF's v=0-at-top already matches loadExr's row-0-at-top convention.
-        cgltf_accessor_read_float(acc.uv, vi, &v.uv.x, 2);
+        if (acc.uv != nullptr) {
+            cgltf_accessor_read_float(acc.uv, vi, &v.uv.x, 2);
+        }
         if (acc.tangent != nullptr) {
             cgltf_accessor_read_float(acc.tangent, vi, &v.tangent.x, 4);
         }
@@ -164,6 +170,26 @@ std::optional<std::vector<unsigned int>> readIndices(const cgltf_accessor* indic
         indices[ii] = static_cast<unsigned int>(cgltf_accessor_read_index(indicesAcc, ii));
     }
     return indices;
+}
+
+// glTF 2.0 3.7.2.1's flat normals: each corner unwelded and given its face's cross(e1, e2), the authored winding's front.
+void generateFlatNormals(std::vector<Vertex>& vertices, std::vector<unsigned int>& indices) {
+    std::vector<Vertex> corners(indices.size());
+    std::transform(indices.begin(), indices.end(), corners.begin(), [&](unsigned int index) { return vertices[index]; });
+    std::iota(indices.begin(), indices.end(), 0U);
+    for (std::size_t i = 0; i + 2 < corners.size(); i += 3) {
+        const glm::vec3 normal =
+            glm::normalize(glm::cross(corners[i + 1].position - corners[i].position, corners[i + 2].position - corners[i].position));
+        corners[i].normal = corners[i + 1].normal = corners[i + 2].normal = normal;
+    }
+    vertices = std::move(corners);
+}
+
+// No uv is no tangent-space chart for MikkTSpace to follow: any basis about the normal is then as valid, so Duff et al. 2017's.
+void generateBasisTangents(std::vector<Vertex>& vertices) {
+    for (Vertex& v : vertices) {
+        v.tangent = glm::vec4(glm::transpose(toFrameAbout(v.normal))[0], 1.0F);
+    }
 }
 
 // The corner a MikkTSpace callback names: the context's user data is the unwelded corner list, three corners per face.
@@ -236,7 +262,7 @@ std::optional<MeshInstance> loadPrimitive(const cgltf_primitive& prim, const glm
                                            const std::string& name, bool vertexColor,
                                            std::vector<Triangle>& outWorldTriangles,
                                            std::vector<ShadingTriangle>& outShadingTriangles) {
-    std::optional<RequiredAccessors> acc = findAttributeAccessors(prim);
+    std::optional<AttributeAccessors> acc = findAttributeAccessors(prim);
     if (!acc.has_value()) {
         return std::nullopt;
     }
@@ -249,9 +275,16 @@ std::optional<MeshInstance> loadPrimitive(const cgltf_primitive& prim, const glm
     }
     std::vector<unsigned int> indices = toTriangleList(std::move(*stream), prim.type);
     std::vector<Vertex> vertices = readVertices(*acc);
+    if (acc->normal == nullptr) {
+        generateFlatNormals(vertices, indices);
+    }
     // Object space and authored winding, as a baker sees the mesh: MikkTSpace reads orientation from each face's UV-area sign.
-    if (acc->tangent == nullptr && !generateTangents(vertices, indices)) {
-        return std::nullopt;
+    if (acc->tangent == nullptr) {
+        if (acc->uv == nullptr) {
+            generateBasisTangents(vertices);
+        } else if (!generateTangents(vertices, indices)) {
+            return std::nullopt;
+        }
     }
     // glTF 2.0 3.7.2.1: a negative global determinant makes faces clockwise; re-wind so cross(e1,e2) keeps facing the normal.
     const float handedness = glm::determinant(glm::mat3(transform)) < 0.0F ? -1.0F : 1.0F;
