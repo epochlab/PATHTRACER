@@ -33,9 +33,9 @@ PostProcessPass& PostProcessPass::operator=(PostProcessPass&& other) noexcept {
 }
 
 // Not wrapped in GL_CALL: the entire body runs every frame.
-void PostProcessPass::draw(unsigned int hdrColorTexture, const ShaderProgram& displayShader,
-                            ViewportRect imageRect) const {
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+void PostProcessPass::draw(unsigned int hdrColorTexture, const ShaderProgram& displayShader, ViewportRect imageRect,
+                            unsigned int framebuffer) const {
+    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
     glViewport(imageRect.x, imageRect.y, imageRect.width, imageRect.height);
 
     displayShader.use();

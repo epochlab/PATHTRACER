@@ -415,8 +415,8 @@ PT_CHECK(quad_light_solid_angle, Slow, Statistical) {
     for (int i = 0; i < kSampleCount; ++i) {
         hits += directionHitsQuad(quad, p, sampleUniformSphere(rng)) ? 1 : 0;
     }
-    // Wilson interval, not Wald: Wald's width collapses near 0 or 1, where a small light lands. Scaled to solid angle by the same 4*pi.
-    const tools::stats::Band fraction = tools::stats::wilsonBand(hits, kSampleCount, ctx.alpha());
+    // Clopper-Pearson, not Wald: Wald's width collapses near 0 or 1, where a small light lands. Scaled to solid angle by the same 4*pi.
+    const tools::stats::Band fraction = tools::stats::clopperPearsonBand(hits, kSampleCount, ctx.alpha());
     const tools::stats::Band solidAngle{4.0 * kPi * fraction.lo, 4.0 * kPi * fraction.hi};
     char detail[224];
     std::snprintf(detail, sizeof(detail), "analytic %.6f vs Monte Carlo interval [%.6f, %.6f] from %lld/%d hits",

@@ -3,6 +3,41 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## GL display tests
+
+The viewer's GPU display path is now tested against the CPU, in a hidden OpenGL context.
+- **Fix:** at 1:1 the chromatic-aberration fringe's red and blue were blurred by the GPU's texture minification while green was
+  not (458 values differed from the CPU). The square lattice fetch now uses the image coordinate's own footprint (`textureGrad`),
+  so all three channels sample the nearest cell as `applyDisplayOptics` does.
+- **Tests** (`display_gl_validate`, Not Run without a GL context):
+  - Texture upload round-trips bit-exactly for 1-4 channels in half and float, on re-upload and on resize.
+  - The OCIO display, gain, channel views, invert and dither match the CPU within a bound from the GLSL precision rules; the worst
+    case uses 0.4-0.8 of it. 8-bit output matches the CPU's codes.
+  - Bloom (0.0013 of its bound) and the fringe on square and hexagonal films match `applyDisplayOptics`.
+  - The HUD histogram's counts equal a CPU count of the drawn frame.
+- **Histogram:** binning and curve shaping moved from the HUD into `histogram_curve.h`, with five CPU tests. The clipping
+  threshold now derives from the histogram's size instead of a copied constant.
+
+## Statistical bands and calibration
+
+Statistical tests now fail by chance no more often than the suite states, and an opt-in run measures it.
+- **Binomial bands:** Wilson's interval is replaced by Clopper & Pearson's (1934), whose coverage holds at every rate. At the
+  suite's small alpha Wilson failed a correct renderer 11x to 2.8 million times more often than stated; Clopper-Pearson stays at or
+  below 1x (`selftest.binomial_band_false_rejection_is_at_most_alpha`, exact).
+- **Difference bands:** `differenceBand` takes Hsu's min(n) - 1 degrees of freedom, whose false-failure rate stays at or below
+  alpha at every variance ratio (Mickey & Brown 1966). Welch's degrees of freedom failed up to 14x too often at 1e-8.
+  `selftest.difference_band_false_rejection_is_at_most_alpha` computes the exact rate by quadrature.
+- **Plan before alpha:** `ctx.alpha()` asked before `ctx.plan()` now fails the check. It caught three checks that gave every
+  assertion the whole check's alpha: `beer_lambert_absorption` (16x), `absorbing_slab_alpha_and_beauty` (6x) and
+  `emission_reaches_indirect` (one assertion, so unaffected).
+- **Root-caused false failures:** the slab reference walk now stops at the render's own depth (it ran 256 vertices against 13, a
+  0.5% gap at roughness 0.4); `normal_map_white_furnace` takes name-derived seeds instead of a fixed one.
+- **Calibration:** `ctest -C Calibration -L calibration` reruns each statistical check under fresh seeds and tests its failure
+  rate with Wald's sequential test, truncated at the fixed-sample test of the same errors. A band narrowed by sqrt 2 is caught.
+  Checks that never ask for alpha are reported as UNDERIVED; 33 remain (README roadmap).
+- **Not fixed:** the later-bounce estimate of normal-mapped glossy metal, glass and coated surfaces has infinite variance (tail
+  index about 1 to 1.8), and rough glass fails its sampling-against-evaluation calibration (README roadmap).
+
 ## Gabor envelope amplitude
 
 The Gabor AOV now reads a tuned grating's amplitude, twice its old value.

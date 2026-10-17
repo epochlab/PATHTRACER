@@ -18,6 +18,7 @@
 
 #include "check.h"
 #include "pathtracer/debug/frame_stats.h"
+#include "pathtracer/debug/histogram_curve.h"
 #include "pathtracer/debug/power_spectrum.h"
 #include "pathtracer/gfx/display_optics.h"
 #include "pathtracer/gfx/hdr_image.h"
@@ -664,6 +665,169 @@ PT_CHECK(viewport_fit_preserves_aspect_and_centres, Fast, Exact) {
                       imageAspect);
         PT_EXPECT(ctx, std::fabs(rectAspect - imageAspect) <= allowed, aspect);
     }
+}
+
+
+// --- HUD histogram: the binning and curve shapes the panel draws, on bins whose answers follow from the definitions in closed form.
+
+using pathtracer::debug::Histogram;
+using pathtracer::debug::HistogramActive;
+using pathtracer::debug::HistogramBins;
+using pathtracer::debug::HistogramCurve;
+
+constexpr std::uint32_t kCapturePixels = Histogram::kWidth * Histogram::kHeight;
+constexpr double kUnitRoundoff = 0x1p-24;
+
+// Every channel holding the same counts, the panel's grayscale case.
+HistogramBins greyBins(const std::array<std::uint32_t, Histogram::kBins>& counts) {
+    return HistogramBins{counts, counts, counts};
+}
+
+// The smoother's definition in double: triangle weights 5-|d| over neighbours inside [1, 254], renormalised by the weight they carry.
+std::array<double, Histogram::kBins> triangleSmooth(const std::array<std::uint32_t, Histogram::kBins>& counts, double peak) {
+    std::array<double, Histogram::kBins> out{};
+    for (int bin = 0; bin < Histogram::kBins; ++bin) {
+        double sum = 0.0;
+        double weights = 0.0;
+        for (int n = std::max(1, bin - 4); n <= std::min(Histogram::kBins - 2, bin + 4); ++n) {
+            const double weight = 5.0 - std::abs(n - bin);
+            sum += weight * std::sqrt(std::min(static_cast<double>(counts[static_cast<std::size_t>(n)]), peak) / peak);
+            weights += weight;
+        }
+        out[static_cast<std::size_t>(bin)] = sum / weights;
+    }
+    return out;
+}
+
+// Each pixel lands in exactly one bin per channel, and a re-bin replaces rather than accumulates.
+PT_CHECK(histogram_bins_count_every_pixel_once, Fast, Exact) {
+    ctx.plan(4);
+    std::vector<unsigned char> rgb(static_cast<std::size_t>(kCapturePixels) * 3);
+    for (std::uint32_t i = 0; i < kCapturePixels; ++i) {
+        rgb[(i * 3) + 0] = static_cast<unsigned char>(i % Histogram::kBins);
+        rgb[(i * 3) + 1] = static_cast<unsigned char>(i / Histogram::kHeight);
+        rgb[(i * 3) + 2] = i < kCapturePixels / 4 ? 0 : 255;
+    }
+    HistogramBins bins{};
+    pathtracer::debug::binPixels(rgb, bins);
+    pathtracer::debug::binPixels(rgb, bins);
+    // R cycles every bin and G steps once per kHeight pixels, so both are flat at kHeight; B splits a quarter / three quarters.
+    const auto flat = [](const std::array<std::uint32_t, Histogram::kBins>& channel) {
+        return std::all_of(channel.begin(), channel.end(), [](std::uint32_t count) { return count == Histogram::kHeight; });
+    };
+    PT_EXPECT(ctx, flat(bins[0]), "R is not flat at kHeight per bin");
+    PT_EXPECT(ctx, flat(bins[1]), "G is not flat at kHeight per bin");
+    PT_EXPECT(ctx, bins[2][0] == kCapturePixels / 4 && bins[2][255] == kCapturePixels - (kCapturePixels / 4),
+              "B splits " + std::to_string(bins[2][0]) + " / " + std::to_string(bins[2][255]));
+    PT_EXPECT(ctx, std::accumulate(bins[2].begin(), bins[2].end(), 0U) == kCapturePixels, "B does not sum to the capture");
+}
+
+// A spike's curve is the triangle itself, renormalised where it meets the clipped extremes, then at unit peak.
+PT_CHECK(histogram_smoothing_is_the_triangle, Fast, Exact) {
+    const std::array<int, 3> spikes{1, 128, Histogram::kBins - 2};
+    ctx.plan(static_cast<int>(spikes.size()));
+    for (const int spike : spikes) {
+        std::array<std::uint32_t, Histogram::kBins> counts{};
+        counts[static_cast<std::size_t>(spike)] = kCapturePixels;
+        const HistogramCurve heights = pathtracer::debug::grayscaleHeights(greyBins(counts));
+        const std::array<double, Histogram::kBins> expected = triangleSmooth(counts, kCapturePixels);
+        const double peak = *std::max_element(expected.begin(), expected.end());
+        double worst = 0.0;
+        for (std::size_t bin = 0; bin < heights.size(); ++bin) {
+            worst = std::max(worst, std::abs(static_cast<double>(heights[bin]) - (expected[bin] / peak)));
+        }
+        // Integer weights sum exactly; the smoother's divide and the rescale's divide round once each on values at most 1: gamma_2.
+        const double bound = (2.0 * kUnitRoundoff) / (1.0 - (2.0 * kUnitRoundoff));
+        PT_EXPECT(ctx, worst <= bound, "spike at " + std::to_string(spike) + " deviates by " + std::to_string(worst));
+    }
+}
+
+// The tallest active curve reaches exactly 1, and one shared peak keeps a quarter-count channel at exactly half height.
+PT_CHECK(histogram_curves_peak_at_one, Fast, Exact) {
+    ctx.plan(3);
+    HistogramBins bins{};
+    for (std::size_t bin = 1; bin + 1 < Histogram::kBins; ++bin) {
+        bins[0][bin] = 4U * static_cast<std::uint32_t>(1 + ((bin * 37) % 61));
+        bins[1][bin] = bins[0][bin] / 4U;
+        bins[2][bin] = static_cast<std::uint32_t>(1 + ((bin * 11) % 23));
+    }
+    const HistogramActive active = pathtracer::debug::activeChannels(bins);
+    const std::array<HistogramCurve, 3> heights = pathtracer::debug::rgbHeights(bins, active);
+    float tallest = 0.0F;
+    for (const HistogramCurve& curve : heights) {
+        tallest = std::max(tallest, *std::max_element(curve.begin(), curve.end()));
+    }
+    PT_EXPECT(ctx, tallest == 1.0F, "tallest curve reaches " + std::to_string(tallest));
+    // A quarter of the counts is half the sqrt, and every later step is linear or a power-of-two scale, so the ratio is exact.
+    bool half = true;
+    for (std::size_t bin = 0; bin < Histogram::kBins; ++bin) {
+        half = half && heights[1][bin] == 0.5F * heights[0][bin];
+    }
+    PT_EXPECT(ctx, half, "the quarter-count channel is not at exactly half height");
+    const HistogramCurve grey = pathtracer::debug::grayscaleHeights(greyBins(bins[2]));
+    PT_EXPECT(ctx, *std::max_element(grey.begin(), grey.end()) == 1.0F, "the grey curve does not reach 1");
+}
+
+// Clipped 0/255 mass never shapes a smoothed curve; under 1% interior pixels the curve is the raw sqrt that keeps the clip spikes.
+PT_CHECK(histogram_ignores_clipping_bins, Fast, Exact) {
+    ctx.plan(4);
+    std::array<std::uint32_t, Histogram::kBins> counts{};
+    for (std::size_t bin = 1; bin + 1 < Histogram::kBins; ++bin) {
+        counts[bin] = static_cast<std::uint32_t>(1 + ((bin * 29) % 17));
+    }
+    const HistogramCurve interior = pathtracer::debug::grayscaleHeights(greyBins(counts));
+    std::array<std::uint32_t, Histogram::kBins> clipped = counts;
+    clipped[0] = kCapturePixels / 2;
+    clipped[Histogram::kBins - 1] = kCapturePixels / 3;
+    PT_EXPECT(ctx, pathtracer::debug::grayscaleHeights(greyBins(clipped)) == interior, "clip-bin mass changed the smoothed curve");
+
+    // The near-binary switch sits at 1% of the capture: one pixel under it the curve is raw, at it the curve is smoothed.
+    const std::uint32_t threshold = kCapturePixels / 100;
+    std::array<std::uint32_t, Histogram::kBins> mask{};
+    mask[128] = threshold - 1;
+    mask[Histogram::kBins - 1] = threshold / 2;
+    mask[0] = kCapturePixels - mask[128] - mask[Histogram::kBins - 1];
+    const HistogramCurve raw = pathtracer::debug::grayscaleHeights(greyBins(mask));
+    const double spike = std::sqrt(static_cast<double>(mask[Histogram::kBins - 1]) / mask[0]);
+    // One divide and one root, each rounding once on a value at most 1.
+    const double bound = (2.0 * kUnitRoundoff) / (1.0 - (2.0 * kUnitRoundoff));
+    PT_EXPECT(ctx, raw[0] == 1.0F && std::abs(static_cast<double>(raw[Histogram::kBins - 1]) - spike) <= bound,
+              "near-binary clip spikes read " + std::to_string(raw[0]) + ", " + std::to_string(raw[Histogram::kBins - 1]));
+    PT_EXPECT(ctx, raw[127] == 0.0F, "the raw curve smoothed into an empty bin");
+    mask[128] += 1;
+    PT_EXPECT(ctx, pathtracer::debug::grayscaleHeights(greyBins(mask))[127] > 0.0F, "at 1% interior the curve is not smoothed");
+}
+
+// Grey means all three channels agree everywhere; a channel all at bin 0 is unused; the overlap is the floor of the active ones only.
+PT_CHECK(histogram_classifies_channels, Fast, Exact) {
+    ctx.plan(4);
+    std::array<std::uint32_t, Histogram::kBins> counts{};
+    counts[200] = kCapturePixels;
+    HistogramBins bins = greyBins(counts);
+    PT_EXPECT(ctx, pathtracer::debug::isGrayscale(bins), "equal channels are not grey");
+    bins[2][200] -= 1;
+    bins[2][201] += 1;
+    PT_EXPECT(ctx, !pathtracer::debug::isGrayscale(bins), "one moved pixel still reads grey");
+
+    bins[1] = {};
+    bins[1][0] = kCapturePixels;
+    bins[2] = {};
+    bins[2][Histogram::kBins - 1] = kCapturePixels;
+    const HistogramActive active = pathtracer::debug::activeChannels(bins);
+    PT_EXPECT(ctx, active[0] && !active[1] && active[2], "only the all-zero channel may be inactive");
+
+    std::array<HistogramCurve, 3> heights{};
+    for (std::size_t bin = 0; bin < Histogram::kBins; ++bin) {
+        heights[0][bin] = static_cast<float>(bin) / Histogram::kBins;
+        heights[1][bin] = 0.0F;
+        heights[2][bin] = 1.0F - heights[0][bin];
+    }
+    const HistogramCurve overlap = pathtracer::debug::overlapHeights(heights, active);
+    bool floor = true;
+    for (std::size_t bin = 0; bin < Histogram::kBins; ++bin) {
+        floor = floor && overlap[bin] == std::min(heights[0][bin], heights[2][bin]);
+    }
+    PT_EXPECT(ctx, floor, "overlap is not the minimum of the active channels alone");
 }
 
 }  // namespace

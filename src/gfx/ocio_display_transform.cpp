@@ -38,12 +38,12 @@ constexpr const char* kApplyChannelViewGlsl =
 // 1.0 - rgb, applied to the final display-referred colour (after the display curve/Raw passthrough, before dither).
 constexpr const char* kInvertGlsl = "uniform bool uInvert;\n";
 
-// pixel_lattice.h's nearestPixel transcribed: a hexagonal film shows each cell's texel over its Voronoi cell, the probe's own lookup.
+// nearestPixel transcribed for a hexagonal film; the square fetch takes vUv's footprint, so the fringe's R and B filter as G does.
 constexpr const char* kLatticeGlsl =
     "uniform bool uHexagonal;\n"
     "uniform bool uWrapsHorizontally;\n"
     "vec3 latticeTexel(vec2 uv) {\n"
-    "    if (!uHexagonal) { return texture(uHdrColor, uv).rgb; }\n"
+    "    if (!uHexagonal) { return textureGrad(uHdrColor, uv, dFdx(vUv), dFdy(vUv)).rgb; }\n"
     "    ivec2 size = textureSize(uHdrColor, 0);\n"
     "    float rowPitch = 0.5 * sqrt(3.0);\n"
     "    vec2 film = uv * vec2(float(size.x), float(size.y) * rowPitch);\n"

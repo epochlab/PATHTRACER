@@ -754,6 +754,8 @@ PT_CHECK(transmissive_slab_walk, Slow, Statistical) {
     // Sized so the band resolves the smallest shortfall the old table left, 0.6% at roughness 0.7; the band stays under it.
     constexpr int kPathsPerReplicate = 1 << 18;
     constexpr double kEscapeInterpolationFloor = 1e-3;
+    // A cap, not a depth: the row asserts no path reaches it, so the walk is the untruncated closure.
+    constexpr int kMaxVertices = 256;
     const std::array<float, 3> roughnesses = {0.4F, 0.7F, 1.0F};
 
     ctx.plan(static_cast<int>(2 * roughnesses.size()));
@@ -770,7 +772,7 @@ PT_CHECK(transmissive_slab_walk, Slow, Statistical) {
             workers.emplace_back([&] {
                 for (int r = next++; r < tools::stats::kReplicates; r = next++) {
                     replicates[static_cast<std::size_t>(r)] =
-                        tools::fixtures::slabWalkLo(params, kPathsPerReplicate, static_cast<std::uint32_t>(rowSeed + r));
+                        tools::fixtures::slabWalkLo(params, kPathsPerReplicate, static_cast<std::uint32_t>(rowSeed + r), kMaxVertices);
                 }
             });
         }
@@ -3572,11 +3574,13 @@ PT_CHECK(normal_map_white_furnace, Slow, Statistical) {
     ctx.plan(1);
     const double perRow = tools::stats::sidak(ctx.alpha(), 9);
     bool ok = true;
-    std::uint32_t seed = 76000;
     for (const Case& c : cases) {
         for (const float tilt : {0.3F, 0.8F, 1.2F}) {
             const glm::vec3 g = geometricAt(tilt);
             for (const float mu : {0.9F, 0.4F, 0.1F}) {
+                char label[64];
+                std::snprintf(label, sizeof(label), "%s tilt %g mu %g", c.name, static_cast<double>(tilt), static_cast<double>(mu));
+                const auto seed = static_cast<std::uint32_t>(ctx.subSeed(label));
                 const pathtracer::scene::NormalMappedBsdf bsdf = normalMapped(c.surface, aboutGeometric(g, mu, 0.0F), g);
                 // Every draw: each facet event weighs 1, so no walk is absorbed and each one's throughput is 1.
                 float worstDraw = 0.0F;
@@ -3586,7 +3590,6 @@ PT_CHECK(normal_map_white_furnace, Slow, Statistical) {
                     const std::optional<pathtracer::scene::BsdfSample> sample = drawFrom(bsdf, sampler, walk);
                     worstDraw = std::max(worstDraw, sample ? maxChannel(glm::abs(sample->throughputWeight - 1.0F)) : 1.0F);
                 }
-                seed += 2U;
                 ok = ok && worstDraw <= kRounding;
                 std::cout << "  " << c.name << " tilt " << tilt << " mu " << mu << ": worst draw |w - 1| " << worstDraw;
                 if (!c.continuous) {
@@ -3596,7 +3599,7 @@ PT_CHECK(normal_map_white_furnace, Slow, Statistical) {
                 // Uniform directions over the sphere: 4 pi times the mean value, against 1, with the first scattering's share beside it.
                 tools::stats::Welford all;
                 tools::stats::Welford first;
-                std::mt19937 rng(seed);
+                std::mt19937 rng(seed + 2U);
                 for (int i = 0; i < kEvaluations; ++i) {
                     glm::vec3 wi = sampleUniformHemisphere(rng);
                     wi.z = (rng() & 1U) != 0U ? -wi.z : wi.z;  // the lower hemisphere's mirror at equal odds: uniform over the sphere

@@ -24,8 +24,8 @@ public:
     Histogram(Histogram&& other) noexcept;
     Histogram& operator=(Histogram&& other) noexcept;
 
-    // Once per frame, after the composited image reaches the default framebuffer and before the HUD is drawn over it.
-    void update(pathtracer::gfx::ViewportRect imageRect);
+    // Once per frame, after the composited image reaches readFramebuffer (the viewer's default, 0) and before the HUD is drawn over it.
+    void update(pathtracer::gfx::ViewportRect imageRect, unsigned int readFramebuffer);
 
     [[nodiscard]] const std::array<std::array<std::uint32_t, kBins>, 3>& bins() const {
         return bins_;

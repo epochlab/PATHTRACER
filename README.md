@@ -28,7 +28,10 @@ cmake --build build
 ```
 cmake -B build -DPython3_EXECUTABLE=/path/to/python   # with pytest, numpy, OpenEXR and Imath, so api.python is registered
 ctest --test-dir build -j4
+ctest --test-dir build -C Calibration -L calibration -j8   # opt-in, hours: how often each statistical test fails by chance
 ```
+
+The `display_gl` tests open a hidden OpenGL window and report Not Run where none can be created.
 
 ## Controls
 
@@ -73,7 +76,8 @@ Output that is wrong, lossy or unverified, most serious first.
 | Area | Item | Detail | Complexity | Status |
 | --- | --- | --- | --- | --- |
 | Texture | Minification filtering | Distant textures still shimmer after a bounce, and the random checker is never filtered (`cornell_checker.json` shows both). Normal, bump and roughness maps also need filtering that keeps surfaces from shading flat. | high | ready |
-| Validation | Untested paths | No tests yet for the Gabor filter's strength, GPU and CPU display matching, screen upload, the HUD histogram, or false tolerance failures. | medium | ready |
+| BSDF | Normal-map noise | On normal-mapped glossy metal, glass and coated surfaces, light that bounces between facets more than once is estimated with infinite variance, so its fireflies fade slower than usual. Rough glass also fails its sampling-against-evaluation calibration (`results/untested_paths/bias`). | high | ready |
+| Validation | Hand-set test tolerances | 33 random tests still use fixed seeds or hand-set tolerances instead of bands from the suite's error rate; `ctest -C Calibration -L calibration` lists them as UNDERIVED. | medium | ready |
 
 ### Features
 

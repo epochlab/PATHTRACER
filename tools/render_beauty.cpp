@@ -450,7 +450,7 @@ int main(int argc, char** argv) {
                 worstPixel = px;
             }
         }
-        // Welch dof is bounded below by R-1 for equal samples, so using it is conservative: it can widen the threshold, never narrow it.
+        // Hsu's R-1 dof: size <= alpha at every variance ratio between the families (Mickey & Brown 1966), where Welch's dof is liberal.
         const double threshold = tools::stats::studentTTwoSided(perPixelAlpha, kSubRenders - 1);
         if (examined == 0 || constantDisagreements != 0) {
             std::cerr << "render_beauty: FAILED convergence -- " << examined << " pixels had measurable variance and "

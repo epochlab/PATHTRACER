@@ -147,6 +147,7 @@ add_library(pathtracer_core STATIC
     src/debug/bench_log.cpp
     src/debug/denoiser.cpp
     src/debug/frame_stats.cpp
+    src/debug/histogram_curve.cpp
     src/debug/host_info.cpp
     src/debug/memory_tracker.cpp
     src/debug/perf_dashboard.cpp
@@ -202,33 +203,36 @@ target_compile_definitions(pathtracer_c PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_D
 pathtracer_target_defaults(pathtracer_c NATIVE IPO TIDY)
 target_link_libraries(pathtracer_c PRIVATE pathtracer_core)
 
-# The GUI application: main.cpp plus exactly the sources that touch GL/GLFW/imgui. Everything else it needs comes from pathtracer_core.
-add_executable(pathtracer
-    src/main.cpp
-    src/platform/window.cpp
-    src/platform/display_link.mm
+# The viewer's display path, GL without imgui: shared by the GUI and the GL display checks, so a test draws exactly what the viewer does.
+add_library(pathtracer_gl STATIC
     src/gfx/gl_debug.cpp
     src/gfx/shader_program.cpp
     src/gfx/texture.cpp
     src/gfx/bloom_pass.cpp
     src/gfx/post_process_pass.cpp
     src/gfx/ocio_display_transform.cpp
+    src/debug/histogram.cpp)
+target_compile_definitions(pathtracer_gl PUBLIC GL_SILENCE_DEPRECATION)
+target_compile_definitions(pathtracer_gl PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
+pathtracer_target_defaults(pathtracer_gl NATIVE IPO TIDY)
+target_link_libraries(pathtracer_gl PUBLIC pathtracer_core glfw GLEW::GLEW OpenGL::GL)
+
+# The GUI application: main.cpp plus the sources that touch GLFW windows or imgui. Everything else comes from pathtracer_gl and core.
+add_executable(pathtracer
+    src/main.cpp
+    src/platform/window.cpp
+    src/platform/display_link.mm
     src/scene/debug_camera_controller.cpp
     src/debug/gpu_timer.cpp
-    src/debug/histogram.cpp
     src/debug/hud_overlay.cpp
     src/debug/system_info.cpp
     src/debug/spec_report.cpp
     $<TARGET_OBJECTS:vendored_imgui>)
 target_include_directories(pathtracer PRIVATE ${IMGUI_DIR} ${IMGUI_DIR}/backends)
-target_compile_definitions(pathtracer PRIVATE
-    GL_SILENCE_DEPRECATION
-    ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
+target_compile_definitions(pathtracer PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
 # IPO is a free codegen speedup for the path tracer's hot loop (ray traversal, BSDF eval), no behaviour or quality change.
 pathtracer_target_defaults(pathtracer NATIVE IPO TIDY)
-target_link_libraries(pathtracer PRIVATE
-    pathtracer_core glfw GLEW::GLEW OpenGL::GL
-    "-framework AppKit" "-framework QuartzCore")
+target_link_libraries(pathtracer PRIVATE pathtracer_gl "-framework AppKit" "-framework QuartzCore")
 set_source_files_properties(src/platform/display_link.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
 
 # Asset/codegen CLIs, deliberately not linking pathtracer_core.
@@ -299,6 +303,12 @@ foreach(validator embree_validate bsdf_validate sampler_validate nee_validate gb
     pathtracer_target_defaults(${validator} NATIVE IPO)
     target_link_libraries(${validator} PRIVATE pathtracer_core)
 endforeach()
+
+# The viewer's GL display path run in a hidden context against the CPU encode; each check skips where no context can be created.
+add_executable(display_gl_validate tools/display_gl_validate.cpp $<TARGET_OBJECTS:pathtracer_check>)
+target_include_directories(display_gl_validate PRIVATE tools)
+pathtracer_target_defaults(display_gl_validate NATIVE IPO)
+target_link_libraries(display_gl_validate PRIVATE pathtracer_gl)
 
 # integrator_validate and io_validate resolve real assets/ files against named instances -- the materialOverrides path.
 target_compile_definitions(integrator_validate PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
@@ -456,6 +466,7 @@ pathtracer_discover_checks(bsdf_validate)
 pathtracer_discover_checks(driver_validate)
 pathtracer_discover_checks(io_validate)
 pathtracer_discover_checks(display_validate)
+pathtracer_discover_checks(display_gl_validate)
 pathtracer_discover_checks(colour_validate)
 pathtracer_discover_checks(api_validate)
 pathtracer_discover_checks(c_abi_validate)

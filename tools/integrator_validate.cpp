@@ -387,7 +387,7 @@ PT_CHECK(depth_and_russian_roulette_invariance, Slow, Statistical) {
 
 // A white non-absorbing dielectric slab is invisible under a uniform environment, the only case reaching a transmissive exiting vertex.
 PT_CHECK(transmissive_slab_energy, Slow, Statistical) {
-    // Enough depth for internally reflected paths to converge; truncation only ever darkens.
+    // Rough slabs trap light past this depth; the walk stops at the same vertex count, so both estimate one truncated expectation.
     constexpr int kSlabBounces = 12;
     constexpr float kThickness = 0.5F;
     constexpr int kWalkPaths = 1 << 16;
@@ -420,8 +420,8 @@ PT_CHECK(transmissive_slab_energy, Slow, Statistical) {
             const glm::vec3 mean =
                 regionMean(renderPass(scene, env, settings, *accel, pool, true, seed).beauty, 0, 0, kImageSize, kImageSize);
             render.add(std::max({mean.x, mean.y, mean.z}));
-            // Disjoint seeds keep the two estimators independent, as Welch's band assumes.
-            walk.add(tools::fixtures::slabWalkLo(inputs, kWalkPaths, seed + tools::stats::kReplicates).mean);
+            // Disjoint seeds keep them independent; the render scatters at bounces 0..maxBounces, its extra one only collects a miss.
+            walk.add(tools::fixtures::slabWalkLo(inputs, kWalkPaths, seed + tools::stats::kReplicates, settings.maxBounces + 1).mean);
         }
         const double difference = render.mean() - walk.mean();
         // The render's float32 film resolves its mean to one ulp: a smooth slab's exact-Fresnel vertices leave no variance above that.
@@ -668,8 +668,8 @@ PT_CHECK(beer_lambert_absorption, Slow, Statistical) {
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     PathTraceSettings settings = makeSettings(kBounces, 999);
     settings.samplesPerPixel = kSamplesPerPixel / tools::stats::kReplicates;
-    const double t = tools::stats::studentTTwoSided(ctx.alpha(), tools::stats::kReplicates - 1);
     ctx.plan(static_cast<int>(cases.size()) * 4);
+    const double t = tools::stats::studentTTwoSided(ctx.alpha(), tools::stats::kReplicates - 1);
 
     std::cout << "integrator_validate: Beer-Lambert absorption through an index-matched medium, chords bracketed by the footprint\n";
     for (const AbsorptionCase& testCase : cases) {
@@ -963,7 +963,7 @@ PT_CHECK(emission_reaches_indirect, Slow, Statistical) {
     tools::stats::Welford enclosedMean;
     tools::stats::Welford openMean;
     for (int r = 0; r < tools::stats::kReplicates; ++r) {
-        // Disjoint seeds keep the two estimators independent, as Welch's band assumes.
+        // Disjoint seeds keep the two estimators independent, as differenceBand assumes.
         const auto seed = static_cast<std::uint32_t>(rowSeed + r);
         const glm::vec3 a = regionMean(
             renderPass(enclosed, env, settings, *enclosedAccel, pool, true, seed).beauty, 0, 0,
@@ -975,6 +975,7 @@ PT_CHECK(emission_reaches_indirect, Slow, Statistical) {
         openMean.add(std::max({b.x, b.y, b.z}));
     }
     const double difference = enclosedMean.mean() - openMean.mean();
+    ctx.plan(1);
     const tools::stats::Band band = tools::stats::differenceBand(enclosedMean, openMean, ctx.alpha());
     char detail[320];
     std::snprintf(detail, sizeof(detail),
@@ -982,7 +983,6 @@ PT_CHECK(emission_reaches_indirect, Slow, Statistical) {
                   "surface emission, above means NEE double-counts it",
                   enclosedMean.mean(), openMean.mean(), difference, band.halfWidth());
     std::cout << "integrator_validate: " << detail << '\n';
-    ctx.plan(1);
     PT_EXPECT(ctx, band.contains(difference), detail);
 }
 
@@ -2881,7 +2881,7 @@ PT_CHECK(denoise_features_follow_lobes_narrower_than_a_pixel, Slow, Statistical)
         closed += static_cast<double>(nearDelta->denoiseNormal.rgb(texel).z) * kSamplesPerPixel;
     }
     const long long trials = static_cast<long long>(kImageSize) * kImageSize * kSamplesPerPixel;
-    const tools::stats::Band band = tools::stats::wilsonBand(std::llround(closed), trials, ctx.alpha());
+    const tools::stats::Band band = tools::stats::clopperPearsonBand(std::llround(closed), trials, ctx.alpha());
     std::cout << "  alpha 1e-4: " << closed / static_cast<double>(trials) << " of draws close at the floor, predicted " << predicted << '\n';
     PT_EXPECT(ctx, band.contains(predicted), "a lobe narrower than a pixel is not followed in proportion to its sub-pixel mass");
     PT_EXPECT(ctx, blockEquals(rough->denoiseNormal, glm::vec3(0.0F, 0.0F, 1.0F), 0, 0, kImageSize, kImageSize),

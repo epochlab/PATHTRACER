@@ -785,7 +785,7 @@ void presentFrame(AppResources& app,
     app.ocioTransform.setPixelLattice(source.pixelLattice, source.wrapsHorizontally);
     app.ocioTransform.setImageRect(imageRect);
     app.ocioTransform.bind();
-    app.postProcess.draw(displayTexture, app.ocioTransform.activeShader(), imageRect);
+    app.postProcess.draw(displayTexture, app.ocioTransform.activeShader(), imageRect, 0);
 }
 
 // Non-blocking: hands a fresh request to PathTraceDriver, which restarts accumulation at this pose and size on its own thread.
@@ -960,7 +960,7 @@ void sampleDisplayedFrame(AppResources& app,
                            pathtracer::gfx::ViewportRect imageRect) {
     {
         const pathtracer::debug::ScopedCpuTimer histogramTimer(app.stages.histogramMs);
-        app.histogram.update(imageRect);
+        app.histogram.update(imageRect, 0);
     }
     updateOverRangeStats(app, pathTraceSnapshot);
 
