@@ -83,7 +83,7 @@ void finish(tools::check::Context& ctx, bool ok, const char* what) {
 constexpr float kQuadExtent = 1000.0F;
 // Sphere geometry shared by its two checks so tessellations cannot drift: checkBeerLambert's transmittance depends on this exact mesh.
 constexpr float kSphereRadius = 1.0F;
-// 64x32 sets transmissionOffsetEpsilon to 1.93e-2 on a unit sphere, backing each origin in and shortening every measured chord.
+// 64x32: 0.098 edges whose vertex normals turn 5.6 degrees, so the terminator lift and grazing neighbour facets are live.
 constexpr int kSphereSlices = 64;
 constexpr int kSphereStacks = 32;
 // Narrow FOV (200mm on a 36x24 gate, ~6.9 degrees vertical) so every pixel direction is within a fraction of a degree of the quad normal.
@@ -166,7 +166,7 @@ TestScene makeCornerScene(float roughness, float wallX = 1.0F) {
     return scene;
 }
 
-// UV sphere, poles on Y so the camera reads the tessellated equator; curvature is the point, as flat quads zero transmissionOffsetEpsilon.
+// UV sphere, poles on Y so the camera reads the tessellated equator; curvature is the point, as flat quads carry no terminator lift.
 TestScene makeSphereScene(float roughness, int slices = kSphereSlices, int stacks = kSphereStacks) {
     const auto vertexAt = [&](int stack, int slice) {
         const float phi = kPi * static_cast<float>(stack) / static_cast<float>(stacks);
@@ -466,7 +466,7 @@ PT_CHECK(transmissive_sphere_energy, Slow, Statistical) {
                       << " -- rendered " << lo
                       << ", expected 1.0. Same invariant as the flat slab above, so a flat slab that "
                          "passes while this fails localises the fault to a curvature-driven term: the "
-                         "transmission offset epsilon, or the shadow-terminator projection's side.\n";
+                         "spawn origin's side or bound, or the shadow-terminator lift.\n";
             ok = false;
         }
     }
@@ -627,30 +627,51 @@ PT_CHECK(transmissive_sphere_energy_radial, Slow, Statistical) {
 PT_CHECK(beer_lambert_absorption, Slow, Statistical) {
     constexpr int kBounces = 8;
     constexpr float kSlabThickness = 0.5F;
-    // Relative, the squared row's green being 0.0625; the sphere row reads high from the tessellated chord and the offset epsilon.
-    constexpr float kRelativeTolerance = 0.03F;
+    // Telephoto, so every ray of the centre block's filter footprint stays within 0.004 rad of the axis and each chord is bracketed tight.
+    constexpr float kTelephotoMm = 2000.0F;
+    constexpr double kUnitRoundoff = std::numeric_limits<float>::epsilon() * 0.5;
+    const auto gamma = [](int n) { return (n * kUnitRoundoff) / (1.0 - (n * kUnitRoundoff)); };
     const glm::vec3 colour(0.5F, 0.25F, 0.75F);
 
     struct AbsorptionCase {
         const char* name;
         bool sphere;
         float depth;
-        glm::vec3 expected;
         float abbe;
     };
     // The dispersive row crosses the hero channel with a per-channel sigmaA, asserting the two do not interact.
     const std::array<AbsorptionCase, 4> cases{{
-        {"flat slab, depth == thickness", false, kSlabThickness, colour, 0.0F},
-        {"flat slab, depth == half thickness", false, kSlabThickness * 0.5F, colour * colour, 0.0F},
-        {"sphere, depth == chord", true, 2.0F * kSphereRadius, colour, 0.0F},
-        {"flat slab, dispersive (abbe 64.17)", false, kSlabThickness, colour, 64.17F},
+        {"flat slab, depth == thickness", false, kSlabThickness, 0.0F},
+        {"flat slab, depth == half thickness", false, kSlabThickness * 0.5F, 0.0F},
+        {"sphere, depth == diameter", true, 2.0F * kSphereRadius, 0.0F},
+        {"flat slab, dispersive (abbe 64.17)", false, kSlabThickness, 64.17F},
     }};
+
+    const Camera base = makeCamera();
+    const Camera camera(base.position(), base.rotationDegrees(), base.filmBack(), kTelephotoMm, base.nearClip(), base.farClip(),
+                        base.aperture(), base.shutterSeconds(), base.iso());
+    // centreMean's block widened by the filter's support: no primary ray of it starts further off the axis than these corners.
+    const glm::vec2 frame = pathtracer::gfx::frameExtent(camera.pixelLattice(), kImageSize, kImageSize);
+    const float reach = 2.0F + pathtracer::scene::kFilterRadius;
+    double maxCosine = 1.0;
+    double maxImpact = 0.0;
+    for (const glm::vec2 corner : {glm::vec2(-1.0F, -1.0F), glm::vec2(-1.0F, 1.0F), glm::vec2(1.0F, -1.0F), glm::vec2(1.0F, 1.0F)}) {
+        const glm::vec2 film = (frame * 0.5F) + (corner * reach);
+        const std::optional<pathtracer::scene::Ray> ray =
+            camera.primaryRay(((film.x / frame.x) * 2.0F) - 1.0F, 1.0F - ((film.y / frame.y) * 2.0F), frame.x / frame.y);
+        const glm::dvec3 dir = glm::normalize(glm::dvec3(ray->dir));
+        maxCosine = std::min(maxCosine, -dir.z);
+        maxImpact = std::max(maxImpact, glm::length(glm::cross(glm::dvec3(ray->origin), dir)));
+    }
 
     const EnvironmentMap env = makeUniformEnvironment();
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
-    bool ok = true;
+    PathTraceSettings settings = makeSettings(kBounces, 999);
+    settings.samplesPerPixel = kSamplesPerPixel / tools::stats::kReplicates;
+    const double t = tools::stats::studentTTwoSided(ctx.alpha(), tools::stats::kReplicates - 1);
+    ctx.plan(static_cast<int>(cases.size()) * 4);
 
-    std::cout << "integrator_validate: Beer-Lambert absorption through an index-matched medium\n";
+    std::cout << "integrator_validate: Beer-Lambert absorption through an index-matched medium, chords bracketed by the footprint\n";
     for (const AbsorptionCase& testCase : cases) {
         const TestScene scene = withSurface(testCase.sphere ? makeSphereScene(0.0F) : makeSlabScene(0.0F, kSlabThickness),
                                             [&](Material& material) {
@@ -662,34 +683,51 @@ PT_CHECK(beer_lambert_absorption, Slow, Statistical) {
                                                 material.transmissionDispersionScale = testCase.abbe > 0.0F ? 1.0F : 0.0F;
                                             });
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+        PT_EXPECT(ctx, accel.has_value(), "failed to build the Embree absorption scene");
         if (!accel.has_value()) {
-            std::cerr << "integrator_validate: FAILED to build Embree scene for " << testCase.name << '\n';
-            finish(ctx, false, "beer_lambert_absorption failed; see the rows above");
-            return;
+            continue;
         }
-        const glm::vec3 lo = centreMean(renderPass(scene, env, makeSettings(kBounces, 999), *accel, pool, true).beauty);
+        // Inscribed in the sphere, the mesh's chords are at most 2R; it holds the ball of its inradius, so a ray rho off centre meets more.
+        double inradius = std::numeric_limits<double>::max();
+        // The entry origin stands off by spawnOrigin's bound, the sum's rounding and a round-away: the one length that shortens a chord.
+        double standOff = 0.0;
+        for (const ShadingTriangle& tri : scene.shadingTriangles) {
+            const glm::dvec3 p0(tri.v0.position);
+            const glm::dvec3 normal = glm::normalize(glm::cross(glm::dvec3(tri.v1.position) - p0, glm::dvec3(tri.v2.position) - p0));
+            inradius = std::min(inradius, std::abs(glm::dot(normal, p0)));
+            const glm::dvec3 sum = glm::abs(p0) + glm::abs(glm::dvec3(tri.v1.position)) + glm::abs(glm::dvec3(tri.v2.position));
+            const double ulp = std::nextafter(static_cast<float>(std::max({sum.x, sum.y, sum.z})), std::numeric_limits<float>::infinity()) -
+                               static_cast<float>(std::max({sum.x, sum.y, sum.z}));
+            standOff = std::max(standOff, glm::dot(glm::abs(normal), (gamma(3) * sum) + (2.0 * gamma(1) * glm::abs(p0))) +
+                                              (2.0 * std::sqrt(3.0) * ulp));
+        }
+        const double longest = testCase.sphere ? 2.0 * kSphereRadius : kSlabThickness / maxCosine;
+        const double shortest =
+            (testCase.sphere ? 2.0 * std::sqrt((inradius * inradius) - (maxImpact * maxImpact)) : kSlabThickness) - standOff;
 
-        std::cout << "  " << testCase.name;
-        for (std::size_t pad = std::string(testCase.name).size(); pad < 36; ++pad) {
-            std::cout << ' ';
-        }
-        std::cout << "measured [" << lo.x << ", " << lo.y << ", " << lo.z << "]   expected ["
-                  << testCase.expected.x << ", " << testCase.expected.y << ", "
-                  << testCase.expected.z << "]\n";
-        for (int c = 0; c < 3; ++c) {
-            if (std::fabs(lo[c] - testCase.expected[c]) > kRelativeTolerance * testCase.expected[c]) {
-                std::cerr << "integrator_validate: FAILED Beer-Lambert at " << testCase.name
-                          << " channel " << c << " -- measured " << lo[c] << ", expected "
-                          << testCase.expected[c]
-                          << ". transmissionDepth is the distance at which transmittance reaches "
-                             "transmissionColor, so with the medium index-matched to vacuum nothing "
-                             "but exp(-sigma_a*d) can move this reading.\n";
-                ok = false;
+        std::array<tools::stats::Welford, 3> readings;
+        for (int r = 0; r < tools::stats::kReplicates; ++r) {
+            const glm::vec3 mean = centreMean(renderPass(scene, env, settings, *accel, pool, true,
+                                                         static_cast<std::uint32_t>(ctx.subSeed(testCase.name) + r), camera)
+                                                  .beauty);
+            for (int c = 0; c < 3; ++c) {
+                readings[c].add(mean[c]);
             }
         }
+        for (int c = 0; c < 3; ++c) {
+            const double low = std::pow(colour[c], longest / testCase.depth);
+            const double high = std::pow(colour[c], shortest / testCase.depth);
+            // The film's float32 mean resolves to one ulp, as in the radial check; the hero channel's draw is the only noise.
+            const double half = (t * readings[c].standardError()) + (std::numeric_limits<float>::epsilon() * readings[c].mean());
+            char detail[320];
+            std::snprintf(detail, sizeof(detail),
+                          "%s channel %d: %.6f vs chord bracket [%.6f, %.6f] +/- %.2e -- above means a spawn shortens the chord, "
+                          "below means the medium outlives the surface",
+                          testCase.name, c, readings[c].mean(), low, high, half);
+            std::cout << "  " << detail << '\n';
+            PT_EXPECT(ctx, readings[c].mean() >= low - half && readings[c].mean() <= high + half, detail);
+        }
     }
-    finish(ctx, ok, "beer_lambert_absorption failed; see the rows above");
-    return;
 }
 
 // The other half of the convention: transmissionDepth == 0 is a tint applied once per crossing, so distance must not matter at all.
@@ -1311,17 +1349,210 @@ pathtracer::scene::PathTraceResult renderPassWithLights(const TestScene& scene,
                                                      const EnvironmentMap* env,
                                                      const PathTraceSettings& settings,
                                                      EmbreeAccel& accel, pathtracer::scene::ThreadPool& pool,
-                                                     bool showSky) {
+                                                     bool showSky, std::uint32_t scrambleSeed = 7U, const Camera& camera = makeCamera(),
+                                                     int width = kImageSize, int height = kImageSize) {
     const std::atomic<std::uint64_t> generation{1};
-    pathtracer::scene::PathTraceResult result = pathtracer::scene::makePathTraceResult(kImageSize, kImageSize, settings.replicates);
+    pathtracer::scene::PathTraceResult result = pathtracer::scene::makePathTraceResult(width, height, settings.replicates);
     const pathtracer::scene::LightSet lights(env, /*envRotationDegrees=*/glm::vec3(0.0F), /*envExposure=*/1.0F, quads);
     pathtracer::debug::PassStats stats;  // required by renderPathTraced; this tool checks radiance, not throughput
-    pathtracer::scene::renderPathTraced(makeCamera(), accel, scene.shadingTriangles, scene.instances,
-                                     instanceLightIndex, lights, pathtracer::scene::VolumeSet{}, kImageSize, kImageSize, showSky,
-                                     settings, /*scrambleSeed=*/7U, /*sampleBase=*/0,
+    pathtracer::scene::renderPathTraced(camera, accel, scene.shadingTriangles, scene.instances,
+                                     instanceLightIndex, lights, pathtracer::scene::VolumeSet{}, width, height, showSky,
+                                     settings, scrambleSeed, /*sampleBase=*/0,
                                      /*sampleCount=*/settings.samplesPerPixel, generation,
                                      /*requestedGeneration=*/1U, pool, stats, result);
     return result;
+}
+
+// The plane through a triangle's float vertices in double: products of floats are exact there, so only the final sums round, at 2^-53.
+double signedDistance(const ShadingTriangle& tri, const glm::dvec3& point) {
+    const glm::dvec3 p0(tri.v0.position);
+    const glm::dvec3 normal = glm::normalize(glm::cross(glm::dvec3(tri.v1.position) - p0, glm::dvec3(tri.v2.position) - p0));
+    return glm::dot(normal, point - p0);
+}
+
+// Every spawned origin clears its own face on the side asked for, at any scale or offset from the origin, by no more than its bound.
+PT_CHECK(spawn_origin_clears_its_plane, Fast, Exact) {
+    constexpr double kUnitRoundoff = std::numeric_limits<float>::epsilon() * 0.5;
+    const auto gamma = [](int n) { return (n * kUnitRoundoff) / (1.0 - (n * kUnitRoundoff)); };
+    constexpr int kSamplesPerTriangle = 8;
+
+    std::vector<ShadingTriangle> unitTriangles = makeSphereScene(0.0F).shadingTriangles;
+    const std::vector<ShadingTriangle> coarse = makeSphereScene(0.0F, 32, 16).shadingTriangles;
+    unitTriangles.insert(unitTriangles.end(), coarse.begin(), coarse.end());
+    // A sliver 1e4 times longer than high, its vertex normals tilted 17 degrees apart so the terminator lift is live on either side.
+    const glm::vec4 tangent(1.0F, 0.0F, 0.0F, 1.0F);
+    const auto sliverVertex = [&](glm::vec3 position, glm::vec3 normal) {
+        return ShadingVertex{position, glm::normalize(normal), glm::vec2(0.0F), tangent};
+    };
+    unitTriangles.push_back(ShadingTriangle{sliverVertex({0.0F, 0.0F, 0.0F}, {-0.3F, 0.0F, 1.0F}),
+                                            sliverVertex({1.0F, 0.0F, 0.0F}, {0.3F, 0.0F, 1.0F}),
+                                            sliverVertex({0.5F, 1e-4F, 0.0F}, {0.0F, 0.3F, 1.0F}), 0});
+
+    // Powers of two scale exactly; the translations are not representable sums, so every vertex rounds.
+    const std::array<int, 5> exponents = {-20, -10, 0, 10, 20};
+    const std::array<glm::vec3, 2> translations = {glm::vec3(0.0F), glm::vec3(1000.37F, -73.1F, 4.9e3F)};
+    std::mt19937_64 rng(ctx.subSeed("barycentrics"));
+    std::uniform_real_distribution<float> unit(0.0F, 1.0F);
+
+    std::uint64_t spawned = 0;
+    std::uint64_t wrongSide = 0;
+    std::uint64_t overshoot = 0;
+    double worstRatio = 0.0;
+    for (int exponent : exponents) {
+        const float scale = std::ldexp(1.0F, exponent);
+        for (const glm::vec3& translation : translations) {
+            for (const ShadingTriangle& unitTriangle : unitTriangles) {
+                ShadingTriangle tri = unitTriangle;
+                for (ShadingVertex* vertex : {&tri.v0, &tri.v1, &tri.v2}) {
+                    vertex->position = (vertex->position * scale) + (translation * scale);
+                }
+                const glm::vec3 geoNormal = pathtracer::scene::geometricNormalOf(tri);
+                for (int s = 0; s < kSamplesPerTriangle; ++s) {
+                    // The vertices and an edge midpoint, then uniform over the triangle by the square-root map.
+                    const std::array<glm::vec2, 4> corners = {glm::vec2(0.0F), glm::vec2(1.0F, 0.0F), glm::vec2(0.0F, 1.0F),
+                                                              glm::vec2(0.5F, 0.5F)};
+                    glm::vec2 uv = s < 4 ? corners[s] : glm::vec2(0.0F);
+                    if (s >= 4) {
+                        const float root = std::sqrt(unit(rng));
+                        const float t = unit(rng);
+                        uv = glm::vec2(root * (1.0F - t), root * t);
+                    }
+                    const double u = uv.x;
+                    const double v = uv.y;
+                    const double w = 1.0 - u - v;
+                    const glm::dvec3 flat = (w * glm::dvec3(tri.v0.position)) + (u * glm::dvec3(tri.v1.position)) +
+                                            (v * glm::dvec3(tri.v2.position));
+                    // The bound spawnOrigin offsets by, in double: what the float hit point and w can be off by, projected on the normal.
+                    const glm::dvec3 error = (gamma(3) * ((std::abs(w) * glm::abs(glm::dvec3(tri.v0.position))) +
+                                                          (u * glm::abs(glm::dvec3(tri.v1.position))) +
+                                                          (v * glm::abs(glm::dvec3(tri.v2.position))))) +
+                                             (gamma(1) * (std::abs(1.0 - u) + std::abs(w)) * glm::abs(glm::dvec3(tri.v0.position)));
+                    const double bound = glm::dot(glm::abs(glm::dvec3(geoNormal)), error);
+                    for (bool normalSide : {true, false}) {
+                        const double side = normalSide ? 1.0 : -1.0;
+                        const auto liftOf = [&](const ShadingVertex& vertex) {
+                            const double d = glm::dot(flat - glm::dvec3(vertex.position), glm::dvec3(vertex.normal));
+                            return (normalSide ? d < 0.0 : d > 0.0) ? -d * glm::dvec3(vertex.normal) : glm::dvec3(0.0);
+                        };
+                        // The lift's own float error: subtract, 3-term dot, scale, weight and 3-term sum, gamma_8 on |t_i|.|n_i| |n_i|.
+                        const auto liftErrorOf = [&](const ShadingVertex& vertex) {
+                            const glm::dvec3 normal = glm::abs(glm::dvec3(vertex.normal));
+                            return gamma(8) * glm::dot(glm::abs(flat - glm::dvec3(vertex.position)), normal) * normal;
+                        };
+                        const glm::dvec3 lift = (w * liftOf(tri.v0)) + (u * liftOf(tri.v1)) + (v * liftOf(tri.v2));
+                        const glm::dvec3 liftError =
+                            (std::abs(w) * liftErrorOf(tri.v0)) + (u * liftErrorOf(tri.v1)) + (v * liftErrorOf(tri.v2));
+                        const glm::vec3 origin = pathtracer::scene::spawnOrigin(tri, uv.x, uv.y, geoNormal, normalSide);
+                        const double clearance = side * signedDistance(tri, glm::dvec3(origin));
+                        // Offset, the float hit's error, that error in the lift (|n|_1 <= sqrt 3), the lift's own, the sum and round-away.
+                        double ulps = 0.0;
+                        for (int i = 0; i < 3; ++i) {
+                            ulps += std::abs(geoNormal[i]) * (std::nextafter(std::abs(origin[i]), std::numeric_limits<float>::infinity()) -
+                                                              std::abs(origin[i]));
+                        }
+                        const double cap = (side * signedDistance(tri, flat + lift)) + ((2.0 + std::sqrt(3.0)) * bound) +
+                                           glm::dot(glm::abs(glm::dvec3(geoNormal)), liftError) + (2.0 * ulps);
+                        ++spawned;
+                        wrongSide += clearance > 0.0 ? 0 : 1;
+                        overshoot += clearance <= cap ? 0 : 1;
+                        worstRatio = std::max(worstRatio, clearance / cap);
+                    }
+                }
+            }
+        }
+    }
+    std::printf("integrator_validate: %llu spawns, %llu on the wrong side, %llu past the bound, worst clearance %.3f of the cap\n",
+                static_cast<unsigned long long>(spawned), static_cast<unsigned long long>(wrongSide),
+                static_cast<unsigned long long>(overshoot), worstRatio);
+    ctx.plan(2);
+    PT_EXPECT(ctx, wrongSide == 0, "a spawned origin sits on or behind its own face: a ray from it can re-hit the triangle it left");
+    PT_EXPECT(ctx, overshoot == 0, "a spawned origin clears its face by more than its rounding bound: an absolute or curvature term");
+}
+
+// Rough glass sphere over a diffuse floor, both scaled by `scale`; the light is the last instance, its quad returned beside it.
+std::pair<TestScene, pathtracer::scene::QuadLight> makeGlassStage(float scale, std::vector<int>& instanceLightIndex) {
+    constexpr float kFloorHeight = -1.2F;  // clear of the south pole vertex, so no contact seam
+    constexpr float kFloorExtent = 10.0F;
+    TestScene scene = withSurface(makeSphereScene(0.3F), transmissive);
+    const glm::vec4 tangent(1.0F, 0.0F, 0.0F, 1.0F);
+    const auto vertex = [&](float x, float z) {
+        return ShadingVertex{glm::vec3(x, kFloorHeight, z), glm::vec3(0.0F, 1.0F, 0.0F), glm::vec2(0.5F, 0.5F), tangent};
+    };
+    // Wound so geometricNormalOf gives +Y.
+    const ShadingVertex f0 = vertex(-kFloorExtent, kFloorExtent);
+    const ShadingVertex f1 = vertex(kFloorExtent, kFloorExtent);
+    const ShadingVertex f2 = vertex(kFloorExtent, -kFloorExtent);
+    const ShadingVertex f3 = vertex(-kFloorExtent, -kFloorExtent);
+    scene.worldTriangles.push_back(Triangle{f0.position, f1.position, f2.position});
+    scene.worldTriangles.push_back(Triangle{f0.position, f2.position, f3.position});
+    scene.shadingTriangles.push_back(ShadingTriangle{f0, f1, f2, 1});
+    scene.shadingTriangles.push_back(ShadingTriangle{f0, f2, f3, 1});
+    scene.instances.push_back(MeshInstance{makeMaterial(1.0F), glm::mat4(1.0F), "floor"});
+    instanceLightIndex.assign(scene.instances.size(), -1);
+    for (ShadingTriangle& tri : scene.shadingTriangles) {
+        for (ShadingVertex* v : {&tri.v0, &tri.v1, &tri.v2}) {
+            v->position *= scale;
+        }
+    }
+    for (Triangle& tri : scene.worldTriangles) {
+        tri = Triangle{tri.v0 * scale, tri.v1 * scale, tri.v2 * scale};
+    }
+    // Above and behind the sphere, facing down, out of frame: refracted paths' exit vertices see it across the glass, NEE's far side.
+    const pathtracer::scene::QuadLight light{glm::vec3(-1.5F, 2.5F, -3.0F) * scale, glm::vec3(3.0F, 0.0F, 0.0F) * scale,
+                                              glm::vec3(0.0F, 0.0F, 2.0F) * scale, glm::vec3(4.0F), false};
+    appendLightGeometry(scene, light, /*quadIndex=*/0, instanceLightIndex);
+    return {scene, light};
+}
+
+// The disc camera with its position and clip planes scaled: the frame then sees exactly the scaled scene.
+Camera scaledDiscCamera(float scale) {
+    const Camera base = makeDiscCamera();
+    return Camera(base.position() * scale, base.rotationDegrees(), base.filmBack(), base.focalLengthMm(), base.nearClip() * scale,
+                  base.farClip() * scale, base.aperture(), base.shutterSeconds(), base.iso());
+}
+
+// Power-of-two scaling is exact in float, so one seed renders the same bits at every scale unless a fixed length sets an origin or tMin.
+PT_CHECK(curved_glass_scale_invariance, Slow, Exact) {
+    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    // Eight bounces carry a path through the sphere twice and onto the floor; 256x128 at 16 samples per pixel.
+    PathTraceSettings settings = makeSettings(8, 999);
+    settings.samplesPerPixel = 16;
+    const auto seed = static_cast<std::uint32_t>(ctx.subSeed("glass stage scales"));
+    const auto render = [&](float scale) -> std::optional<pathtracer::gfx::HdrImage> {
+        std::vector<int> lightIndex;
+        const auto [scene, light] = makeGlassStage(scale, lightIndex);
+        std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+        if (!accel.has_value()) {
+            return std::nullopt;
+        }
+        return renderPassWithLights(scene, lightIndex, {light}, /*env=*/nullptr, settings, *accel, pool, /*showSky=*/false, seed,
+                                    scaledDiscCamera(scale), kDiscWidth, kDiscHeight)
+            .beauty;
+    };
+    // 2^+-16 puts the unit sphere's 0.1 edges at 1.5e-6 and its coordinates' ulp at 7.8e-3: any fixed length is past one or the other.
+    const std::array<int, 2> exponents = {-16, 16};
+    const std::optional<pathtracer::gfx::HdrImage> unitScale = render(1.0F);
+    ctx.plan(static_cast<int>(exponents.size()) + 1);
+    PT_EXPECT(ctx, unitScale.has_value(), "failed to build the Embree glass stage");
+    if (!unitScale.has_value()) {
+        return;
+    }
+    for (int exponent : exponents) {
+        const std::optional<pathtracer::gfx::HdrImage> scaled = render(std::ldexp(1.0F, exponent));
+        const std::size_t total = unitScale->texels.size();
+        std::size_t differing = total;
+        if (scaled.has_value()) {
+            differing = 0;
+            for (std::size_t i = 0; i < total; ++i) {
+                differing += scaled->texels[i] == unitScale->texels[i] ? 0 : 1;
+            }
+        }
+        char detail[256];
+        std::snprintf(detail, sizeof(detail), "2^%d vs 1: %zu of %zu floats differ -- a ray origin or tMin carries a fixed length",
+                      exponent, differing, total);
+        std::printf("integrator_validate: rough glass over a floor, %s\n", detail);
+        PT_EXPECT(ctx, differing == 0, detail);
+    }
 }
 
 // The rough lobe's half of the transmissionDepth 0 convention: Lo is exactly linear in transmissionColor.

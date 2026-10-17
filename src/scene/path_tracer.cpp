@@ -22,8 +22,6 @@ namespace pathtracer::scene {
 
 namespace {
 
-constexpr float kRayEpsilon = 1e-4F;
-
 // Offsets the AO sampler's seed from the path sampler's so the two streams are independent. 2^32/phi, Knuth's decorrelating constant.
 constexpr std::uint32_t kAoSeedOffset = 0x9E3779B9U;
 // The same for the Fresnel AOV's stream: frac(sqrt 2)*2^32, kAoSeedOffset's sibling. Distinct, non-zero and odd is the whole requirement.
@@ -44,21 +42,6 @@ struct Medium {
     [[nodiscard]] glm::vec3 transmittance(float t) const { return depth > 0.0F ? glm::pow(color, glm::vec3(t / depth)) : glm::vec3(1.0F); }
 };
 
-// Transmission needs a curvature-scaled offset, ~1e-3 on a 500-triangle sphere; raw edge length has no zero and blew up on a flat slab.
-float transmissionOffsetEpsilon(const ShadingTriangle& tri) {
-    const glm::vec3 n0 = glm::normalize(tri.v0.normal);
-    const glm::vec3 n1 = glm::normalize(tri.v1.normal);
-    const glm::vec3 n2 = glm::normalize(tri.v2.normal);
-    const float curvature = std::max({glm::length(glm::cross(n0, n1)), glm::length(glm::cross(n1, n2)),
-                                       glm::length(glm::cross(n2, n0))});
-    const float e0 = glm::length(tri.v1.position - tri.v0.position);
-    const float e1 = glm::length(tri.v2.position - tri.v1.position);
-    const float e2 = glm::length(tri.v0.position - tri.v2.position);
-    return std::max(kRayEpsilon, std::max({e0, e1, e2}) * curvature);
-}
-
-// Blackman-Harris (Harris 1978) at Arnold's default 1.5 px radius, importance-sampled (Ernst et al. 2006): pdf proportional to f, weight 1.
-constexpr float kFilterRadius = 1.5F;
 // The window's cosine-series coefficients: w(t) = a0 - a1 cos(2 pi t) + a2 cos(4 pi t) - a3 cos(6 pi t) over t in [0, 1].
 constexpr double kBlackmanHarrisA0 = 0.35875;
 constexpr double kBlackmanHarrisA1 = 0.48829;
@@ -594,11 +577,9 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
             const bool frontSide = glm::dot(geoNormal, woWorld) > 0.0F;
             const glm::vec3 aoDir =
                 frame * sampleCosineHemisphere(aoSample) * (frontSide ? 1.0F : -1.0F);
-            // NEE's near-side origin verbatim: the shading-terminator offset plus a geometric-normal back-off, on whichever side wo is.
-            const glm::vec3 aoOrigin = shadowTerminatorOffset(triangle, hit->u, hit->v, frontSide) +
-                                        (geoNormal * kRayEpsilon * (frontSide ? 1.0F : -1.0F));
+            const glm::vec3 aoOrigin = spawnOrigin(triangle, hit->u, hit->v, geoNormal, frontSide);
             ++rays.ao;
-            gAo = obscuranceAlong(Ray{aoOrigin, aoDir, kRayEpsilon, settings.aoMaxDistance}, scene, settings.aoMaxDistance);
+            gAo = obscuranceAlong(Ray{aoOrigin, aoDir, 0.0F, settings.aoMaxDistance}, scene, settings.aoMaxDistance);
         }
 
         // A zero BSDF, emission alone, carries no light onward: the path ends here, its AO and Fresnel lanes already written.
@@ -640,12 +621,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
                 const glm::vec3 bsdfValue = farSide ? eval.transmission : eval.diffuse + eval.specular;
                 // A zero pdf is light only the walk's later orders reach: the BSDF draw's MIS weight is 0 there, so NEE takes it whole.
                 if (bsdfValue.x > 0.0F || bsdfValue.y > 0.0F || bsdfValue.z > 0.0F) {
-                    // Offset along geoNormal toward the light's side: the far side crosses the interface, so it takes the curvature offset.
-                    const float shadowEpsilon =
-                        farSide ? transmissionOffsetEpsilon(triangle) : kRayEpsilon;
-                    const glm::vec3 shadowOrigin =
-                        shadowTerminatorOffset(triangle, hit->u, hit->v, geoCos > 0.0F) +
-                        (geoNormal * shadowEpsilon * (geoCos > 0.0F ? 1.0F : -1.0F));
+                    const glm::vec3 shadowOrigin = spawnOrigin(triangle, hit->u, hit->v, geoNormal, geoCos > 0.0F);
                     // pbrt's SpawnRayTo: re-formed from the offset origin to the sampled point, which a back-off along wi cannot reach.
                     const bool finiteLight = lightSample->distance < std::numeric_limits<float>::max();
                     const glm::vec3 toLight =
@@ -654,7 +630,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
                                      : lightSample->direction;  // the environment's point is at infinity
                     const float shadowDistance = finiteLight ? glm::length(toLight) : lightSample->distance;
                     const Ray shadowRay{shadowOrigin, finiteLight ? toLight / shadowDistance : toLight,
-                                         shadowEpsilon, shadowDistance * (1.0F - kShadowDistanceEpsilon)};
+                                         0.0F, shadowDistance * (1.0F - kShadowDistanceEpsilon)};
                     ++rays.shadow;
                     const glm::vec3 visibility = transmittanceAlong(shadowRay, scene, heroChannel, rays.shadow, volumeSampler);
                     // As at a scattering: the unweighted light estimator, its luminance and the share the occluders remove of it.
@@ -736,15 +712,9 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
             continue;
         }
 
-        // Chiang/Li/Burley origin nudged toward wi's side: unmirrored, it desynced the medium stack on 0.93% of cornell's glass entries.
-        const bool leavingOnNormalSide = glm::dot(wiWorld, geoNormal) > 0.0F;
-        const float offsetEpsilon = sample->type == LobeType::Transmission
-                                         ? transmissionOffsetEpsilon(triangle)
-                                         : kRayEpsilon;
-        const glm::vec3 offsetOrigin =
-            shadowTerminatorOffset(triangle, hit->u, hit->v, leavingOnNormalSide) +
-            (geoNormal * offsetEpsilon * (leavingOnNormalSide ? 1.0F : -1.0F));
-        ray = Ray{offsetOrigin, wiWorld, offsetEpsilon, std::numeric_limits<float>::max()};
+        // On wi's side for every lobe: an unmirrored terminator lift desynced the medium stack on 0.93% of cornell's glass entries.
+        const glm::vec3 origin = spawnOrigin(triangle, hit->u, hit->v, geoNormal, glm::dot(wiWorld, geoNormal) > 0.0F);
+        ray = Ray{origin, wiWorld, 0.0F, std::numeric_limits<float>::max()};
         segmentStart = 0.0F;
     }
 
