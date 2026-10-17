@@ -194,13 +194,22 @@ void diffuseHexagonal(std::span<float> plane, int width, int height, float t, bo
     const int paddedWidth = width + (2 * pad.x);
     const int paddedHeight = height + (2 * pad.y);
     std::vector<float> padded(static_cast<std::size_t>(paddedWidth) * static_cast<std::size_t>(paddedHeight));
+    // The fold is separable: a cell's folded column depends on its row's parity alone, so one table per parity serves every row.
+    std::array<std::vector<int>, 2> columns;
+    for (int parity = 0; parity < 2; ++parity) {
+        columns[static_cast<std::size_t>(parity)].resize(static_cast<std::size_t>(paddedWidth));
+        for (int x = 0; x < paddedWidth; ++x) {
+            columns[static_cast<std::size_t>(parity)][static_cast<std::size_t>(x)] =
+                pathtracer::gfx::hexagonalReflection(x - pad.x, parity, width, height, wrapsHorizontally).x;
+        }
+    }
     threadPool.parallelFor(paddedHeight, [&](int y) {
         float* out = padded.data() + (static_cast<std::size_t>(y) * static_cast<std::size_t>(paddedWidth));
         // The row pad is even, so padded row y has the parity of frame row y - pad.y and the lattice geometry carries over unchanged.
+        const float* in = plane.data() + (static_cast<std::size_t>(mirrorIndex(y - pad.y, height)) * static_cast<std::size_t>(width));
+        const std::vector<int>& column = columns[static_cast<std::size_t>(y & 1)];
         for (int x = 0; x < paddedWidth; ++x) {
-            const glm::ivec2 cell =
-                pathtracer::gfx::hexagonalReflection(x - pad.x, y - pad.y, width, height, wrapsHorizontally);
-            out[x] = plane[(static_cast<std::size_t>(cell.y) * static_cast<std::size_t>(width)) + static_cast<std::size_t>(cell.x)];
+            out[x] = in[column[static_cast<std::size_t>(x)]];
         }
     });
     std::vector<float> scratch(padded.size());
