@@ -39,6 +39,7 @@ AovSource aovSource(AovId aov) {
         case AovId::DoG:
         case AovId::ColourOpponent:
         case AovId::SNR:
+        case AovId::SampleCount:
         case AovId::Shadow:
         case AovId::Denoised:
             return AovSource::BeautyFilter;
@@ -77,6 +78,7 @@ int aovChannels(AovId aov) {
         case AovId::Shadow:
         case AovId::BounceCount:
         case AovId::SNR:
+        case AovId::SampleCount:
         case AovId::Luminance:
         case AovId::Sobel:
         case AovId::Gabor:
@@ -158,6 +160,7 @@ bool aovCarriesRadiance(AovId aov) {
         case AovId::IOR:
         case AovId::BounceCount:
         case AovId::SNR:
+        case AovId::SampleCount:
         case AovId::Shadow:
         case AovId::Count:
             return false;
@@ -211,6 +214,7 @@ bool aovIsColour(AovId aov) {
         case AovId::IOR:
         case AovId::BounceCount:
         case AovId::SNR:
+        case AovId::SampleCount:
         case AovId::Shadow:
         case AovId::Count:
             return false;
@@ -250,6 +254,7 @@ bool aovIsBipolar(AovId aov) {
         case AovId::IOR:
         case AovId::BounceCount:
         case AovId::SNR:
+        case AovId::SampleCount:
         case AovId::DirectDiffuse:
         case AovId::IndirectDiffuse:
         case AovId::DirectSpecular:
@@ -333,12 +338,11 @@ void mapSnrForDisplay(const pathtracer::gfx::HdrImage& snr, int samples, pathtra
     }
 }
 
-// Bounce Count's domain is a real bound -- maxBounces + 1 possible terminations -- so the colormap's argument is exact and frame-stable.
-void mapBounceCountForDisplay(const pathtracer::gfx::HdrImage& bounces, int maxBounces, pathtracer::gfx::HdrImage& out) {
-    const float ceiling = static_cast<float>(maxBounces) + 1.0F;
-    out = pathtracer::gfx::makeImage(bounces.width, bounces.height, pathtracer::gfx::kRgbChannels);
-    for (std::size_t pixel = 0; pixel < bounces.texels.size(); ++pixel) {
-        const glm::vec3 mapped = turbo(bounces.texels[pixel] / ceiling);
+// A count over its real bound, maxBounces + 1 terminations or the passes run, so the colormap's argument is exact and frame-stable.
+void mapCountForDisplay(const pathtracer::gfx::HdrImage& counts, float ceiling, pathtracer::gfx::HdrImage& out) {
+    out = pathtracer::gfx::makeImage(counts.width, counts.height, pathtracer::gfx::kRgbChannels);
+    for (std::size_t pixel = 0; pixel < counts.texels.size(); ++pixel) {
+        const glm::vec3 mapped = turbo(counts.texels[pixel] / ceiling);
         float* texel = out.texels.data() + (pixel * pathtracer::gfx::kRgbChannels);
         texel[0] = mapped.r;
         texel[1] = mapped.g;
@@ -366,7 +370,13 @@ AovDisplay aovDisplay(AovId aov, const pathtracer::gfx::HdrImage& image, const A
             }
             return display;
         case AovId::BounceCount:
-            mapBounceCountForDisplay(image, context.maxBounces, display.mapped);
+            mapCountForDisplay(image, static_cast<float>(context.maxBounces) + 1.0F, display.mapped);
+            return display;
+        // Full red is a texel traced every pass; no pass yet leaves nothing to scale by.
+        case AovId::SampleCount:
+            if (context.samples >= 1) {
+                mapCountForDisplay(image, static_cast<float>(context.samples), display.mapped);
+            }
             return display;
         // dx and dy share the pixel, so one pooled range keeps the direction; the swizzle's zero third lane stays black.
         case AovId::MotionVector: {
@@ -491,6 +501,7 @@ bool aovSupportsLattice(AovId aov, pathtracer::gfx::PixelLattice lattice) {
         case AovId::IOR:
         case AovId::BounceCount:
         case AovId::SNR:
+        case AovId::SampleCount:
         case AovId::DirectDiffuse:
         case AovId::IndirectDiffuse:
         case AovId::DirectSpecular:

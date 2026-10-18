@@ -41,9 +41,9 @@ def renderer() -> Renderer:
 
 
 def test_aov_table_is_populated() -> None:
-    assert len(AOVS) == 37
+    assert len(AOVS) == 38
     names = ("beauty", "depth", "lookahead", "normal", "sobel", "luminance", "gabor", "hsv", "dog", "colourOpponent", "motionVector", "snr",
-             "directVolume", "indirectVolume", "directSubsurface", "indirectSubsurface")
+             "sampleCount", "directVolume", "indirectVolume", "directSubsurface", "indirectSubsurface")
     for name in names:
         assert name in AOVS
 
@@ -142,6 +142,18 @@ def test_every_aov_renders(renderer: Renderer) -> None:
         # SNR's +inf is a positive signal every replicate agreed on exactly, its true value; any other non-finite texel is a defect.
         admitted = np.isposinf(array) if name == "snr" else np.zeros_like(array, dtype=bool)
         assert (np.isfinite(array) | admitted).all(), f"{name} produced a non-finite value"
+
+
+def test_sample_count_is_the_cap_or_the_checkpoint_a_texel_stopped_at(renderer: Renderer) -> None:
+    profile = json.loads((REPO_ROOT / "assets" / "config" / "profile.json").read_text())["pathTracer"]
+    replicates, adaptive, samples = profile["replicates"], profile["adaptive"], 16
+    counts = renderer.render(aovs=("sampleCount",), width=32, height=32, samples=samples, seed=3)["sampleCount"]
+    if adaptive["threshold"] == 0:
+        assert (counts == samples).all()
+        return
+    # A stopped texel holds whole rounds whose per-replicate count is a power of two, from minSamples on.
+    checkpoints = [replicates * 2**j for j in range(samples.bit_length()) if adaptive["minSamples"] <= replicates * 2**j < samples]
+    assert np.isin(counts, [*checkpoints, samples]).all()
 
 
 def test_multi_aov_request_matches_single_requests(renderer: Renderer) -> None:

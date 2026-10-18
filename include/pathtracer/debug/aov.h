@@ -41,6 +41,7 @@ enum class AovId : int {
     IOR,
     BounceCount,
     SNR,
+    SampleCount,  // passes folded into each texel: below the published count where adaptive sampling stopped it
     // Lighting.
     DirectDiffuse,
     IndirectDiffuse,
@@ -62,7 +63,7 @@ inline constexpr const char* kAovNames[] = {
     "beauty", "wireframe", "alpha", "depth", "lookahead", "hsv", "luminance", "sobel",
     "gabor", "dog", "worldPos", "uv", "motionVector", "colourOpponent",
     "normal", "geomNormal", "albedo", "metallic", "roughness", "tangent", "objectID", "ao",
-    "fresnel", "ior", "bounceCount", "snr",
+    "fresnel", "ior", "bounceCount", "snr", "sampleCount",
     "directDiffuse", "indirectDiffuse", "directSpecular", "indirectSpecular", "refraction", "directVolume", "indirectVolume",
     "directSubsurface", "indirectSubsurface", "shadow",
     "denoised",
@@ -75,7 +76,7 @@ inline constexpr const char* kAovLabels[] = {
     "Beauty", "Wireframe", "Alpha", "Depth", "Lookahead", "HSV", "Luminance", "Sobel",
     "Gabor", "DoG", "World Pos", "UV", "Motion Vector", "Colour Opponent",
     "Normal", "Geom Normal", "Albedo", "Metallic", "Roughness", "Tangent", "Object ID", "AO",
-    "Fresnel", "IOR", "Bounce Count", "SNR",
+    "Fresnel", "IOR", "Bounce Count", "SNR", "Sample Count",
     "Direct Diffuse", "Indirect Diffuse", "Direct Specular", "Indirect Specular", "Refraction", "Direct Volume", "Indirect Volume",
     "Direct Subsurface", "Indirect Subsurface", "Shadow",
     "Denoised",
@@ -83,7 +84,7 @@ inline constexpr const char* kAovLabels[] = {
 static_assert(sizeof(kAovLabels) / sizeof(kAovLabels[0]) == static_cast<int>(AovId::Count),
               "kAovLabels must stay index-parallel with AovId");
 
-// Which of the three producers computes each AOV: 14 accumulated path-traced lanes, 14 G-buffer lanes, 9 derived after accumulation.
+// Which of the three producers computes each AOV: 14 accumulated path-traced lanes, 14 G-buffer lanes, 10 derived after accumulation.
 enum class AovSource { PathTraced, GBuffer, BeautyFilter };
 
 [[nodiscard]] AovSource aovSource(AovId aov);

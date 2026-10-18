@@ -389,6 +389,24 @@ PT_CHECK(bounce_count_display_matches_the_turbo_colormap, Fast, Exact) {
     }
 }
 
+// Sample Count's domain is the published pass count, so a texel traced every pass is the colormap's top and a stopped one sits below.
+PT_CHECK(sample_count_display_matches_the_turbo_colormap, Fast, Exact) {
+    constexpr int kSamples = 64;
+    const std::vector<float> counts{8.0F, 16.0F, 32.0F, 64.0F};
+    ctx.plan(static_cast<int>(counts.size()) + 1);
+    const pathtracer::debug::AovDisplay display = pathtracer::debug::aovDisplay(AovId::SampleCount, frame(1, counts), {kSamples, 0});
+    for (std::size_t i = 0; i < counts.size(); ++i) {
+        const glm::vec3 expected = pathtracer::debug::turbo(counts[i] / static_cast<float>(kSamples));
+        const glm::vec3 got{displayLane(display, i * 3), displayLane(display, (i * 3) + 1), displayLane(display, (i * 3) + 2)};
+        PT_EXPECT(ctx, got == expected,
+                      "sample count " + std::to_string(counts[i]) + " displayed (" + std::to_string(got.r) + ", " +
+                          std::to_string(got.g) + ", " + std::to_string(got.b) + "), not the colormap's colour");
+    }
+    // Before the first pass there is no count to scale by, so the display passes the zeros through.
+    PT_EXPECT(ctx, pathtracer::debug::aovDisplay(AovId::SampleCount, frame(1, {0.0F}), {0, 0}).mapped.texels.empty(),
+              "Sample Count pre-mapped with no pass to scale by");
+}
+
 // Raw metres quantize to white and farClip is a ray bound rather than a depth span, so Depth's gain comes from the depth present.
 PT_CHECK(depth_display_ranges_to_its_own_maximum, Fast, Exact) {
     // Powers of two, so 1/max is exact and the product with the maximum must be exactly 1 rather than within a rounding.
@@ -434,11 +452,11 @@ PT_CHECK(an_auto_ranged_aov_never_also_takes_the_exposure, Fast, Exact) {
 }
 
 // A nonlinear pre-map costs a full frame copy, so it must apply only where the affine map genuinely cannot express the display.
-PT_CHECK(display_premap_applies_to_exactly_two_aovs, Fast, Exact) {
+PT_CHECK(display_premap_applies_to_exactly_three_aovs, Fast, Exact) {
     ctx.plan(kAovCount);
     for (int i = 0; i < kAovCount; ++i) {
         const auto aov = static_cast<AovId>(i);
-        const bool premapped = aov == AovId::SNR || aov == AovId::BounceCount;
+        const bool premapped = aov == AovId::SNR || aov == AovId::BounceCount || aov == AovId::SampleCount;
         PT_EXPECT(ctx, pathtracer::debug::aovDisplay(aov, aovFrame(aov), {1024, 8, kAovFrameMax}).mapped.texels.empty() != premapped,
                       std::string(pathtracer::debug::kAovNames[i]) +
                           (premapped ? " lost its pre-map" : " gained a pre-map it does not need"));
@@ -806,6 +824,12 @@ PT_CHECK(aov_filter_dispatch_is_total, Fast, Exact) {
     }
     input.shadowLost = &lost;
     input.shadowUnoccluded = &unoccluded;
+    // Sample Count's lane: passes ramping across x, as adaptive sampling leaves them, so it reads neither zero nor the source.
+    std::vector<int> counts(static_cast<std::size_t>(kWidth) * kHeight);
+    for (std::size_t texel = 0; texel < counts.size(); ++texel) {
+        counts[texel] = 1 + static_cast<int>(texel % kWidth);
+    }
+    input.texelSamples = counts.data();
 
     std::vector<HdrImage> outputs;
     outputs.reserve(filters.size());

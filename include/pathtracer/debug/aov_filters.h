@@ -86,6 +86,9 @@ void demodulate(std::span<const float> plane, const MorletPlaneWave& wave, int w
 [[nodiscard]] pathtracer::gfx::HdrImage snrAov(int width, int height, const float* replicateLuminance, int replicates, int samples,
                                             pathtracer::scene::ThreadPool& threadPool);
 
+// Each texel's pass count as a float, the samples its estimate averages; null counts, before any pass, read zero.
+[[nodiscard]] pathtracer::gfx::HdrImage sampleCountAov(int width, int height, const int* texelSamples, pathtracer::scene::ThreadPool& threadPool);
+
 // 1 - direct luminance / unoccluded direct luminance at the primary vertex, as a ratio of means; 0 where no direct light arrives.
 [[nodiscard]] pathtracer::gfx::HdrImage shadowAov(const pathtracer::gfx::HdrImage& lost, const pathtracer::gfx::HdrImage& unoccluded,
                                                pathtracer::scene::ThreadPool& threadPool);
@@ -97,6 +100,7 @@ struct FilterInput {
     const float* replicateLuminance = nullptr;
     int replicates = 1;
     int samples = 0;
+    const int* texelSamples = nullptr;  // passes per texel, `samples` wherever adaptive sampling never stopped it
     bool wrapsHorizontally = false;  // the lens joins the image's left and right edges, so neighbourhood filters wrap in x
     pathtracer::gfx::PixelLattice lattice = pathtracer::gfx::PixelLattice::Square;  // where the texels sit, so a stencil finds neighbours
     // Denoised's auxiliary features from Beauty's own samples, and the OIDN filter state reused across calls; Denoised needs all three.

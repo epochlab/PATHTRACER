@@ -3,6 +3,16 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Sample Count AOV
+
+`sampleCount` / "Sample Count" (38 AOVs): the passes each texel averages. Under adaptive sampling it shows where the stopping rule
+spent samples; without it, every texel reads the published pass count. It is a Beauty filter over the published per-texel counts,
+so the C ABI and Python pick it up from their tables. It sits after SNR, so the Lighting block and Denoised each move one index later.
+- **Display:** `turbo(count / samples)`, sharing Bounce Count's colormap path (`mapCountForDisplay`): red is a texel traced every
+  pass, cooler colours stopped earlier. Before the first pass there is no count to scale by, and the zeros pass through.
+- **Tests:** `api_validate` checks the colormap at checkpoint counts, and that the pre-mapped AOVs are now exactly three. The filter
+  dispatch check gives it a count ramp. `test_render.py` asserts every count is the cap or a checkpoint at or past `minSamples`.
+
 ## Adaptive sampling from the replicate standard error
 
 Texels now stop sampling once their noise is confidently within a target, and the render ends when every texel has stopped or the
