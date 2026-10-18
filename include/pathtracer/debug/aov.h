@@ -49,6 +49,8 @@ enum class AovId : int {
     Refraction,
     DirectVolume,
     IndirectVolume,
+    DirectSubsurface,
+    IndirectSubsurface,
     Shadow,
     // OIDN's estimate of Beauty, guided by albedo and normal lanes averaged over Beauty's own samples (kDenoiseFeatureLanes).
     Denoised,
@@ -61,7 +63,8 @@ inline constexpr const char* kAovNames[] = {
     "gabor", "dog", "worldPos", "uv", "motionVector", "colourOpponent",
     "normal", "geomNormal", "albedo", "metallic", "roughness", "tangent", "objectID", "ao",
     "fresnel", "ior", "bounceCount", "snr",
-    "directDiffuse", "indirectDiffuse", "directSpecular", "indirectSpecular", "refraction", "directVolume", "indirectVolume", "shadow",
+    "directDiffuse", "indirectDiffuse", "directSpecular", "indirectSpecular", "refraction", "directVolume", "indirectVolume",
+    "directSubsurface", "indirectSubsurface", "shadow",
     "denoised",
 };
 static_assert(sizeof(kAovNames) / sizeof(kAovNames[0]) == static_cast<int>(AovId::Count),
@@ -74,7 +77,7 @@ inline constexpr const char* kAovLabels[] = {
     "Normal", "Geom Normal", "Albedo", "Metallic", "Roughness", "Tangent", "Object ID", "AO",
     "Fresnel", "IOR", "Bounce Count", "SNR",
     "Direct Diffuse", "Indirect Diffuse", "Direct Specular", "Indirect Specular", "Refraction", "Direct Volume", "Indirect Volume",
-    "Shadow",
+    "Direct Subsurface", "Indirect Subsurface", "Shadow",
     "Denoised",
 };
 static_assert(sizeof(kAovLabels) / sizeof(kAovLabels[0]) == static_cast<int>(AovId::Count),

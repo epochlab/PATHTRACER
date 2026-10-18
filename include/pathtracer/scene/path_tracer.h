@@ -102,7 +102,7 @@ struct PathTraceResult {
     pathtracer::gfx::HdrImage shadowLost;
     pathtracer::gfx::HdrImage shadowUnoccluded;
 
-    // These seven plus the background sum to beauty per channel, bucketed by the bounce-0 lobe; transmission sticks to refraction.
+    // These nine plus the background sum to beauty per channel, bucketed by the bounce-0 lobe; transmission sticks to refraction.
     pathtracer::gfx::HdrImage directDiffuse;
     pathtracer::gfx::HdrImage indirectDiffuse;
     pathtracer::gfx::HdrImage directSpecular;
@@ -111,6 +111,9 @@ struct PathTraceResult {
     // Paths whose bounce-0 vertex is a scattering in a volume, rather than a surface lobe.
     pathtracer::gfx::HdrImage directVolume;
     pathtracer::gfx::HdrImage indirectVolume;
+    // Paths whose bounce-0 transmission enters a scattering interior; direct is light reaching that walk's boundary from a light.
+    pathtracer::gfx::HdrImage directSubsurface;
+    pathtracer::gfx::HdrImage indirectSubsurface;
 
     // E[F(wo.wh)] at the primary hit, wh ~ D_vis(wo), one VNDF draw per sample (bsdf.h). 0 where bounce 0 has no BSDF vertex.
     pathtracer::gfx::HdrImage fresnel;

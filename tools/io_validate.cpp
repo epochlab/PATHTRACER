@@ -594,7 +594,7 @@ PT_CHECK(material_config_accepts_the_shipped_materials, Fast, Exact) {
     }
 }
 
-// geometry_thin_walled is read before the inputs: a thin wall accepts the subsurface its sheet shades, and the flag reaches the material.
+// geometry_thin_walled reaches the material beside a thin wall's subsurface and opacity.
 PT_CHECK(material_config_thin_walled, Fast, Exact) {
     const std::filesystem::path path = writeJson("engine_io_material_thin.json",
                                                  "{\"geometry_thin_walled\":true,\"subsurface_weight\":0.5,\"geometry_opacity\":0.25}");
@@ -603,6 +603,23 @@ PT_CHECK(material_config_thin_walled, Fast, Exact) {
     ctx.plan(1);
     PT_EXPECT(ctx, material && material->geometryThinWalled && material->subsurfaceWeight == 0.5F && material->geometryOpacity == 0.25F,
               "a thin-walled material with subsurface and opacity did not load as written");
+}
+
+// A bulk material's interior inputs load as written: subsurface and transmission_scatter are media, a checker on a weight among them.
+PT_CHECK(material_config_bulk_interior, Fast, Exact) {
+    const std::filesystem::path path =
+        writeJson("engine_io_material_bulk.json",
+                  "{\"subsurface_weight\":{\"randomChecker\":{\"cellSize\":0.1}},\"subsurface_radius\":0.05,"
+                  "\"subsurface_radius_scale\":[1,0.5,0],\"transmission_weight\":0.5,\"transmission_depth\":0.2,"
+                  "\"transmission_scatter\":[0.1,0.2,0.3],\"transmission_scatter_anisotropy\":0.4}");
+    const std::optional<pathtracer::config::MaterialConfig> material = pathtracer::config::loadMaterialConfig(path.string());
+    std::filesystem::remove(path);
+    ctx.plan(2);
+    PT_EXPECT(ctx, material && !material->geometryThinWalled && material->subsurfaceRadius == 0.05F &&
+                       material->subsurfaceRadiusScale == glm::vec3(1.0F, 0.5F, 0.0F) && material->transmissionScatter == glm::vec3(0.1F, 0.2F, 0.3F) &&
+                       material->transmissionScatterAnisotropy == 0.4F,
+              "a bulk material's interior inputs did not load as written");
+    PT_EXPECT(ctx, material && material->randomCheckers.contains("subsurface_weight"), "a checker on a bulk subsurface_weight did not load");
 }
 
 // A {"randomChecker": {...}} object replaces one input's constant: it reaches materialOf as that input's pattern, seed 0 when omitted.
@@ -661,9 +678,9 @@ PT_CHECK(material_config_rejects_malformed_input, Fast, Exact) {
         {"transmission_scatter_anisotropy below -1", "engine_io_material_anisotropy.json",
          material(",\"transmission_scatter_anisotropy\":-1.5")},
         {"negative emission_luminance", "engine_io_material_negemission.json", material(",\"emission_luminance\":-1.0")},
-        // In-volume scattering needs transport the renderer lacks: a non-zero switch must fail, not render as if zero.
-        {"non-zero subsurface_weight", "engine_io_material_subsurface.json", material(",\"subsurface_weight\":0.5")},
-        {"non-zero transmission_scatter", "engine_io_material_scatter.json", material(",\"transmission_scatter\":[0.1,0,0]")},
+        // A mean free path and a scattering coefficient are lengths' reciprocals: negative, the medium amplifies.
+        {"negative subsurface_radius", "engine_io_material_negradius.json", material(",\"subsurface_weight\":1,\"subsurface_radius\":-0.1")},
+        {"negative transmission_scatter", "engine_io_material_negscatter.json", material(",\"transmission_scatter\":[-0.1,0,0]")},
         // A presence probability: past [0, 1] the mix with the ambient takes a negative weight.
         {"geometry_opacity above 1", "engine_io_material_opacity.json", material(",\"geometry_opacity\":1.5")},
         // A uniform bool: a number is a type error, not a truthy switch.
@@ -671,8 +688,6 @@ PT_CHECK(material_config_rejects_malformed_input, Fast, Exact) {
         // A random checker's 0 is a constant 0 at half the cells: refused where the constant would be, as for an ior.
         {"a random checker on specular_ior", "engine_io_material_checkerior.json",
          material(",\"specular_ior\":{\"randomChecker\":{\"cellSize\":0.1}}")},
-        {"a random checker on subsurface_weight", "engine_io_material_checkersss.json",
-         material(",\"subsurface_weight\":{\"randomChecker\":{\"cellSize\":0.1}}")},
         // A zero cell size divides by nothing; a negative one has no meaning as a width.
         {"zero cellSize", "engine_io_material_checkerzero.json", material(",\"base_weight\":{\"randomChecker\":{\"cellSize\":0}}")},
         {"negative cellSize", "engine_io_material_checkerneg.json",

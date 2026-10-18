@@ -70,7 +70,8 @@ OpenPbrInputs<Constant> resolveInputs(const Material& material, glm::vec2 uv, co
     // Footprint filtering is exact in expectation only where radiance is linear; a lobe-shaping input is point-sampled.
     forEachInput(
         [&](const InputSpec& spec, auto& value, const auto& input) {
-            if (spec.use == InputUse::Surface) {
+            // A bulk's interior inputs are read where a path enters it; a thin wall has no interior to read them for.
+            if (spec.use == InputUse::Surface || (spec.use == InputUse::Volume && !material.geometryThinWalled)) {
                 value = evaluate(input, uv, spec.filtered ? footprint : pathtracer::gfx::TextureFootprint{}, spec.range);
             }
         },
@@ -84,10 +85,10 @@ float opacityAt(const Material& material, glm::vec2 uv, const pathtracer::gfx::T
     return evaluate(material.geometryOpacity, uv, footprint, InputRange::Unit);
 }
 
-bool isDispersive(const OpenPbrInputs<Constant>& inputs) {
-    // A thin wall transmits undeviated, so no wavelength bends apart from another.
-    return !inputs.geometryThinWalled && inputs.transmissionDispersionScale > 0.0F && inputs.transmissionWeight > 0.0F &&
-           inputs.baseMetalness < 1.0F;
+bool isDispersive(const OpenPbrInputs<Constant>& inputs, bool ambientDisperses) {
+    // A thin wall transmits undeviated, so no wavelength bends apart from another; either side's dispersion bends the interior's ray.
+    return !inputs.geometryThinWalled && (inputs.transmissionDispersionScale > 0.0F || ambientDisperses) &&
+           (inputs.transmissionWeight > 0.0F || inputs.subsurfaceWeight > 0.0F) && inputs.baseMetalness < 1.0F;
 }
 
 glm::vec3 emittedRadiance(const Material& material, const ShadingTriangle& triangle, const ShadingVertex& shading, const glm::vec3& wo,
