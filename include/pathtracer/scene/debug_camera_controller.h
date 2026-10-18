@@ -59,12 +59,8 @@ public:
     void setPixelLattice(pathtracer::gfx::PixelLattice pixelLattice) { pixelLattice_ = pixelLattice; }
     void setAcceptanceAngleDegrees(float acceptanceAngleDegrees) { acceptanceAngleDegrees_ = acceptanceAngleDegrees; }
 
-    // EV100 delta against profile.json defaults, applied at the display stage as pow(2,ev): the scene is not photometrically calibrated.
-    [[nodiscard]] float relativeExposureEv() const {
-        const float defaultEv100 = Camera::ev100(defaultAperture_, defaultShutterSeconds_, defaultIso_);
-        const float currentEv100 = Camera::ev100(aperture_, shutterSeconds_, iso_);
-        return defaultEv100 - currentEv100;
-    }
+    // The live aperture, shutter and ISO's SOS display gain on scene luminance in cd/m^2, applied at the display stage.
+    [[nodiscard]] float exposureGain() const { return Camera::exposureGain(aperture_, shutterSeconds_, iso_); }
 
 private:
     glm::vec3 position_;
@@ -84,10 +80,6 @@ private:
     Lens lens_;
     pathtracer::gfx::PixelLattice pixelLattice_;
     float acceptanceAngleDegrees_;
-
-    const float defaultAperture_;
-    const float defaultShutterSeconds_;
-    const float defaultIso_;
 
     const float flySpeedMetersPerSecond_;
     const float orbitSensitivityDegPerPixel_;

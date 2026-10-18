@@ -5,7 +5,8 @@
         "rotation": [90.0, 0.0, -90.0]
     },
     "environment": {
-        "hdriPath": "textures/republiqueHDR_2k.exr"
+        "hdriPath": "textures/republiqueHDR_2k.exr",
+        "lux": 405.6
     },
     "materialPath": "materials/principled.json",
     "textures": {

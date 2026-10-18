@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numbers>
 
 #include <glm/gtc/constants.hpp>
 
@@ -47,7 +48,8 @@ EquirectTexel equirectTexelOf(int width, int height, const glm::vec3& direction,
 
 }  // namespace
 
-EnvironmentMap::EnvironmentMap(std::shared_ptr<const pathtracer::gfx::ImageTexture> texture) : texture_(std::move(texture)) {
+EnvironmentMap::EnvironmentMap(std::shared_ptr<const pathtracer::gfx::ImageTexture> texture, std::optional<float> illuminanceLux)
+    : texture_(std::move(texture)) {
     const pathtracer::gfx::HdrImage image = pathtracer::gfx::readTexels(*texture_).value();
     width_ = image.width;
     height_ = image.height;
@@ -58,6 +60,7 @@ EnvironmentMap::EnvironmentMap(std::shared_ptr<const pathtracer::gfx::ImageTextu
                             0.0F);
 
     float total = 0.0F;
+    double upward = 0.0;
     for (int y = 0; y < height; ++y) {
         // Row-centre theta, sin(theta)-weighted so density corrects for the equirect projection's polar over-representation.
         const float theta = glm::pi<float>() * (static_cast<float>(y) + 0.5F) / static_cast<float>(height);
@@ -65,10 +68,19 @@ EnvironmentMap::EnvironmentMap(std::shared_ptr<const pathtracer::gfx::ImageTextu
 
         float* row = &conditionalCdf_[static_cast<std::size_t>(y) * (static_cast<std::size_t>(width) + 1)];
         float rowSum = 0.0F;
+        double rowLuminance = 0.0;
         for (int x = 0; x < width; ++x) {
-            rowSum += luminanceOf(image, x, y) * sinTheta;
+            const float luminance = luminanceOf(image, x, y);
+            rowSum += luminance * sinTheta;
+            rowLuminance += luminance;
             row[x + 1] = rowSum;
         }
+        // Each texel's integral of cos(theta) dOmega over the upper hemisphere: (2pi/W) (sin^2 theta1 - sin^2 theta0) / 2, clipped at pi/2.
+        const double theta0 = std::min(std::numbers::pi * y / height, std::numbers::pi / 2.0);
+        const double theta1 = std::min(std::numbers::pi * (y + 1) / height, std::numbers::pi / 2.0);
+        const double sin0 = std::sin(theta0);
+        const double sin1 = std::sin(theta1);
+        upward += rowLuminance * (std::numbers::pi / width) * ((sin1 * sin1) - (sin0 * sin0));
         if (rowSum > 0.0F) {
             for (int x = 0; x <= width; ++x) {
                 row[x] /= rowSum;
@@ -94,10 +106,12 @@ EnvironmentMap::EnvironmentMap(std::shared_ptr<const pathtracer::gfx::ImageTextu
             marginalCdf_[static_cast<std::size_t>(y)] = static_cast<float>(y) / static_cast<float>(height);
         }
     }
+    upwardIlluminance_ = static_cast<float>(upward);
+    radianceScale_ = illuminanceLux ? *illuminanceLux / upwardIlluminance_ : 1.0F;
 }
 
 glm::vec3 EnvironmentMap::sampleDirection(const glm::vec3& direction, const glm::mat3& rotation) const {
-    return pathtracer::gfx::sampleTexture(*texture_, latLongUv(mapLocalOf(direction, rotation)));
+    return pathtracer::gfx::sampleTexture(*texture_, latLongUv(mapLocalOf(direction, rotation))) * radianceScale_;
 }
 
 glm::vec3 EnvironmentMap::sampleDirection(const glm::vec3& direction, const glm::mat2x3& dirFootprint, const glm::mat3& rotation) const {
@@ -106,7 +120,7 @@ glm::vec3 EnvironmentMap::sampleDirection(const glm::vec3& direction, const glm:
     const glm::mat3x2 uvPerLocal = latLongUvJacobian(local);
     const pathtracer::gfx::TextureFootprint footprint{uvPerLocal * mapLocalOf(dirFootprint[0], rotation),
                                                       uvPerLocal * mapLocalOf(dirFootprint[1], rotation)};
-    return pathtracer::gfx::sampleTexture(*texture_, latLongUv(local), footprint);
+    return pathtracer::gfx::sampleTexture(*texture_, latLongUv(local), footprint) * radianceScale_;
 }
 
 EnvironmentMap::EnvSample EnvironmentMap::importanceSampleDirection(glm::vec2 u,

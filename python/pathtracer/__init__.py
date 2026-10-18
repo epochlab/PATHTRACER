@@ -7,9 +7,10 @@
     (256, 256, 3)
 
 Values are scene-referred linear, unclamped, with no display transform applied: what a model should train on, not
-what a monitor should show. The viewer's lens optics, bloom and colour fringing, are off unless ``render`` asks for
-them. Pass one through ``display_encode`` for a picture that matches the viewer, or use ``render_beauty --out`` to write
-one from the CLI. ``lattice_preview`` draws a hexagonal render's cells as the viewer does.
+what a monitor should show. Radiance AOVs are photometric, their luminance in cd/m^2. The viewer's lens optics, bloom and
+colour fringing, are off unless ``render`` asks for them. Pass one through ``display_encode(image, camera=...)`` for a
+picture that matches the viewer, or use ``render_beauty --out`` to write one from the CLI. ``meter_ev100`` reads a luminance
+as a spot meter would. ``lattice_preview`` draws a hexagonal render's cells as the viewer does.
 
 Arrays are C-contiguous float32, so ``torch.from_numpy(frame["beauty"])`` shares memory with no copy, leaving one
 explicit ``.to(device)``.
@@ -26,7 +27,7 @@ import numpy as np
 
 from . import _ffi
 
-__all__ = ["AOVS", "Camera", "Renderer", "aov_channels", "aov_needs_samples", "display_encode", "lattice_preview"]
+__all__ = ["AOVS", "Camera", "Renderer", "aov_channels", "aov_needs_samples", "display_encode", "lattice_preview", "meter_ev100"]
 
 _LIB = _ffi.load_library()
 
@@ -66,13 +67,16 @@ def aov_needs_samples(name: str) -> bool:
 
 
 def display_encode(
-    image: np.ndarray, *, exposure_ev: float = 0.0, display_transform: bool = True
+    image: np.ndarray, *, camera: Camera | None = None, exposure_ev: float = 0.0, display_transform: bool = True
 ) -> np.ndarray:
     """Scene-referred linear RGB to display-referred 8-bit sRGB, the viewer's own chain.
 
     Applies exposure, the OCIO display transform the window and ``render_beauty`` both use, triangular-PDF dither,
     then quantises. Takes ``(height, width, 3)`` float32 and returns ``(height, width, 3)`` uint8, ready for
     ``imshow`` or a PNG write.
+
+    The gain is ``camera.exposure_gain * 2**exposure_ev``: pass the render's camera to expose its cd/m^2 as the viewer
+    does, ``exposure_ev`` trimming in stops. Without a camera the gain is ``2**exposure_ev`` on the raw values.
 
     Pass ``display_transform=False`` for a data AOV such as depth or normal, whose raw range is not
     display-referred; exposure and the quantise still apply.
@@ -91,6 +95,7 @@ def display_encode(
         source.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
         width,
         height,
+        None if camera is None else ctypes.byref(camera._to_struct()),
         exposure_ev,
         1 if display_transform else 0,
         out.ctypes.data_as(ctypes.POINTER(ctypes.c_ubyte)),
@@ -99,6 +104,14 @@ def display_encode(
     ) != 0:
         raise RuntimeError(error.value.decode())
     return out
+
+
+def meter_ev100(luminance: float) -> float:
+    """A reflected spot meter's EV100 for a luminance in cd/m^2: ``log2(luminance * 100 / K)``, K = 12.5 (ISO 2720).
+
+    Compare it with ``Camera.ev100``: equal where the camera is set as a meter reading that surface would set it.
+    """
+    return float(_LIB.pt_meter_ev100(luminance))
 
 
 def lattice_preview(image: np.ndarray, camera: Camera, *, scale: int = 8) -> np.ndarray:
@@ -152,8 +165,9 @@ PIXEL_LATTICES = ("square", "hexagonal")
 class Camera:
     """Pose, lens, exposure and pixel lattice.
 
-    ``aperture``, ``shutter_seconds`` and ``iso`` set the photographic exposure value only. No projection
-    produces depth of field, and ``aperture`` is not a lens radius.
+    ``aperture``, ``shutter_seconds`` and ``iso`` set the photographic exposure, which ``display_encode(camera=)`` applies:
+    ``exposure_gain`` is the ISO 12232 standard-output-sensitivity gain on luminance in cd/m^2, the viewer's own, and ``ev100``
+    the exposure value at ISO 100. No projection produces depth of field, and ``aperture`` is not a lens radius.
 
     ``lens`` selects the projection: ``"rectilinear"`` is the pinhole, ``"fisheye_polynomial"`` is
     Kannala & Brandt's ``r(theta) = focal_length_mm * (theta + k1*theta**3 + k2*theta**5 + k3*theta**7 + k4*theta**9)``,
@@ -208,6 +222,16 @@ class Camera:
     fisheye_field_of_view_degrees: float = 180.0
     pixel_lattice: str = "square"
     acceptance_angle_degrees: float = 0.0
+
+    @property
+    def exposure_gain(self) -> float:
+        """Display gain on luminance in cd/m^2: an image-plane exposure of ``10 / iso`` lx s renders at sRGB code 118."""
+        return float(_LIB.pt_exposure_gain(self.aperture, self.shutter_seconds, self.iso))
+
+    @property
+    def ev100(self) -> float:
+        """``log2(aperture**2 / shutter_seconds * 100 / iso)``, the exposure value at ISO 100."""
+        return float(_LIB.pt_ev100(self.aperture, self.shutter_seconds, self.iso))
 
     @classmethod
     def _from_struct(cls, struct: _ffi.PtCamera) -> Camera:
@@ -359,7 +383,7 @@ class Renderer:
         ``env_rotation`` turns the environment map, background and lighting alike; zero is the map unrotated.
 
         ``light_temperatures`` replaces each light's colour, one kelvin per light in scene order, with the Planckian
-        radiator's linear ACEScg colour at unit luminance, so ``intensity`` keeps its meaning. A colour outside the scene
+        radiator's linear ACEScg colour at unit luminance, so each light keeps its authored luminance. A colour outside the scene
         gamut (blue turns negative) is refused rather than clamped. ``None`` keeps the authored colours.
         Only the lights' radiance changes, so it never rebuilds the BVH. The environment keeps its measured colour.
 

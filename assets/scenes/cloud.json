@@ -1,6 +1,7 @@
 {
     "environment": {
-        "hdriPath": "textures/republiqueHDR_2k.exr"
+        "hdriPath": "textures/republiqueHDR_2k.exr",
+        "lux": 405.6
     },
     "lights": [
         {
@@ -9,7 +10,7 @@
             "rotation": [-90.0, 0.0, 0.0],
             "size": [420.0, 540.0],
             "color": [0.9815, 0.9631, 0.8954],
-            "intensity": 2.6,
+            "lumens": 3.707e8,
             "twoSided": false
         }
     ],

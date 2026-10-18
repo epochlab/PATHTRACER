@@ -46,12 +46,12 @@ GLenum glComponentType(ScalarType format) {
     return format == ScalarType::Float16 ? GL_HALF_FLOAT : GL_FLOAT;
 }
 
-// Converts `channels`-wide float texels to `Lanes`-wide T, padding with 1; compile-time widths so the loop vectorises.
+// Converts `channels`-wide float texels to `Lanes`-wide T, each scaled by its lane's factor, padding with 1; compile-time widths vectorise.
 template <typename T, int Channels, int Lanes>
-void packTexels(const float* texels, std::size_t pixels, T* out) {
+void packTexels(const float* texels, std::size_t pixels, const glm::vec3& laneScale, T* out) {
     for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
         for (int c = 0; c < Channels; ++c) {
-            out[(pixel * Lanes) + c] = static_cast<T>(texels[(pixel * Channels) + c]);
+            out[(pixel * Lanes) + c] = static_cast<T>(texels[(pixel * Channels) + c] * laneScale[c]);
         }
         for (int c = Channels; c < Lanes; ++c) {
             out[(pixel * Lanes) + c] = T(1);
@@ -61,22 +61,22 @@ void packTexels(const float* texels, std::size_t pixels, T* out) {
 
 // Writes the texels to `out` in the texture's own type and lane count, so the driver transfers them rather than converting.
 template <typename T>
-void stage(const float* texels, std::size_t pixels, int channels, T* out) {
+void stage(const float* texels, std::size_t pixels, int channels, const glm::vec3& laneScale, T* out) {
     if constexpr (std::is_same_v<T, float>) {
-        if (storedLanes(channels) == channels) {
+        if (storedLanes(channels) == channels && laneScale == glm::vec3(1.0F)) {
             std::memcpy(out, texels, pixels * static_cast<std::size_t>(channels) * sizeof(float));
             return;
         }
     }
     switch (channels) {
         case 1:
-            packTexels<T, 1, 1>(texels, pixels, out);
+            packTexels<T, 1, 1>(texels, pixels, laneScale, out);
             break;
         case 2:
-            packTexels<T, 2, 2>(texels, pixels, out);
+            packTexels<T, 2, 2>(texels, pixels, laneScale, out);
             break;
         default:
-            packTexels<T, 3, 4>(texels, pixels, out);
+            packTexels<T, 3, 4>(texels, pixels, laneScale, out);
             break;
     }
 }
@@ -132,7 +132,8 @@ Texture& Texture::operator=(Texture&& other) noexcept {
     return *this;
 }
 
-Texture Texture::createFromFloatPixels(int width, int height, int channels, const float* texels, ScalarType format) {
+Texture Texture::createFromFloatPixels(int width, int height, int channels, const float* texels, ScalarType format,
+                                       const glm::vec3& laneScale) {
     unsigned int id = 0;
     unsigned int pixelBuffer = 0;
     GL_CALL(glGenTextures(1, &id));
@@ -147,13 +148,13 @@ Texture Texture::createFromFloatPixels(int width, int height, int channels, cons
     GL_CALL(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST));
 
     Texture texture(id, pixelBuffer, format);
-    texture.upload(width, height, channels, texels);
+    texture.upload(width, height, channels, texels, laneScale);
     GL_CALL(glBindTexture(GL_TEXTURE_2D, 0));
     return texture;
 }
 
 // Not wrapped in GL_CALL on the in-place path: it runs every frame the image changes and glGetError is a driver sync point.
-void Texture::upload(int width, int height, int channels, const float* texels) {
+void Texture::upload(int width, int height, int channels, const float* texels, const glm::vec3& laneScale) {
     const std::size_t pixels = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
     const std::size_t bytes = pixels * static_cast<std::size_t>(storedLanes(channels)) * scalarBytes(format_);
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pixelBuffer_);
@@ -172,9 +173,9 @@ void Texture::upload(int width, int height, int channels, const float* texels) {
         return;
     }
     if (format_ == ScalarType::Float16) {
-        stage(texels, pixels, channels, static_cast<Half*>(mapped));
+        stage(texels, pixels, channels, laneScale, static_cast<Half*>(mapped));
     } else {
-        stage(texels, pixels, channels, static_cast<float*>(mapped));
+        stage(texels, pixels, channels, laneScale, static_cast<float*>(mapped));
     }
     // GL_FALSE: the store was corrupted while mapped (e.g. a display change), so its contents are undefined and must not be uploaded.
     if (glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER) == GL_FALSE) {

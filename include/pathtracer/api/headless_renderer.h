@@ -119,8 +119,7 @@ private:
     HeadlessRenderer(std::string assetRoot, pathtracer::config::ProfileConfig profile, pathtracer::config::SceneConfig scene,
                      Geometry geometry, pathtracer::scene::VolumeSet volumes,
                      pathtracer::scene::PathTraceSettings baseSettings,
-                     std::shared_ptr<const pathtracer::gfx::ImageTexture> environmentTexture,
-                     const pathtracer::scene::Camera& defaultCamera);
+                     pathtracer::scene::EnvironmentMap environmentMap, const pathtracer::scene::Camera& defaultCamera);
 
     // Loads the glTF under model's root, places lights under it and builds the BVH: open() and every pose change share it.
     [[nodiscard]] static std::optional<Geometry> buildGeometry(const std::string& assetRoot,

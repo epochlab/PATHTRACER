@@ -446,9 +446,19 @@ PT_CHECK(an_auto_ranged_aov_never_also_takes_the_exposure, Fast, Exact) {
         // Whatever aovDisplay decided from the values -- a pre-map or any map but unity gain at zero offset -- is a range already taken.
         const bool ranged = !display.mapped.texels.empty() || display.affine.gain != glm::vec3(1.0F) ||
                             display.affine.offset != glm::vec3(0.0F);
-        PT_EXPECT(ctx, !(ranged && pathtracer::debug::aovTakesDisplayExposure(aov)),
+        PT_EXPECT(ctx, !(ranged && pathtracer::debug::aovExposureGain(aov, 2.0F) != glm::vec3(1.0F)),
                       std::string(pathtracer::debug::kAovNames[i]) + " auto-ranges and takes the exposure, so it would range twice");
     }
+}
+
+// The exposure scales what is radiance and nothing else: Beauty's every lane, HSV's scene-referred value alone, a ratio or length never.
+PT_CHECK(the_exposure_reaches_only_radiance_lanes, Fast, Exact) {
+    using pathtracer::debug::aovExposureGain;
+    ctx.plan(3);
+    PT_EXPECT(ctx, aovExposureGain(AovId::Beauty, 4.0F) == glm::vec3(4.0F), "Beauty must take the exposure on every lane");
+    PT_EXPECT(ctx, aovExposureGain(AovId::HSV, 4.0F) == glm::vec3(1.0F, 1.0F, 4.0F),
+              "HSV's hue and saturation are ratios and must stay; its value is radiance and must take the exposure");
+    PT_EXPECT(ctx, aovExposureGain(AovId::Depth, 4.0F) == glm::vec3(1.0F), "Depth is a length, which no exposure scales");
 }
 
 // A nonlinear pre-map costs a full frame copy, so it must apply only where the affine map genuinely cannot express the display.

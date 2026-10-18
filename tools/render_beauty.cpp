@@ -52,7 +52,7 @@ struct Options {
     int passes = pathtracer::debug::kBenchSamples;
     // The scramble seed is one realization, not a sampler property: two seeds give independent error images with the same expected RMSE.
     std::uint32_t scrambleSeed = 1;
-    float exposureEv = 0.0F;
+    float exposureEv = 0.0F;  // stops over the camera's own SOS exposure
     // -1 uses the scene's authored environment.lightEnabled; 0/1 override it, so an env-off Cornell capture needs no second scene.json.
     int envLight = -1;
     // Gate modes set a non-zero exit code, which is what makes them ctest entries; the reporting paths above deliberately do not.
@@ -575,10 +575,8 @@ int main(int argc, char** argv) {
     const pathtracer::debug::AovDisplay prepared = pathtracer::debug::aovDisplay(
         options.aov, accumulated, {options.passes, renderer->baseSettings().maxBounces, renderer->lastDepthMax()});
     pathtracer::debug::BipolarDisplay display = prepared.affine;
-    // The photographic exposure, which only the caller knows; aovDisplay leaves the gain at unity for every AOV that takes one.
-    if (pathtracer::debug::aovTakesDisplayExposure(options.aov)) {
-        display.gain = glm::vec3(std::pow(2.0F, options.exposureEv));
-    }
+    // The photographic exposure, which only the caller knows: the camera's SOS gain on cd/m^2, trimmed by --exposure stops.
+    display.gain *= pathtracer::debug::aovExposureGain(options.aov, camera.exposureGain() * std::pow(2.0F, options.exposureEv));
     // The shared encode takes packed RGB, so expand each texel exactly as the viewer's texture swizzle does.
     const pathtracer::gfx::HdrImage& source = prepared.mapped.texels.empty() ? accumulated : prepared.mapped;
     const std::size_t pixels = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);

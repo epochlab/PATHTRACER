@@ -17,6 +17,7 @@
 
 #include "check.h"
 #include "stats.h"
+#include "pathtracer/debug/hud_overlay.h"
 #include "pathtracer/gfx/pixel_lattice.h"
 #include "pathtracer/scene/camera.h"
 #include "pathtracer/scene/debug_camera_controller.h"
@@ -767,6 +768,7 @@ PT_CHECK(camera_validate_rejects_each_invalid_parameter, Fast, Exact) {
         {"aperture inf", with([&](CameraArgs& a) { a.aperture = kInf; }), false},
         {"aperture 1e30, EV100 overflows", with([](CameraArgs& a) { a.aperture = 1e30F; }), false},
         {"aperture 1e-30, EV100 underflows", with([](CameraArgs& a) { a.aperture = 1e-30F; }), false},
+        {"aperture 1e-20, EV100 finite but the display gain overflows", with([](CameraArgs& a) { a.aperture = 1e-20F; }), false},
         {"shutter 0", with([](CameraArgs& a) { a.shutterSeconds = 0.0F; }), false},
         {"shutter -0.008", with([](CameraArgs& a) { a.shutterSeconds = -0.008F; }), false},
         {"shutter NaN", with([&](CameraArgs& a) { a.shutterSeconds = kNaN; }), false},
@@ -797,6 +799,47 @@ PT_CHECK(camera_validate_rejects_each_invalid_parameter, Fast, Exact) {
         PT_EXPECT(ctx, accepted == row.accepted && error.empty() == accepted,
                   std::string(row.name) + (accepted ? " was accepted" : " was rejected: " + error));
     }
+}
+
+// SOS against values worked by hand from the standards: q = (pi/4) 0.9 0.98 cos^4(10 deg), sRGB code 118, and ISO 2720's K = 12.5.
+PT_CHECK(sos_gain_and_meter_follow_iso_12232_and_2720, Fast, Exact) {
+    // Hand-computed in double: q = 0.6515748345 and code 118's linear level 0.1811642442, so their product at t S / N^2 = 10.
+    constexpr double kLevelTimesQ = 0.1811642442 * 0.6515748345;
+    // Float arguments round each operand by u: a bound of a few ulps over the exact quotient.
+    constexpr double kTolerance = 4.0 * std::numeric_limits<float>::epsilon();
+    const auto near = [&](double got, double want) { return std::abs(got - want) <= kTolerance * want; };
+    ctx.plan(6);
+    PT_EXPECT(ctx, near(Camera::exposureGain(1.0F, 1.0F, 10.0F), kLevelTimesQ),
+              "at H = q L / 1 lx s per cd/m^2 and S = 10, H_SOS = 1 lx s must render at code 118: gain q * level");
+    PT_EXPECT(ctx, near(Camera::exposureGain(2.8F, 0.008F, 400.0F), kLevelTimesQ * 0.008 * 400.0 / (10.0 * 2.8 * 2.8)),
+              "the profile's f/2.8, 1/125 s, ISO 400 gain departs from 0.004818043");
+    const float shutter = 0.008F;
+    PT_EXPECT(ctx, Camera::exposureGain(2.8F, 2.0F * shutter, 400.0F) == 2.0F * Camera::exposureGain(2.8F, shutter, 400.0F) &&
+                       Camera::exposureGain(2.8F, shutter, 800.0F) == 2.0F * Camera::exposureGain(2.8F, shutter, 400.0F),
+              "doubling the shutter or the ISO must double the gain exactly: one stop is one stop");
+    PT_EXPECT(ctx, Camera::meterEv100(0.125F) == 0.0F && Camera::meterEv100(1.0F) == 3.0F,
+              "a spot meter at K = 12.5 reads EV100 0 at 0.125 cd/m^2 and 3 at 1 cd/m^2");
+    // Sunny 16: f/16 at 1/128 s, ISO 100 is EV100 15, which a K = 12.5 meter sets for 2^15 * 12.5 / 100 = 4096 cd/m^2.
+    PT_EXPECT(ctx, Camera::ev100(16.0F, 1.0F / 128.0F, 100.0F) == 15.0F && Camera::meterEv100(4096.0F) == 15.0F,
+              "sunny 16 is not EV100 15, or 4096 cd/m^2 does not meter to it");
+    // Metered at the camera's own EV100, a surface lands at level q K / 10 = 0.14755, the 0.3 stops SOS keeps below code 118.
+    PT_EXPECT(ctx, near(Camera::exposureGain(16.0F, 1.0F / 128.0F, 100.0F) * 4096.0, kLevelTimesQ * 12.5 / 10.0),
+              "a surface metered at the camera's EV100 does not render at q K level / 10 = 0.14755");
+}
+
+// The over-range readout bins clip luminances 1/gain: every corner of the HUD's exposure sliders must fall strictly inside its window.
+PT_CHECK(over_range_window_covers_every_hud_exposure, Fast, Exact) {
+    using pathtracer::debug::kApertureSlider;
+    using pathtracer::debug::kIsoSlider;
+    using pathtracer::debug::kShutterSecondsSlider;
+    ctx.plan(2);
+    // Brightest: wide open, slowest, most sensitive; darkest: the opposite corner. The gain is monotone in each, so these bound it.
+    const float lowestClip = 1.0F / Camera::exposureGain(kApertureSlider.min, kShutterSecondsSlider.max, kIsoSlider.max);
+    const float highestClip = 1.0F / Camera::exposureGain(kApertureSlider.max, kShutterSecondsSlider.min, kIsoSlider.min);
+    PT_EXPECT(ctx, pathtracer::scene::overRangeBin(lowestClip) > 0,
+              "f/1, 1 s, ISO 6400 clips at " + std::to_string(lowestClip) + " cd/m^2, below the readout's first bin");
+    PT_EXPECT(ctx, pathtracer::scene::overRangeBin(highestClip) < pathtracer::scene::kOverRangeBinCount - 1,
+              "f/22, 1/4000 s, ISO 50 clips at " + std::to_string(highestClip) + " cd/m^2, above the readout's last bin");
 }
 
 // The basis is the rotation's columns, right +X, up +Y, forward -Z: orthonormal and right-handed for every finite triple.

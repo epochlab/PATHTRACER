@@ -7,6 +7,7 @@
 #include <glm/glm.hpp>
 
 #include "pathtracer/debug/denoiser.h"
+#include "pathtracer/debug/hud_overlay.h"
 #include "pathtracer/gfx/ocio_display_transform.h"
 #include "pathtracer/gfx/scalar_type.h"
 #include "pathtracer/scene/camera.h"
@@ -52,6 +53,7 @@ struct RenderConfig {
     pathtracer::gfx::ScalarType displayFormat;
     // The glare PSF's scattered fraction in [0,1], 0 = off: the HUD Bloom slider's starting value, applied to picture AOVs only.
     float bloomStrength;
+    pathtracer::debug::PixelProbeReadout pixelProbe;  // profile.json "colour", "photometric" or "none"
 };
 
 struct PathTracerConfig {

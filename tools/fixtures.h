@@ -88,9 +88,10 @@ inline std::shared_ptr<const pathtracer::gfx::ImageTexture> makeTexture(
 }
 
 // An equirect environment of interleaved RGB test radiance, through the same texture path a scene's HDRI takes.
-inline pathtracer::scene::EnvironmentMap makeEnvironment(int width, int height, std::vector<float> rgb) {
+inline pathtracer::scene::EnvironmentMap makeEnvironment(int width, int height, std::vector<float> rgb,
+                                                         std::optional<float> illuminanceLux = std::nullopt) {
     return pathtracer::scene::EnvironmentMap(
-        makeTexture(width, height, pathtracer::gfx::kRgbChannels, std::move(rgb), pathtracer::gfx::TextureWrap::LatLong));
+        makeTexture(width, height, pathtracer::gfx::kRgbChannels, std::move(rgb), pathtracer::gfx::TextureWrap::LatLong), illuminanceLux);
 }
 
 // Uniform-radiance (L0 = 1) equirect environment: a real image, so EnvironmentMap's CDFs run their normal path, not the all-black fallback.

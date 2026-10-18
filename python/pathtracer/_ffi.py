@@ -18,7 +18,7 @@ _ERROR_CAPACITY = 512
 PT_DEFAULT = -1
 
 # PT_ABI_VERSION in pathtracer_c.h. PtCamera and PtRenderRequest cross the boundary by value, so a layout drift must fail loudly.
-PT_ABI_VERSION = 10
+PT_ABI_VERSION = 11
 
 # PtCamera.lens_projection, PT_LENS_* in pathtracer_c.h. Index-parallel with LENS_PROJECTIONS in __init__.py.
 PT_LENS_RECTILINEAR = 0
@@ -147,6 +147,7 @@ def load_library() -> ctypes.CDLL:
         ctypes.POINTER(ctypes.c_float),
         ctypes.c_int,
         ctypes.c_int,
+        ctypes.POINTER(PtCamera),
         ctypes.c_float,
         ctypes.c_int,
         ctypes.POINTER(ctypes.c_ubyte),
@@ -154,6 +155,11 @@ def load_library() -> ctypes.CDLL:
         ctypes.c_int,
     ]
     library.pt_display_encode.restype = ctypes.c_int
+    for exposure in (library.pt_exposure_gain, library.pt_ev100):
+        exposure.argtypes = [ctypes.c_float, ctypes.c_float, ctypes.c_float]
+        exposure.restype = ctypes.c_float
+    library.pt_meter_ev100.argtypes = [ctypes.c_float]
+    library.pt_meter_ev100.restype = ctypes.c_float
 
     library.pt_lattice_preview.argtypes = [
         ctypes.POINTER(ctypes.c_float),

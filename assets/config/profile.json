@@ -30,7 +30,8 @@
         "defaultLUT": "sRGB",
         "vsync": true,
         "displayBitDepth": 16,
-        "bloomStrength": 0.0
+        "bloomStrength": 0.0,
+        "pixelProbe": "colour"
     },
     "pathTracer": {
         "samplesPerPixel": 1,

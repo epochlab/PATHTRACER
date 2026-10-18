@@ -63,7 +63,7 @@ from pathtracer import Renderer
 renderer = Renderer("scenes/cornell.json")
 frame = renderer.render(aovs=("beauty", "depth", "normal"), width=128, height=64, samples=8, seed=1)
 
-frame["beauty"]   # (64, 128, 3) float32, linear ACEScg radiance
+frame["beauty"]   # (64, 128, 3) float32, linear ACEScg radiance, luminance in cd/m^2
 frame["depth"]    # (64, 128, 1) float32, camera-space Z
 ```
 
@@ -89,7 +89,6 @@ Capability the renderer lacks, most valuable first.
 | Sampling | Foveated sampling | Spend fewer samples away from where the viewer is looking, by loosening each pixel's noise target with its distance from the gaze point (Guenter et al. 2012; Koskela et al. 2019). Needs a gaze input and the viewing distance, to turn pixels into degrees of vision. | medium | ready |
 | Camera | Scene graph and instancing | Every copy of an object is stored separately. Keeping objects in a hierarchy would let copies share memory and enable motion blur. | high | ready |
 | Transport | Volume emission | Media that glow, such as fire or a lit gas, gathered where a ray collides inside them. OpenPBR's surface has no such input, so it would be a volume material key. | medium | ready |
-| Colour | Photometric calibration | Link the renderer's light values to real units (lux, candela), so exposure can be checked against a real light meter. | medium | ready |
 | Camera | Lens model | Most fisheye lenses are only approximated and lose accuracy near the edge. Real cameras also need an off-centre lens and non-square pixels. | medium | ready |
 
 ### Parked
@@ -105,4 +104,4 @@ Refinements, speculative or blocked; not scheduled.
 | Camera | Anamorphic and distortion | Stretched widescreen lenses and real lens distortion. Each needs an inverse to keep motion vectors and texture filtering right. | high | ready |
 | Camera | Multi-viewpoint compound eyes | Facets share one viewpoint and one acceptance angle. CompoundRay (Millward et al. 2022) places each on its own eye surface with its own axis and angle, from measured eye data. | high | ready |
 | Camera | Subdivision surfaces | Smooth curved surfaces from coarse meshes, subdivided at load. Needs a scene-file flag and waits for the scene graph. | high | blocked |
-| AOV | Contrast sensitivity | An output showing which detail a human can actually see. Needs brightness in real units, so it waits for photometric calibration. | high | blocked |
+| AOV | Contrast sensitivity | An output showing which detail a human can actually see, from the beauty's luminance in cd/m^2. | high | ready |

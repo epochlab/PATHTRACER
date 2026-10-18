@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 
 from pathtracer import (AOVS, LENS_PROJECTIONS, PIXEL_LATTICES, Renderer, aov_channels, aov_needs_samples, display_encode,
-                        lattice_preview)
+                        lattice_preview, meter_ev100)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCENE = "scenes/cornell.json"
@@ -473,6 +473,36 @@ def test_display_encode_exposure_is_a_stop() -> None:
     linear = np.full((1, 1, 3), 0.1, dtype=np.float32)
     assert abs(int(display_encode(linear, exposure_ev=1.0)[0, 0, 0]) -
                int(display_encode(np.full((1, 1, 3), 0.2, dtype=np.float32))[0, 0, 0])) <= 1
+
+
+def test_display_encode_exposes_by_the_camera(renderer: Renderer) -> None:
+    """ISO 12232 SOS: the luminance whose image-plane exposure is 10/S lx s, at the camera's own gain, encodes as code 118."""
+    camera = renderer.default_camera
+    q = math.pi / 4.0 * 0.9 * 0.98 * math.cos(math.pi / 18.0) ** 4
+    luminance = 10.0 * camera.aperture ** 2 / (q * camera.shutter_seconds * camera.iso)
+    encoded = display_encode(np.full((64, 64, 3), luminance, dtype=np.float32), camera=camera)
+    assert abs(float(encoded.mean()) - 118.0) <= 0.5
+
+
+def test_display_encode_camera_is_the_gain_times_the_trim(renderer: Renderer) -> None:
+    """camera= and exposure_ev compose as one product, render_beauty's, so the bytes match a pre-multiplied raw encode."""
+    camera = renderer.default_camera
+    linear = np.linspace(0.0, 400.0, 48, dtype=np.float32).repeat(3).reshape(4, 12, 3)
+    premultiplied = linear * np.float32(np.float32(camera.exposure_gain) * np.float32(2.0))
+    assert np.array_equal(display_encode(linear, camera=camera, exposure_ev=1.0), display_encode(premultiplied))
+
+
+def test_display_encode_rejects_an_invalid_camera_by_name(renderer: Renderer) -> None:
+    camera = dataclasses.replace(renderer.default_camera, aperture=math.nan)
+    with pytest.raises(RuntimeError, match="aperture"):
+        display_encode(np.zeros((2, 2, 3), dtype=np.float32), camera=camera)
+
+
+def test_meter_and_camera_agree_at_sunny_16(renderer: Renderer) -> None:
+    """f/16, 1/128 s, ISO 100 is EV100 15, which a K = 12.5 spot meter reads off 4096 cd/m^2."""
+    sunny = dataclasses.replace(renderer.default_camera, aperture=16.0, shutter_seconds=1.0 / 128.0, iso=100.0)
+    assert sunny.ev100 == 15.0 and meter_ev100(4096.0) == 15.0
+    assert meter_ev100(0.125) == 0.0
 
 
 def test_display_encode_without_transform_is_linear() -> None:

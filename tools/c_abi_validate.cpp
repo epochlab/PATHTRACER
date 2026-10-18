@@ -453,20 +453,67 @@ PT_CHECK(display_encode_boundary, Fast, Exact) {
     std::fill(rgb.begin(), rgb.begin() + (kBytes / 2), -1.0F);
     std::vector<unsigned char> out(static_cast<std::size_t>(kBytes) + kGuardCount, kGuardByte);
     std::vector<char> err(kErrorCapacity, '\0');
-    PT_EXPECT(ctx, pt_display_encode(rgb.data(), kW, kH, 0.0F, 0, out.data(), err.data(), kErrorCapacity) == PT_OK,
+    PT_EXPECT(ctx, pt_display_encode(rgb.data(), kW, kH, nullptr, 0.0F, 0, out.data(), err.data(), kErrorCapacity) == PT_OK,
               std::string("encode failed: ") + err.data());
     PT_EXPECT(ctx, allBytes(out.begin(), out.begin() + (kBytes / 2), 0) && allBytes(out.begin() + (kBytes / 2), out.begin() + kBytes, 255),
               "-1 must encode to 0 and 4 to 255 exactly");
     PT_EXPECT(ctx, allBytes(out.begin() + kBytes, out.end(), kGuardByte), "wrote past width * height * 3 bytes");
     std::vector<unsigned char> untouched(static_cast<std::size_t>(kBytes), kGuardByte);
     const auto encode = [&](const float* in, int width, int height, unsigned char* to) {
-        return pt_display_encode(in, width, height, 0.0F, 1, to, err.data(), kErrorCapacity);
+        return pt_display_encode(in, width, height, nullptr, 0.0F, 1, to, err.data(), kErrorCapacity);
     };
     const bool rejected = encode(nullptr, kW, kH, untouched.data()) == PT_ERROR && encode(rgb.data(), kW, kH, nullptr) == PT_ERROR &&
                           encode(rgb.data(), 0, kH, untouched.data()) == PT_ERROR &&
                           encode(rgb.data(), kW, -1, untouched.data()) == PT_ERROR;
     PT_EXPECT(ctx, rejected && allBytes(untouched.begin(), untouched.end(), kGuardByte),
               "null buffers and non-positive extents must fail without writing");
+}
+
+// A camera's SOS gain times 2^ev is render_beauty's product: its bytes are a NULL-camera encode of the image pre-multiplied by it.
+PT_CHECK(display_encode_applies_the_camera_exposure, Fast, Exact) {
+    ctx.plan(4);
+    constexpr int kW = 8;
+    constexpr int kH = 2;
+    constexpr std::size_t kCount = static_cast<std::size_t>(kW * kH * 3);
+    PtCamera camera{};
+    camera.film_back_mm[0] = 36.0F;
+    camera.film_back_mm[1] = 24.0F;
+    camera.focal_length_mm = 50.0F;
+    camera.near_clip = 0.01F;
+    camera.far_clip = 100.0F;
+    camera.aperture = 2.8F;
+    camera.shutter_seconds = 0.008F;
+    camera.iso = 400.0F;
+    camera.fisheye_field_of_view_degrees = 180.0F;
+    // Luminances spanning the exposure's range, in cd/m^2: the camera brings each into display range.
+    std::vector<float> rgb(kCount);
+    for (std::size_t i = 0; i < kCount; ++i) {
+        rgb[i] = 5.0F * static_cast<float>(i);
+    }
+    const float gain = pt_exposure_gain(camera.aperture, camera.shutter_seconds, camera.iso) * 2.0F;
+    std::vector<float> premultiplied(kCount);
+    std::transform(rgb.begin(), rgb.end(), premultiplied.begin(), [gain](float value) { return value * gain; });
+    std::vector<unsigned char> exposed(kCount);
+    std::vector<unsigned char> reference(kCount);
+    std::vector<char> err(kErrorCapacity, '\0');
+    const bool encoded = pt_display_encode(rgb.data(), kW, kH, &camera, 1.0F, 1, exposed.data(), err.data(), kErrorCapacity) == PT_OK &&
+                         pt_display_encode(premultiplied.data(), kW, kH, nullptr, 0.0F, 1, reference.data(), err.data(),
+                                           kErrorCapacity) == PT_OK;
+    PT_EXPECT(ctx, encoded && exposed == reference, std::string("the camera's exposure is not the gain times 2^ev: ") + err.data());
+    PtCamera invalid = camera;
+    invalid.aperture = std::numeric_limits<float>::quiet_NaN();
+    std::vector<unsigned char> untouched(kCount, kGuardByte);
+    const bool rejected =
+        pt_display_encode(rgb.data(), kW, kH, &invalid, 0.0F, 1, untouched.data(), err.data(), kErrorCapacity) == PT_ERROR;
+    PT_EXPECT(ctx, rejected && std::string_view(err.data()).find("aperture") != std::string_view::npos &&
+                       allBytes(untouched.begin(), untouched.end(), kGuardByte),
+              std::string("an invalid camera must fail by name without writing: ") + err.data());
+    // f/16, 1/128 s, ISO 100 is EV100 15 exactly, and a K = 12.5 meter reads 4096 cd/m^2 there.
+    PT_EXPECT(ctx, pt_ev100(16.0F, 1.0F / 128.0F, 100.0F) == 15.0F && pt_meter_ev100(4096.0F) == 15.0F,
+              "pt_ev100 or pt_meter_ev100 misses sunny 16's EV100 15");
+    // 0.1811642442 * 0.6515748345 * 0.008 * 400 / (10 * 2.8^2), worked by hand from ISO 12232's SOS and nominal lens.
+    PT_EXPECT(ctx, std::abs(pt_exposure_gain(2.8F, 0.008F, 400.0F) - 0.004818043F) <= 4e-6F * 0.004818043F,
+              "pt_exposure_gain at f/2.8, 1/125 s, ISO 400 departs from 0.004818043");
 }
 
 // One texel per square pixel copies through exactly and no further; null buffers, empty extents and unknown lattices write nothing.

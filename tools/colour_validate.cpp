@@ -123,7 +123,7 @@ PT_CHECK(blackbody_reproduces_illuminant_a, Fast, Exact) {
     PT_EXPECT(ctx, error <= 5e-5, detail);
 }
 
-// Unit luminance makes intensity mean the same for a temperature as for color [1, 1, 1]; outside the gamut or domain is refused.
+// Unit luminance makes a light's luminance its meter reading whatever its temperature; outside the gamut or domain is refused.
 PT_CHECK(blackbody_has_unit_luminance_and_refuses_outside_the_scene_gamut, Fast, Exact) {
     constexpr std::array<double, 7> kInGamut{1000.0, 2000.0, 2856.0, 4000.0, 6504.0, 10000.0, 1e6};
     constexpr std::array<double, 5> kRefused{0.0, -2856.0, 500.0, std::numeric_limits<double>::infinity(),

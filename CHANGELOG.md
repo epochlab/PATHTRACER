@@ -3,6 +3,41 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Photometric calibration
+
+Light values are now real units, so a render's exposure can be checked against a real light meter. One scene-linear luminance unit
+is 1 cd/m^2, the unit `emission_luminance` already used. The camera's aperture, shutter and ISO set an absolute exposure, as a
+digital camera's do, instead of one relative to the profile's default.
+- **Exposure:** ISO 12232:2019 standard output sensitivity. Image-plane exposure is H = q L t / N^2 lx s, with the standard's
+  nominal lens q = (pi/4) 0.9 0.98 cos^4(10 deg) = 0.6516. H = 10/S renders at the linear level of sRGB code 118 (0.1812).
+  The display gain is `Camera::exposureGain()`, and `Camera::validate` refuses a camera whose gain is not finite.
+- **Lights (breaking):** `intensity` is refused by name. Each light takes exactly one of `luminance` (cd/m^2) or `lumens`. A flux
+  resolves over the placed emitting area as L = Phi / (pi A sides): a quad's w h, a disk's pi r^2, a sphere's 4 pi r^2, or a
+  mesh's summed triangles after its `scale`. An authored `color` is normalised to unit luminance, as `temperature` already was,
+  so the key alone carries the meter quantity. A black colour is refused.
+- **Environment:** optional `environment.lux` (illuminance, lm/m^2) scales the map until an upward plane in its frame receives that much.
+  The divisor is the texels' own E = sum Y cos(theta) dOmega over the upper hemisphere, exact per row for piecewise-constant
+  texels. Absent, texels read as cd/m^2. The HUD's HDRI slider stays a relative trim.
+- **Meter:** the HUD shows the camera's EV100 under ISO. `profile.json` `render.pixelProbe` selects the pixel probe's readout:
+  `colour` (RGBA, as before), `photometric` (the picture texel's luminance and a reflected spot-meter EV100, ISO 2720 with
+  K = 12.5, beside the camera's), or `none` (neither sampled nor drawn). A surface metered at the camera's EV100 renders at
+  0.1476, 0.3 stop under code 118, as a real SOS camera does.
+- **API (ABI 11):** `pt_display_encode` takes a `const PtCamera*` before `exposure_ev`, and its gain is the camera's (1 if NULL)
+  times 2^ev, render_beauty's product. New `pt_exposure_gain`, `pt_ev100` and `pt_meter_ev100`. Python adds
+  `display_encode(camera=)`, `Camera.exposure_gain`, `Camera.ev100` and `meter_ev100`. `render_beauty --exposure` is now
+  stops over the camera's exposure.
+- **Migration:** every scene is re-expressed at the profile's f/2.8, 1/125 s, ISO 400 (k = 1/gain = 207.55), so its picture is
+  unchanged. Cornell's panel is 880.3 lm, cloud's sky panel 3.707e8 lm, the republique sky 405.6 lx, and `emission.json`
+  207.6 cd/m^2.
+- **Display headroom:** the viewer uploads its texture pre-exposed per lane (`Texture::upload` laneScale) and divides the upload's
+  gain back out per frame. So binary16 still holds 65504 times display white, not 65504 cd/m^2, and the exposure slider never
+  re-uploads. HSV's value lane takes the exposure; hue and saturation do not.
+- **Over-range:** the readout's window is the clip luminance's 2^-8 to 2^24 cd/m^2, which holds every HUD exposure. That is still
+  32 stops, so the bin count is unchanged.
+- **Tests:** SOS and meter pins against hand-worked standard values, including sunny 16. Code 118 end to end through OCIO.
+  Lumens over every shape's placed area. Disks and spheres at 100 lm against Howell's form factors. A calibrated sky against
+  E/pi, the upward cosine integral with an odd-height horizon row, rejection of each malformed key, and C and Python parity.
+
 ## Sample Count AOV
 
 `sampleCount` / "Sample Count" (38 AOVs): the passes each texel averages. Under adaptive sampling it shows where the stopping rule

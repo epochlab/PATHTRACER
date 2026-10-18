@@ -27,6 +27,7 @@ struct EnvironmentConfig {
     // Whether the environment is a light (NEE, MIS, contributing to every miss) rather than just the background. Optional, default true.
     bool lightEnabled = true;
     std::optional<std::string> colorSpace;  // the map's OCIO colour space, overriding its file's tag. Optional
+    std::optional<float> illuminanceLux;  // lux on an upward plane in the map's frame its texels are scaled to; absent reads them as cd/m^2
 };
 
 // A height map supplying a normal input by bump: the image and the world-space height, in metres, of one unit of its value.
@@ -64,13 +65,23 @@ struct MeshShape {
     float scale = 1.0F;    // optional, default 1; loadSceneConfig rejects a non-positive one
 };
 
-// An area light centred on its local origin, color * intensity leaving along local -Z (quad, disk), outward (sphere) or each face's front.
+// Luminance in cd/m^2 at every emitting point, the scene-linear unit.
+struct Luminance {
+    float candelasPerSquareMetre;
+};
+
+// A Lambertian emitter's luminous flux; buildLights resolves it to Phi / (pi A sides) over the placed emitting area.
+struct LuminousFlux {
+    float lumens;
+};
+
+// An area light centred on its local origin, color * luminance leaving along local -Z (quad, disk), outward (sphere) or each face's front.
 struct LightConfig {
     glm::vec3 position;  // the shape's centre, before the model root transform
     glm::vec3 rotation;  // degrees; Rz*Ry*Rx as ModelConfig::rotation, so X applies first
     std::variant<QuadShape, DiskShape, SphereShape, MeshShape> shape;
-    glm::vec3 color;  // authored, or resolved from a kelvin temperature at unit luminance; loadSceneConfig rejects a negative one
-    float intensity;
+    glm::vec3 color;  // unit luminance: an authored colour over its own luminance, or a kelvin temperature's blackbody
+    std::variant<Luminance, LuminousFlux> emission;  // exactly one of scene.json's luminance or lumens, positive
     bool twoSided = false;  // a sphere's stays false
 };
 

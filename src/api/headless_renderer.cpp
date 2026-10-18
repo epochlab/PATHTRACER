@@ -296,19 +296,24 @@ std::unique_ptr<HeadlessRenderer> HeadlessRenderer::open(const std::string& asse
         return nullptr;
     }
 
+    pathtracer::scene::EnvironmentMap environmentMap(std::move(inputs->environmentTexture), scene.environment.illuminanceLux);
+    if (scene.environment.illuminanceLux && !(environmentMap.upwardIlluminance() > 0.0F)) {
+        error = "environment.lux needs a map with light above its horizon";
+        return nullptr;
+    }
+
     // One sample per pass: convergence comes from accumulating passes, as the driver and render_beauty both drive the integrator.
     const pathtracer::scene::PathTraceSettings baseSettings = pathtracer::scene::baseSettingsOf(inputs->profile, /*samplesPerPixel=*/1);
 
     return std::unique_ptr<HeadlessRenderer>(new HeadlessRenderer(
         assetRoot, std::move(inputs->profile), std::move(inputs->scene), std::move(*geometry), std::move(*volumes),
-        baseSettings, std::move(inputs->environmentTexture), *camera));
+        baseSettings, std::move(environmentMap), *camera));
 }
 
 HeadlessRenderer::HeadlessRenderer(std::string assetRoot, pathtracer::config::ProfileConfig profile,
                                    pathtracer::config::SceneConfig scene, Geometry geometry, pathtracer::scene::VolumeSet volumes,
                                    pathtracer::scene::PathTraceSettings baseSettings,
-                                   std::shared_ptr<const pathtracer::gfx::ImageTexture> environmentTexture,
-                                   const pathtracer::scene::Camera& defaultCamera)
+                                   pathtracer::scene::EnvironmentMap environmentMap, const pathtracer::scene::Camera& defaultCamera)
     : assetRoot_(std::move(assetRoot)),
       profile_(std::move(profile)),
       scene_(std::move(scene)),
@@ -317,7 +322,7 @@ HeadlessRenderer::HeadlessRenderer(std::string assetRoot, pathtracer::config::Pr
       builtRootRotationDegrees_(scene_.model.rotation),
       builtLightRotationsDegrees_(rotationsOf(scene_.lights)),
       baseSettings_(baseSettings),
-      environmentMap_(std::move(environmentTexture)),
+      environmentMap_(std::move(environmentMap)),
       defaultCamera_(defaultCamera) {}
 
 HeadlessRenderer::~HeadlessRenderer() = default;
@@ -409,7 +414,8 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
     }
     // Radiance is all a light's colour reaches and selection is uniform, so a new colour rewrites it here and never the BVH.
     for (std::size_t i = 0; i < colours->size(); ++i) {
-        std::visit([&](auto& light) { light.radiance = (*colours)[i] * scene_.lights[i].intensity; }, geometry_.lights[i]);
+        const float luminance = pathtracer::scene::emittedLuminance(scene_.lights[i], geometry_.lights[i]);
+        std::visit([&](auto& light) { light.radiance = (*colours)[i] * luminance; }, geometry_.lights[i]);
     }
     const bool wantsFilter = requestsSource(request.aovs, AovSource::BeautyFilter);
     resizeBuffers(request.width, request.height);

@@ -136,9 +136,12 @@ struct AovDisplay {
 // One call per rebuilt pass, never per frame. The photographic exposure stays with the caller: it changes without a re-upload.
 [[nodiscard]] AovDisplay aovDisplay(AovId aov, const pathtracer::gfx::HdrImage& image, const AovDisplayContext& context);
 
-// True where the display's gain is the photographic exposure: degree one in radiance, and not already auto-ranged by aovDisplay.
-[[nodiscard]] inline bool aovTakesDisplayExposure(AovId aov) {
-    return aovCarriesRadiance(aov) && !aovIsBipolar(aov);
+// Per-lane display gain from the photographic exposure: every lane of unsigned radiance, HSV's scene-referred value alone, else 1.
+[[nodiscard]] inline glm::vec3 aovExposureGain(AovId aov, float exposure) {
+    if (aov == AovId::HSV) {
+        return {1.0F, 1.0F, exposure};
+    }
+    return glm::vec3(aovCarriesRadiance(aov) && !aovIsBipolar(aov) ? exposure : 1.0F);
 }
 
 // True for AOVs needing light transport, false for the 14 primary-hit ones. Derived from aovSource, so the two cannot drift apart.

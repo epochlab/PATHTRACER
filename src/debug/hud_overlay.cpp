@@ -240,12 +240,13 @@ void drawCameraSection(const HudFrameData& frame, float& focalLengthMm, float& a
     // A facet's half-maximum width over its whole domain, logarithmic so the degree-scale acceptance of real insect eyes gets the travel.
     ImGui::SliderFloat("##acceptanceAngle", &acceptanceAngleDegrees, 0.0F, 360.0F, "Acceptance  %.2f deg", ImGuiSliderFlags_Logarithmic);
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-    ImGui::SliderFloat("##aperture", &aperture, 1.0F, 22.0F, "Aperture  f/%.1f");
+    ImGui::SliderFloat("##aperture", &aperture, kApertureSlider.min, kApertureSlider.max, "Aperture  f/%.1f");
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-    ImGui::SliderFloat("##shutterSeconds", &shutterSeconds, 1.0F / 4000.0F, 1.0F,
+    ImGui::SliderFloat("##shutterSeconds", &shutterSeconds, kShutterSecondsSlider.min, kShutterSecondsSlider.max,
                         "Shutter  %.4f s", ImGuiSliderFlags_Logarithmic);
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-    ImGui::SliderFloat("##iso", &iso, 50.0F, 6400.0F, "ISO  %.0f", ImGuiSliderFlags_Logarithmic);
+    ImGui::SliderFloat("##iso", &iso, kIsoSlider.min, kIsoSlider.max, "ISO  %.0f", ImGuiSliderFlags_Logarithmic);
+    ImGui::Text("EV100  %.2f", frame.camera.ev100());
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
     // Beauty only -- main.cpp zeroes this elsewhere -- ranged so the full sweep stays a lens effect rather than an unreadable smear.
     ImGui::SliderFloat("##aberrationStrength", &aberrationStrength, 0.0F, 0.05F, "Aberration  %.3f");
@@ -273,7 +274,7 @@ void drawHdriSection(bool& showSky, bool& envLightEnabled, int& envRotationDegre
 }
 
 // Bottom-right, pinned via (1,1) pivot. Swatch + RGBA to 3dp; blank if !pixelProbe.valid.
-void drawPixelProbePanel(const PixelProbeSample& pixelProbe) {
+void drawPixelProbePanel(const PixelProbeSample& pixelProbe, PixelProbeReadout readout, float cameraEv100) {
     const ImVec2 displaySize = ImGui::GetIO().DisplaySize;
     ImGui::SetNextWindowPos(ImVec2(displaySize.x - 8.0F, displaySize.y - 8.0F), ImGuiCond_Always,
                              ImVec2(1.0F, 1.0F));
@@ -289,10 +290,18 @@ void drawPixelProbePanel(const PixelProbeSample& pixelProbe) {
                         ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoBorder,
                         ImVec2(14.0F, 14.0F));
     ImGui::SameLine();
-    if (pixelProbe.valid) {
-        ImGui::Text("R %.3f  G %.3f  B %.3f  A %.3f", color.r, color.g, color.b, color.a);
+    if (readout == PixelProbeReadout::Colour) {
+        if (pixelProbe.valid) {
+            ImGui::Text("R %.3f  G %.3f  B %.3f  A %.3f", color.r, color.g, color.b, color.a);
+        } else {
+            ImGui::TextDisabled("R --   G --   B --   A --");
+        }
+    // A spot meter on the texel: its reading against the camera's EV100 is the stops a real meter would set the exposure off by.
+    } else if (pixelProbe.luminance.has_value() && *pixelProbe.luminance > 0.0F) {
+        ImGui::Text("L %.4g cd/m^2  Spot EV100 %.2f  Camera %.2f", *pixelProbe.luminance,
+                    pathtracer::scene::Camera::meterEv100(*pixelProbe.luminance), cameraEv100);
     } else {
-        ImGui::TextDisabled("R --   G --   B --   A --");
+        ImGui::TextDisabled("L --  Spot EV100 --  Camera %.2f", cameraEv100);
     }
 
     const ImVec2 windowMin = ImGui::GetWindowPos();
@@ -406,7 +415,9 @@ void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm,
 
     drawChannelViewCorner(frame.channelView);
     drawFramingOverlays(framing, ImGui::GetIO().DisplaySize);
-    drawPixelProbePanel(pixelProbe);
+    if (frame.pixelProbeReadout != PixelProbeReadout::None) {
+        drawPixelProbePanel(pixelProbe, frame.pixelProbeReadout, frame.camera.ev100());
+    }
 }
 
 void HudOverlay::render() const {

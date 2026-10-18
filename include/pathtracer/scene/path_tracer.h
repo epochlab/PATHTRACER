@@ -75,14 +75,15 @@ struct PathTraceSettings {
     AdaptiveSampling adaptive;
 };
 
-// Stops either side of unity the readout is exact over: the next binade above the +/-13.95 EV the exposure controls reach.
-inline constexpr int kOverRangeEvRadius = 16;
-inline constexpr float kOverRangeMin = 1.0F / static_cast<float>(1U << kOverRangeEvRadius);
+// Clip luminances the readout is exact over, log2 cd/m^2: the HUD exposures clip at 2^-6.24 to 2^21.65, with over a binade spare.
+inline constexpr int kOverRangeMinEv = -8;
+inline constexpr int kOverRangeMaxEv = 24;
+inline constexpr float kOverRangeMin = 1.0F / static_cast<float>(1U << -kOverRangeMinEv);
 
 // Mantissa bits above the shift, 1024 bins/stop. Error 2.6/0.65/0.18/0.047 pp at 4/6/8/10 bits, cornell 2048x1152.
 inline constexpr int kOverRangeSubBinBits = 10;
 inline constexpr int kOverRangeBinShift = 23 - kOverRangeSubBinBits;  // float32 carries 23 mantissa bits
-inline constexpr int kOverRangeBinCount = 2 * kOverRangeEvRadius * (1 << kOverRangeSubBinBits);
+inline constexpr int kOverRangeBinCount = (kOverRangeMaxEv - kOverRangeMinEv) * (1 << kOverRangeSubBinBits);
 inline constexpr int kOverRangeBinOrigin =
     static_cast<int>(std::bit_cast<std::uint32_t>(kOverRangeMin) >> kOverRangeBinShift);
 

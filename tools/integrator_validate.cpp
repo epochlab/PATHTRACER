@@ -1304,7 +1304,7 @@ PT_CHECK(quad_light_placement, Fast, Exact) {
         glm::vec3 expectedNormal;
     };
     const auto light = [](glm::vec3 position, glm::vec3 rotation, glm::vec2 size) {
-        return pathtracer::config::LightConfig{position, rotation, pathtracer::config::QuadShape{size}, glm::vec3(1.0F), 1.0F};
+        return pathtracer::config::LightConfig{position, rotation, pathtracer::config::QuadShape{size}, glm::vec3(1.0F), pathtracer::config::Luminance{1.0F}};
     };
     const glm::mat4 identity(1.0F);
     const glm::mat4 sceneMoved = glm::translate(identity, glm::vec3(1.0F, 2.0F, 3.0F)) *
@@ -1358,6 +1358,58 @@ PT_CHECK(quad_light_placement, Fast, Exact) {
     PT_EXPECT(ctx, migrationError <= kTolerance, detail);
 }
 
+// Lumens resolve per side over the placed area, L = Phi / (pi A sides): a quad's edges, pi r^2, 4 pi r^2, or a mesh's summed triangles.
+PT_CHECK(lumens_resolve_over_the_placed_area, Fast, Exact) {
+    constexpr float kLumens = 800.0F;
+    // A rigid placement leaves areas as authored, so only the cross product's and radius' roundings stand between the two sides.
+    constexpr double kTolerance = 8.0 * std::numeric_limits<float>::epsilon();
+    const glm::mat4 sceneMoved = glm::translate(glm::mat4(1.0F), glm::vec3(1.0F, 2.0F, 3.0F)) *
+                                 glm::rotate(glm::mat4(1.0F), glm::radians(37.0F), glm::vec3(0.0F, 1.0F, 0.0F));
+    using Shape = std::variant<pathtracer::config::QuadShape, pathtracer::config::DiskShape, pathtracer::config::SphereShape,
+                               pathtracer::config::MeshShape>;
+    const auto config = [](Shape shape, std::variant<pathtracer::config::Luminance, pathtracer::config::LuminousFlux> emission,
+                           bool twoSided) {
+        return pathtracer::config::LightConfig{glm::vec3(0.5F, -0.25F, 2.0F), glm::vec3(-90.0F, 20.0F, 0.0F), shape, glm::vec3(1.0F), emission,
+                                               twoSided};
+    };
+    struct Row {
+        const char* name;
+        pathtracer::config::LightConfig light;
+        double area;
+        double sides;
+    };
+    const std::vector<Row> rows = {
+        {"quad 2 x 0.5", config(pathtracer::config::QuadShape{{2.0F, 0.5F}}, pathtracer::config::LuminousFlux{kLumens}, false), 1.0, 1.0},
+        {"two-sided quad 2 x 0.5", config(pathtracer::config::QuadShape{{2.0F, 0.5F}}, pathtracer::config::LuminousFlux{kLumens}, true), 1.0,
+         2.0},
+        {"disk r 0.25", config(pathtracer::config::DiskShape{0.25F}, pathtracer::config::LuminousFlux{kLumens}, false),
+         std::numbers::pi / 16.0, 1.0},
+        {"sphere r 0.5", config(pathtracer::config::SphereShape{0.5F}, pathtracer::config::LuminousFlux{kLumens}, false), std::numbers::pi, 1.0},
+    };
+    ctx.plan(static_cast<int>(rows.size()) + 2);
+    for (const Row& row : rows) {
+        const std::optional<std::vector<pathtracer::scene::AreaLight>> placed = pathtracer::scene::buildLights({row.light}, sceneMoved, "");
+        const glm::vec3 radiance = placed ? std::visit([](const auto& light) { return light.radiance; }, placed->front()) : glm::vec3(0.0F);
+        const double expected = kLumens / (std::numbers::pi * row.area * row.sides);
+        PT_EXPECT(ctx, std::abs(radiance.x - expected) <= kTolerance * expected && radiance.x == radiance.y && radiance.y == radiance.z,
+                  std::string(row.name) + ": " + std::to_string(radiance.x) + " cd/m^2 from 800 lm, expected " + std::to_string(expected));
+    }
+    // A mesh's area is MeshLight's own sum: two triangles tiling a 2 x 3 rectangle.
+    const std::vector<Triangle> rectangle{{glm::vec3(0.0F), glm::vec3(2.0F, 0.0F, 0.0F), glm::vec3(2.0F, 3.0F, 0.0F)},
+                                          {glm::vec3(0.0F), glm::vec3(2.0F, 3.0F, 0.0F), glm::vec3(0.0F, 3.0F, 0.0F)}};
+    const pathtracer::scene::MeshLight mesh(rectangle, glm::vec3(1.0F), false);
+    const float meshLuminance = pathtracer::scene::emittedLuminance(
+        config(pathtracer::config::MeshShape{"m.gltf"}, pathtracer::config::LuminousFlux{kLumens}, false), mesh);
+    const double meshExpected = kLumens / (std::numbers::pi * 6.0);
+    PT_EXPECT(ctx, std::abs(meshLuminance - meshExpected) <= kTolerance * meshExpected,
+              "a 6 m^2 mesh at 800 lm resolved to " + std::to_string(meshLuminance) + " cd/m^2, expected " + std::to_string(meshExpected));
+    // A luminance passes through exactly, whatever the area.
+    const std::optional<std::vector<pathtracer::scene::AreaLight>> direct = pathtracer::scene::buildLights(
+        {config(pathtracer::config::QuadShape{{2.0F, 0.5F}}, pathtracer::config::Luminance{5.0F}, true)}, sceneMoved, "");
+    PT_EXPECT(ctx, direct && std::get<pathtracer::scene::QuadLight>(direct->front()).radiance == glm::vec3(5.0F),
+              "a 5 cd/m^2 light did not emit exactly 5 cd/m^2");
+}
+
 // Disk and sphere centre on sceneTransform * position with the quad's frame: the disk emits along local -Z, its tangents +X and -Y.
 PT_CHECK(disk_and_sphere_light_placement, Fast, Exact) {
     const glm::mat4 sceneMoved = glm::translate(glm::mat4(1.0F), glm::vec3(1.0F, 2.0F, 3.0F)) *
@@ -1365,8 +1417,8 @@ PT_CHECK(disk_and_sphere_light_placement, Fast, Exact) {
     const glm::vec3 position(0.25F, -0.5F, 0.75F);
     const glm::vec3 rotation(-90.0F, 30.0F, 0.0F);
     const std::vector<pathtracer::config::LightConfig> configs = {
-        {position, rotation, pathtracer::config::DiskShape{0.4F}, glm::vec3(1.0F), 2.0F, true},
-        {position, rotation, pathtracer::config::SphereShape{0.3F}, glm::vec3(1.0F), 2.0F},
+        {position, rotation, pathtracer::config::DiskShape{0.4F}, glm::vec3(1.0F), pathtracer::config::Luminance{2.0F}, true},
+        {position, rotation, pathtracer::config::SphereShape{0.3F}, glm::vec3(1.0F), pathtracer::config::Luminance{2.0F}},
     };
     const std::optional<std::vector<pathtracer::scene::AreaLight>> lights = pathtracer::scene::buildLights(configs, sceneMoved, "");
     const glm::mat4 lightToWorld = sceneMoved * glm::translate(glm::mat4(1.0F), position) * glm::mat4(pathtracer::scene::rotationXyz(rotation));
@@ -2363,10 +2415,22 @@ PT_CHECK(area_light_irradiance, Slow, Statistical) {
         pathtracer::scene::AreaLight light;
         float reference;  // Lo = E / pi off the white Lambertian floor
     };
+    // A scene.json light of 100 lm, placed by buildLights: Lambertian, so L = Phi / (pi A sides), here over a disk or a sphere of kRadius.
+    constexpr float kLumens = 100.0F;
+    const auto fromLumens = [&](std::variant<pathtracer::config::QuadShape, pathtracer::config::DiskShape, pathtracer::config::SphereShape,
+                                             pathtracer::config::MeshShape> shape, bool twoSided) {
+        const std::vector<pathtracer::config::LightConfig> config{
+            {centre, glm::vec3(0.0F), shape, glm::vec3(1.0F), pathtracer::config::LuminousFlux{kLumens}, twoSided}};
+        return pathtracer::scene::buildLights(config, glm::mat4(1.0F), "").value().front();
+    };
+    const float diskLumensLuminance = kLumens / (kPi * kPi * r2);
     const std::vector<Row> rows = {
         {"disk", makeDiskLight(centre, -floorNormal, kRadius, false), kRadiance * diskFactor},
         {"sphere", pathtracer::scene::SphereLight{centre, glm::mat3(1.0F), kRadius, glm::vec3(kRadiance)}, kRadiance * sphereFactor},
         {"mesh", pathtracer::scene::MeshLight(faces, glm::vec3(kRadiance), false), meshIrradiance / kPi},
+        {"disk at 100 lm", fromLumens(pathtracer::config::DiskShape{kRadius}, false), diskLumensLuminance * diskFactor},
+        {"two-sided disk at 100 lm", fromLumens(pathtracer::config::DiskShape{kRadius}, true), 0.5F * diskLumensLuminance * diskFactor},
+        {"sphere at 100 lm", fromLumens(pathtracer::config::SphereShape{kRadius}, false), kLumens / (4.0F * kPi * kPi * r2) * sphereFactor},
     };
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     // The references are point values at the origin; a pixel block averages a footprint whose curvature biases at second order, so 1/64th.
@@ -2393,6 +2457,36 @@ PT_CHECK(area_light_irradiance, Slow, Statistical) {
         std::cout << "  " << detail << '\n';
         PT_EXPECT(ctx, accel && std::abs(replicates.mean() - static_cast<double>(row.reference)) <= half, detail);
     }
+}
+
+// An unoccluded sky calibrated to E lux lights an upward white Lambertian floor at Lo = E / pi, whatever the map's own scale.
+PT_CHECK(calibrated_environment_lights_the_floor_at_its_illuminance, Slow, Statistical) {
+    constexpr float kLux = 400.0F;
+    constexpr int kWidth = 64;
+    constexpr int kHeight = 32;
+    ctx.plan(1);
+    // Arbitrary stored scale: the calibration, not the texels, must set the floor's level. Uniform, so bilinear is piecewise-constant.
+    const EnvironmentMap env = tools::fixtures::makeEnvironment(
+        kWidth, kHeight, std::vector<float>(static_cast<std::size_t>(kWidth) * kHeight * pathtracer::gfx::kRgbChannels, 0.37F), kLux);
+    const LitScene lit = withLights(makeLambertianFloor(), {});
+    std::optional<EmbreeAccel> accel = EmbreeAccel::build(lit.scene.worldTriangles, lit.shapes);
+    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    tools::stats::Welford replicates;
+    const std::uint64_t seed = ctx.subSeed("calibrated sky");
+    for (int r = 0; accel && r < tools::stats::kReplicates; ++r) {
+        const auto scramble = static_cast<std::uint32_t>(seed + static_cast<std::uint64_t>(r));
+        replicates.add(centreMean(renderPassWithLights(lit.scene, lit.instanceLightIndex, {}, &env, makeSettings(0, 999), *accel, pool,
+                                                       /*showSky=*/false, scramble)
+                                      .beauty)
+                           .x);
+    }
+    const double reference = kLux / std::numbers::pi;
+    const double half = tools::stats::studentTTwoSided(ctx.alpha(), static_cast<double>(replicates.count() - 1)) * replicates.standardError();
+    char detail[160];
+    std::snprintf(detail, sizeof(detail), "floor under a %.0f lx sky: rendered %.6f +/- %.2e cd/m^2, E / pi %.6f", kLux, replicates.mean(), half,
+                  reference);
+    std::cout << "  " << detail << '\n';
+    PT_EXPECT(ctx, accel && std::abs(replicates.mean() - reference) <= half, detail);
 }
 
 // A convex receiver cannot occlude itself from a light it faces, so Shadow is exactly 0 however coarsely the sphere is tessellated.

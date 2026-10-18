@@ -21,7 +21,7 @@ struct QuadLight {
     glm::vec3 origin;
     glm::vec3 edge0;
     glm::vec3 edge1;
-    glm::vec3 radiance;  // constant Le over the emitting face, colour * intensity
+    glm::vec3 radiance;  // constant Le over the emitting face, colour * luminance
     bool twoSided;
     // Derived from edge0/edge1 once here, not per query: every NEE sample of the quad reads it.
     glm::vec3 normal;
@@ -50,7 +50,7 @@ struct DiskLight {
     glm::vec3 centre;
     glm::mat3 frame;  // orthonormal columns tangent, bitangent, emitting normal: the placed local +X, -Y and -Z, as a quad's edges
     float radius;
-    glm::vec3 radiance;  // constant Le over the emitting face, colour * intensity
+    glm::vec3 radiance;  // constant Le over the emitting face, colour * luminance
     bool twoSided;
 };
 

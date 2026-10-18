@@ -27,6 +27,9 @@ namespace pathtracer::scene {
 [[nodiscard]] std::optional<std::vector<AreaLight>> buildLights(const std::vector<pathtracer::config::LightConfig>& lights,
                                                                 const glm::mat4& sceneTransform, const std::string& assetRoot);
 
+// The luminance in cd/m^2 `light` emits once placed as `placed`: its authored luminance, or its lumens over pi A sides.
+[[nodiscard]] float emittedLuminance(const pathtracer::config::LightConfig& light, const AreaLight& placed);
+
 // scene.json's model placement: translate * rotationXyz, the order every caller places the scene in.
 [[nodiscard]] glm::mat4 rootTransformOf(const pathtracer::config::ModelConfig& model);
 
