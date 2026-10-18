@@ -1,4 +1,4 @@
-// Correctness checks for volume.cpp: VDB loading and validation, the majorant grid, ratio and spectral tracking, Henyey-Greenstein.
+// Correctness checks for volume.cpp and medium.cpp: VDB loading, the majorant grid, tracking, bounded media, Henyey-Greenstein.
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -32,6 +32,7 @@
 #include "pathtracer/scene/shading_scene.h"
 #include "pathtracer/scene/thread_pool.h"
 #include "pathtracer/scene/volume.h"
+#include "medium.h"
 #include "stats.h"
 #include "volume_majorant.h"
 
@@ -270,6 +271,77 @@ PT_CHECK(spectral_tracking_is_unbiased, Slow, Statistical) {
                   "scatter channel " + std::to_string(c) + ": " + std::to_string(scattered[c].mean()) + " vs " + std::to_string(scatter));
     }
     PT_EXPECT(ctx, inside.mean() == 1.0, "a scattering fell outside [t0, t1)");
+}
+
+// A bounded medium's chromatic free flight over [0, L): E[escape weight] = T(L) and E[collision weight] = (sigma_s/sigma_t)(1 - T(L)).
+PT_CHECK(bounded_medium_free_flight_is_unbiased, Slow, Statistical) {
+    struct Case {
+        const char* name;
+        pathtracer::scene::HomogeneousMedium medium;
+    };
+    // The second leaves blue clear, so its odds are 0 and its escape weight must still read exactly T = 1.
+    const std::array<Case, 2> cases{{
+        {"chromatic", {glm::vec3(0.01F, 0.05F, 0.02F), glm::vec3(0.06F, 0.01F, 0.03F), 0.0F}},
+        {"clear blue", {glm::vec3(0.02F, 0.0F, 0.0F), glm::vec3(0.05F, 0.08F, 0.0F), 0.0F}},
+    }};
+    constexpr float kLength = 40.0F;
+    const glm::vec3 throughput(0.7F, 1.0F, 0.4F);  // a coloured history, which the odds follow and the weights undo
+    constexpr int kTrials = 1 << 15;
+    ctx.plan(static_cast<int>(cases.size()) * 6);
+    const double t = tools::stats::studentTTwoSided(ctx.alpha(), static_cast<double>(kTrials - 1));
+    for (const Case& testCase : cases) {
+        const pathtracer::scene::HomogeneousMedium& medium = testCase.medium;
+        const glm::vec3 odds = pathtracer::scene::channelOdds(medium, throughput);
+        std::array<tools::stats::Welford, 3> escaped;
+        std::array<tools::stats::Welford, 3> scattered;
+        for (int i = 0; i < kTrials; ++i) {
+            Sampler sampler(0, 0, i, kTrials, static_cast<std::uint32_t>(ctx.subSeed(testCase.name)));
+            const float d = pathtracer::scene::sampleCollision(medium, odds, sampler.next2D());
+            const glm::vec3 escape = d < kLength ? glm::vec3(0.0F) : pathtracer::scene::passWeight(medium, odds, kLength);
+            const glm::vec3 scatter = d < kLength ? pathtracer::scene::collisionWeight(medium, odds, d) : glm::vec3(0.0F);
+            for (int c = 0; c < 3; ++c) {
+                escaped[c].add(escape[c]);
+                scattered[c].add(scatter[c]);
+            }
+        }
+        for (int c = 0; c < 3; ++c) {
+            const double extinction = static_cast<double>(medium.absorption[c] + medium.scattering[c]);
+            const double transmittance = std::exp(-extinction * kLength);
+            const double scatter = extinction > 0.0 ? (static_cast<double>(medium.scattering[c]) / extinction) * (1.0 - transmittance) : 0.0;
+            const std::string where = std::string(testCase.name) + " channel " + std::to_string(c) + ": ";
+            PT_EXPECT(ctx, std::abs(escaped[c].mean() - transmittance) <= t * escaped[c].standardError(),
+                      where + "escape " + std::to_string(escaped[c].mean()) + " vs " + std::to_string(transmittance));
+            PT_EXPECT(ctx, std::abs(scattered[c].mean() - scatter) <= t * scattered[c].standardError(),
+                      where + "scatter " + std::to_string(scattered[c].mean()) + " vs " + std::to_string(scatter));
+        }
+    }
+}
+
+// Transmittance's limits where mu_t d is undefined, and OpenPBR's clear and scattering interiors from their inputs.
+PT_CHECK(bounded_medium_limits, Fast, Exact) {
+    using pathtracer::scene::HomogeneousMedium;
+    constexpr float kInf = std::numeric_limits<float>::infinity();
+    const HomogeneousMedium opaque{glm::vec3(kInf, 0.0F, 0.5F), glm::vec3(0.0F), 0.0F};
+    pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant> glass;
+    glass.transmissionWeight = 1.0F;
+    glass.transmissionColor = glm::vec3(0.0F, 0.5F, 1.0F);
+    glass.transmissionDepth = 0.5F;
+    pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant> fog = glass;
+    fog.transmissionScatter = glm::vec3(0.2F);
+    fog.transmissionScatterAnisotropy = 1.0F;
+    pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant> wax;
+    wax.subsurfaceWeight = 1.0F;
+    wax.subsurfaceRadiusScale = glm::vec3(1.0F, 0.5F, 0.0F);
+    const HomogeneousMedium waxMedium = pathtracer::scene::interiorMedium(wax);
+    ctx.plan(6);
+    PT_EXPECT(ctx, pathtracer::scene::transmittance(opaque, 0.0F) == glm::vec3(1.0F), "T(0) must be 1 at infinite extinction");
+    PT_EXPECT(ctx, pathtracer::scene::transmittance(opaque, kInf) == glm::vec3(0.0F, 1.0F, 0.0F), "T(inf) must be 0 or, clear, 1");
+    PT_EXPECT(ctx, pathtracer::scene::transmittance(opaque, 2.0F) == glm::vec3(0.0F, 1.0F, std::exp(-1.0F)), "T(2) off the closed form");
+    PT_EXPECT(ctx, !pathtracer::scene::scatters(pathtracer::scene::interiorMedium(glass)), "an absorbing interior scattered");
+    PT_EXPECT(ctx, !pathtracer::scene::scatters(pathtracer::scene::interiorMedium(fog)), "a g = 1 interior's forward delta scattered");
+    // A zero-MFP channel takes the glossy-diffuse limit: no medium there, finite coefficients elsewhere.
+    PT_EXPECT(ctx, waxMedium.scattering.z == 0.0F && waxMedium.absorption.z == 0.0F && waxMedium.scattering.y == 2.0F * waxMedium.scattering.x,
+              "a zero-MFP channel entered the medium, or 1/MFP left the open ones");
 }
 
 // A grey scattering-only medium's free-flight distances binned against 1 - exp(-sigma t): the exponential law itself, not its mean.

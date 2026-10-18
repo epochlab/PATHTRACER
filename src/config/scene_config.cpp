@@ -245,19 +245,15 @@ std::optional<std::vector<VolumeConfig>> parseVolumes(const nlohmann::json& j, c
     return volumes;
 }
 
-// One input's constant: in its specification range per channel, and a bulk material's volumetric switch at its zero default.
+// One input's constant: in its specification range per channel.
 template <typename T>
-bool validInput(const pathtracer::scene::InputSpec& spec, const T& value, const T& fallback, bool thinWalled, const std::string& path) {
+bool validInput(const pathtracer::scene::InputSpec& spec, const T& value, const std::string& path) {
     const glm::vec3 channels(value);
     for (int c = 0; c < (std::is_same_v<T, float> ? 1 : 3); ++c) {
         if (!pathtracer::scene::inRange(channels[c], spec.range)) {
             std::cerr << "loadMaterialConfig: " << path << ": " << spec.name << " " << channels[c] << " is outside its OpenPBR range\n";
             return false;
         }
-    }
-    if (spec.requiresVolumes && !thinWalled && value != fallback) {
-        std::cerr << "loadMaterialConfig: " << path << ": " << spec.name << " requires volumetric transport or geometry_thin_walled\n";
-        return false;
     }
     return true;
 }
@@ -278,10 +274,6 @@ bool addRandomChecker(const pathtracer::scene::InputSpec& spec, const nlohmann::
     // 1 lies in every OpenPBR range, so the pattern's 0 alone decides: a Positive input (an ior) cannot take it.
     if (!pathtracer::scene::inRange(0.0F, spec.range)) {
         std::cerr << "loadMaterialConfig: " << path << ": " << spec.name << " cannot take a random checker's 0\n";
-        return false;
-    }
-    if (spec.requiresVolumes && !material.geometryThinWalled) {
-        std::cerr << "loadMaterialConfig: " << path << ": " << spec.name << " requires volumetric transport or geometry_thin_walled\n";
         return false;
     }
     const auto seed = checker.find("seed");
@@ -438,11 +430,10 @@ std::optional<MaterialConfig> loadMaterialConfig(const std::string& path) {
             }
         }
         MaterialConfig material;
-        // Read first: whether the volumetric switches are accepted depends on it.
         material.geometryThinWalled = j.value("geometry_thin_walled", false);
         bool ok = true;
         pathtracer::scene::forEachInput(
-            [&](const pathtracer::scene::InputSpec& spec, auto& value, const auto& fallback) {
+            [&](const pathtracer::scene::InputSpec& spec, auto& value) {
                 const auto it = j.find(spec.name);
                 if (it == j.end()) {
                     return;
@@ -456,9 +447,9 @@ std::optional<MaterialConfig> loadMaterialConfig(const std::string& path) {
                 } else {
                     value = it->template get<glm::vec3>();
                 }
-                ok = validInput(spec, value, fallback, material.geometryThinWalled, path) && ok;
+                ok = validInput(spec, value, path) && ok;
             },
-            material, defaults);
+            material);
         if (!ok) {
             return std::nullopt;
         }

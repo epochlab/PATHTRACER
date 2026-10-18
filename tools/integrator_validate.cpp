@@ -119,31 +119,37 @@ TestScene makeQuadScene(float roughness) {
     return scene;
 }
 
-// Two parallel quads with opposing geometric normals, front at +Z and back at -Z, so a camera ray enters the front and exits the back.
-TestScene makeSlabScene(float roughness, float thickness) {
+// Two parallel quads with opposing geometric normals, front at z = top and back at z = bottom, as one more instance of the scene.
+void appendSlab(TestScene& scene, float top, float bottom, const Material& material) {
     const glm::vec4 tangent(1.0F, 0.0F, 0.0F, 1.0F);
     const auto vertex = [&](float x, float y, float z, float nz) {
         return ShadingVertex{glm::vec3(x, y, z), glm::vec3(0.0F, 0.0F, nz), glm::vec2(0.5F, 0.5F),
                               tangent};
     };
     // Front wound counter-clockwise as seen from +Z, back clockwise, so geometricNormalOf gives +Z and -Z.
-    const ShadingVertex fv0 = vertex(-kQuadExtent, -kQuadExtent, 0.0F, 1.0F);
-    const ShadingVertex fv1 = vertex(kQuadExtent, -kQuadExtent, 0.0F, 1.0F);
-    const ShadingVertex fv2 = vertex(kQuadExtent, kQuadExtent, 0.0F, 1.0F);
-    const ShadingVertex fv3 = vertex(-kQuadExtent, kQuadExtent, 0.0F, 1.0F);
-    const ShadingVertex bv0 = vertex(-kQuadExtent, -kQuadExtent, -thickness, -1.0F);
-    const ShadingVertex bv1 = vertex(-kQuadExtent, kQuadExtent, -thickness, -1.0F);
-    const ShadingVertex bv2 = vertex(kQuadExtent, kQuadExtent, -thickness, -1.0F);
-    const ShadingVertex bv3 = vertex(kQuadExtent, -kQuadExtent, -thickness, -1.0F);
+    const ShadingVertex fv0 = vertex(-kQuadExtent, -kQuadExtent, top, 1.0F);
+    const ShadingVertex fv1 = vertex(kQuadExtent, -kQuadExtent, top, 1.0F);
+    const ShadingVertex fv2 = vertex(kQuadExtent, kQuadExtent, top, 1.0F);
+    const ShadingVertex fv3 = vertex(-kQuadExtent, kQuadExtent, top, 1.0F);
+    const ShadingVertex bv0 = vertex(-kQuadExtent, -kQuadExtent, bottom, -1.0F);
+    const ShadingVertex bv1 = vertex(-kQuadExtent, kQuadExtent, bottom, -1.0F);
+    const ShadingVertex bv2 = vertex(kQuadExtent, kQuadExtent, bottom, -1.0F);
+    const ShadingVertex bv3 = vertex(kQuadExtent, -kQuadExtent, bottom, -1.0F);
 
+    const int instance = static_cast<int>(scene.instances.size());
+    scene.worldTriangles.insert(scene.worldTriangles.end(), {Triangle{fv0.position, fv1.position, fv2.position},
+                                                             Triangle{fv0.position, fv2.position, fv3.position},
+                                                             Triangle{bv0.position, bv1.position, bv2.position},
+                                                             Triangle{bv0.position, bv2.position, bv3.position}});
+    scene.shadingTriangles.insert(scene.shadingTriangles.end(), {ShadingTriangle{fv0, fv1, fv2, instance}, ShadingTriangle{fv0, fv2, fv3, instance},
+                                                                 ShadingTriangle{bv0, bv1, bv2, instance}, ShadingTriangle{bv0, bv2, bv3, instance}});
+    scene.instances.push_back(MeshInstance{material, glm::mat4(1.0F), ""});
+}
+
+// One slab, front at z = 0 facing +Z and back at -thickness, so a camera ray enters the front and exits the back.
+TestScene makeSlabScene(float roughness, float thickness) {
     TestScene scene;
-    scene.worldTriangles = {Triangle{fv0.position, fv1.position, fv2.position},
-                             Triangle{fv0.position, fv2.position, fv3.position},
-                             Triangle{bv0.position, bv1.position, bv2.position},
-                             Triangle{bv0.position, bv2.position, bv3.position}};
-    scene.shadingTriangles = {ShadingTriangle{fv0, fv1, fv2, 0}, ShadingTriangle{fv0, fv2, fv3, 0},
-                               ShadingTriangle{bv0, bv1, bv2, 0}, ShadingTriangle{bv0, bv2, bv3, 0}};
-    scene.instances = {MeshInstance{makeMaterial(roughness), glm::mat4(1.0F), ""}};
+    appendSlab(scene, 0.0F, -thickness, makeMaterial(roughness));
     return scene;
 }
 
@@ -253,6 +259,17 @@ const auto transmissive = [](Material& material) { material.transmissionWeight =
 
 // Index-matched, so fresnelDielectric is exactly 0 and a non-metallic, non-transmissive surface is EON alone: f = base_color/pi at r = 0.
 const auto indexMatched = [](Material& material) { material.specularIor = 1.0F; };
+
+// A bulk subsurface: subsurface_weight 1 at the given multiple-scattering colour, mean free path radius * scale and asymmetry g.
+const auto subsurface = [](const glm::vec3& colour, float radius, const glm::vec3& scale, float g) {
+    return [=](Material& material) {
+        material.subsurfaceWeight = 1.0F;
+        material.subsurfaceColor = colour;
+        material.subsurfaceRadius = radius;
+        material.subsurfaceRadiusScale = scale;
+        material.subsurfaceScatterAnisotropy = g;
+    };
+};
 
 Camera makeCamera() {
     return Camera(glm::vec3(0.0F, 0.0F, 5.0F), glm::vec3(0.0F), Camera::FilmBack{36.0F, 24.0F},
@@ -625,12 +642,40 @@ PT_CHECK(transmissive_sphere_energy_radial, Slow, Statistical) {
     }
 }
 
+// How far the centre block's rays stray from the -Z axis: their least cosine, and their greatest distance from the origin's axis line.
+struct CentreReach {
+    double cosine = 1.0;
+    double impact = 0.0;
+};
+
+// centreMean's block widened by the filter's support: no primary ray of it starts further off the axis than these corners.
+CentreReach centreReach(const Camera& camera) {
+    const glm::vec2 frame = pathtracer::gfx::frameExtent(camera.pixelLattice(), kImageSize, kImageSize);
+    const float reach = 2.0F + pathtracer::scene::kFilterRadius;
+    CentreReach result;
+    for (const glm::vec2 corner : {glm::vec2(-1.0F, -1.0F), glm::vec2(-1.0F, 1.0F), glm::vec2(1.0F, -1.0F), glm::vec2(1.0F, 1.0F)}) {
+        const glm::vec2 film = (frame * 0.5F) + (corner * reach);
+        const std::optional<pathtracer::scene::Ray> ray =
+            camera.primaryRay(((film.x / frame.x) * 2.0F) - 1.0F, 1.0F - ((film.y / frame.y) * 2.0F), frame.x / frame.y);
+        const glm::dvec3 dir = glm::normalize(glm::dvec3(ray->dir));
+        result.cosine = std::min(result.cosine, -dir.z);
+        result.impact = std::max(result.impact, glm::length(glm::cross(glm::dvec3(ray->origin), dir)));
+    }
+    return result;
+}
+
+// Telephoto, so every ray of the centre block's filter footprint stays within 0.004 rad of the axis and each chord is bracketed tight.
+Camera telephotoCamera() {
+    constexpr float kTelephotoMm = 2000.0F;
+    const Camera base = makeCamera();
+    return Camera(base.position(), base.rotationDegrees(), base.filmBack(), kTelephotoMm, base.nearClip(), base.farClip(), base.aperture(),
+                  base.shutterSeconds(), base.iso());
+}
+
 // Beer-Lambert: transmissionDepth is the distance at which transmittance reaches transmissionColor, so that identity is the specification.
 PT_CHECK(beer_lambert_absorption, Slow, Statistical) {
     constexpr int kBounces = 8;
     constexpr float kSlabThickness = 0.5F;
-    // Telephoto, so every ray of the centre block's filter footprint stays within 0.004 rad of the axis and each chord is bracketed tight.
-    constexpr float kTelephotoMm = 2000.0F;
     constexpr double kUnitRoundoff = std::numeric_limits<float>::epsilon() * 0.5;
     const auto gamma = [](int n) { return (n * kUnitRoundoff) / (1.0 - (n * kUnitRoundoff)); };
     const glm::vec3 colour(0.5F, 0.25F, 0.75F);
@@ -649,22 +694,8 @@ PT_CHECK(beer_lambert_absorption, Slow, Statistical) {
         {"flat slab, dispersive (abbe 64.17)", false, kSlabThickness, 64.17F},
     }};
 
-    const Camera base = makeCamera();
-    const Camera camera(base.position(), base.rotationDegrees(), base.filmBack(), kTelephotoMm, base.nearClip(), base.farClip(),
-                        base.aperture(), base.shutterSeconds(), base.iso());
-    // centreMean's block widened by the filter's support: no primary ray of it starts further off the axis than these corners.
-    const glm::vec2 frame = pathtracer::gfx::frameExtent(camera.pixelLattice(), kImageSize, kImageSize);
-    const float reach = 2.0F + pathtracer::scene::kFilterRadius;
-    double maxCosine = 1.0;
-    double maxImpact = 0.0;
-    for (const glm::vec2 corner : {glm::vec2(-1.0F, -1.0F), glm::vec2(-1.0F, 1.0F), glm::vec2(1.0F, -1.0F), glm::vec2(1.0F, 1.0F)}) {
-        const glm::vec2 film = (frame * 0.5F) + (corner * reach);
-        const std::optional<pathtracer::scene::Ray> ray =
-            camera.primaryRay(((film.x / frame.x) * 2.0F) - 1.0F, 1.0F - ((film.y / frame.y) * 2.0F), frame.x / frame.y);
-        const glm::dvec3 dir = glm::normalize(glm::dvec3(ray->dir));
-        maxCosine = std::min(maxCosine, -dir.z);
-        maxImpact = std::max(maxImpact, glm::length(glm::cross(glm::dvec3(ray->origin), dir)));
-    }
+    const Camera camera = telephotoCamera();
+    const CentreReach centre = centreReach(camera);
 
     const EnvironmentMap env = makeUniformEnvironment();
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
@@ -703,9 +734,9 @@ PT_CHECK(beer_lambert_absorption, Slow, Statistical) {
             standOff = std::max(standOff, glm::dot(glm::abs(normal), (gamma(3) * sum) + (2.0 * gamma(1) * glm::abs(p0))) +
                                               (2.0 * std::sqrt(3.0) * ulp));
         }
-        const double longest = testCase.sphere ? 2.0 * kSphereRadius : kSlabThickness / maxCosine;
+        const double longest = testCase.sphere ? 2.0 * kSphereRadius : kSlabThickness / centre.cosine;
         const double shortest =
-            (testCase.sphere ? 2.0 * std::sqrt((inradius * inradius) - (maxImpact * maxImpact)) : kSlabThickness) - standOff;
+            (testCase.sphere ? 2.0 * std::sqrt((inradius * inradius) - (centre.impact * centre.impact)) : kSlabThickness) - standOff;
 
         std::array<tools::stats::Welford, 3> readings;
         for (int r = 0; r < tools::stats::kReplicates; ++r) {
@@ -730,6 +761,233 @@ PT_CHECK(beer_lambert_absorption, Slow, Statistical) {
             PT_EXPECT(ctx, readings[c].mean() >= low - half && readings[c].mean() <= high + half, detail);
         }
     }
+}
+
+// A white subsurface sphere under a uniform sky: a lossless interface over an albedo-1 medium returns all it receives, Lo = 1.
+PT_CHECK(subsurface_white_furnace, Slow, Statistical) {
+    struct FurnaceCase {
+        const char* name;
+        float roughness;
+        float ior;
+        float radius;
+        glm::vec3 scale;
+        float g;
+    };
+    // Chromatic MFPs exercise the spectral estimator; the smooth row draws delta exits; maxBounces 1 asserts a walk costs one bounce.
+    const std::array<FurnaceCase, 4> cases{{
+        {"index-matched, chromatic MFP", 0.3F, 1.0F, 0.3F, glm::vec3(1.0F, 0.5F, 0.25F), 0.0F},
+        {"smooth, ior 1.5, chromatic MFP", 0.0F, 1.5F, 0.3F, glm::vec3(1.0F, 0.5F, 0.25F), 0.0F},
+        {"rough, ior 1.5, forward g", 0.5F, 1.5F, 0.1F, glm::vec3(1.0F), 0.6F},
+        {"rough, ior 1.33, dense, backward g", 0.3F, 1.33F, 0.05F, glm::vec3(1.0F, 0.5F, 0.25F), -0.5F},
+    }};
+    const EnvironmentMap env = makeUniformEnvironment();
+    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    PathTraceSettings settings = makeSettings(/*maxBounces=*/1, 999);
+    settings.samplesPerPixel = kSamplesPerPixel / tools::stats::kReplicates;
+    ctx.plan(static_cast<int>(cases.size()) * 3);
+    const double t = tools::stats::studentTTwoSided(ctx.alpha(), tools::stats::kReplicates - 1);
+    std::cout << "integrator_validate: white subsurface sphere, uniform L0 = 1 (1.0 = energy conserved)\n";
+    for (const FurnaceCase& testCase : cases) {
+        const TestScene scene = withSurface(makeSphereScene(testCase.roughness), [&](Material& material) {
+            subsurface(glm::vec3(1.0F), testCase.radius, testCase.scale, testCase.g)(material);
+            material.specularIor = testCase.ior;
+        });
+        std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+        std::array<tools::stats::Welford, 3> readings;
+        for (int r = 0; accel && r < tools::stats::kReplicates; ++r) {
+            const glm::vec3 mean = centreMean(
+                renderPass(scene, env, settings, *accel, pool, true, static_cast<std::uint32_t>(ctx.subSeed(testCase.name) + r)).beauty);
+            for (int c = 0; c < 3; ++c) {
+                readings[c].add(mean[c]);
+            }
+        }
+        for (int c = 0; c < 3; ++c) {
+            const double half = t * readings[c].standardError();
+            char detail[256];
+            std::snprintf(detail, sizeof(detail), "%s channel %d: Lo %.5f +/- %.2e, expected 1", testCase.name, c, readings[c].mean(), half);
+            std::cout << "  " << detail << '\n';
+            PT_EXPECT(ctx, std::abs(readings[c].mean() - 1.0) <= half, detail);
+        }
+    }
+}
+
+// Chandrasekhar's H for isotropic scattering at albedo alpha: 1/H(mu) = sqrt(1 - alpha) + (alpha/2) int_0^1 mu' H(mu') / (mu + mu') dmu'.
+double chandrasekharH(double albedo, double mu) {
+    // Simpson's nodes on [0, 1]; the contraction is iterated until its largest step stops shrinking, which is its rounding floor.
+    constexpr int kPanels = 2048;
+    std::vector<double> h(kPanels + 1, 1.0);
+    const auto integral = [&](double at) {
+        return tools::stats::simpson(0.0, 1.0, kPanels, [&](double x) {
+            const auto node = static_cast<std::size_t>(std::lround(x * kPanels));
+            return x > 0.0 ? x * h[node] / (at + x) : 0.0;
+        });
+    };
+    for (double previous = std::numeric_limits<double>::infinity();;) {
+        std::vector<double> next(h.size());
+        double step = 0.0;
+        for (std::size_t i = 0; i < h.size(); ++i) {
+            next[i] = 1.0 / (std::sqrt(1.0 - albedo) + (0.5 * albedo * integral(static_cast<double>(i) / kPanels)));
+            step = std::max(step, std::abs(next[i] - h[i]));
+        }
+        h = std::move(next);
+        if (!(step < previous)) {
+            break;
+        }
+        previous = step;
+    }
+    return 1.0 / (std::sqrt(1.0 - albedo) + (0.5 * albedo * integral(mu)));
+}
+
+// An index-matched isotropic half-space under a uniform sky reflects 1 - sqrt(1 - alpha) H(mu) toward mu (Chandrasekhar 1960, ch. IV).
+PT_CHECK(subsurface_half_space_albedo, Slow, Statistical) {
+    // Per channel, alpha and MFP differ: the scale invariance of a half-space makes each channel's albedo independent of its MFP.
+    const glm::dvec3 albedo(0.5, 0.9, 0.99);
+    const glm::vec3 scale(1.0F, 0.5F, 0.25F);
+    // van de Hulst's forward relation, which the renderer inverts: the colour whose single-scattering albedo is alpha at g = 0.
+    glm::vec3 colour;
+    for (int c = 0; c < 3; ++c) {
+        const double s = std::sqrt(1.0 - albedo[c]);
+        colour[c] = static_cast<float>((1.0 - s) * (1.0 - (0.139 * s)) / (1.0 + (1.17 * s)));
+    }
+    // 50 MFPs deep at the reddest channel: light from the far face is attenuated past float resolution.
+    constexpr float kThickness = 50.0F;
+    const TestScene scene = withSurface(makeSlabScene(0.0F, kThickness), [&](Material& material) {
+        indexMatched(material);
+        subsurface(colour, 1.0F, scale, 0.0F)(material);
+    });
+    std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+    const Camera camera = telephotoCamera();
+    const double cosine = centreReach(camera).cosine;
+    const EnvironmentMap env = makeUniformEnvironment();
+    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    PathTraceSettings settings = makeSettings(/*maxBounces=*/1, 999);
+    settings.samplesPerPixel = kSamplesPerPixel / tools::stats::kReplicates;
+    std::array<tools::stats::Welford, 3> readings;
+    for (int r = 0; accel && r < tools::stats::kReplicates; ++r) {
+        const glm::vec3 mean =
+            centreMean(renderPass(scene, env, settings, *accel, pool, true, static_cast<std::uint32_t>(ctx.seed() + r), camera).beauty);
+        for (int c = 0; c < 3; ++c) {
+            readings[c].add(mean[c]);
+        }
+    }
+    ctx.plan(3);
+    const double t = tools::stats::studentTTwoSided(ctx.alpha(), tools::stats::kReplicates - 1);
+    std::cout << "integrator_validate: index-matched half-space against Chandrasekhar's H\n";
+    for (int c = 0; c < 3; ++c) {
+        // H rises with mu, so A falls: the centre block's rays, within `cosine` of the normal, bracket it.
+        const double high = 1.0 - (std::sqrt(1.0 - albedo[c]) * chandrasekharH(albedo[c], cosine));
+        const double low = 1.0 - (std::sqrt(1.0 - albedo[c]) * chandrasekharH(albedo[c], 1.0));
+        const double half = t * readings[c].standardError();
+        char detail[256];
+        std::snprintf(detail, sizeof(detail), "alpha %.2f: Lo %.5f +/- %.2e vs [%.5f, %.5f]", albedo[c], readings[c].mean(), half, low, high);
+        std::cout << "  " << detail << '\n';
+        PT_EXPECT(ctx, readings[c].mean() >= low - half && readings[c].mean() <= high + half, detail);
+    }
+}
+
+// Index-matched slabs, one inside another: a ray leaving the inner returns to the outer's medium, so T = T_outer(2) T_inner(1).
+PT_CHECK(nested_media_attenuate_in_turn, Slow, Statistical) {
+    const glm::vec3 outerColour(0.5F, 0.7F, 0.9F);
+    const glm::vec3 innerColour(0.8F, 0.4F, 0.6F);
+    const auto absorbing = [](const glm::vec3& colour) {
+        Material material = makeMaterial(0.0F);
+        transmissive(material);
+        indexMatched(material);
+        material.transmissionColor = colour;
+        material.transmissionDepth = 1.0F;
+        return material;
+    };
+    TestScene scene;
+    appendSlab(scene, 0.0F, -3.0F, absorbing(outerColour));
+    appendSlab(scene, -1.0F, -2.0F, absorbing(innerColour));
+    std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+    const Camera camera = telephotoCamera();
+    const double cosine = centreReach(camera).cosine;
+    const EnvironmentMap env = makeUniformEnvironment();
+    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    PathTraceSettings settings = makeSettings(/*maxBounces=*/8, 999);
+    settings.samplesPerPixel = kSamplesPerPixel / tools::stats::kReplicates;
+    std::array<tools::stats::Welford, 3> readings;
+    for (int r = 0; accel && r < tools::stats::kReplicates; ++r) {
+        const glm::vec3 mean =
+            centreMean(renderPass(scene, env, settings, *accel, pool, true, static_cast<std::uint32_t>(ctx.seed() + r), camera).beauty);
+        for (int c = 0; c < 3; ++c) {
+            readings[c].add(mean[c]);
+        }
+    }
+    ctx.plan(3);
+    const double t = tools::stats::studentTTwoSided(ctx.alpha(), tools::stats::kReplicates - 1);
+    std::cout << "integrator_validate: nested index-matched absorbers\n";
+    for (int c = 0; c < 3; ++c) {
+        const auto through = [&](double length) {
+            return std::pow(outerColour[c], 2.0 * length) * std::pow(innerColour[c], length);
+        };
+        // Planes are exact, so only the off-axis rays lengthen a chord; the film's float mean resolves to one ulp.
+        const double half = (t * readings[c].standardError()) + (std::numeric_limits<float>::epsilon() * readings[c].mean());
+        char detail[256];
+        std::snprintf(detail, sizeof(detail), "channel %d: %.6f vs [%.6f, %.6f] +/- %.2e", c, readings[c].mean(), through(1.0 / cosine),
+                      through(1.0), half);
+        std::cout << "  " << detail << '\n';
+        PT_EXPECT(ctx, readings[c].mean() >= through(1.0 / cosine) - half && readings[c].mean() <= through(1.0) + half, detail);
+    }
+}
+
+// A glass slab embedded in glass of its own index is invisible: its faces see a ratio of 1, not the 1.5 they would see against air.
+PT_CHECK(embedded_object_of_its_ambient_index_is_invisible, Slow, Statistical) {
+    // A sky lit on the +Z half (u = 0.5 at +Z) and dark on the -Z half, so the slabs' reflectance is all the camera sees.
+    constexpr int kWidth = 64;
+    constexpr int kHeight = 32;
+    std::vector<float> halfSky;
+    for (int y = 0; y < kHeight; ++y) {
+        for (int x = 0; x < kWidth; ++x) {
+            const float lit = x >= kWidth / 4 && x < 3 * kWidth / 4 ? 1.0F : 0.0F;
+            halfSky.insert(halfSky.end(), {lit, lit, lit});
+        }
+    }
+    const EnvironmentMap env = tools::fixtures::makeEnvironment(kWidth, kHeight, std::move(halfSky));
+    const auto glass = [](float ior) {
+        Material material = makeMaterial(0.0F);
+        transmissive(material);
+        material.specularIor = ior;
+        return material;
+    };
+    TestScene alone;
+    appendSlab(alone, 0.0F, -3.0F, glass(1.5F));
+    TestScene embedded = alone;
+    appendSlab(embedded, -1.0F, -2.0F, glass(1.5F));
+    // The control is what ignoring the ambient would render: inner faces at glass-to-air's ratio, 2.25 / 1.5.
+    TestScene control = alone;
+    appendSlab(control, -1.0F, -2.0F, glass(2.25F));
+
+    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    PathTraceSettings settings = makeSettings(/*maxBounces=*/16, 999);
+    settings.samplesPerPixel = kSamplesPerPixel / tools::stats::kReplicates;
+    const auto replicates = [&](const TestScene& scene, const char* name) {
+        std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+        std::array<tools::stats::Welford, 3> readings;
+        for (int r = 0; accel && r < tools::stats::kReplicates; ++r) {
+            const glm::vec3 mean =
+                centreMean(renderPass(scene, env, settings, *accel, pool, true, static_cast<std::uint32_t>(ctx.subSeed(name) + r)).beauty);
+            for (int c = 0; c < 3; ++c) {
+                readings[c].add(mean[c]);
+            }
+        }
+        return readings;
+    };
+    const std::array<tools::stats::Welford, 3> base = replicates(alone, "alone");
+    const std::array<tools::stats::Welford, 3> same = replicates(embedded, "embedded");
+    const std::array<tools::stats::Welford, 3> other = replicates(control, "control");
+    ctx.plan(2);
+    const double alpha = ctx.alpha();
+    // Grey sky and glass, so one channel speaks for all three.
+    const double invisible = same[0].mean() - base[0].mean();
+    const double visible = other[0].mean() - base[0].mean();
+    char detail[256];
+    std::snprintf(detail, sizeof(detail), "alone %.5f: embedded - alone %.2e within +/- %.2e; control - alone %.2e", base[0].mean(),
+                  invisible, tools::stats::differenceBand(same[0], base[0], alpha).halfWidth(), visible);
+    std::cout << "integrator_validate: " << detail << '\n';
+    PT_EXPECT(ctx, tools::stats::differenceBand(same[0], base[0], alpha).contains(invisible), detail);
+    PT_EXPECT(ctx, !tools::stats::differenceBand(other[0], base[0], alpha).contains(visible), detail);
 }
 
 // The other half of the convention: transmissionDepth == 0 is a tint applied once per crossing, so distance must not matter at all.
@@ -1210,9 +1468,13 @@ PT_CHECK(texture_binding_resolution, Fast, Exact) {
               "a channel on a colour input was accepted");
     PT_EXPECT(ctx, !apply(untouched, {{"beta", {{"base_weight", TextureConfig{exr, std::nullopt, 0, pathtracer::config::BumpConfig{exr, 1.0F}}}}}}),
               "a bump on an input other than a normal input was accepted");
-    // Volumetric switches need transport this renderer lacks: binding one must fail, not render as if it were zero.
-    PT_EXPECT(ctx, !apply(untouched, {{"beta", {{"subsurface_weight", file}}}}), "a texture on a volumetric switch was accepted");
-    // A thin wall has no interior: its subsurface is a sheet the surface shades, so the same binding is accepted there.
+    // A bulk's subsurface is a medium resolved where a path enters it, so a texture on its weight binds as a thin wall's does.
+    std::vector<MeshInstance> bulk = makeInstances();
+    PT_EXPECT(ctx, apply(bulk, {{"beta", {{"subsurface_weight", file}, {"subsurface_radius", file}}}}) &&
+                       std::holds_alternative<TextureHandle>(bulk[1].material.subsurfaceWeight) &&
+                       std::holds_alternative<TextureHandle>(bulk[1].material.subsurfaceRadius),
+              "a bulk material's subsurface_weight or subsurface_radius texture did not bind");
+    // A thin wall has no interior: its subsurface is a sheet the surface shades, and its weight binds the same way.
     std::vector<MeshInstance> sheets = makeInstances();
     for (MeshInstance& instance : sheets) {
         instance.material.geometryThinWalled = true;
@@ -1267,9 +1529,10 @@ PT_CHECK(transport_aov_partition, Slow, Exact) {
         float abbe;  // 0: no dispersion
         bool thinWalled = false;
         float opacity = 1.0F;
+        float subsurface = 0.0F;
     };
     // The dispersive row is here because the hero channel is the one mechanism writing different values into channels of one throughput.
-    const std::array<PartitionCase, 9> cases{{
+    const std::array<PartitionCase, 10> cases{{
         {"quad diffuse (rough 1.0)", Geometry::Quad, 1.0F, 0.0F, 0.0F, 1, 0.0F},
         {"quad glossy dielectric (rough 0.35)", Geometry::Quad, 0.35F, 0.0F, 0.0F, 1, 0.0F},
         {"quad rough metal (rough 0.5)", Geometry::Quad, 0.5F, 1.0F, 0.0F, 2, 0.0F},
@@ -1280,6 +1543,8 @@ PT_CHECK(transport_aov_partition, Slow, Exact) {
         // A window's pass-through at bounce 0 is a transmission vertex: what lies behind it sticks to the refraction bucket.
         {"slab of smooth thin windows", Geometry::Slab, 0.0F, 0.0F, 1.0F, 8, 0.0F, true},
         {"half-present quad diffuse (rough 1.0)", Geometry::Quad, 1.0F, 0.0F, 0.0F, 1, 0.0F, false, 0.5F},
+        // A walk's boundary NEE and its exit's sky hit are direct Subsurface: a lone slab has nothing for a later bounce to meet.
+        {"slab subsurface (rough 0.4)", Geometry::Slab, 0.4F, 0.0F, 0.0F, 4, 0.0F, false, 1.0F, 1.0F},
     }};
 
     const EnvironmentMap env = makeUniformEnvironment();
@@ -1298,6 +1563,8 @@ PT_CHECK(transport_aov_partition, Slow, Exact) {
             material.transmissionDispersionAbbeNumber = testCase.abbe > 0.0F ? testCase.abbe : 20.0F;
             material.geometryThinWalled = testCase.thinWalled;
             material.geometryOpacity = testCase.opacity;
+            material.subsurfaceWeight = testCase.subsurface;
+            material.subsurfaceRadius = 0.1F;
         });
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         if (!accel.has_value()) {
@@ -1311,12 +1578,15 @@ PT_CHECK(transport_aov_partition, Slow, Exact) {
         float worstGap = 0.0F;
         float worstBeauty = 0.0F;
         float maxIndirect = 0.0F;
-        // All six lanes are RGB, so one index walks every channel of every texel in step.
+        float maxDirectSubsurface = 0.0F;
+        // Every lane is RGB, so one index walks every channel of every texel in step.
         for (std::size_t i = 0; i < result.beauty.texels.size(); ++i) {
             const float beauty = result.beauty.texels[i];
             const float sum = result.directDiffuse.texels[i] + result.indirectDiffuse.texels[i] +
                                result.directSpecular.texels[i] + result.indirectSpecular.texels[i] +
-                               result.refraction.texels[i];
+                               result.refraction.texels[i] + result.directVolume.texels[i] + result.indirectVolume.texels[i] +
+                               result.directSubsurface.texels[i] + result.indirectSubsurface.texels[i];
+            maxDirectSubsurface = std::max(maxDirectSubsurface, result.directSubsurface.texels[i]);
             const float gap = std::fabs(beauty - sum) / std::max(std::fabs(beauty), 1e-3F);
             if (gap > worstGap) {
                 worstGap = gap;
@@ -1335,6 +1605,11 @@ PT_CHECK(transport_aov_partition, Slow, Exact) {
             std::cerr << "integrator_validate: FAILED transport partition coverage -- the corner scene "
                          "produced no Indirect bucket energy, so the identity below is not testing "
                          "them. Check that the wall is being hit by bounce rays.\n";
+            ok = false;
+        }
+        if (testCase.subsurface > 0.0F && !(maxDirectSubsurface > 0.0F)) {
+            std::cerr << "integrator_validate: FAILED transport partition coverage -- the subsurface slab produced no Direct "
+                         "Subsurface energy, so the identity below is not testing that lane.\n";
             ok = false;
         }
         if (worstGap > kTolerance) {

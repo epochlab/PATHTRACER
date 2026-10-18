@@ -26,6 +26,8 @@ AovSource aovSource(AovId aov) {
         case AovId::Refraction:
         case AovId::DirectVolume:
         case AovId::IndirectVolume:
+        case AovId::DirectSubsurface:
+        case AovId::IndirectSubsurface:
         case AovId::Fresnel:
             return AovSource::PathTraced;
 
@@ -105,6 +107,8 @@ int aovChannels(AovId aov) {
         case AovId::Refraction:
         case AovId::DirectVolume:
         case AovId::IndirectVolume:
+        case AovId::DirectSubsurface:
+        case AovId::IndirectSubsurface:
         case AovId::Denoised:
         case AovId::Count:
             return 3;
@@ -124,6 +128,8 @@ bool aovCarriesRadiance(AovId aov) {
         case AovId::Refraction:
         case AovId::DirectVolume:
         case AovId::IndirectVolume:
+        case AovId::DirectSubsurface:
+        case AovId::IndirectSubsurface:
         case AovId::Luminance:
         case AovId::Sobel:
         case AovId::Gabor:
@@ -174,6 +180,8 @@ bool aovIsColour(AovId aov) {
         case AovId::Refraction:
         case AovId::DirectVolume:
         case AovId::IndirectVolume:
+        case AovId::DirectSubsurface:
+        case AovId::IndirectSubsurface:
         case AovId::Albedo:
         case AovId::Fresnel:
         case AovId::Denoised:
@@ -249,6 +257,8 @@ bool aovIsBipolar(AovId aov) {
         case AovId::Refraction:
         case AovId::DirectVolume:
         case AovId::IndirectVolume:
+        case AovId::DirectSubsurface:
+        case AovId::IndirectSubsurface:
         case AovId::Shadow:
         case AovId::Denoised:
         case AovId::Count:
@@ -385,6 +395,8 @@ PathTracedLane pathTracedLane(AovId aov) {
         case AovId::Refraction:       return &Result::refraction;
         case AovId::DirectVolume:     return &Result::directVolume;
         case AovId::IndirectVolume:   return &Result::indirectVolume;
+        case AovId::DirectSubsurface: return &Result::directSubsurface;
+        case AovId::IndirectSubsurface: return &Result::indirectSubsurface;
         case AovId::Fresnel:          return &Result::fresnel;
         case AovId::Alpha:            return &Result::alpha;
         default:                      return nullptr;
@@ -486,6 +498,8 @@ bool aovSupportsLattice(AovId aov, pathtracer::gfx::PixelLattice lattice) {
         case AovId::Refraction:
         case AovId::DirectVolume:
         case AovId::IndirectVolume:
+        case AovId::DirectSubsurface:
+        case AovId::IndirectSubsurface:
         case AovId::Shadow:
         case AovId::Count:
             break;

@@ -170,6 +170,7 @@ add_library(pathtracer_core STATIC
     src/scene/lens.cpp
     src/scene/light.cpp
     src/scene/material_binding.cpp
+    src/scene/medium.cpp
     src/scene/microfacet.cpp
     src/scene/path_trace_driver.cpp
     src/scene/path_tracer.cpp

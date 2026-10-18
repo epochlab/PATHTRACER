@@ -13,7 +13,7 @@ namespace pathtracer::scene {
 // An input's hard range from the OpenPBR Surface specification v1.1.1: Unit [0,1], NonNegative [0,inf), Positive (0,inf), Signed [-1,1].
 enum class InputRange { Unit, NonNegative, Positive, Signed };
 
-// What reads an input: the surface BSDF at every vertex, emission at a hit, or in-volume scattering, inert without volumetric transport.
+// What reads an input: the surface BSDF at every vertex, emission at a hit, or the interior medium a bulk surface bounds.
 enum class InputUse { Surface, Emission, Volume };
 
 // One OpenPBR input: its specification name, range, image role and reader; filtered means a primary hit prefilters it by its footprint.
@@ -24,8 +24,6 @@ struct InputSpec {
     // A mix weight or reflectance factor; an input shaping a lobe (roughness, ior, a power) is point-sampled, as the pixel integrates it.
     bool filtered;
     InputUse use = InputUse::Surface;
-    // A switch for in-volume scattering, which needs volumetric transport: a bulk material accepts only its zero default.
-    bool requiresVolumes = false;
 };
 
 // The identity wrapper: OpenPbrInputs<Constant> holds plain values, as a material file and a resolved shading point do.
@@ -93,12 +91,12 @@ void forEachInput(Visit&& visit, Inputs&... inputs) {
     visit(InputSpec{"transmission_weight", Unit, kData, true}, inputs.transmissionWeight...);
     visit(InputSpec{"transmission_color", Unit, kColour, false}, inputs.transmissionColor...);
     visit(InputSpec{"transmission_depth", NonNegative, kData, false}, inputs.transmissionDepth...);
-    visit(InputSpec{"transmission_scatter", NonNegative, kColour, false, InputUse::Volume, true}, inputs.transmissionScatter...);
+    visit(InputSpec{"transmission_scatter", NonNegative, kColour, false, InputUse::Volume}, inputs.transmissionScatter...);
     visit(InputSpec{"transmission_scatter_anisotropy", Signed, kData, false, InputUse::Volume}, inputs.transmissionScatterAnisotropy...);
     visit(InputSpec{"transmission_dispersion_scale", Unit, kData, false}, inputs.transmissionDispersionScale...);
     visit(InputSpec{"transmission_dispersion_abbe_number", NonNegative, kData, false}, inputs.transmissionDispersionAbbeNumber...);
-    // Thin-walled, the subsurface is a translucent sheet the surface shades; its radii, a mean free path, need a volume.
-    visit(InputSpec{"subsurface_weight", Unit, kData, false, InputUse::Surface, true}, inputs.subsurfaceWeight...);
+    // Thin-walled, the subsurface is a translucent sheet the surface shades; bulk, a medium whose radii are its mean free path.
+    visit(InputSpec{"subsurface_weight", Unit, kData, false}, inputs.subsurfaceWeight...);
     visit(InputSpec{"subsurface_color", Unit, kColour, false}, inputs.subsurfaceColor...);
     visit(InputSpec{"subsurface_radius", NonNegative, kData, false, InputUse::Volume}, inputs.subsurfaceRadius...);
     visit(InputSpec{"subsurface_radius_scale", Unit, kData, false, InputUse::Volume}, inputs.subsurfaceRadiusScale...);

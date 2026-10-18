@@ -20,6 +20,7 @@
 #include "check.h"
 #include "eon.h"
 #include "fuzz.h"
+#include "medium.h"
 #include "microfacet.h"
 #include "microfacet_quadrature.h"
 #include "pathtracer/scene/bsdf.h"
@@ -209,6 +210,96 @@ PT_CHECK(dispersion_matches_reference, Fast, Exact) {
         }
     }
     expectWithin(ctx, "dispersed specular_ior vs openpbr_dispersion_adjusted_ior", worst, kFloatAgreement, where);
+}
+
+// Interior media against Adobe's openpbr_create_*_volume_from_openpbr_params, above its 1e-3 colour and distance clamps.
+PT_CHECK(interior_medium_matches_reference, Fast, Exact) {
+    ctx.plan(4);
+    // van de Hulst inverted in double: the root of a s^2 - (1 + a + b C) s + (1 - C) in [0, 1], a = 0.139, b = 1.17.
+    const auto exactAlbedo = [](double colour, double g) {
+        const double b = 1.139 + (1.17 * colour);
+        const double s = (b - std::sqrt((b * b) - (4.0 * 0.139 * (1.0 - colour)))) / (2.0 * 0.139);
+        return (1.0 - (s * s)) / (1.0 - (g * s * s));
+    };
+    double worstExact = 0.0;
+    double worstReference = 0.0;
+    double worstCoefficients = 0.0;
+    std::string exactAt;
+    std::string referenceAt;
+    std::string coefficientsAt;
+    for (const float colour : {0.01F, 0.1F, 0.3F, 0.5F, 0.7F, 0.9F, 0.99F}) {
+        for (const float g : {-0.9F, -0.3F, 0.0F, 0.5F, 0.9F}) {
+            const double albedo = scene::singleScatterAlbedo(glm::vec3(colour), g).x;
+            const double exact = exactAlbedo(colour, g);
+            if (relativeGap(albedo, exact) > worstExact) {
+                worstExact = relativeGap(albedo, exact);
+                exactAt = format("C %.2f g %.1f", colour, g);
+            }
+            // Adobe's constants are the same root rounded to six digits: its gap beyond that rounding must be float agreement.
+            const OpenPBR_HomogeneousVolume reference =
+                openpbr_create_subsurface_volume_from_openpbr_params(1.0F, vec3(1.0F), vec3(colour), g);
+            const double excess = relativeGap(albedo, reference.albedo.x) - relativeGap(reference.albedo.x, exact);
+            if (excess > worstReference) {
+                worstReference = excess;
+                referenceAt = format("C %.2f g %.1f", colour, g);
+            }
+        }
+    }
+    // Coefficients per channel: subsurface, transmission with grey-shifted absorption, and their blend by share of the dielectric.
+    Surface surface;
+    surface.subsurfaceColor = glm::vec3(0.9F, 0.6F, 0.4F);
+    surface.subsurfaceRadius = 0.05F;
+    surface.subsurfaceScatterAnisotropy = 0.3F;
+    surface.transmissionColor = glm::vec3(0.8F, 0.5F, 0.2F);
+    surface.transmissionScatter = glm::vec3(0.6F, 0.1F, 0.3F);
+    const OpenPBR_HomogeneousVolume subsurfaceReference = openpbr_create_subsurface_volume_from_openpbr_params(
+        surface.subsurfaceRadius, vec3(1.0F, 0.5F, 0.25F), vec3(0.9F, 0.6F, 0.4F), surface.subsurfaceScatterAnisotropy);
+    const OpenPBR_HomogeneousVolume transmissionReference =
+        openpbr_create_volume_from_openpbr_params(vec3(0.8F, 0.5F, 0.2F), 0.4F, vec3(0.6F, 0.1F, 0.3F), 0.0F);
+    struct Row {
+        const char* name;
+        float transmission;
+        float subsurface;
+        float depth;
+        OpenPBR_HomogeneousVolume reference;
+    };
+    const float subsurfaceShare = 0.6F * 0.7F / ((0.6F * 0.7F) + 0.4F);
+    const float transmissionShare = 0.4F / ((0.6F * 0.7F) + 0.4F);
+    // At depth 0 transmission is a surface tint whose empty volume still takes its share (openpbr_prepare_volume).
+    const std::array<Row, 4> rows{{
+        {"subsurface", 0.0F, 1.0F, 0.4F, subsurfaceReference},
+        {"transmission", 1.0F, 0.0F, 0.4F, transmissionReference},
+        {"blend T 0.4, S 0.7", 0.4F, 0.7F, 0.4F, openpbr_add_volumes(subsurfaceReference, transmissionReference, subsurfaceShare, transmissionShare)},
+        {"blend T 0.4, S 0.7, depth 0", 0.4F, 0.7F, 0.0F,
+         openpbr_add_volumes(subsurfaceReference, openpbr_make_empty_volume(), subsurfaceShare, transmissionShare)},
+    }};
+    for (const Row& row : rows) {
+        surface.transmissionWeight = row.transmission;
+        surface.subsurfaceWeight = row.subsurface;
+        surface.transmissionDepth = row.depth;
+        const scene::HomogeneousMedium medium = scene::interiorMedium(surface);
+        const vec3 absorption = openpbr_calculate_absorption_coefficient(row.reference);
+        const vec3 scattering = openpbr_calculate_scattering_coefficient(row.reference);
+        for (int c = 0; c < 3; ++c) {
+            // Adobe's albedo carries its six-digit constants, so the subsurface rows compare at their own rounding as above.
+            const double rounding = row.subsurface > 0.0F ? relativeGap(scene::singleScatterAlbedo(surface.subsurfaceColor, 0.3F)[c],
+                                                                        subsurfaceReference.albedo[c]) : 0.0;
+            const double gap = std::max(relativeGap(medium.absorption[c], absorption[c]), relativeGap(medium.scattering[c], scattering[c])) -
+                               (std::max(medium.absorption[c] + medium.scattering[c], 1.0F) * rounding);
+            if (gap > worstCoefficients) {
+                worstCoefficients = gap;
+                coefficientsAt = std::string(row.name) + format(" channel %.0f", c);
+            }
+        }
+    }
+    expectWithin(ctx, "singleScatterAlbedo vs van de Hulst inverted in double", worstExact, kFloatAgreement, exactAt);
+    expectWithin(ctx, "singleScatterAlbedo's gap to Adobe's beyond its six-digit constants", worstReference, kFloatAgreement, referenceAt);
+    expectWithin(ctx, "interiorMedium's coefficients vs Adobe's volumes beyond its albedo rounding", worstCoefficients, kFloatAgreement,
+                 coefficientsAt);
+    // The blend's phase: OpenPBR leaves a mix undefined, so the oracle's share-weighted g is not asserted; a single medium's g is.
+    surface.transmissionWeight = 0.0F;
+    surface.subsurfaceWeight = 1.0F;
+    PT_EXPECT(ctx, scene::interiorMedium(surface).anisotropy == surface.subsurfaceScatterAnisotropy, "a lone subsurface medium's g moved");
 }
 
 // Gulbrandsen 2014's (n, k) against its formula in double, and against Adobe's, whose float k^2 cancels as r -> 1, to Adobe's own rounding.

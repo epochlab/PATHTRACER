@@ -417,6 +417,8 @@ HdrImage evaluateFilterAov(AovId aov, const FilterInput& input, ThreadPool& thre
         case AovId::Refraction:
         case AovId::DirectVolume:
         case AovId::IndirectVolume:
+        case AovId::DirectSubsurface:
+        case AovId::IndirectSubsurface:
         case AovId::Count:
             break;
     }

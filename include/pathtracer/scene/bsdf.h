@@ -166,7 +166,7 @@ enum class Technique : std::uint8_t {
     Diffuse,                 // EON
     SheetSingle,             // a thin wall's VNDF lobe, reflected or mirrored through it by side; the mirror or -wo when smooth
     SheetMulti,              // its Kulla-Conty lobe, reflected or mirrored through the wall
-    ThinSubsurface,          // a thin wall's subsurface, an albedo-1 EON reflected or mirrored through it by its anisotropy
+    DiffuseSubsurface,       // subsurface as an albedo-1 EON: a thin wall's, mirrored through it by g; a bulk's zero-MFP limit
     Count,
 };
 inline constexpr std::size_t kTechniqueCount = static_cast<std::size_t>(Technique::Count);
@@ -204,19 +204,19 @@ struct BsdfClosure {
     DielectricSlab dielectric;  // built where dielectricWeight > 0
     DiffuseSlab diffuse;        // built where its selection mass is positive
     SheetSlab sheet;            // built where the thin wall's translucent share is positive
-    // The thin wall's subsurface under the interface, (1 - M)(1 - T) S (1 - E_spec(mu_o)) subsurface_color, reflected (1 - g)/2.
+    // Subsurface as a surface lobe, (1 - M)(1 - T) S (1 - E_spec(mu_o)) subsurface_color: a thin wall's, or a bulk's gated channels.
     glm::vec3 subsurfaceWeight;
-    float subsurfaceReflectShare;
+    float subsurfaceReflectShare;  // (1 - g)/2 on a thin wall, 1 for a bulk's limit
     DiffuseSlab subsurface;     // rho = 1, built where its selection mass is positive
     bool thinTransmission = false;  // a thin wall's sheet or subsurface transmits: light behind it reaches wo
     std::array<float, kTechniqueCount> mass{};  // selection probabilities: each technique's energy at wo over the total, or all zero
 };
 
-// Resolved inputs, wo, a hero RGB band dispersing specular_ior and the coat's normal and tangent in the base frame build it. No draws.
+// Resolved inputs, wo, a hero band, the coat frame and the embedding medium's index (1 in vacuum) build it. No draws.
 [[nodiscard]] BsdfClosure makeBsdfClosure(const OpenPbrInputs<Constant>& inputs, const glm::vec3& woLocal,
                                           std::optional<int> heroChannel = std::nullopt,
                                           const glm::vec3& coatNormalLocal = glm::vec3(0.0F, 0.0F, 1.0F),
-                                          const glm::vec3& coatTangentLocal = glm::vec3(1.0F, 0.0F, 0.0F));
+                                          const glm::vec3& coatTangentLocal = glm::vec3(1.0F, 0.0F, 0.0F), float ambientIor = 1.0F);
 
 // A vertex whose every strategy is massless has a zero BSDF: it can only emit, so neither NEE nor a continuation carries light from it.
 [[nodiscard]] inline bool scatters(const BsdfClosure& closure) {
@@ -253,6 +253,7 @@ struct NormalMappedBsdf {
     std::optional<int> heroChannel;
     glm::vec3 coatNormal;
     glm::vec3 coatTangent;
+    float ambientIor = 1.0F;
 };
 
 // Where a walk first returns to the facet, its Markov state: what NEE's estimate of the later orders resumes from.
@@ -265,7 +266,8 @@ struct WalkVertex {
 // The closure at wo with geometricLocal, the interpolated normal in the perturbed frame, where a normal or bump input bends it.
 [[nodiscard]] NormalMappedBsdf makeNormalMappedBsdf(const OpenPbrInputs<Constant>& inputs, const glm::vec3& woLocal,
                                                     std::optional<glm::vec3> geometricLocal, std::optional<int> heroChannel,
-                                                    const glm::vec3& coatNormalLocal, const glm::vec3& coatTangentLocal);
+                                                    const glm::vec3& coatNormalLocal, const glm::vec3& coatTangentLocal,
+                                                    float ambientIor = 1.0F);
 
 // The continuous lobes at wiLocal, split by transport type; one call, so GGX, Fresnel and table reads are computed once.
 [[nodiscard]] BsdfEval evaluateBsdfSplit(const BsdfClosure& closure, const glm::vec3& wiLocal);
@@ -298,6 +300,9 @@ struct WalkVertex {
 [[nodiscard]] float pdfBsdf(const OpenPbrInputs<Constant>& inputs, const glm::vec3& woLocal, const glm::vec3& wiLocal);
 [[nodiscard]] glm::vec3 evaluateBsdf(const OpenPbrInputs<Constant>& inputs, const glm::vec3& woLocal, const glm::vec3& wiLocal);
 [[nodiscard]] std::optional<BsdfSample> sampleBsdf(const OpenPbrInputs<Constant>& inputs, const glm::vec3& woLocal, Sampler& sampler);
+
+// An index n_d at the hero band by Cauchy from V_d = abbe / scale; unset or zero scale, n_d itself. Bulks and their ambient alike.
+[[nodiscard]] float dispersedIor(float ior, float abbeNumber, float dispersionScale, std::optional<int> heroChannel);
 
 // The dielectric's index ratio: heroChannel disperses specular_ior, specular_weight modulates it (OpenPBR's epsilon, eta').
 [[nodiscard]] float modulatedIor(const OpenPbrInputs<Constant>& inputs, std::optional<int> heroChannel);

@@ -2413,6 +2413,100 @@ PT_CHECK(coat_weight_zero_is_identity, Fast, Exact) {
     finish(ctx, ok, "coat_weight 0 changed a value, density or draw: an absent coat must not reach the base");
 }
 
+// Two closures that must agree to the bit: every value and density at each (wo, wi), and every draw from one sample stream.
+bool sameClosure(const pathtracer::scene::BsdfClosure& a, const pathtracer::scene::BsdfClosure& b, const std::vector<float>& wiCosines) {
+    constexpr int kDraws = 64;
+    bool same = true;
+    for (float muI : wiCosines) {
+        const glm::vec3 wi = pairAt(a.wo.z * a.sign, muI).second;
+        const pathtracer::scene::BsdfEval x = pathtracer::scene::evaluateBsdfSplit(a, wi);
+        const pathtracer::scene::BsdfEval y = pathtracer::scene::evaluateBsdfSplit(b, wi);
+        same = same && x.diffuse == y.diffuse && x.specular == y.specular && x.transmission == y.transmission && x.pdf == y.pdf;
+    }
+    for (int i = 0; i < kDraws; ++i) {
+        pathtracer::scene::Sampler first(0, 0, i, kDraws, 77U);
+        pathtracer::scene::Sampler second(0, 0, i, kDraws, 77U);
+        const auto x = pathtracer::scene::sampleBsdf(a, first);
+        const auto y = pathtracer::scene::sampleBsdf(b, second);
+        same = same && x.has_value() == y.has_value() &&
+               (!x || (x->wiLocal == y->wiLocal && x->throughputWeight == y->throughputWeight && x->pdf == y->pdf && x->type == y->type));
+    }
+    return same;
+}
+
+// Bulk subsurface refracts into its medium through transmission's interface (Adobe's trans + sss): from either side, the same BSDF.
+PT_CHECK(bulk_subsurface_interface_is_transmissions, Fast, Exact) {
+    const std::vector<float> cosines = {1.0F, 0.6F, 0.2F, -0.2F, -0.6F, -1.0F};
+    bool ok = true;
+    for (float roughness : {0.0F, 0.3F, 0.7F}) {
+        const Surface glass = makeParams(roughness, 0.0F, 1.0F);
+        const Surface wax = paramsWith([&](Surface& inputs) {
+            inputs.specularRoughness = roughness;
+            inputs.subsurfaceWeight = 1.0F;
+            inputs.subsurfaceColor = glm::vec3(0.3F, 0.6F, 0.9F);
+        });
+        for (float muO : {1.0F, 0.5F, 0.1F, -0.1F, -0.5F, -1.0F}) {
+            const glm::vec3 wo = pairAt(muO, 1.0F).first;
+            ok = ok && sameClosure(pathtracer::scene::makeBsdfClosure(glass, wo), pathtracer::scene::makeBsdfClosure(wax, wo), cosines);
+        }
+    }
+    finish(ctx, ok, "bulk subsurface's interface left transmission's: a value, density or draw differs");
+}
+
+// OpenPBR's zero-MFP limit is the glossy-diffuse BSDF: a bulk at radius 0 reflects as the albedo-1 lobe a thin wall at g = -1 does.
+PT_CHECK(zero_mfp_subsurface_is_its_glossy_diffuse_limit, Fast, Exact) {
+    const std::vector<float> cosines = {1.0F, 0.6F, 0.2F, -0.2F, -0.6F, -1.0F};
+    bool ok = true;
+    for (float roughness : {0.0F, 0.4F}) {
+        const auto subsurface = [&](bool thinWalled) {
+            return paramsWith([&](Surface& inputs) {
+                inputs.specularRoughness = roughness;
+                inputs.baseDiffuseRoughness = 0.5F;
+                inputs.subsurfaceWeight = 1.0F;
+                inputs.subsurfaceColor = glm::vec3(0.3F, 0.6F, 0.9F);
+                inputs.subsurfaceRadius = thinWalled ? 1.0F : 0.0F;
+                inputs.subsurfaceScatterAnisotropy = thinWalled ? -1.0F : 0.0F;
+                inputs.geometryThinWalled = thinWalled;
+            });
+        };
+        // From outside alone: from inside, a bulk is its interface, where a thin wall is the same either side.
+        for (float muO : {1.0F, 0.5F, 0.1F}) {
+            const glm::vec3 wo = pairAt(muO, 1.0F).first;
+            ok = ok && sameClosure(pathtracer::scene::makeBsdfClosure(subsurface(false), wo),
+                                   pathtracer::scene::makeBsdfClosure(subsurface(true), wo), cosines);
+        }
+    }
+    finish(ctx, ok, "a zero-MFP bulk subsurface left the thin wall's all-reflected albedo-1 lobe");
+}
+
+// Optics see index ratios and optical paths alone: an ambient index a equals every index over a and the film's thickness times a.
+PT_CHECK(ambient_index_is_a_ratio, Fast, Exact) {
+    constexpr float kAmbient = 1.33F;
+    const std::vector<float> cosines = {1.0F, 0.6F, 0.2F, -0.2F, -0.6F, -1.0F};
+    const Surface embedded = filmed(paramsWith([](Surface& inputs) {
+                                        inputs.specularRoughness = 0.3F;
+                                        inputs.transmissionWeight = 0.5F;
+                                        inputs.specularIor = 1.7F;
+                                        inputs.coatWeight = 0.5F;
+                                        inputs.coatIor = 1.6F;
+                                    }),
+                                    0.7F, 0.4F, 1.3F);
+    Surface relative = embedded;
+    relative.specularIor = embedded.specularIor / kAmbient;
+    relative.coatIor = embedded.coatIor / kAmbient;
+    relative.thinFilmIor = embedded.thinFilmIor / kAmbient;
+    relative.thinFilmThickness = embedded.thinFilmThickness * kAmbient;
+    const glm::vec3 up(0.0F, 0.0F, 1.0F);
+    const glm::vec3 tangent(1.0F, 0.0F, 0.0F);
+    bool ok = true;
+    for (float muO : {1.0F, 0.5F, 0.1F, -0.1F, -0.5F, -1.0F}) {
+        const glm::vec3 wo = pairAt(muO, 1.0F).first;
+        ok = ok && sameClosure(pathtracer::scene::makeBsdfClosure(embedded, wo, std::nullopt, up, tangent, kAmbient),
+                               pathtracer::scene::makeBsdfClosure(relative, wo), cosines);
+    }
+    finish(ctx, ok, "an ambient index differed from its ratios: base, coat or film read an absolute index");
+}
+
 // An index-matched coat (coat_ior 1) reflects and darkens nothing: the base under it is the base times (1-C) + C T(mu_o) T(mu_i).
 PT_CHECK(index_matched_coat_is_absorption, Fast, Exact) {
     // Base roughening at coat_roughness 0 is lerp(r, (r^4)^(1/4), C): r up to the two square roots' rounding.
@@ -3715,7 +3809,7 @@ PT_CHECK(lobe_pdf_is_the_drawn_technique_density, Fast, Exact) {
     // Facet Fresnel or wall side picks a branch inside these techniques: pdf carries that choice's odds, lobePdf is conditioned on it.
     const auto branched = [](Technique technique) {
         return technique == Technique::CoatSingle || technique == Technique::DielectricSingle || technique == Technique::SheetSingle ||
-               technique == Technique::SheetMulti || technique == Technique::ThinSubsurface;
+               technique == Technique::SheetMulti || technique == Technique::DiffuseSubsurface;
     };
     std::array<bool, pathtracer::scene::kTechniqueCount> drawn{};
     bool ok = true;
