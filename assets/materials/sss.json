@@ -4,6 +4,6 @@
     "specular_ior": 1.45,
     "subsurface_weight": 1.0,
     "subsurface_color": [0.9, 0.6, 0.4],
-    "subsurface_scatter_anisotropy": 0.0,
-    "geometry_thin_walled": true
+    "subsurface_radius": 0.05,
+    "subsurface_scatter_anisotropy": 0.0
 }
