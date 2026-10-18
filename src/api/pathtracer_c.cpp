@@ -322,7 +322,7 @@ int pt_render(PtRenderer* renderer, const PtRenderRequest* request, float* const
     }
 }
 
-int pt_display_encode(const float* rgb, int width, int height, float exposure_ev, int display_transform,
+int pt_display_encode(const float* rgb, int width, int height, const PtCamera* camera, float exposure_ev, int display_transform,
                       unsigned char* out, char* err, int err_cap) {
     try {
         if (rgb == nullptr || out == nullptr) {
@@ -333,9 +333,19 @@ int pt_display_encode(const float* rgb, int width, int height, float exposure_ev
             writeError(err, err_cap, "resolution must be positive");
             return PT_ERROR;
         }
+        float cameraGain = 1.0F;
+        if (camera != nullptr) {
+            std::string error;
+            const auto decoded = toCamera(*camera, error);
+            if (!decoded || !decoded->validate(error)) {
+                writeError(err, err_cap, "camera: " + error);
+                return PT_ERROR;
+            }
+            cameraGain = decoded->exposureGain();
+        }
         const auto count = static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3;
-        // Caller-driven with no AOV context, so the map stays a scalar photographic gain with no offset, as this entry point always was.
-        pathtracer::gfx::encodeForDisplay(std::span<const float>(rgb, count), width, height, glm::vec3(std::pow(2.0F, exposure_ev)),
+        // Caller-driven with no AOV context, so the map stays a scalar photographic gain with no offset: render_beauty's product.
+        pathtracer::gfx::encodeForDisplay(std::span<const float>(rgb, count), width, height, glm::vec3(cameraGain * std::pow(2.0F, exposure_ev)),
                                           display_transform != 0, glm::vec3(0.0F), std::span<unsigned char>(out, count));
         return PT_OK;
     } catch (const std::exception& e) {
@@ -345,6 +355,18 @@ int pt_display_encode(const float* rgb, int width, int height, float exposure_ev
         writeError(err, err_cap, "unknown error during display encode");
         return PT_ERROR;
     }
+}
+
+float pt_exposure_gain(float aperture, float shutter_seconds, float iso) {
+    return pathtracer::scene::Camera::exposureGain(aperture, shutter_seconds, iso);
+}
+
+float pt_ev100(float aperture, float shutter_seconds, float iso) {
+    return pathtracer::scene::Camera::ev100(aperture, shutter_seconds, iso);
+}
+
+float pt_meter_ev100(float luminance) {
+    return pathtracer::scene::Camera::meterEv100(luminance);
 }
 
 int pt_lattice_preview(const float* image, int width, int height, int channels, const PtCamera* camera, int out_width,

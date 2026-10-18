@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -20,6 +21,17 @@ struct GpuInfo;
 class FrameStats;
 class Histogram;
 
+// A slider's domain, shared where a test must cover what the HUD can reach.
+struct SliderRange {
+    float min;
+    float max;
+};
+
+// The Camera section's exposure sliders; the over-range readout's window must hold the clip luminance at every corner.
+inline constexpr SliderRange kApertureSlider{1.0F, 22.0F};
+inline constexpr SliderRange kShutterSecondsSlider{1.0F / 4000.0F, 1.0F};
+inline constexpr SliderRange kIsoSlider{50.0F, 6400.0F};
+
 // Toggle for the centre-crosshair framing overlay, owned by main.cpp (defaults on, no runtime toggle), read here.
 struct FramingOverlayState {
     bool crosshair = true;
@@ -35,10 +47,14 @@ struct PathTracedStatus {
     double samplingFraction = 1.0;  // texels the next pass traces over all texels; 0 once every one has stopped
 };
 
+// What the bottom-right probe shows: the cursor texel's RGBA, its luminance as a spot meter, or nothing, neither sampled nor drawn.
+enum class PixelProbeReadout { Colour, Photometric, None };
+
 // Pixel under the cursor (samplePixelProbe): the display-transformed texel for Beauty, the raw texel for any other AOV.
 struct PixelProbeSample {
     bool valid = false;
     glm::vec4 color{0.0F};
+    std::optional<float> luminance;  // the picture texel's scene luminance in cd/m^2, before any display transform; absent off the picture
 };
 
 // Everything HudOverlay::draw needs for one frame. aov and FramingOverlayState stay separate arguments because draw writes them back.
@@ -63,6 +79,7 @@ struct HudFrameData {
     float overRangePeakMultiple;
     bool vsync;  // profile.json frame cap, for the Cap readout
     int aovCount;  // the AOV dropdown's length: kAovCountWithoutDenoiser while profile.json disables the denoiser
+    PixelProbeReadout pixelProbeReadout;  // profile.json render.pixelProbe
 };
 
 // Owns the ImGui context and GLFW/OpenGL3 backends for one window's lifetime, move-only. Composites the debug panel onto the backbuffer.

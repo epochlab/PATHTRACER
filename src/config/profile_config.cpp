@@ -89,7 +89,23 @@ std::optional<pathtracer::gfx::PixelLattice> parsePixelLattice(const nlohmann::j
     return std::nullopt;
 }
 
-// The render block's output fields: display LUT, bit depth, image size and bloom. Scales, AOV and vsync are read after controls.
+// The probe's readout by name; nullopt logs any other.
+std::optional<pathtracer::debug::PixelProbeReadout> parsePixelProbe(const nlohmann::json& probe, const std::string& path) {
+    const std::string name = probe.get<std::string>();
+    if (name == "colour") {
+        return pathtracer::debug::PixelProbeReadout::Colour;
+    }
+    if (name == "photometric") {
+        return pathtracer::debug::PixelProbeReadout::Photometric;
+    }
+    if (name == "none") {
+        return pathtracer::debug::PixelProbeReadout::None;
+    }
+    std::cerr << "loadProfileConfig: " << path << " has render.pixelProbe " << name << ", expected colour, photometric or none\n";
+    return std::nullopt;
+}
+
+// The render block's output fields: display LUT, bit depth, image size, bloom and probe. Scales, AOV and vsync are read after controls.
 std::optional<RenderConfig> parseRenderOutput(const nlohmann::json& render, const std::string& path) {
     const std::string defaultLutName = render.at("defaultLUT").get<std::string>();
     const std::optional<pathtracer::gfx::OcioDisplayTransform::Lut> defaultLut =
@@ -111,9 +127,13 @@ std::optional<RenderConfig> parseRenderOutput(const nlohmann::json& render, cons
         std::cerr << "loadProfileConfig: " << path << " sets the retired textureBitDepth; textures keep their own format\n";
         return std::nullopt;
     }
+    const std::optional<pathtracer::debug::PixelProbeReadout> pixelProbe = parsePixelProbe(render.at("pixelProbe"), path);
+    if (!pixelProbe.has_value()) {
+        return std::nullopt;
+    }
     const int width = render.at("width").get<int>();
     const int height = render.at("height").get<int>();
-    return RenderConfig{width, height, 0.0F, 0.0F, 0, *defaultLut, false, *displayFormat, toFloat(render.at("bloomStrength"))};
+    return RenderConfig{width, height, 0.0F, 0.0F, 0, *defaultLut, false, *displayFormat, toFloat(render.at("bloomStrength")), *pixelProbe};
 }
 
 // The camera block in field order, then lens, lattice and acceptance. Ranges need the film back, so Camera::validate runs on the whole.

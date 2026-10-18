@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <limits>
+#include <numbers>
 #include <numeric>
 #include <random>
 #include <span>
@@ -25,6 +26,7 @@
 #include "pathtracer/gfx/pixel_lattice.h"
 #include "pathtracer/gfx/ocio_cpu_transform.h"
 #include "pathtracer/gfx/viewport.h"
+#include "pathtracer/scene/camera.h"
 #include "pathtracer/scene/sampler.h"
 #include "pathtracer/scene/thread_pool.h"
 
@@ -252,6 +254,27 @@ PT_CHECK(encode_of_flat_field_is_unbiased, Fast, Exact) {
                   static_cast<double>(worstLevel), kQuadratureBound);
     ctx.plan(1);
     PT_EXPECT(ctx, worst <= kQuadratureBound, detail);
+}
+
+// ISO 12232 SOS end to end: the luminance whose image-plane exposure is 10/S lx s, exposed by the camera's gain, displays as code 118.
+PT_CHECK(sos_luminance_encodes_to_code_118, Fast, Exact) {
+    constexpr float kAperture = 2.8F;
+    constexpr float kShutterSeconds = 0.008F;
+    constexpr float kIso = 400.0F;
+    // H = q L t / N^2 with ISO 12232's nominal lens, solved for H = 10 / S, independently of Camera's own constants.
+    const double q = std::numbers::pi / 4.0 * 0.9 * 0.98 * std::pow(std::cos(std::numbers::pi / 18.0), 4);
+    const auto luminance = static_cast<float>(10.0 * kAperture * kAperture / (q * kShutterSeconds * kIso));
+    // Neutral: the scene weights sum to one, so this texel's luminance is the level itself.
+    const std::vector<float> rgb(static_cast<std::size_t>(kTileTexels) * 3, luminance);
+    std::vector<unsigned char> codes(rgb.size());
+    const float gain = pathtracer::scene::Camera::exposureGain(kAperture, kShutterSeconds, kIso);
+    pathtracer::gfx::encodeForDisplay(rgb, kTile, kTile, glm::vec3(gain), true, glm::vec3(0.0F), codes);
+    const double mean = std::accumulate(codes.begin(), codes.end(), 0.0) / static_cast<double>(codes.size());
+    char detail[160];
+    std::snprintf(detail, sizeof(detail), "%.6g cd/m^2 at f/2.8, 1/125 s, ISO 400 encodes to mean code %.3f, not 118", luminance, mean);
+    ctx.plan(1);
+    // The dither is unbiased, so within half a code is the code an undithered quantiser would round to.
+    PT_EXPECT(ctx, std::fabs(mean - 118.0) <= 0.5, detail);
 }
 
 // A flat field's quantization error must be blue, every threshold of a void-and-cluster mask being so; sampler_validate's gate.

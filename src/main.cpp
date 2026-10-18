@@ -50,6 +50,7 @@
 #include "pathtracer/platform/display_link.h"
 #include "pathtracer/platform/window.h"
 #include "pathtracer/scene/camera.h"
+#include "pathtracer/scene/cie.h"
 #include "pathtracer/scene/debug_camera_controller.h"
 #include "pathtracer/scene/embree_accel.h"
 #include "pathtracer/scene/environment_map.h"
@@ -256,6 +257,7 @@ struct AppResources {
     float aberrationStrength = 0.0F;
     // Glare PSF's scattered fraction (0 = off), picture AOVs only; starts at profile.json bloomStrength, then the HUD slider.
     float bloomStrength;
+    pathtracer::debug::PixelProbeReadout pixelProbeReadout;  // profile.json render.pixelProbe
     // The bloom pyramid no longer matches pathTraceDisplayTexture: set by each upload, cleared by the next build.
     bool bloomStale = true;
     // Async path-traced view, selected by `aov`; requestTrace() is called only from requestPathTraceIfTriggerChanged.
@@ -268,6 +270,8 @@ struct AppResources {
     DisplayedAovSource pathTraceDisplayed{};
     // The display decision for the last rebuilt pathTraceDisplayTexture; its pre-mapped texels are what that texture already holds.
     pathtracer::debug::AovDisplay pathTraceDisplay{{}, {glm::vec3(1.0F), glm::vec3(0.0F)}};
+    // Per-lane exposure the texels were uploaded at, so binary16 holds display-relative values; presentFrame divides it back out.
+    glm::vec3 displayPreExposure{1.0F};
     PathTraceTriggerState lastPathTraceTrigger{};  // sentinel-initialized, see its own doc comment
     GBufferTriggerState lastGBufferTrigger{};  // the same, for the G-buffer's independent refresh
     // The camera the last frame displayed, MotionVector's origin; the startup pose before the first frame, so it moves from itself.
@@ -337,7 +341,7 @@ std::optional<FilmBackCatalogue> loadFilmBackCatalogue(const pathtracer::config:
     return FilmBackCatalogue{std::move(*presets), std::move(names), defaultIndex};
 }
 
-// ev100() is not read here: relativeExposureEv() derives the display-stage multiplier from the profile's aperture, shutter and ISO.
+// The controller's exposureGain() turns the live aperture, shutter and ISO into the display-stage multiplier on cd/m^2.
 pathtracer::scene::DebugCameraController makeDebugCamera(const pathtracer::config::ProfileConfig& profileConfig,
                                                          const pathtracer::scene::Camera::FilmBack& filmBack) {
     const pathtracer::config::CameraConfig& camera = profileConfig.camera;
@@ -377,6 +381,11 @@ std::optional<AppScene> loadAppScene(const pathtracer::config::SceneConfig& scen
         std::cerr << "main: model, material, volume or environment map load failed, aborting startup\n";
         return std::nullopt;
     }
+    pathtracer::scene::EnvironmentMap environmentMap(std::move(environmentTexture), sceneConfig.environment.illuminanceLux);
+    if (sceneConfig.environment.illuminanceLux && !(environmentMap.upwardIlluminance() > 0.0F)) {
+        std::cerr << "main: environment.lux needs a map with light above its horizon, aborting startup\n";
+        return std::nullopt;
+    }
 
     std::vector<int> instanceLightIndex(model->instances.size(), -1);
     std::optional<std::vector<pathtracer::scene::AreaLight>> lights =
@@ -404,7 +413,7 @@ std::optional<AppScene> loadAppScene(const pathtracer::config::SceneConfig& scen
     const pathtracer::scene::PathTraceSettings baseSettings =
         pathtracer::scene::baseSettingsOf(profileConfig, profileConfig.pathTracer.samplesPerPixel);
     return AppScene{std::move(*model), std::move(instanceLightIndex), std::move(*lights),
-                    pathtracer::scene::EnvironmentMap(std::move(environmentTexture)), std::move(*accel), std::move(*volumes), baseSettings,
+                    std::move(environmentMap), std::move(*accel), std::move(*volumes), baseSettings,
                     std::move(instanceBounds), totalTriangles, loadMs, accelBuildMs};
 }
 
@@ -493,6 +502,7 @@ std::optional<AppResources> initializeApp(const pathtracer::config::SceneConfig&
         .statsEnabled = statsEnabled,
         .vsync = profileConfig.render.vsync,
         .bloomStrength = profileConfig.render.bloomStrength,
+        .pixelProbeReadout = profileConfig.render.pixelProbe,
         .maxSamples = profileConfig.pathTracer.maxSamples,
         .displayFormat = profileConfig.render.displayFormat,
         .previousFrameCamera = initialCamera,
@@ -581,7 +591,7 @@ glm::vec3 applyBeautyDisplayTransform(glm::vec3 hdrColor, const AppResources& ap
     } else if (app.channelView == 3) {
         hdrColor = glm::vec3(hdrColor.b);
     }
-    const glm::vec3 exposed = hdrColor * std::pow(2.0F, app.debugCamera.relativeExposureEv());
+    const glm::vec3 exposed = hdrColor * app.debugCamera.exposureGain();
     std::array<float, 3> pixel{exposed.r, exposed.g, exposed.b};
     pathtracer::gfx::applyOcioDisplayTransform(pixel, 1, 1, app.userLut);
     glm::vec3 displayColor{pixel[0], pixel[1], pixel[2]};
@@ -710,9 +720,11 @@ pathtracer::debug::PixelProbeSample samplePixelProbe(
     // Direct texel read, no bilinear: G-buffer AOVs are per-pixel snapshots, expanded as the display texture's swizzle does.
     const glm::vec3 texel = source.image->rgb((static_cast<std::size_t>(cell.y) * static_cast<std::size_t>(source.image->width)) +
                                               static_cast<std::size_t>(cell.x));
-    const glm::vec3 color =
-        pathtracer::debug::aovIsPicture(aovId) ? applyBeautyDisplayTransform(texel, app) : texel;
-    return {true, glm::vec4(color, 1.0F)};
+    if (!pathtracer::debug::aovIsPicture(aovId)) {
+        return {true, glm::vec4(texel, 1.0F), std::nullopt};
+    }
+    const float luminance = glm::dot(pathtracer::scene::cie::sceneLuminanceWeights(), texel);
+    return {true, glm::vec4(applyBeautyDisplayTransform(texel, app), 1.0F), luminance};
 }
 
 // Re-uploads only when the displayed image's contents changed: re-sending texels the GPU already holds is work without a reason.
@@ -725,18 +737,21 @@ void ensurePathTraceDisplayTexture(AppResources& app, const DisplayedAovSource& 
     const pathtracer::debug::ScopedCpuTimer uploadTimer(app.stages.uploadMs);
     app.stages.uploaded = true;
     // Every display decision that has to read the texels, made once here rather than per frame; the exposure stays in presentFrame.
+    const auto aovId = static_cast<pathtracer::debug::AovId>(app.aov);
     app.pathTraceDisplay = pathtracer::debug::aovDisplay(
-        static_cast<pathtracer::debug::AovId>(app.aov), image,
+        aovId, image,
         {samples, app.scene.baseSettings.maxBounces, app.gbuffer->depthMax});
     // A nonlinear pre-map cannot ride the shader's two vec3 uniforms, so where one applies the texture carries its output instead.
     const pathtracer::gfx::HdrImage& shown =
         app.pathTraceDisplay.mapped.texels.empty() ? image : app.pathTraceDisplay.mapped;
+    // Pre-exposed: cd/m^2 past 65504 overflow binary16, but at the live exposure only texels 2^16 times display white can.
+    app.displayPreExposure = pathtracer::debug::aovExposureGain(aovId, app.debugCamera.exposureGain());
     // Uploaded straight from the HdrImage: the vertex shader resolves row order, and upload reallocates only on a shape change.
     if (app.pathTraceDisplayTexture.has_value()) {
-        app.pathTraceDisplayTexture->upload(shown.width, shown.height, shown.channels, shown.texels.data());
+        app.pathTraceDisplayTexture->upload(shown.width, shown.height, shown.channels, shown.texels.data(), app.displayPreExposure);
     } else {
         app.pathTraceDisplayTexture = pathtracer::gfx::Texture::createFromFloatPixels(
-            shown.width, shown.height, shown.channels, shown.texels.data(), app.displayFormat);
+            shown.width, shown.height, shown.channels, shown.texels.data(), app.displayFormat, app.displayPreExposure);
     }
     // Minification and the aberration taps then read across a lat-long's seam as across any interior column.
     app.pathTraceDisplayTexture->setWrapsHorizontally(source.wrapsHorizontally);
@@ -768,11 +783,9 @@ void presentFrame(AppResources& app,
     const bool isPicture = pathtracer::debug::aovIsPicture(aovId);
     app.ocioTransform.setActiveLut(isPicture ? app.userLut
                                               : pathtracer::gfx::OcioDisplayTransform::Lut::Raw);
-    // The photographic exposure is the one arm that cannot be cached with the upload: the slider moves without rebuilding the texture.
+    // The exposure moves without rebuilding the texture: the live gain over the one the texels were uploaded at.
     pathtracer::debug::BipolarDisplay display = app.pathTraceDisplay.affine;
-    if (pathtracer::debug::aovTakesDisplayExposure(aovId)) {
-        display.gain = glm::vec3(std::pow(2.0F, app.debugCamera.relativeExposureEv()));
-    }
+    display.gain *= pathtracer::debug::aovExposureGain(aovId, app.debugCamera.exposureGain()) / app.displayPreExposure;
     app.ocioTransform.setDisplayAffine(display.gain, display.offset);
     app.ocioTransform.setChannelView(app.channelView);
     app.ocioTransform.setInvert(app.invert);
@@ -861,7 +874,7 @@ void updateOverRangeStats(AppResources& app,
         return;
     }
     const pathtracer::scene::OverRangeStats& stats = pathTraceSnapshot->overRange;
-    const float exposure = std::pow(2.0F, app.debugCamera.relativeExposureEv());
+    const float exposure = app.debugCamera.exposureGain();
     app.overRangePeakMultiple = exposure * stats.rawPeak;
     // Texels binned strictly above the one holding 1/exposure: exact above that edge, the threshold quantised to 1/1024 of a stop.
     const auto bin = static_cast<std::size_t>(pathtracer::scene::overRangeBin(1.0F / exposure));
@@ -946,13 +959,15 @@ void updateHud(AppResources& app, const pathtracer::platform::Window& window,
         app.overRangePeakMultiple,
         app.vsync,
         app.denoiserConfig.enabled ? static_cast<int>(pathtracer::debug::AovId::Count) : pathtracer::debug::kAovCountWithoutDenoiser,
+        app.pixelProbeReadout,
     };
     CameraEdits edits = cameraEditsOf(app);
-    // Only the HUD reads it, so with the HUD hidden the fetch is skipped outright rather than computed and thrown away.
+    // Only the HUD reads it, so with the HUD hidden or the probe off the fetch is skipped rather than computed and thrown away.
     const pathtracer::debug::PixelProbeSample pixelProbe =
-        app.showHud ? samplePixelProbe(window, pathTraceSnapshot, app, static_cast<pathtracer::debug::AovId>(app.aov),
-                                       imageRect, app.stages.probeMs)
-                     : pathtracer::debug::PixelProbeSample{};
+        app.showHud && app.pixelProbeReadout != pathtracer::debug::PixelProbeReadout::None
+            ? samplePixelProbe(window, pathTraceSnapshot, app, static_cast<pathtracer::debug::AovId>(app.aov), imageRect,
+                               app.stages.probeMs)
+            : pathtracer::debug::PixelProbeSample{};
     const pathtracer::debug::ScopedCpuTimer hudTimer(app.stages.hudMs);
     if (app.showHud) {
         app.hud.draw(hudFrameData, app.aov, edits.focalLengthMm, edits.aperture, edits.shutterSeconds, edits.iso,

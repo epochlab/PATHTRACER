@@ -2,6 +2,8 @@
 
 #include <cstddef>
 
+#include <glm/glm.hpp>
+
 #include "pathtracer/gfx/scalar_type.h"
 
 namespace pathtracer::gfx {
@@ -16,11 +18,12 @@ public:
     Texture(Texture&& other) noexcept;
     Texture& operator=(Texture&& other) noexcept;
 
-    // Uploads width*height texels of `channels` (1-3) floats, row-major and unpadded; binary16 storage overflows above 65504.
-    static Texture createFromFloatPixels(int width, int height, int channels, const float* texels, ScalarType format);
+    // Uploads width*height texels of `channels` (1-3) floats times laneScale, row-major and unpadded; binary16 overflows above 65504.
+    static Texture createFromFloatPixels(int width, int height, int channels, const float* texels, ScalarType format,
+                                         const glm::vec3& laneScale = glm::vec3(1.0F));
 
     // Replaces the texels through the pixel buffer, reallocating only on a size or channel change. Sampled as HdrImage::rgb expands them.
-    void upload(int width, int height, int channels, const float* texels);
+    void upload(int width, int height, int channels, const float* texels, const glm::vec3& laneScale = glm::vec3(1.0F));
 
     void bind(unsigned int unit) const;
 

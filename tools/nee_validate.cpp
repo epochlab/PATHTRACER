@@ -85,6 +85,40 @@ EnvironmentMap makeStructuredEnvironment() {
     return tools::fixtures::makeEnvironment(kWidth, kHeight, rgb);
 }
 
+// E = sum of Y cos(theta) dOmega over the upper hemisphere: pi at unit radiance, the horizon row split exactly, the scale on Le alone.
+PT_CHECK(environment_illuminance_is_the_upward_cosine_integral, Fast, Exact) {
+    constexpr int kWidth = 16;
+    constexpr int kHeight = 33;
+    constexpr int kChannels = pathtracer::gfx::kRgbChannels;
+    // Each texel's luminance is a float dot product summed in double: a few float ulps over the exact integral.
+    constexpr double kTolerance = 8.0 * std::numeric_limits<float>::epsilon();
+    const auto near = [&](double got, double want) { return std::abs(got - want) <= kTolerance * want; };
+    ctx.plan(3);
+    const EnvironmentMap uniform = tools::fixtures::makeUniformEnvironment();
+    PT_EXPECT(ctx, near(uniform.upwardIlluminance(), std::numbers::pi), "a unit-radiance sky must give pi lux on an upward plane");
+    // Rows 0-15 lie above the horizon, row 16 straddles it, rows 17-32 below: only row 16's upper part and the rows above count.
+    constexpr float kAbove = 2.0F;
+    constexpr float kHorizon = 5.0F;
+    constexpr float kBelow = 100.0F;
+    std::vector<float> rgb(static_cast<std::size_t>(kWidth) * kHeight * kChannels, kBelow);
+    std::fill(rgb.begin(), rgb.begin() + static_cast<std::ptrdiff_t>(16 * kWidth * kChannels), kAbove);
+    std::fill(rgb.begin() + static_cast<std::ptrdiff_t>(16 * kWidth * kChannels), rgb.begin() + static_cast<std::ptrdiff_t>(17 * kWidth * kChannels),
+              kHorizon);
+    const double edge = std::sin(16.0 * std::numbers::pi / kHeight);
+    const double expected = std::numbers::pi * ((kAbove * edge * edge) + (kHorizon * (1.0 - (edge * edge))));
+    const EnvironmentMap split = tools::fixtures::makeEnvironment(kWidth, kHeight, rgb);
+    PT_EXPECT(ctx, near(split.upwardIlluminance(), expected),
+              "the straddling row must count only above the horizon, and the ground not at all: E = " +
+                  std::to_string(split.upwardIlluminance()) + ", expected " + std::to_string(expected));
+    // Calibrated to 1000 lx, a unit sky reads 1000 / pi cd/m^2 in every direction.
+    const EnvironmentMap calibrated =
+        tools::fixtures::makeEnvironment(64, 32, std::vector<float>(static_cast<std::size_t>(64 * 32 * kChannels), 1.0F), 1000.0F);
+    const glm::vec3 up = calibrated.sampleDirection(glm::vec3(0.0F, 1.0F, 0.0F));
+    const glm::vec3 down = calibrated.sampleDirection(glm::vec3(0.0F, -1.0F, 0.0F));
+    const double scaled = 1000.0 / uniform.upwardIlluminance();
+    PT_EXPECT(ctx, near(up.g, scaled) && near(down.g, scaled), "calibrated to 1000 lx, a unit sky must read 1000 / E cd/m^2 everywhere");
+}
+
 // sample returns a density, pdf() recovers it from a direction; MIS uses both, so disagreement corrupts every MIS weight in the renderer.
 PT_CHECK(environment_pdf_consistency, Fast, Exact) {
     constexpr int kSampleCount = 20000;

@@ -101,7 +101,7 @@ std::optional<std::map<std::string, std::map<std::string, TextureConfig>>> parse
     return textures;
 }
 
-// Exactly one of an authored scene-space color or a Planckian temperature in kelvin, at unit luminance so intensity means the same.
+// Exactly one of an authored scene-space color or a Planckian temperature in kelvin, at unit luminance so luminance is the meter's.
 std::optional<glm::vec3> lightColor(const nlohmann::json& light, const std::string& path, std::size_t index) {
     const auto color = light.find("color");
     const auto temperature = light.find("temperature");
@@ -110,7 +110,14 @@ std::optional<glm::vec3> lightColor(const nlohmann::json& light, const std::stri
         return std::nullopt;
     }
     if (color != light.end()) {
-        return color->get<glm::vec3>();
+        const auto rgb = color->get<glm::vec3>();
+        // Negative radiance is unrepresentable and would propagate through NEE as a permanent bias no downstream clamp removes.
+        const float luminance = glm::dot(pathtracer::scene::cie::sceneLuminanceWeights(), rgb);
+        if (glm::any(glm::lessThan(rgb, glm::vec3(0.0F))) || !(luminance > 0.0F)) {
+            std::cerr << "loadSceneConfig: " << path << ": lights[" << index << "] color is negative or black\n";
+            return std::nullopt;
+        }
+        return rgb / luminance;
     }
     const double kelvin = temperature->get<double>();
     const std::optional<glm::dvec3> rgb = pathtracer::scene::cie::blackbodyToScene(kelvin);
@@ -120,6 +127,28 @@ std::optional<glm::vec3> lightColor(const nlohmann::json& light, const std::stri
         return std::nullopt;
     }
     return glm::vec3(*rgb);
+}
+
+// Exactly one of a luminance in cd/m^2 or a luminous flux in lumens, positive: a zero light is an authoring error, not a dark one.
+std::optional<std::variant<Luminance, LuminousFlux>> lightEmission(const nlohmann::json& light, const std::string& path,
+                                                                   std::size_t index) {
+    const auto luminance = light.find("luminance");
+    const auto lumens = light.find("lumens");
+    if ((luminance == light.end()) == (lumens == light.end())) {
+        std::cerr << "loadSceneConfig: " << path << ": lights[" << index << "] needs exactly one of luminance or lumens\n";
+        return std::nullopt;
+    }
+    const bool isLuminance = luminance != light.end();
+    const float value = toFloat(isLuminance ? *luminance : *lumens);
+    if (!(value > 0.0F)) {
+        std::cerr << "loadSceneConfig: " << path << ": lights[" << index << "] " << (isLuminance ? "luminance " : "lumens ") << value
+                  << " is not positive\n";
+        return std::nullopt;
+    }
+    if (isLuminance) {
+        return Luminance{value};
+    }
+    return LuminousFlux{value};
 }
 
 // The type's own shape, its keys closed per type; nullopt logs an unknown type, a foreign key or a non-positive extent.
@@ -132,7 +161,8 @@ std::optional<std::variant<QuadShape, DiskShape, SphereShape, MeshShape>> lightS
     };
     // Each extent is a measure: zero subtends no solid angle, and a negative size would mirror a quad and flip which face emits.
     if (type == "quad") {
-        if (!onlyKnownKeys(light, {"type", "position", "rotation", "size", "color", "temperature", "intensity", "twoSided"}, path, "light")) {
+        if (!onlyKnownKeys(light, {"type", "position", "rotation", "size", "color", "temperature", "luminance", "lumens", "twoSided"}, path,
+                           "light")) {
             return std::nullopt;
         }
         const QuadShape quad{light.at("size").get<glm::vec2>()};
@@ -142,7 +172,8 @@ std::optional<std::variant<QuadShape, DiskShape, SphereShape, MeshShape>> lightS
         return quad;
     }
     if (type == "disk") {
-        if (!onlyKnownKeys(light, {"type", "position", "rotation", "radius", "color", "temperature", "intensity", "twoSided"}, path, "light")) {
+        if (!onlyKnownKeys(light, {"type", "position", "rotation", "radius", "color", "temperature", "luminance", "lumens", "twoSided"}, path,
+                           "light")) {
             return std::nullopt;
         }
         const DiskShape disk{toFloat(light.at("radius"))};
@@ -152,7 +183,8 @@ std::optional<std::variant<QuadShape, DiskShape, SphereShape, MeshShape>> lightS
         return disk;
     }
     if (type == "sphere") {
-        if (!onlyKnownKeys(light, {"type", "position", "rotation", "radius", "color", "temperature", "intensity"}, path, "light")) {
+        if (!onlyKnownKeys(light, {"type", "position", "rotation", "radius", "color", "temperature", "luminance", "lumens"}, path,
+                           "light")) {
             return std::nullopt;
         }
         const SphereShape sphere{toFloat(light.at("radius"))};
@@ -162,8 +194,9 @@ std::optional<std::variant<QuadShape, DiskShape, SphereShape, MeshShape>> lightS
         return sphere;
     }
     if (type == "mesh") {
-        if (!onlyKnownKeys(light, {"type", "position", "rotation", "gltfPath", "scale", "color", "temperature", "intensity", "twoSided"}, path,
-                           "light")) {
+        if (!onlyKnownKeys(light, {"type", "position", "rotation", "gltfPath", "scale", "color", "temperature", "luminance", "lumens",
+                                   "twoSided"},
+                           path, "light")) {
             return std::nullopt;
         }
         const MeshShape mesh{light.at("gltfPath").get<std::string>(), light.contains("scale") ? toFloat(light.at("scale")) : 1.0F};
@@ -195,20 +228,18 @@ std::optional<std::vector<LightConfig>> parseLights(const nlohmann::json& j, con
         if (!color) {
             return std::nullopt;
         }
-        const LightConfig config{
+        const auto emission = lightEmission(light, path, index);
+        if (!emission) {
+            return std::nullopt;
+        }
+        lights.push_back(LightConfig{
             light.at("position").get<glm::vec3>(),
             light.at("rotation").get<glm::vec3>(),
             *shape,
             *color,
-            toFloat(light.at("intensity")),
+            *emission,
             light.value("twoSided", false),
-        };
-        // Negative radiance is unrepresentable and would propagate through NEE as a permanent bias no downstream clamp removes.
-        if (config.intensity < 0.0F || glm::any(glm::lessThan(config.color, glm::vec3(0.0F)))) {
-            std::cerr << "loadSceneConfig: " << path << ": lights[" << index << "] has a negative intensity/color\n";
-            return std::nullopt;
-        }
-        lights.push_back(config);
+        });
     }
     return lights;
 }
@@ -297,7 +328,7 @@ std::optional<SceneConfig> loadSceneConfig(const std::string& path) {
         const nlohmann::json& environment = j.at("environment");
         if (!onlyKnownKeys(j, {"model", "environment", "materialPath", "materialOverrides", "textures", "lights", "volumes", "camera"},
                            path, "top-level") ||
-            !onlyKnownKeys(environment, {"hdriPath", "lightEnabled", "colorSpace"}, path, "environment")) {
+            !onlyKnownKeys(environment, {"hdriPath", "lightEnabled", "colorSpace", "lux"}, path, "environment")) {
             return std::nullopt;
         }
         // No model is a scene of lights and volumes alone; the surface keys all name the model's nodes, so they come with it.
@@ -324,6 +355,17 @@ std::optional<SceneConfig> loadSceneConfig(const std::string& path) {
             return std::nullopt;
         }
 
+        // A calibration target: zero would scale the sky to black, which lightEnabled false already expresses.
+        std::optional<float> illuminanceLux;
+        if (const auto it = environment.find("lux"); it != environment.end()) {
+            illuminanceLux = toFloat(*it);
+            if (!(*illuminanceLux > 0.0F)) {
+                std::cerr << "loadSceneConfig: " << path << ": environment lux " << *illuminanceLux
+                          << " lx is not positive\n";
+                return std::nullopt;
+            }
+        }
+
         std::optional<SceneCameraConfig> camera;
         if (const auto it = j.find("camera"); it != j.end()) {
             if (!onlyKnownKeys(*it, {"position", "rotation", "farClip"}, path, "camera")) {
@@ -339,6 +381,7 @@ std::optional<SceneConfig> loadSceneConfig(const std::string& path) {
                 environment.at("hdriPath").get<std::string>(),
                 environment.value("lightEnabled", true),
                 optionalString(environment, "colorSpace"),
+                illuminanceLux,
             },
             hasModel ? std::optional(j.at("materialPath").get<std::string>()) : std::nullopt,
             std::move(materialOverrides),

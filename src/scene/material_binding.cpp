@@ -14,6 +14,7 @@
 #include <variant>
 #include <vector>
 
+#include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
 #include "pathtracer/scene/rotation.h"
@@ -203,6 +204,20 @@ void assignBinding(Material& material, const std::string& name, const ResolvedBi
         material);
 }
 
+// One face's area of the placed emitter, world-space, so a mesh's own scale is in it and the rigid placement leaves it unchanged.
+float emittingArea(const AreaLight& placed) {
+    if (const auto* quad = std::get_if<QuadLight>(&placed)) {
+        return glm::length(glm::cross(quad->edge0, quad->edge1));
+    }
+    if (const auto* disk = std::get_if<DiskLight>(&placed)) {
+        return glm::pi<float>() * disk->radius * disk->radius;
+    }
+    if (const auto* sphere = std::get_if<SphereLight>(&placed)) {
+        return 4.0F * glm::pi<float>() * sphere->radius * sphere->radius;
+    }
+    return std::get<MeshLight>(placed).area;
+}
+
 }  // namespace
 
 bool applySceneMaterials(std::vector<MeshInstance>& instances, const std::string& materialPath,
@@ -278,7 +293,8 @@ std::optional<std::vector<AreaLight>> buildLights(const std::vector<pathtracer::
         const glm::mat4 lightToWorld = sceneTransform * placementTransform(light.position, light.rotation);
         const glm::vec3 centre(lightToWorld * glm::vec4(0.0F, 0.0F, 0.0F, 1.0F));
         const glm::mat3 axes(lightToWorld);
-        const glm::vec3 radiance = light.color * light.intensity;
+        // Placed at unit-luminance colour first: a lumens light's luminance needs the placed area, a mesh's known only once loaded.
+        const glm::vec3& radiance = light.color;
         if (const auto* quad = std::get_if<pathtracer::config::QuadShape>(&light.shape)) {
             const glm::vec2 halfSize = 0.5F * quad->size;
             // edge0 = +X, edge1 = -Y: cross(edge0, edge1) is local -Z, the emitting side, from the (-x, +y) corner.
@@ -321,8 +337,19 @@ std::optional<std::vector<AreaLight>> buildLights(const std::vector<pathtracer::
             }
             placed.emplace_back(std::move(meshLight));
         }
+        const float luminance = emittedLuminance(light, placed.back());
+        std::visit([luminance](auto& emitter) { emitter.radiance *= luminance; }, placed.back());
     }
     return placed;
+}
+
+float emittedLuminance(const pathtracer::config::LightConfig& light, const AreaLight& placed) {
+    if (const auto* luminance = std::get_if<pathtracer::config::Luminance>(&light.emission)) {
+        return luminance->candelasPerSquareMetre;
+    }
+    // Lambertian: M = pi L leaves each emitting side, so Phi = pi L A per side (a sphere's one side is its outside).
+    const float sides = light.twoSided ? 2.0F : 1.0F;
+    return std::get<pathtracer::config::LuminousFlux>(light.emission).lumens / (glm::pi<float>() * emittingArea(placed) * sides);
 }
 
 glm::mat4 rootTransformOf(const pathtracer::config::ModelConfig& model) {

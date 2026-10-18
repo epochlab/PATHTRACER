@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -12,8 +13,12 @@ namespace pathtracer::scene {
 // CPU-resident equirect env map for path-traced miss rays and NEE light sampling.
 class EnvironmentMap {
 public:
-    // Builds the piecewise-constant importance-sampling CDFs (marginal over rows, conditional over columns) from the texture's texels.
-    explicit EnvironmentMap(std::shared_ptr<const pathtracer::gfx::ImageTexture> texture);
+    // Builds the importance-sampling CDFs from the texels; illuminanceLux scales Le to that lux on an upward plane, absent reads cd/m^2.
+    explicit EnvironmentMap(std::shared_ptr<const pathtracer::gfx::ImageTexture> texture,
+                            std::optional<float> illuminanceLux = std::nullopt);
+
+    // Lux on a +Y-facing plane in the map's frame from the stored texels, exact for piecewise-constant ones: the calibration's divisor.
+    [[nodiscard]] float upwardIlluminance() const { return upwardIlluminance_; }
 
     // Direction -> equirect UV -> filtered lookup. The renderer's only Le: pdf() below is merely its importance.
     [[nodiscard]] glm::vec3 sampleDirection(const glm::vec3& direction, const glm::mat3& rotation = glm::mat3(1.0F)) const;
@@ -39,6 +44,8 @@ private:
     int height_;
     std::vector<float> marginalCdf_;     // size height+1, marginalCdf_[0]=0, marginalCdf_[height]=1
     std::vector<float> conditionalCdf_;  // size height*(width+1), row-major, each row's slice sums to 1 at its last entry
+    float upwardIlluminance_;
+    float radianceScale_;  // authored lux over upwardIlluminance_, or 1 uncalibrated: the pdf is scale-invariant, so only Le takes it
 };
 
 }  // namespace pathtracer::scene

@@ -16,6 +16,15 @@ namespace pathtracer::scene {
 
 namespace {
 
+// SOS's display level per lx s of image-plane exposure: sRGB code 118 on the IEC 61966-2-1 power branch (118/255 > 0.04045) over 10/S.
+const double kSosLevelPerExposure = std::pow(((118.0 / 255.0) + 0.055) / 1.055, 2.4) / 10.0;
+
+// ISO 12232's nominal lens q = (pi/4) T v cos^4(theta): transmittance 0.9 and vignetting 0.98 at 10 degrees off axis.
+const double kNominalLensFactor = std::numbers::pi / 4.0 * 0.9 * 0.98 * std::pow(std::cos(std::numbers::pi / 18.0), 4);
+
+// ISO 2720's reflected-light calibration constant in cd s / m^2, 12.5 as Canon, Nikon and Sekonic meters.
+constexpr float kReflectedMeterK = 12.5F;
+
 // isfinite first: inf > 0 holds, and a NaN fails both, so every caller's rejection covers it.
 bool finitePositive(float value) {
     return std::isfinite(value) && value > 0.0F;
@@ -162,9 +171,9 @@ bool Camera::validate(std::string& error) const {
         reason << "shutter " << shutterSeconds_ << " s is not finite and positive";
     } else if (!finitePositive(iso_)) {
         reason << "ISO " << iso_ << " is not finite and positive";
-    // aperture^2 / shutter * 100 / iso overflows or underflows at finite extremes; the display gain is 2^-ev.
-    } else if (!std::isfinite(ev100())) {
-        reason << "exposure f/" << aperture_ << ", " << shutterSeconds_ << " s, ISO " << iso_ << " has no finite EV100";
+    // aperture^2 / shutter * 100 / iso overflows or underflows at finite extremes, and the display gain past float range.
+    } else if (!std::isfinite(ev100()) || !finitePositive(exposureGain())) {
+        reason << "exposure f/" << aperture_ << ", " << shutterSeconds_ << " s, ISO " << iso_ << " has no finite EV100 and display gain";
     // Checked whichever projection is active: the HUD switches projection at runtime over the same polynomial.
     } else if (!(lens_.maxFieldOfViewDegrees > 0.0F && lens_.maxFieldOfViewDegrees <= 360.0F)) {
         reason << "fisheye field of view " << lens_.maxFieldOfViewDegrees << " degrees is outside (0, 360]";
@@ -315,6 +324,20 @@ float Camera::ev100() const {
 
 float Camera::ev100(float aperture, float shutterSeconds, float iso) {
     return std::log2((aperture * aperture) / shutterSeconds * (100.0F / iso));
+}
+
+float Camera::exposureGain() const {
+    return exposureGain(aperture_, shutterSeconds_, iso_);
+}
+
+// In double, so only the final narrowing can overflow, and doubling t or S doubles the gain exactly.
+float Camera::exposureGain(float aperture, float shutterSeconds, float iso) {
+    const double fNumber = aperture;
+    return static_cast<float>(kSosLevelPerExposure * kNominalLensFactor * shutterSeconds * iso / (fNumber * fNumber));
+}
+
+float Camera::meterEv100(float luminance) {
+    return std::log2(luminance * (100.0F / kReflectedMeterK));
 }
 
 }  // namespace pathtracer::scene

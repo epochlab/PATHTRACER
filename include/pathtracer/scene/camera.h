@@ -121,6 +121,13 @@ public:
     [[nodiscard]] float ev100() const;
     [[nodiscard]] static float ev100(float aperture, float shutterSeconds, float iso);
 
+    // ISO 12232:2019 SOS display gain on luminance in cd/m^2: image-plane H = q L t / N^2 lx s, and H = 10/S renders at sRGB code 118.
+    [[nodiscard]] float exposureGain() const;
+    [[nodiscard]] static float exposureGain(float aperture, float shutterSeconds, float iso);
+
+    // A reflected spot meter's EV100 for a luminance in cd/m^2 (ISO 2720): N^2/t = L S / K at S = 100, K = 12.5.
+    [[nodiscard]] static float meterEv100(float luminance);
+
 private:
     glm::vec3 position_;
     glm::vec3 rotationDegrees_;

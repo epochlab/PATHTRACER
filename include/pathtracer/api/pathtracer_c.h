@@ -13,7 +13,7 @@ typedef struct PtRenderer PtRenderer;
 #define PT_OK 0
 #define PT_ERROR 1
 /* PtCamera is passed by value, so a caller built against a different layout must be caught rather than reading the fields as garbage. */
-#define PT_ABI_VERSION 10
+#define PT_ABI_VERSION 11
 /* Lens projections, PtCamera.lens_projection: the pinhole, Kannala & Brandt's polynomial fisheye, and the 360-degree lat-long. */
 #define PT_LENS_RECTILINEAR 0
 #define PT_LENS_FISHEYE_POLYNOMIAL 1
@@ -41,7 +41,7 @@ int pt_aov_needs_samples(int aov);
 /* PT_ABI_VERSION this library was built with: a caller compares it to its own header's and refuses to call on a mismatch. */
 int pt_abi_version(void);
 
-/* Pose, lens, exposure, lattice; aperture/shutter_seconds/iso set EV only (no depth of field). pt_render names any field out of range. */
+/* Pose, lens, exposure, lattice; aperture/shutter_seconds/iso set pt_display_encode's exposure (no depth of field). Ranges named. */
 typedef struct {
     float position[3]; /* finite */
     float rotation_degrees[3]; /* finite; XYZ degrees as Rz*Ry*Rx, scene.json's convention, so -Z forward at rest */
@@ -50,7 +50,7 @@ typedef struct {
     /* 0 < near_clip < far_clip, near_clip finite; far_clip may be +inf, the unbounded ray. */
     float near_clip;
     float far_clip;
-    float aperture; /* f-number; aperture, shutter_seconds and iso each finite, > 0, with a finite EV100 */
+    float aperture; /* f-number; aperture, shutter_seconds and iso each finite, > 0, with a finite EV100 and display gain */
     float shutter_seconds;
     float iso;
     /* PT_LENS_*. Every AOV renders under either projection; G-buffer depth is distance along the primary ray. */
@@ -110,9 +110,16 @@ typedef struct {
 /* Renders every requested AOV. out parallels request->aovs at width * height * pt_aov_channels(aovs[i]) floats, row-major top-left. */
 int pt_render(PtRenderer* renderer, const PtRenderRequest* request, float* const* out, char* err, int err_cap);
 
-/* Scene-referred linear to display-referred 8-bit sRGB, the viewer's chain and render_beauty's PNG encode. Buffers hold w*h*3. */
-int pt_display_encode(const float* rgb, int width, int height, float exposure_ev, int display_transform,
+/* Linear cd/m^2 to 8-bit sRGB, the viewer's chain: gain is camera's SOS exposure (1 if NULL) times 2^exposure_ev. Buffers hold w*h*3. */
+int pt_display_encode(const float* rgb, int width, int height, const PtCamera* camera, float exposure_ev, int display_transform,
                       unsigned char* out, char* err, int err_cap);
+
+/* ISO 12232 SOS display gain on luminance in cd/m^2, the viewer's exposure: sRGB code 118 at image-plane exposure 10/iso lx s. */
+float pt_exposure_gain(float aperture, float shutter_seconds, float iso);
+/* log2(aperture^2 / shutter_seconds * 100 / iso), the exposure value at ISO 100. */
+float pt_ev100(float aperture, float shutter_seconds, float iso);
+/* A reflected spot meter's EV100 for a luminance in cd/m^2 (ISO 2720, K = 12.5): equal to pt_ev100 where that exposure meters it. */
+float pt_meter_ev100(float luminance);
 
 /* Draws a w*h*channels image's cells over camera's frame onto out_w*out_h*channels, each texel its nearest pixel, as the viewer does. */
 int pt_lattice_preview(const float* image, int width, int height, int channels, const PtCamera* camera, int out_width,
