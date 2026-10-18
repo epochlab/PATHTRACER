@@ -168,6 +168,9 @@ bool appendTimingRecord(const Options& options, int argc, char** argv, int width
                    {"env_light", envLightEnabled},
                    {"spp_per_pass", settings.samplesPerPixel},
                    {"replicates", settings.replicates},
+                   {"adaptive_threshold", settings.adaptive.threshold},
+                   {"adaptive_confidence", settings.adaptive.confidence},
+                   {"adaptive_min_samples", settings.adaptive.minSamples},
                    {"denoise_features", settings.denoiseFeatures},
                    {"max_bounces", settings.maxBounces},
                    {"rr_start_bounce", settings.russianRouletteStartBounce},
@@ -495,13 +498,15 @@ int main(int argc, char** argv) {
     const pathtracer::debug::RayCounts rays = stats.rays;
     // A G-buffer AOV runs no path-traced passes, so there is no per-pass distribution to report for it.
     if (!milliseconds.empty()) {
-        std::cout << "render_beauty: rays over " << options.passes << " passes -- primary " << rays.primary
+        // Adaptive sampling can end the accumulation before options.passes, so the passes run are the timed ones.
+        const std::size_t passesRun = milliseconds.size();
+        std::cout << "render_beauty: rays over " << passesRun << " passes -- primary " << rays.primary
                   << ", bounce " << rays.bounce << ", ao " << rays.ao << ", shadow " << rays.shadow << ", total "
                   << rays.total() << "\n";
         const auto [best, worst] = std::minmax_element(milliseconds.begin(), milliseconds.end());
         const double totalMs = std::accumulate(milliseconds.begin(), milliseconds.end(), 0.0);
-        std::cout << "render_beauty: best-of-" << options.passes << ": " << *best << " ms/pass  (mean "
-                  << totalMs / static_cast<double>(options.passes) << ", worst " << *worst << ", total "
+        std::cout << "render_beauty: best-of-" << passesRun << ": " << *best << " ms/pass  (mean "
+                  << totalMs / static_cast<double>(passesRun) << ", worst " << *worst << ", total "
                   << totalMs << ")\n";
     }
     if (stats.gbufferMilliseconds > 0.0) {

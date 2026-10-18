@@ -338,6 +338,7 @@ PathTraceSettings baseSettingsOf(const pathtracer::config::ProfileConfig& profil
         .lookaheadDistance = profile.pathTracer.lookaheadDistance,
         .replicates = profile.pathTracer.replicates,
         .denoiseFeatures = profile.denoiser.enabled,
+        .adaptive = {profile.pathTracer.adaptiveThreshold, profile.pathTracer.adaptiveConfidence, profile.pathTracer.adaptiveMinSamples},
     };
 }
 

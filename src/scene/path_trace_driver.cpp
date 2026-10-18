@@ -4,9 +4,16 @@
 #include "pathtracer/debug/aov_routing.h"
 #include "pathtracer/scene/cie.h"
 
+#include <boost/math/distributions/chi_squared.hpp>
+
 #include <algorithm>
+#include <bit>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
+#include <iterator>
+#include <limits>
+#include <numeric>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -134,6 +141,81 @@ void foldReplicateLuminance(const float* previousMeans, const float* drawn, std:
     }
 }
 
+ReplicateEstimate replicateEstimate(const float* means, int populated) {
+    const double mean = std::accumulate(means, means + populated, 0.0) / static_cast<double>(populated);
+    double squares = 0.0;
+    for (int r = 0; r < populated; ++r) {
+        squares += (means[r] - mean) * (means[r] - mean);
+    }
+    const double inverseDegrees = 1.0 / (static_cast<double>(populated) * static_cast<double>(populated - 1));
+    return {mean, squares * inverseDegrees};
+}
+
+// Normal replicate means make (K-1) s^2 / sigma^2 chi-squared on K-1 dof (Cochran 1934): small at sigma below the tolerance.
+double convergenceStatistic(const ReplicateEstimate& estimate, int replicates, float threshold) {
+    const double tolerance = static_cast<double>(threshold) * estimate.mean;
+    // Zero spread is no evidence: replicates of a few samples agree exactly when every sample missed a rare path, as at a silhouette.
+    if (!(estimate.meanVariance > 0.0) || !(tolerance > 0.0)) {
+        return std::numeric_limits<double>::infinity();
+    }
+    return (static_cast<double>(replicates) - 1.0) * estimate.meanVariance / (tolerance * tolerance);
+}
+
+std::size_t stepUpRejections(std::span<const double> ascendingP, std::size_t tests, double alpha) {
+    for (std::size_t k = ascendingP.size(); k > 0; --k) {
+        if (ascendingP[k - 1] <= static_cast<double>(k) * alpha / static_cast<double>(tests)) {
+            return k;
+        }
+    }
+    return 0;
+}
+
+bool adaptiveCheckpoint(int n, const PathTraceSettings& settings) {
+    const AdaptiveSampling& adaptive = settings.adaptive;
+    return adaptive.threshold > 0.0F && n >= adaptive.minSamples && n % settings.replicates == 0 &&
+           std::has_single_bit(static_cast<unsigned int>(n / settings.replicates));
+}
+
+// Texels are independent under filter importance sampling, so the step-up holds the stopped set's false share to 1 - confidence.
+void retireConvergedTexels(std::vector<std::uint32_t>& active, const float* replicateLuminance, const PathTraceSettings& settings,
+                           ThreadPool& threadPool) {
+    const auto stride = static_cast<std::size_t>(settings.replicates);
+    const double alpha = 1.0 - static_cast<double>(settings.adaptive.confidence);
+    const boost::math::chi_squared_distribution<double> chiSquared(static_cast<double>(settings.replicates) - 1.0);
+    // p_(k) <= k alpha / m <= alpha, so only statistics at or below the alpha quantile can be rejected; they rank first among all m.
+    const double screen = boost::math::quantile(chiSquared, alpha);
+    std::vector<double> statistics(active.size());
+    const int chunkTexels = pathTraceChunkTexels(static_cast<int>(active.size()), threadPool.threadCount());
+    const int chunks = (static_cast<int>(active.size()) + chunkTexels - 1) / chunkTexels;
+    threadPool.parallelFor(chunks, [&](int chunk) {
+        const auto begin = static_cast<std::size_t>(chunk) * static_cast<std::size_t>(chunkTexels);
+        const std::size_t end = std::min(begin + static_cast<std::size_t>(chunkTexels), active.size());
+        for (std::size_t i = begin; i < end; ++i) {
+            const ReplicateEstimate estimate = replicateEstimate(replicateLuminance + (active[i] * stride), settings.replicates);
+            statistics[i] = convergenceStatistic(estimate, settings.replicates, settings.adaptive.threshold);
+        }
+    });
+    std::vector<double> candidates;
+    std::copy_if(statistics.begin(), statistics.end(), std::back_inserter(candidates), [screen](double x) { return x <= screen; });
+    // The CDF is monotone, so sorting statistics sorts p-values; it is evaluated only for the screened few.
+    std::sort(candidates.begin(), candidates.end());
+    std::vector<double> ascendingP(candidates.size());
+    std::transform(candidates.begin(), candidates.end(), ascendingP.begin(), [&](double x) { return boost::math::cdf(chiSquared, x); });
+    const std::size_t rejected = stepUpRejections(ascendingP, active.size(), alpha);
+    if (rejected == 0) {
+        return;
+    }
+    // Every texel at or below the k-th smallest statistic is rejected, ties included, as the procedure defines.
+    const double cutoff = candidates[rejected - 1];
+    std::size_t kept = 0;
+    for (std::size_t i = 0; i < active.size(); ++i) {
+        if (statistics[i] > cutoff) {
+            active[kept++] = active[i];
+        }
+    }
+    active.resize(kept);
+}
+
 PathTraceDriver::PathTraceDriver(const EmbreeAccel& accel,
                                   const std::vector<ShadingTriangle>& shadingTriangles,
                                   const std::vector<MeshInstance>& instances,
@@ -210,7 +292,7 @@ std::vector<pathtracer::debug::PassRecord> PathTraceDriver::takePassRecords() {
     return taken;
 }
 
-// Driver-thread-only. passStats_ is read here so the completed and cancelled call sites share one definition of a PassRecord.
+// Driver-thread-only. passStats_ and activeTexels_ are read here so the completed and cancelled call sites share one PassRecord.
 void PathTraceDriver::publishPassRecord(std::uint64_t generation, int passIndex, int width,
                                          int height, double traceMs, double accumulateMs,
                                          double overRangeMs, double publishMs, double passMs,
@@ -227,6 +309,7 @@ void PathTraceDriver::publishPassRecord(std::uint64_t generation, int passIndex,
                                             passStats_.rays(),
                                             passStats_.chunksCompleted(),
                                             passStats_.chunksCancelled(),
+                                            activeTexels_.size(),
                                             cancelled};
     const std::lock_guard<std::mutex> lock(statsMutex_);
     lastPass_ = record;
@@ -252,7 +335,7 @@ double PathTraceDriver::tracePass(const Request& request, int sampleBase, std::u
 
 // Driver-thread-only. Folds a completed pass into the running mean, reduces its over-range stats, then publishes it and its record.
 void PathTraceDriver::finishPass(const std::shared_ptr<PathTraceResult>& pass, std::shared_ptr<PathTraceResult>& currentMean,
-                                 int passIndex, std::uint64_t generation, double traceMs,
+                                 const PathTraceSettings& settings, int passIndex, std::uint64_t generation, double traceMs,
                                  std::chrono::steady_clock::time_point passStart) {
     // passIndex == 1 leaves the pass as rendered: the running mean of one sample is that sample, and no previous mean exists.
     const auto accumulateStart = std::chrono::steady_clock::now();
@@ -267,6 +350,10 @@ void PathTraceDriver::finishPass(const std::shared_ptr<PathTraceResult>& pass, s
                                /*replicate=*/0, /*invCount=*/1.0F);
         std::fill(pass->texelSamples.begin(), pass->texelSamples.end(), 1);
     }
+    if (adaptiveCheckpoint(passIndex, settings)) {
+        retireConvergedTexels(activeTexels_, pass->replicateLuminance.data(), settings, threadPool_);
+    }
+    pass->activeTexels = activeTexels_.size();
     const double accumulateMs = millisecondsSince(accumulateStart);
 
     // After the mean, before the publish: the statistics must describe the image about to go on screen.
@@ -323,8 +410,8 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
 
         // Engaged: requestedGeneration goes non-zero only inside requestTrace(), under one lock.
         const Request& request = *activeRequest;  // NOLINT(bugprone-unchecked-optional-access)
-        // A zero-size view, or converged: nothing changes until a new request or a suspend, both bumping the epoch this wait keys on.
-        if (request.width <= 0 || request.height <= 0 || (request.maxSamples > 0 && accumulated >= request.maxSamples)) {
+        // A zero-size view, capped or every texel stopped: nothing changes until a new request or a suspend, both bumping the epoch.
+        if (request.width <= 0 || request.height <= 0 || activeTexels_.empty() || (request.maxSamples > 0 && accumulated >= request.maxSamples)) {
             idleUntilWake(stopToken, wakeSeen);
             continue;
         }
@@ -347,7 +434,7 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
                                /*cancelled=*/true);
             continue;  // superseded mid-pass -- discard, next iteration picks up the new request
         }
-        finishPass(pass, currentMean, passIndex, activeGeneration, traceMs, passStart);
+        finishPass(pass, currentMean, request.settings, passIndex, activeGeneration, traceMs, passStart);
         accumulated = passIndex;
     }
 }

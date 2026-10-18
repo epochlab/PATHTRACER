@@ -80,8 +80,9 @@ private:
                             double publishMs, double passMs, bool cancelled);
     std::shared_ptr<PathTraceResult> acquireFreeBuffer(int width, int height, int replicates);
     double tracePass(const Request& request, int sampleBase, std::uint64_t generation, PathTraceResult& pass);
-    void finishPass(const std::shared_ptr<PathTraceResult>& pass, std::shared_ptr<PathTraceResult>& currentMean, int passIndex,
-                    std::uint64_t generation, double traceMs, std::chrono::steady_clock::time_point passStart);
+    void finishPass(const std::shared_ptr<PathTraceResult>& pass, std::shared_ptr<PathTraceResult>& currentMean,
+                    const PathTraceSettings& settings, int passIndex, std::uint64_t generation, double traceMs,
+                    std::chrono::steady_clock::time_point passStart);
 
     const EmbreeAccel& accel_;
     const std::vector<ShadingTriangle>& shadingTriangles_;
@@ -142,6 +143,28 @@ void foldRunningMean(const float* previousMean, const float* drawn, float* mean,
 // Folds drawn Beauty's scene luminance into one replicate's running mean, carrying the rest; means may alias previousMeans.
 void foldReplicateLuminance(const float* previousMeans, const float* drawn, std::size_t channels, float* means, std::size_t pixels,
                             int replicates, int replicate, float invCount);
+
+// One texel's replicated estimate of mean scene luminance and the variance of that mean.
+struct ReplicateEstimate {
+    double mean;
+    double meanVariance;  // sum (m_r - mbar)^2 / (K(K-1)), unbiased for Var(mbar) at any replicate counts
+};
+
+// The estimate from `populated` replicate means, in double: a converged texel's deviations are rounding-scale differences of floats.
+[[nodiscard]] ReplicateEstimate replicateEstimate(const float* means, int populated);
+
+// (K-1) s^2 / (threshold mean)^2, chi-squared on K-1 dof where SD(mbar) = threshold * mean; +inf for zero spread, zero mean or NaN.
+[[nodiscard]] double convergenceStatistic(const ReplicateEstimate& estimate, int replicates, float threshold);
+
+// Benjamini & Hochberg 1995 step-up: how many of the smallest of `tests` p-values, given ascending, are rejected at rate alpha.
+[[nodiscard]] std::size_t stepUpRejections(std::span<const double> ascendingP, std::size_t tests, double alpha);
+
+// Whether pass n is a checkpoint, n = K 2^j >= minSamples, where every replicate holds a power-of-two prefix of its own sequence.
+[[nodiscard]] bool adaptiveCheckpoint(int n, const PathTraceSettings& settings);
+
+// Drops the texels of ascending `active` the step-up procedure finds converged at 1 - confidence, keeping the rest ascending.
+void retireConvergedTexels(std::vector<std::uint32_t>& active, const float* replicateLuminance, const PathTraceSettings& settings,
+                           ThreadPool& threadPool);
 
 // Splits [begin, end) into runs of consecutive texels in ascending `traced`, passed to fold(b, e), and the gaps, passed to carry(b, e).
 template <typename Fold, typename Carry>

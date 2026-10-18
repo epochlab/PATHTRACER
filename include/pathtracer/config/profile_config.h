@@ -62,6 +62,10 @@ struct PathTracerConfig {
     float aoMaxDistance;  // ray-traced AO occlusion range, scene units; occluders beyond it don't darken
     float lookaheadDistance;  // horizon of the Lookahead AOV's ramp, scene units; geometry at or beyond it reads 0
     int replicates;  // independent scrambles interleaved by pass, whose spread is the SNR's standard error; divides maxSamples
+    // pathTracer.adaptive: texels stop once their relative luminance error is within threshold, at this false-discovery confidence.
+    float adaptiveThreshold;
+    float adaptiveConfidence;
+    int adaptiveMinSamples;  // the first checkpoint, replicates times a power of two
 };
 
 // profile.json's denoiser block: OIDN for the Denoised AOV, and the feature chain its albedo and normal come from.
@@ -78,6 +82,9 @@ struct ProfileConfig {
     PathTracerConfig pathTracer;
     DenoiserConfig denoiser;
 };
+
+// The sample, bounce and size counts and their cross-constraints, logged against `source`; main re-checks after its overrides.
+[[nodiscard]] bool validCounts(const RenderConfig& render, const PathTracerConfig& pathTracer, const std::string& source);
 
 // Reads and parses path; nullopt and a stderr log if missing, unreadable or unparseable. User input: failure is surfaced, not asserted.
 [[nodiscard]] std::optional<ProfileConfig> loadProfileConfig(const std::string& path);

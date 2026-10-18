@@ -155,6 +155,9 @@ void drawFrameSection(const HudFrameData& frame) {
             ImGui::Text("path-traced  %d samples  %.2f s/pass", frame.pathTraced.accumulatedSamples,
                         frame.pathTraced.lastPassSeconds);
         }
+        if (frame.pathTraced.adaptive) {
+            ImGui::Text("adaptive  %.1f%% of texels sampling", 100.0 * frame.pathTraced.samplingFraction);
+        }
     } else {
         ImGui::TextDisabled("path-traced: no render yet");
     }

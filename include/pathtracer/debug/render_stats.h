@@ -81,6 +81,7 @@ struct PassRecord {
     RayCounts rays;
     std::uint64_t chunksCompleted = 0;
     std::uint64_t chunksCancelled = 0;
+    std::size_t activeTexels = 0;  // texels the next pass traces; 0 once adaptive sampling has stopped every one
     bool cancelled = false;  // superseded mid-flight and discarded; its rays were still traced and paid for
 };
 

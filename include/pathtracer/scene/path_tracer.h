@@ -49,6 +49,13 @@ struct AcceptanceSample {
 // Every texel of a width x height image as ascending row-major indices: the work list of a pass that traces them all.
 [[nodiscard]] std::vector<std::uint32_t> allTexels(int width, int height);
 
+// Per-texel stopping on the replicate standard error, read by the driver and headless folds; renderPathTraced traces what they list.
+struct AdaptiveSampling {
+    float threshold = 0.0F;  // relative standard error of scene luminance a texel stops at, 1/SNR; 0 traces every texel every pass
+    float confidence = 0.0F;  // 1 - the false discovery rate: the expected share of stopped texels whose error is within threshold
+    int minSamples = 0;  // first checkpoint, replicates times a power of two
+};
+
 // samplesPerPixel is per renderPathTraced() call -- under PathTraceDriver, samples per accumulated pass (typically 1), not the total.
 struct PathTraceSettings {
     int samplesPerPixel;
@@ -65,6 +72,7 @@ struct PathTraceSettings {
     int replicates = 1;
     // OIDN's albedo and normal lanes; false leaves the chain unopened, so the lanes read 0 and the paths pay nothing for them.
     bool denoiseFeatures = false;
+    AdaptiveSampling adaptive;
 };
 
 // Stops either side of unity the readout is exact over: the next binade above the +/-13.95 EV the exposure controls reach.
@@ -134,6 +142,7 @@ struct PathTraceResult {
     int replicates = 1;
     // Passes folded into each texel, `samples` wherever every pass traced it; the driver and headless fold write it, not renderPathTraced.
     std::vector<int> texelSamples;
+    std::size_t activeTexels = 0;  // texels the next pass would trace, 0 once every texel has stopped
 
     // Reduced from `beauty` immediately before publish, so it describes exactly the pixels published with it, unlike PassRecord.
     OverRangeStats overRange;

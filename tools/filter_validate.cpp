@@ -2,11 +2,13 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <complex>
 #include <limits>
 #include <cstddef>
 #include <numbers>
+#include <numeric>
 #include <random>
 #include <set>
 #include <stdexcept>
@@ -17,11 +19,14 @@
 #include <glm/glm.hpp>
 
 #include "check.h"
+#include "stats.h"
 #include "pathtracer/debug/aov_filters.h"
 #include "pathtracer/debug/denoiser.h"
 #include "pathtracer/debug/scale_space.h"
 #include "pathtracer/gfx/hdr_image.h"
 #include "pathtracer/scene/cie.h"
+#include "pathtracer/scene/path_trace_driver.h"
+#include "pathtracer/scene/path_tracer.h"
 #include "pathtracer/scene/thread_pool.h"
 
 namespace {
@@ -906,6 +911,166 @@ PT_CHECK(snr_is_zero_where_undefined_and_infinite_where_exact, Fast, Exact) {
               "no signal did not read zero");
     PT_EXPECT(ctx, all(pathtracer::debug::snrAov(kWidth, kHeight, agreed.data(), kReplicates, 64, pool), kInfinity),
               "a positive signal every replicate agreed on did not read +inf");
+}
+
+// --- Adaptive sampling's stopping rule, on the replicate estimate the SNR above is built from.
+
+// Alternating mu +/- delta over even K: mean mu and sum of squares K delta^2 are exact, so the variance is one rounding off delta^2/(K-1).
+PT_CHECK(replicate_estimate_matches_the_closed_form, Fast, Exact) {
+    constexpr std::array<int, 4> kCounts{2, 4, 8, 64};
+    constexpr float kMean = 1.0F;
+    constexpr float kDelta = 0.015625F;
+    ctx.plan(static_cast<int>(kCounts.size()));
+    for (const int replicates : kCounts) {
+        std::vector<float> means(static_cast<std::size_t>(replicates));
+        for (int r = 0; r < replicates; ++r) {
+            means[static_cast<std::size_t>(r)] = r % 2 == 0 ? kMean + kDelta : kMean - kDelta;
+        }
+        const pathtracer::scene::ReplicateEstimate estimate = pathtracer::scene::replicateEstimate(means.data(), replicates);
+        const double expected = static_cast<double>(kDelta) * kDelta / (replicates - 1.0);
+        // Two roundings, 1/(K(K-1)) and its product, each within half an ulp of double.
+        const double bound = 2.0 * std::numeric_limits<double>::epsilon() * expected;
+        char detail[160];
+        std::snprintf(detail, sizeof(detail), "K=%d: mean %.17g, variance %.17g against %.17g", replicates, estimate.mean,
+                      estimate.meanVariance, expected);
+        PT_EXPECT(ctx, estimate.mean == kMean && std::fabs(estimate.meanVariance - expected) <= bound, detail);
+    }
+}
+
+// Benjamini & Hochberg 1995's own worked example: 15 p-values at a false discovery rate of 0.05 reject exactly the four smallest.
+PT_CHECK(step_up_matches_benjamini_hochbergs_example, Fast, Exact) {
+    constexpr std::array<double, 15> kP{0.0001, 0.0004, 0.0019, 0.0095, 0.0201, 0.0278, 0.0298, 0.0344,
+                                        0.0459, 0.3240, 0.4262, 0.5719, 0.6528, 0.7590, 1.0000};
+    ctx.plan(3);
+    PT_EXPECT(ctx, pathtracer::scene::stepUpRejections(kP, kP.size(), 0.05) == 4, "the paper's example did not reject its four smallest");
+    // Only the p-values at or below alpha can be rejected, so passing those nine against all fifteen tests must agree.
+    PT_EXPECT(ctx, pathtracer::scene::stepUpRejections(std::span(kP).first(9), kP.size(), 0.05) == 4,
+              "the screened p-values ranked against the whole family rejected a different set");
+    PT_EXPECT(ctx, pathtracer::scene::stepUpRejections({}, 15, 0.05) == 0, "an empty screen rejected something");
+}
+
+// Replicates that agree exactly carry no variance to test, whatever their mean; zero mean with spread and NaN meet no relative tolerance.
+PT_CHECK(convergence_statistic_needs_spread_and_signal, Fast, Exact) {
+    ctx.plan(5);
+    constexpr int kReplicates = 4;
+    const auto statistic = [&](std::array<float, kReplicates> means, float threshold) {
+        return pathtracer::scene::convergenceStatistic(pathtracer::scene::replicateEstimate(means.data(), kReplicates), kReplicates,
+                                                       threshold);
+    };
+    constexpr float kHuge = std::numeric_limits<float>::max();
+    constexpr double kNoEvidence = std::numeric_limits<double>::infinity();
+    PT_EXPECT(ctx, statistic({0.0F, 0.0F, 0.0F, 0.0F}, kHuge) == kNoEvidence, "replicates agreeing on zero gave evidence of convergence");
+    PT_EXPECT(ctx, statistic({0.5F, 0.5F, 0.5F, 0.5F}, kHuge) == kNoEvidence, "replicates agreeing on a positive value gave evidence");
+    PT_EXPECT(ctx, statistic({0.5F, 0.5F, 0.5F, std::nextafter(0.5F, 1.0F)}, kHuge) < 1e-30,
+              "the least spread under any threshold was not converged");
+    PT_EXPECT(ctx, statistic({0.25F, -0.25F, 0.25F, -0.25F}, kHuge) == kNoEvidence, "a zero mean with spread gave evidence of convergence");
+    PT_EXPECT(ctx, statistic({0.5F, std::numeric_limits<float>::quiet_NaN(), 0.5F, 0.5F}, kHuge) == kNoEvidence,
+              "a NaN replicate gave evidence");
+}
+
+// Checkpoints are exactly n = K 2^j >= minSamples, and none exist with the threshold at zero.
+PT_CHECK(adaptive_checkpoints_are_power_of_two_rounds, Fast, Exact) {
+    constexpr std::array<int, 3> kCounts{2, 4, 8};
+    constexpr int kPasses = 4096;
+    ctx.plan(static_cast<int>(kCounts.size()) * 3);
+    for (const int replicates : kCounts) {
+        for (const int minRounds : {1, 4}) {
+            pathtracer::scene::PathTraceSettings settings{};
+            settings.replicates = replicates;
+            settings.adaptive = {0.01F, 0.95F, replicates * minRounds};
+            int wrong = 0;
+            for (int n = 1; n <= kPasses; ++n) {
+                const bool expected = n >= settings.adaptive.minSamples && n % replicates == 0 &&
+                                      std::has_single_bit(static_cast<unsigned>(n / replicates));
+                wrong += pathtracer::scene::adaptiveCheckpoint(n, settings) != expected ? 1 : 0;
+            }
+            char detail[128];
+            std::snprintf(detail, sizeof(detail), "K=%d, minSamples %d: %d of %d passes misclassified", replicates,
+                          settings.adaptive.minSamples, wrong, kPasses);
+            PT_EXPECT(ctx, wrong == 0, detail);
+        }
+        pathtracer::scene::PathTraceSettings off{};
+        off.replicates = replicates;
+        off.adaptive = {0.0F, 0.95F, replicates};
+        bool any = false;
+        for (int n = 1; n <= kPasses; ++n) {
+            any = any || pathtracer::scene::adaptiveCheckpoint(n, off);
+        }
+        PT_EXPECT(ctx, !any, "a zero threshold produced a checkpoint");
+    }
+}
+
+// The test's size: at a true standard error of exactly threshold * mean, the statistic is chi-squared, so P(p <= alpha) = alpha.
+PT_CHECK(convergence_statistic_is_chi_squared_at_the_boundary, Fast, Statistical) {
+    constexpr std::array<int, 4> kCounts{2, 4, 8, 16};
+    constexpr double kAlpha = 0.05;
+    // Small, so the sampled mean's own error moves the tolerance by O(threshold^2), far inside the band below.
+    constexpr float kThreshold = 1e-3F;
+    constexpr long long kTrials = 200000;
+    ctx.plan(static_cast<int>(kCounts.size()));
+    std::mt19937_64 rng(ctx.seed());
+    for (const int replicates : kCounts) {
+        // Each replicate mean's spread is sqrt(K) times their average's, which is set to sit exactly on the threshold.
+        std::normal_distribution<double> replicate(1.0, static_cast<double>(kThreshold) * std::sqrt(static_cast<double>(replicates)));
+        std::vector<float> means(static_cast<std::size_t>(replicates));
+        long long rejections = 0;
+        for (long long trial = 0; trial < kTrials; ++trial) {
+            for (float& mean : means) {
+                mean = static_cast<float>(replicate(rng));
+            }
+            const pathtracer::scene::ReplicateEstimate estimate = pathtracer::scene::replicateEstimate(means.data(), replicates);
+            // The p-value through stats.h's own incomplete gamma, independent of the Boost.Math CDF the renderer ranks by.
+            const double x = pathtracer::scene::convergenceStatistic(estimate, replicates, kThreshold);
+            rejections += 1.0 - tools::stats::chiSquareUpperTail(x, replicates - 1) <= kAlpha ? 1 : 0;
+        }
+        const tools::stats::Band band = tools::stats::clopperPearsonBand(rejections, kTrials, ctx.alpha());
+        char detail[160];
+        std::snprintf(detail, sizeof(detail), "K=%d: p <= %.2f in %lld of %lld, band [%.5f, %.5f]", replicates, kAlpha, rejections, kTrials,
+                      band.lo, band.hi);
+        PT_EXPECT(ctx, band.lo <= kAlpha && kAlpha <= band.hi, detail);
+    }
+}
+
+// The retirement's guarantee: with unconverged texels on the boundary, the stopped set's false share averages pi0 * (1 - confidence).
+PT_CHECK(retirement_holds_the_false_discovery_rate, Fast, Statistical) {
+    constexpr int kReplicates = 4;
+    constexpr int kTexels = 2000;
+    constexpr int kTrials = 400;
+    constexpr float kThreshold = 1e-3F;
+    constexpr float kConfidence = 0.95F;
+    // Half the texels converged far inside the tolerance, half exactly on it, where each null's p-value is uniform.
+    constexpr double kNullShare = 0.5;
+    ctx.plan(1);
+    pathtracer::scene::ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    pathtracer::scene::PathTraceSettings settings{};
+    settings.replicates = kReplicates;
+    settings.adaptive = {kThreshold, kConfidence, kReplicates};
+    std::mt19937_64 rng(ctx.seed());
+    const double boundarySpread = static_cast<double>(kThreshold) * std::sqrt(static_cast<double>(kReplicates));
+    std::normal_distribution<double> unconverged(1.0, boundarySpread);
+    std::normal_distribution<double> converged(1.0, 0.1 * boundarySpread);
+    tools::stats::Welford falseShare;
+    std::vector<float> means(static_cast<std::size_t>(kTexels) * kReplicates);
+    for (int trial = 0; trial < kTrials; ++trial) {
+        for (std::size_t i = 0; i < means.size(); ++i) {
+            const bool isNull = static_cast<double>(i / kReplicates) < kNullShare * kTexels;
+            means[i] = static_cast<float>(isNull ? unconverged(rng) : converged(rng));
+        }
+        std::vector<std::uint32_t> active(kTexels);
+        std::iota(active.begin(), active.end(), 0U);
+        pathtracer::scene::retireConvergedTexels(active, means.data(), settings, pool);
+        // Survivors are ascending, so the stopped nulls are the null indices missing from them.
+        const auto nullsKept = static_cast<double>(std::count_if(active.begin(), active.end(), [](std::uint32_t texel) {
+            return static_cast<double>(texel) < kNullShare * kTexels;
+        }));
+        const double stopped = kTexels - static_cast<double>(active.size());
+        falseShare.add(stopped > 0.0 ? ((kNullShare * kTexels) - nullsKept) / stopped : 0.0);
+    }
+    const double expected = kNullShare * (1.0 - static_cast<double>(kConfidence));
+    const double half = tools::stats::studentTTwoSided(ctx.alpha(), kTrials - 1) * falseShare.standardError();
+    char detail[192];
+    std::snprintf(detail, sizeof(detail), "mean false share %.5f +/- %.5f against pi0 * alpha = %.5f", falseShare.mean(), half, expected);
+    PT_EXPECT(ctx, std::fabs(falseShare.mean() - expected) <= half, detail);
 }
 
 // The Morlet bank's admissibility term is a 2-D blur written as two 1-D ones, which is only sound if the mirror separates too.

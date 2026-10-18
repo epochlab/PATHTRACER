@@ -1032,27 +1032,46 @@ PT_CHECK(profile_config_scene_scale_distances, Fast, Exact) {
 PT_CHECK(profile_config_integer_counts, Fast, Exact) {
     struct Case {
         std::string name;
-        const char* section;
-        const char* key;
-        nlohmann::json value;  // null = key removed
+        nlohmann::json patch;  // RFC 7396 merge patch on the shipped profile: null removes a key
         bool accepted;
     };
+    const auto pathTracer = [](nlohmann::json fields) { return nlohmann::json{{"pathTracer", std::move(fields)}}; };
+    // Off, so the floors below test the counts alone: one replicate is legal only without the stopping rule that needs two.
+    const nlohmann::json uniform = {{"threshold", 0.0}};
     std::vector<Case> cases;
     // Lowest legal value accepted, then each way of going under it. maxBounces/maxSamples 0 are meaningful: direct-only and unbounded.
     const std::vector<std::pair<const char*, int>> floors = {
         {"samplesPerPixel", 1}, {"maxBounces", 0}, {"russianRouletteStartBounce", 0}, {"maxSamples", 0}, {"replicates", 1}};
     for (const auto& [key, floor] : floors) {
-        cases.push_back({std::string(key) + " " + std::to_string(floor), "pathTracer", key, floor, true});
-        cases.push_back({std::string(key) + " " + std::to_string(floor - 1), "pathTracer", key, floor - 1, false});
-        cases.push_back({std::string(key) + " missing", "pathTracer", key, nlohmann::json(nullptr), false});
+        cases.push_back({std::string(key) + " " + std::to_string(floor), pathTracer({{key, floor}, {"adaptive", uniform}}), true});
+        cases.push_back({std::string(key) + " " + std::to_string(floor - 1), pathTracer({{key, floor - 1}, {"adaptive", uniform}}), false});
+        cases.push_back({std::string(key) + " missing", pathTracer({{key, nullptr}}), false});
     }
     // The traced image renderScale multiplies and the denominator of the primary ray's aspect ratio.
     for (const char* key : {"width", "height"}) {
-        cases.push_back({std::string("render.") + key + " 1", "render", key, 1, true});
-        cases.push_back({std::string("render.") + key + " 0", "render", key, 0, false});
-        cases.push_back({std::string("render.") + key + " -1", "render", key, -1, false});
-        cases.push_back({std::string("render.") + key + " missing", "render", key, nlohmann::json(nullptr), false});
+        cases.push_back({std::string("render.") + key + " 1", {{"render", {{key, 1}}}}, true});
+        cases.push_back({std::string("render.") + key + " 0", {{"render", {{key, 0}}}}, false});
+        cases.push_back({std::string("render.") + key + " -1", {{"render", {{key, -1}}}}, false});
+        cases.push_back({std::string("render.") + key + " missing", {{"render", {{key, nullptr}}}}, false});
     }
+    // Adaptive sampling: every key required; minSamples a power-of-two multiple of replicates; a stopping rule needs two replicates.
+    for (const char* key : {"threshold", "confidence", "minSamples"}) {
+        cases.push_back({std::string("adaptive.") + key + " missing", pathTracer({{"adaptive", {{key, nullptr}}}}), false});
+    }
+    cases.push_back({"adaptive missing", pathTracer({{"adaptive", nullptr}}), false});
+    cases.push_back({"adaptive.threshold 0", pathTracer({{"adaptive", uniform}}), true});
+    cases.push_back({"adaptive.threshold -0.01", pathTracer({{"adaptive", {{"threshold", -0.01}}}}), false});
+    cases.push_back({"adaptive.confidence 0.5", pathTracer({{"adaptive", {{"confidence", 0.5}}}}), true});
+    for (const double confidence : {0.0, 1.0}) {
+        cases.push_back({"adaptive.confidence " + std::to_string(confidence), pathTracer({{"adaptive", {{"confidence", confidence}}}}), false});
+    }
+    const std::vector<std::pair<int, bool>> minSamples = {{4, true}, {16, true}, {12, false}, {2, false}, {0, false}};
+    for (const auto& [count, accepted] : minSamples) {
+        cases.push_back({"adaptive.minSamples " + std::to_string(count) + " at replicates 4",
+                         pathTracer({{"replicates", 4}, {"adaptive", {{"minSamples", count}}}}), accepted});
+    }
+    cases.push_back({"adaptive on at replicates 1", pathTracer({{"replicates", 1}, {"adaptive", {{"threshold", 0.02}, {"minSamples", 1}}}}),
+                     false});
 
     const std::filesystem::path shippedPath = std::filesystem::path(ASSET_ROOT_DIR) / "config" / "profile.json";
     const std::optional<pathtracer::config::ProfileConfig> shippedConfig =
@@ -1061,19 +1080,17 @@ PT_CHECK(profile_config_integer_counts, Fast, Exact) {
     const nlohmann::json shipped = nlohmann::json::parse(shippedFile);
     // A capped accumulation must end on a complete round: replicates of maxSamples + 1 cannot divide a positive maxSamples.
     const int shippedMaxSamples = shipped["pathTracer"]["maxSamples"].get<int>();
-    cases.push_back({"replicates not dividing maxSamples", "pathTracer", "replicates", shippedMaxSamples + 1, shippedMaxSamples == 0});
-    ctx.plan(static_cast<int>(cases.size()) + 1);
+    cases.push_back({"replicates not dividing maxSamples",
+                     pathTracer({{"replicates", shippedMaxSamples + 1}, {"adaptive", {{"minSamples", shippedMaxSamples + 1}}}}),
+                     shippedMaxSamples == 0});
+    ctx.plan(static_cast<int>(cases.size()) + 3);
     PT_EXPECT(ctx, shippedConfig.has_value(), "the shipped profile does not load, so no row below means anything");
     if (!shippedConfig) {
         return;
     }
     for (const Case& testCase : cases) {
         nlohmann::json edited = shipped;
-        if (testCase.value.is_null()) {
-            edited[testCase.section].erase(testCase.key);
-        } else {
-            edited[testCase.section][testCase.key] = testCase.value;
-        }
+        edited.merge_patch(testCase.patch);
         const std::filesystem::path path = writeJson("engine_io_profile_counts.json", edited.dump());
         const std::optional<pathtracer::config::ProfileConfig> loaded = pathtracer::config::loadProfileConfig(path.string());
         std::filesystem::remove(path);
@@ -1082,6 +1099,12 @@ PT_CHECK(profile_config_integer_counts, Fast, Exact) {
                       testCase.name.c_str());
         PT_EXPECT(ctx, loaded.has_value() == testCase.accepted, detail);
     }
+    // The viewer's -max-samples lands after loading; the exported check is what refuses a cap that splits a round.
+    pathtracer::config::PathTracerConfig overridden = shippedConfig->pathTracer;
+    PT_EXPECT(ctx, pathtracer::config::validCounts(shippedConfig->render, overridden, "test"), "the shipped counts failed validCounts");
+    overridden.maxSamples = overridden.replicates + 1;
+    PT_EXPECT(ctx, overridden.replicates < 2 || !pathtracer::config::validCounts(shippedConfig->render, overridden, "test"),
+              "validCounts accepted a maxSamples override that is not a multiple of replicates");
 }
 
 // The cache keeps each file's own format: a float32 texel past binary16's 65504, an unclipped sun, reads back exactly, not as Inf.

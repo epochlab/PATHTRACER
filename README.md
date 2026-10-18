@@ -86,7 +86,7 @@ Capability the renderer lacks, most valuable first.
 | Area | Item | Detail | Complexity | Status |
 | --- | --- | --- | --- | --- |
 | Sampling | Many-light sampling | Lights are picked uniformly, so a small dim light gets as many shadow rays as a large bright one. A light tree would pick by power and orientation, and ReSTIR would reuse picks across pixels. | high | ready |
-| Sampling | Adaptive sampling | Spend more samples on noisy pixels and fewer on clean ones. The per-pixel noise estimate it needs already exists. | medium | ready |
+| Sampling | Foveated sampling | Spend fewer samples away from where the viewer is looking, by loosening each pixel's noise target with its distance from the gaze point (Guenter et al. 2012; Koskela et al. 2019). Needs a gaze input and the viewing distance, to turn pixels into degrees of vision. | medium | ready |
 | Camera | Scene graph and instancing | Every copy of an object is stored separately. Keeping objects in a hierarchy would let copies share memory and enable motion blur. | high | ready |
 | Transport | Volume emission | Media that glow, such as fire or a lit gas, gathered where a ray collides inside them. OpenPBR's surface has no such input, so it would be a volume material key. | medium | ready |
 | Colour | Photometric calibration | Link the renderer's light values to real units (lux, candela), so exposure can be checked against a real light meter. | medium | ready |

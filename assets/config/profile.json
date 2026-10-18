@@ -39,7 +39,12 @@
         "maxSamples": 64,
         "aoMaxDistance": 1.0,
         "lookaheadDistance": 10.0,
-        "replicates": 4
+        "replicates": 4,
+        "adaptive": {
+            "threshold": 0.02,
+            "confidence": 0.95,
+            "minSamples": 8
+        }
     },
     "denoiser": {
         "enabled": true,
