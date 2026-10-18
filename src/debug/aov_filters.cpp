@@ -350,6 +350,20 @@ HdrImage snrAov(int width, int height, const float* replicateLuminance, int repl
     return out;
 }
 
+HdrImage sampleCountAov(int width, int height, const int* texelSamples, ThreadPool& threadPool) {
+    HdrImage out = makeAovImage(AovId::SampleCount, width, height);
+    if (texelSamples == nullptr) {
+        return out;
+    }
+    threadPool.parallelFor(height, [&](int y) {
+        for (int x = 0; x < width; ++x) {
+            const std::size_t pixel = (static_cast<std::size_t>(y) * static_cast<std::size_t>(width)) + static_cast<std::size_t>(x);
+            writeTexel(out, x, y, static_cast<float>(texelSamples[pixel]));
+        }
+    });
+    return out;
+}
+
 HdrImage shadowAov(const HdrImage& lost, const HdrImage& unoccluded, ThreadPool& threadPool) {
     HdrImage out = makeAovImage(AovId::Shadow, lost.width, lost.height);
     threadPool.parallelFor(lost.height, [&](int y) {
@@ -373,6 +387,8 @@ HdrImage evaluateFilterAov(AovId aov, const FilterInput& input, ThreadPool& thre
         case AovId::ColourOpponent:  return colourOpponentAov(input.beauty, threadPool);
         case AovId::SNR:
             return snrAov(input.beauty.width, input.beauty.height, input.replicateLuminance, input.replicates, input.samples, threadPool);
+        case AovId::SampleCount:
+            return sampleCountAov(input.beauty.width, input.beauty.height, input.texelSamples, threadPool);
         case AovId::Denoised:
             if (input.denoiseAlbedo == nullptr || input.denoiseNormal == nullptr || input.denoiser == nullptr) {
                 throw std::invalid_argument("denoised: needs the denoiseAlbedo and denoiseNormal lanes and a Denoiser");

@@ -544,6 +544,7 @@ void HeadlessRenderer::evaluateFilters(const Request& request) {
                                                      pathTraced_.replicateLuminance.data(),
                                                      pathTraced_.replicates,
                                                      request.samples,
+                                                     pathTraced_.texelSamples.data(),
                                                      pathtracer::scene::wrapsHorizontally(request.camera.lens().projection),
                                                      request.camera.pixelLattice(),
                                                      denoises ? &accumulatedImage(pathtracer::debug::kDenoiseFeatureLanes[0]) : nullptr,
