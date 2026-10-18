@@ -14,7 +14,7 @@ namespace pathtracer::debug {
 
 AovSource aovSource(AovId aov) {
     switch (aov) {
-        // Accumulated by renderPathTraced into PathTraceResult's 12 AOV lanes.
+        // Accumulated by renderPathTraced into PathTraceResult's 14 AOV lanes.
         case AovId::Beauty:
         case AovId::Alpha:
         case AovId::BounceCount:
