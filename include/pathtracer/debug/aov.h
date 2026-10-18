@@ -83,7 +83,7 @@ inline constexpr const char* kAovLabels[] = {
 static_assert(sizeof(kAovLabels) / sizeof(kAovLabels[0]) == static_cast<int>(AovId::Count),
               "kAovLabels must stay index-parallel with AovId");
 
-// Which of the three producers computes each AOV: 12 accumulated path-traced lanes, 14 G-buffer lanes, 9 derived after accumulation.
+// Which of the three producers computes each AOV: 14 accumulated path-traced lanes, 14 G-buffer lanes, 9 derived after accumulation.
 enum class AovSource { PathTraced, GBuffer, BeautyFilter };
 
 [[nodiscard]] AovSource aovSource(AovId aov);

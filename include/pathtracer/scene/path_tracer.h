@@ -137,7 +137,7 @@ struct PathTraceResult {
     int samples = 0;  // passes averaged in, stamped with generation so image and count publish as one snapshot
 };
 
-// The 12 AOV lanes at their aovChannels counts, the 2 RGB denoise features, the 2 shadow means and the replicate means, zeroed.
+// The 14 AOV lanes at their aovChannels counts, the 2 RGB denoise features, the 2 shadow means and the replicate means, zeroed.
 [[nodiscard]] PathTraceResult makePathTraceResult(int width, int height, int replicates);
 
 // Whether a primary ray that misses returns environment radiance when nothing overrides it; viewer, driver and headless share it.
