@@ -31,6 +31,8 @@ struct PathTracedStatus {
     double lastPassSeconds = 0.0;
     int accumulatedSamples = 0;
     int maxSamples = 0;  // 0 = unbounded
+    bool adaptive = false;  // profile.json's adaptive.threshold is positive, so texels stop on their own error
+    double samplingFraction = 1.0;  // texels the next pass traces over all texels; 0 once every one has stopped
 };
 
 // Pixel under the cursor (samplePixelProbe): the display-transformed texel for Beauty, the raw texel for any other AOV.

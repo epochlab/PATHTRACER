@@ -3,6 +3,56 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Adaptive sampling from the replicate standard error
+
+Texels now stop sampling once their noise is confidently within a target, and the render ends when every texel has stopped or the
+cap is reached. The noise estimate is the SNR's own: K independent scrambles whose spread gives each texel's standard error. It is
+set in `profile.json` `pathTracer.adaptive`. `threshold` is the target relative luminance error, 1/SNR (0 turns adaptive sampling
+off). `confidence` is the expected share of stopped texels that truly meet it. `minSamples` is the first checkpoint.
+- **Test:** at a texel's boundary, SD(mbar) = threshold x mean, normal replicate means make `(K-1) s^2 / (threshold mean)^2`
+  chi-squared on K-1 degrees of freedom (Cochran 1934). Its CDF is the p-value against "not yet converged".
+- **Multiplicity:** a per-texel 95% bound is not enough. With most texels unconverged, the few that pass are mostly lucky draws
+  with an underestimated spread. On cornell at 16 passes, stopped texels' squared error was 5-120x the tolerance. The
+  Benjamini & Hochberg 1995 step-up runs over every active texel at a checkpoint, at a false discovery rate of `1 - confidence`.
+  Texels are independent under filter importance sampling, which the procedure needs.
+- **Cost:** only statistics at or below the alpha quantile can be rejected, and they rank first among all p-values. So the CDF is
+  evaluated only for those candidates, and the screen is one comparison per texel.
+- **Zero spread is no evidence.** When every sample of a texel has missed a rare path, such as a silhouette inside the 1.5 px
+  filter, its replicates agree exactly. Stopping those biased stump by -1.1% (minSamples 4) and -0.3% (8), so they run to the cap.
+  The cost is that black, sky-less misses are traced to the cap as well.
+- **Checkpoints:** pass n = K 2^j at or past `minSamples`. Every replicate then holds a power-of-two prefix of its own shuffled
+  Owen-scrambled Sobol sequence, a (0,m,2)-net (Burley 2020). So a stopped texel keeps full stratification and complete rounds,
+  and the SNR's populated count stays exact.
+- **Driver and headless:**
+  - A texel's lanes freeze with its Beauty decision, and the work list drops it (`retireConvergedTexels`).
+  - The driver idles once the list is empty, and headless ends its loop.
+  - `PathTraceResult` and `PassRecord` carry `activeTexels`. The HUD shows the share still sampling, and `-bench` completes a
+    stage at the cap or at an empty list.
+  - Bench configs record the three keys, so `bench_compare` never pairs different settings.
+- **Config:** every key is required; `minSamples` must be `replicates` times a power of two, and `threshold > 0` needs
+  `replicates >= 2`. `validCounts` is exported and re-run after the viewer's `-size` and `-max-samples`, which could previously
+  set a cap that split a replicate round. Shipped: threshold 0.02, confidence 0.95, minSamples 8 at K = 4.
+- **`snrAov`** now reads `replicateEstimate`, the stopping rule's own estimate, so the AOV shows exactly the error texels retire by;
+  its output is bit-identical.
+- **Measured** (256x128, 16 passes, 6 seeds, `results/adaptive_sampling`):
+  - Threshold 0 is bit-identical to `main` (12 of 12: cornell, macbeth, stump, cornell_sss x Beauty, AO, Alpha).
+  - At 16 passes almost no texel is truly within 2-10%, so few stop: 0% on cornell and stump, 1-1.8% on macbeth's flat chart
+    patches. The trace time is unchanged within noise.
+  - Where texels stop in numbers (macbeth, minSamples 8, threshold 0.05-0.1), their pooled squared error over tolerance is
+    0.07-0.47, against a target of at most 1.
+  - The image-mean bias against the same seeds' uniform renders is within +0.06%. minSamples 4 doubles it, as replicate means of
+    single samples are far from normal.
+  - The savings need accumulations past what a 16-pass gate can show.
+- **Tests:**
+  - `filter_validate`: Benjamini & Hochberg's worked example (4 of 15 at 0.05), with and without the screen; the statistic's
+    no-evidence cases; its size (P(p <= 0.05) = 0.05 at the boundary, through stats.h's independent incomplete gamma, K = 2 to 16).
+  - Also in `filter_validate`: the retirement's false share at pi0 x alpha (2000 texels, 400 trials), and exact checkpoints.
+    Breaking the step-up to a per-texel alpha fails at 0.047 against 0.025, and swapping the quantile's tail fails every K.
+  - `driver_validate`: the driver equals an in-place sequential fold bit for bit, with stops at several checkpoints and texels at
+    the cap; it idles below its cap once every texel has stopped.
+  - `io_validate`: the counts check moves to JSON merge patches, so a row can edit several keys. It gains the adaptive rows and
+    the exported `validCounts`.
+
 ## Texel work list in balanced chunks
 
 `renderPathTraced` traces a list of texels, not a grid of tiles: ascending row-major indices split into

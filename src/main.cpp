@@ -914,7 +914,11 @@ void updateHud(AppResources& app, const pathtracer::platform::Window& window,
         pathTraceSnapshot != nullptr,
         // PassRecord is the single source of truth for pass timing now; the HUD wants seconds, the record carries milliseconds.
         app.pathTraceDriver != nullptr ? app.pathTraceDriver->lastPassRecord().passMs / 1000.0 : 0.0,
-        pathTraceSnapshot != nullptr ? pathTraceSnapshot->samples : 0, app.maxSamples};
+        pathTraceSnapshot != nullptr ? pathTraceSnapshot->samples : 0, app.maxSamples,
+        app.scene.baseSettings.adaptive.threshold > 0.0F,
+        pathTraceSnapshot != nullptr ? static_cast<double>(pathTraceSnapshot->activeTexels) /
+                                           static_cast<double>(pathTraceSnapshot->texelSamples.size())
+                                     : 1.0};
     const pathtracer::debug::SceneStats sceneStats{
         static_cast<int>(app.scene.model.instances.size()),
         app.scene.totalTriangles,
@@ -1029,8 +1033,9 @@ bool stageComplete(const AppResources& app, const BenchCapture& bench) {
     if (!aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(app.aov))) {
         return app.gbuffer->generation != 0;
     }
+    // At the cap, or earlier once adaptive sampling has stopped every texel and the driver idles.
     return !bench.passes.empty() && bench.passes.back().generation == bench.generation &&
-           bench.passes.back().passIndex == app.maxSamples;
+           (bench.passes.back().passIndex == app.maxSamples || bench.passes.back().activeTexels == 0);
 }
 
 // Appends this frame's stage times and its finished passes. `passes` were taken before this frame's snapshot, the driver publishing first.
@@ -1085,6 +1090,9 @@ nlohmann::json benchConfig(const AppResources& app, const BenchCapture& bench) {
             {"max_samples", app.maxSamples},
             {"spp_per_pass", app.scene.baseSettings.samplesPerPixel},
             {"replicates", app.scene.baseSettings.replicates},
+            {"adaptive_threshold", app.scene.baseSettings.adaptive.threshold},
+            {"adaptive_confidence", app.scene.baseSettings.adaptive.confidence},
+            {"adaptive_min_samples", app.scene.baseSettings.adaptive.minSamples},
             {"denoise_features", app.scene.baseSettings.denoiseFeatures},
             {"denoiser_quality", pathtracer::debug::kDenoiseQualityNames[static_cast<int>(app.denoiserConfig.options.quality)]},
             {"denoiser_prefilter_auxiliary", app.denoiserConfig.options.prefilterAuxiliary},
@@ -1415,6 +1423,10 @@ bool validStartup(const Options& options, const std::optional<pathtracer::config
                   const std::optional<pathtracer::config::ProfileConfig>& profileConfig) {
     if (!sceneConfig || !profileConfig) {
         std::cerr << "main: scene/profile config load failed, aborting startup\n";
+        return false;
+    }
+    // -size and -max-samples replaced counts loadProfileConfig validated, so their cross-constraints are checked again.
+    if (!pathtracer::config::validCounts(profileConfig->render, profileConfig->pathTracer, "profile.json under command-line overrides")) {
         return false;
     }
     if (options.benchLogPath.empty() && !options.benchAovs.empty()) {

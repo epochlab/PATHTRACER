@@ -1,6 +1,8 @@
 #include "pathtracer/config/profile_config.h"
 
 #include <algorithm>
+#include <bit>
+#include <cmath>
 #include <fstream>
 #include <iterator>
 #include <iostream>
@@ -85,37 +87,6 @@ std::optional<pathtracer::gfx::PixelLattice> parsePixelLattice(const nlohmann::j
     }
     std::cerr << "loadProfileConfig: " << path << " has camera.pixelLattice " << name << ", expected square or hexagonal\n";
     return std::nullopt;
-}
-
-// The counts loadProfileConfig otherwise takes on trust. Nothing downstream re-checks them, and each has a concrete failure mode.
-bool validCounts(const RenderConfig& render, const PathTracerConfig& pathTracer, const std::string& path) {
-    bool ok = true;
-    const auto atLeast = [&](const char* name, int v, int low) {
-        if (v < low) {
-            std::cerr << "loadProfileConfig: " << path << ": " << name << " is " << v << ", expected >= " << low << "\n";
-            ok = false;
-        }
-    };
-    // At zero the per-sample loop never runs, so renderPathTraced divides by a zero filter weight and writes NaN to every AOV texel.
-    atLeast("samplesPerPixel", pathTracer.samplesPerPixel, 1);
-    // Zero is direct lighting only, a legitimate render; negative makes the depth cap reject the primary hit before it is shaded.
-    atLeast("maxBounces", pathTracer.maxBounces, 0);
-    // Negative starts roulette before the primary ray, killing paths at full throughput.
-    atLeast("russianRouletteStartBounce", pathTracer.russianRouletteStartBounce, 0);
-    // Zero is the documented unbounded case; negative would cap accumulation below the first pass.
-    atLeast("maxSamples", pathTracer.maxSamples, 0);
-    // One replicate is one sequence, a valid render whose SNR is undefined; zero would divide the pass index.
-    atLeast("replicates", pathTracer.replicates, 1);
-    // A capped accumulation must end on a complete round, or its replicates settle at unequal counts.
-    if (pathTracer.replicates >= 1 && pathTracer.maxSamples % pathTracer.replicates != 0) {
-        std::cerr << "loadProfileConfig: " << path << ": maxSamples " << pathTracer.maxSamples << " is not a multiple of replicates "
-                  << pathTracer.replicates << "\n";
-        ok = false;
-    }
-    // The traced image the render scale multiplies, and the denominator of the primary ray's aspect ratio.
-    atLeast("render.width", render.width, 1);
-    atLeast("render.height", render.height, 1);
-    return ok;
 }
 
 // The render block's output fields: display LUT, bit depth, image size and bloom. Scales, AOV and vsync are read after controls.
@@ -206,6 +177,23 @@ bool validRender(const RenderConfig& render, const std::string& path) {
     return true;
 }
 
+// Every key required, as everywhere in this file: a missing one throws and is reported by loadProfileConfig's catch.
+PathTracerConfig parsePathTracer(const nlohmann::json& pathTracer) {
+    const nlohmann::json& adaptive = pathTracer.at("adaptive");
+    return PathTracerConfig{
+        pathTracer.at("samplesPerPixel").get<int>(),
+        pathTracer.at("maxBounces").get<int>(),
+        pathTracer.at("russianRouletteStartBounce").get<int>(),
+        pathTracer.at("maxSamples").get<int>(),
+        toFloat(pathTracer.at("aoMaxDistance")),
+        toFloat(pathTracer.at("lookaheadDistance")),
+        pathTracer.at("replicates").get<int>(),
+        toFloat(adaptive.at("threshold")),
+        toFloat(adaptive.at("confidence")),
+        adaptive.at("minSamples").get<int>(),
+    };
+}
+
 bool validPathTracer(const PathTracerConfig& pathTracer, const std::string& path) {
     // AO ray tfar. At or below zero every occlusion ray is degenerate and the AO lane reads a uniform 1.0: inert white, not an error.
     if (pathTracer.aoMaxDistance <= 0.0F) {
@@ -217,10 +205,64 @@ bool validPathTracer(const PathTracerConfig& pathTracer, const std::string& path
         std::cerr << "loadProfileConfig: " << path << " has a non-positive lookaheadDistance\n";
         return false;
     }
+    // Negative or NaN would stop nothing or everything; infinity would stop every texel at its first checkpoint.
+    if (!std::isfinite(pathTracer.adaptiveThreshold) || pathTracer.adaptiveThreshold < 0.0F) {
+        std::cerr << "loadProfileConfig: " << path << " has an adaptive.threshold outside [0, inf)\n";
+        return false;
+    }
+    // The false discovery rate is 1 - confidence: at confidence 1 nothing could stop, at 0 every texel with spread would.
+    if (!(pathTracer.adaptiveConfidence > 0.0F && pathTracer.adaptiveConfidence < 1.0F)) {
+        std::cerr << "loadProfileConfig: " << path << " has an adaptive.confidence outside (0, 1)\n";
+        return false;
+    }
     return true;
 }
 
 }  // namespace
+
+// Each count has a concrete failure mode, and the viewer overrides some after loading, so this runs at both boundaries.
+bool validCounts(const RenderConfig& render, const PathTracerConfig& pathTracer, const std::string& source) {
+    bool ok = true;
+    const auto atLeast = [&](const char* name, int v, int low) {
+        if (v < low) {
+            std::cerr << "loadProfileConfig: " << source << ": " << name << " is " << v << ", expected >= " << low << "\n";
+            ok = false;
+        }
+    };
+    // At zero the per-sample loop never runs, so renderPathTraced divides by a zero filter weight and writes NaN to every AOV texel.
+    atLeast("samplesPerPixel", pathTracer.samplesPerPixel, 1);
+    // Zero is direct lighting only, a legitimate render; negative makes the depth cap reject the primary hit before it is shaded.
+    atLeast("maxBounces", pathTracer.maxBounces, 0);
+    // Negative starts roulette before the primary ray, killing paths at full throughput.
+    atLeast("russianRouletteStartBounce", pathTracer.russianRouletteStartBounce, 0);
+    // Zero is the documented unbounded case; negative would cap accumulation below the first pass.
+    atLeast("maxSamples", pathTracer.maxSamples, 0);
+    // One replicate is one sequence, a valid render whose SNR is undefined; zero would divide the pass index.
+    atLeast("replicates", pathTracer.replicates, 1);
+    // A capped accumulation must end on a complete round, or its replicates settle at unequal counts.
+    if (pathTracer.replicates >= 1 && pathTracer.maxSamples % pathTracer.replicates != 0) {
+        std::cerr << "loadProfileConfig: " << source << ": maxSamples " << pathTracer.maxSamples << " is not a multiple of replicates "
+                  << pathTracer.replicates << "\n";
+        ok = false;
+    }
+    // Checkpoints fall where every replicate holds a power-of-two prefix of its sequence, so the first must be one of them.
+    const int perReplicate = pathTracer.replicates >= 1 ? pathTracer.adaptiveMinSamples / pathTracer.replicates : 0;
+    if (pathTracer.adaptiveMinSamples < pathTracer.replicates || pathTracer.adaptiveMinSamples % pathTracer.replicates != 0 ||
+        !std::has_single_bit(static_cast<unsigned int>(perReplicate))) {
+        std::cerr << "loadProfileConfig: " << source << ": adaptive.minSamples " << pathTracer.adaptiveMinSamples
+                  << " is not replicates " << pathTracer.replicates << " times a power of two\n";
+        ok = false;
+    }
+    // One replicate leaves no spread to bound the error by, so no texel could ever stop.
+    if (pathTracer.adaptiveThreshold > 0.0F && pathTracer.replicates < 2) {
+        std::cerr << "loadProfileConfig: " << source << ": adaptive sampling needs replicates >= 2, has " << pathTracer.replicates << "\n";
+        ok = false;
+    }
+    // The traced image the render scale multiplies, and the denominator of the primary ray's aspect ratio.
+    atLeast("render.width", render.width, 1);
+    atLeast("render.height", render.height, 1);
+    return ok;
+}
 
 // Reads every block before any range check, so a file with several faults reports the first in read order, then in check order.
 std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
@@ -259,15 +301,7 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
         renderConfig->interactiveRenderScale = toFloat(render.at("interactiveRenderScale"));
         renderConfig->defaultAov = render.at("defaultAOV").get<int>();
         renderConfig->vsync = render.at("vsync").get<bool>();
-        const PathTracerConfig pathTracerConfig{
-            pathTracer.at("samplesPerPixel").get<int>(),
-            pathTracer.at("maxBounces").get<int>(),
-            pathTracer.at("russianRouletteStartBounce").get<int>(),
-            pathTracer.at("maxSamples").get<int>(),
-            toFloat(pathTracer.at("aoMaxDistance")),
-            toFloat(pathTracer.at("lookaheadDistance")),
-            pathTracer.at("replicates").get<int>(),
-        };
+        const PathTracerConfig pathTracerConfig = parsePathTracer(pathTracer);
 
         if (!validRender(*renderConfig, path) ||
             !validPathTracer(pathTracerConfig, path) || !validCounts(*renderConfig, pathTracerConfig, path)) {

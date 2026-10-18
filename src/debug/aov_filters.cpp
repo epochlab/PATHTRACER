@@ -4,13 +4,13 @@
 #include <cmath>
 #include <cstddef>
 #include <numbers>
-#include <numeric>
 #include <stdexcept>
 #include <vector>
 
 #include "pathtracer/debug/scale_space.h"
 #include "pathtracer/scene/cie.h"
 #include "pathtracer/scene/cone_space.h"
+#include "pathtracer/scene/path_trace_driver.h"
 
 namespace pathtracer::debug {
 
@@ -334,22 +334,16 @@ HdrImage snrAov(int width, int height, const float* replicateLuminance, int repl
     if (replicateLuminance == nullptr || populated < 2) {
         return out;
     }
-    // Independent replicate means m_r of one expectation: sum (m_r - mbar)^2 / (K(K-1)) is unbiased for Var(mbar) at any counts.
-    const double inverseDegrees = 1.0 / (static_cast<double>(populated) * static_cast<double>(populated - 1));
     const auto stride = static_cast<std::size_t>(replicates);
     threadPool.parallelFor(height, [&](int y) {
         for (int x = 0; x < width; ++x) {
             const std::size_t pixel = (static_cast<std::size_t>(y) * static_cast<std::size_t>(width)) + static_cast<std::size_t>(x);
-            const float* means = replicateLuminance + (pixel * stride);
-            // Double: the deviations of a converged texel's replicates are rounding-scale differences of float means.
-            const double mean = std::accumulate(means, means + populated, 0.0) / static_cast<double>(populated);
-            double squares = 0.0;
-            for (int r = 0; r < populated; ++r) {
-                squares += (means[r] - mean) * (means[r] - mean);
-            }
-            const double standardError = std::sqrt(squares * inverseDegrees);
+            // The adaptive stopping rule's own estimate, so the AOV shows exactly the error the sampler retires texels by.
+            const pathtracer::scene::ReplicateEstimate estimate =
+                pathtracer::scene::replicateEstimate(replicateLuminance + (pixel * stride), populated);
+            const double standardError = std::sqrt(estimate.meanVariance);
             // No signal reads zero; a positive signal every replicate agreed on exactly is known exactly, so its SNR is +inf, not zero.
-            const double ratio = mean > 0.0 ? mean / standardError : 0.0;
+            const double ratio = estimate.mean > 0.0 ? estimate.mean / standardError : 0.0;
             writeTexel(out, x, y, static_cast<float>(ratio));
         }
     });

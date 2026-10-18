@@ -999,4 +999,159 @@ PT_CHECK(replicate_means_match_batch_means, Slow, Exact) {
     PT_EXPECT(ctx, largestSpread > 0.0, detail);
 }
 
+// Adaptive sampling on the driver fixture: a cap of 32 passes at K = 4 checks at 4, 8, 16 and 32, the first from minSamples.
+constexpr int kAdaptiveCap = 32;
+constexpr int kAdaptiveMinSamples = 4;
+
+PathTraceDriver::Request makeAdaptiveRequest(float threshold, const Camera& camera) {
+    PathTraceDriver::Request request = makeRequest(kAdaptiveCap, camera);
+    request.settings.adaptive = {threshold, 0.95F, kAdaptiveMinSamples};
+    return request;
+}
+
+// The driver's final result once its accumulation ends, at the cap or with every texel stopped; nullptr on timeout.
+std::shared_ptr<const PathTraceResult> waitForSettled(const PathTraceDriver& driver, std::uint64_t generation) {
+    std::shared_ptr<const PathTraceResult> result;
+    const bool settled = waitFor([&] {
+        result = driver.latestResult();
+        return result != nullptr && result->generation == generation && (result->samples == kAdaptiveCap || result->activeTexels == 0);
+    });
+    return settled ? result : nullptr;
+}
+
+// HeadlessRenderer's adaptive loop on the shared kernels: trace the list, fold its runs in place, retire converged texels at checkpoints.
+PathTraceResult sequentialAdaptiveFold(DriverFixture& fixture, const PathTraceDriver::Request& request, std::uint32_t scrambleSeed) {
+    const pathtracer::scene::LightSet lights(&fixture.environment, glm::vec3(0.0F), 1.0F, fixture.scene.lights);
+    const PathTraceSettings& settings = request.settings;
+    PathTraceResult pass = pathtracer::scene::makePathTraceResult(kImageSize, kImageSize, settings.replicates);
+    PathTraceResult mean = pathtracer::scene::makePathTraceResult(kImageSize, kImageSize, settings.replicates);
+    std::vector<std::uint32_t> active = pathtracer::scene::allTexels(kImageSize, kImageSize);
+    const std::atomic<std::uint64_t> generation{scrambleSeed};
+    pathtracer::debug::PassStats stats;
+    const auto stride = static_cast<std::size_t>(settings.replicates);
+    int p = 0;
+    for (; p < request.maxSamples && !active.empty(); ++p) {
+        pathtracer::scene::renderPathTraced(request.camera, *fixture.accel, fixture.scene.shadingTriangles, fixture.scene.instances,
+                                            fixture.scene.instanceLightIndex, lights, pathtracer::scene::VolumeSet{}, kImageSize, kImageSize,
+                                            active, request.showSky, settings, scrambleSeed, /*sampleBase=*/p,
+                                            /*sampleCount=*/request.maxSamples, generation, scrambleSeed, fixture.pool, stats, pass);
+        const float invN = 1.0F / static_cast<float>(p + 1);
+        const float invCount = 1.0F / static_cast<float>((p / settings.replicates) + 1);
+        const auto fold = [&](std::uint32_t begin, std::uint32_t end) {
+            const std::size_t run = end - begin;
+            float* means = mean.replicateLuminance.data() + (begin * stride);
+            pathtracer::scene::foldReplicateLuminance(means, pass.beauty.texels.data() + (begin * 3), 3, means, run, settings.replicates,
+                                                      p % settings.replicates, invCount);
+            std::fill(mean.texelSamples.data() + begin, mean.texelSamples.data() + end, p + 1);
+            for (const Lane& lane : kLanes) {
+                const auto channels = static_cast<std::size_t>((pass.*lane.image).channels);
+                const float* drawn = (pass.*lane.image).texels.data() + (begin * channels);
+                float* folded = (mean.*lane.image).texels.data() + (begin * channels);
+                if (p == 0) {
+                    std::copy(drawn, drawn + (run * channels), folded);
+                } else {
+                    pathtracer::scene::foldRunningMean(folded, drawn, folded, run * channels, invN);
+                }
+            }
+        };
+        for (int y = 0; y < kImageSize; ++y) {
+            const auto rowBegin = static_cast<std::uint32_t>(y * kImageSize);
+            pathtracer::scene::forEachTracedRun(active, rowBegin, rowBegin + kImageSize, fold, [](std::uint32_t, std::uint32_t) {});
+        }
+        if (pathtracer::scene::adaptiveCheckpoint(p + 1, settings)) {
+            pathtracer::scene::retireConvergedTexels(active, mean.replicateLuminance.data(), settings, fixture.pool);
+        }
+    }
+    mean.samples = p;
+    mean.activeTexels = active.size();
+    return mean;
+}
+
+// Stopped texels are carried bit-exact through the pool's rotation, so the driver equals the in-place sequential fold everywhere.
+PT_CHECK(adaptive_driver_matches_the_sequential_fold, Slow, Exact) {
+    // Chosen on this fixture so texels stop at several checkpoints and some reach the cap; the last assertion holds it to that.
+    constexpr float kThreshold = 0.5F;
+    ctx.plan(4);
+    std::unique_ptr<DriverFixture> fixture = makeFixture();
+    if (!fixture->valid()) {
+        for (int i = 0; i < 4; ++i) {
+            PT_EXPECT(ctx, false, "scene/driver construction failed");
+        }
+        return;
+    }
+    const PathTraceDriver::Request request = makeAdaptiveRequest(kThreshold, makeCamera());
+    const std::uint64_t generation = fixture->driver->requestTrace(request);
+    const std::shared_ptr<const PathTraceResult> published = waitForSettled(*fixture->driver, generation);
+    if (published == nullptr) {
+        for (int i = 0; i < 4; ++i) {
+            PT_EXPECT(ctx, false, "driver never settled");
+        }
+        return;
+    }
+    const PathTraceResult expected = sequentialAdaptiveFold(*fixture, request, static_cast<std::uint32_t>(generation));
+    std::size_t differing = 0;
+    for (const Lane& lane : kLanes) {
+        const std::vector<float>& image = ((*published).*lane.image).texels;
+        for (std::size_t i = 0; i < image.size(); ++i) {
+            differing += std::bit_cast<std::uint32_t>(image[i]) != std::bit_cast<std::uint32_t>((expected.*lane.image).texels[i]) ? 1 : 0;
+        }
+    }
+    for (std::size_t i = 0; i < published->replicateLuminance.size(); ++i) {
+        differing += std::bit_cast<std::uint32_t>(published->replicateLuminance[i]) !=
+                             std::bit_cast<std::uint32_t>(expected.replicateLuminance[i])
+                         ? 1
+                         : 0;
+    }
+    char detail[192];
+    std::snprintf(detail, sizeof(detail), "%zu lane and replicate floats differ from the sequential adaptive fold", differing);
+    PT_EXPECT(ctx, differing == 0, detail);
+    std::snprintf(detail, sizeof(detail), "driver ended at %d passes with %zu active, the fold at %d with %zu", published->samples,
+                  published->activeTexels, expected.samples, expected.activeTexels);
+    PT_EXPECT(ctx, published->samples == expected.samples && published->activeTexels == expected.activeTexels &&
+                       published->texelSamples == expected.texelSamples,
+              detail);
+    // Every count is a checkpoint a texel stopped at, or the final pass of one still sampling.
+    const auto checkpoint = [&](int n) { return pathtracer::scene::adaptiveCheckpoint(n, request.settings); };
+    const bool countsValid = std::all_of(published->texelSamples.begin(), published->texelSamples.end(),
+                                         [&](int n) { return checkpoint(n) || n == published->samples; });
+    PT_EXPECT(ctx, countsValid, "a texel stopped between checkpoints");
+    // Non-vacuous: stops at two or more checkpoints, and texels still sampling at the cap, or the check exercised no carry or no fold.
+    std::vector<int> stops;
+    for (const int n : published->texelSamples) {
+        if (n < published->samples && std::find(stops.begin(), stops.end(), n) == stops.end()) {
+            stops.push_back(n);
+        }
+    }
+    std::snprintf(detail, sizeof(detail), "texels stopped at %zu distinct checkpoints with %zu still active at %d passes", stops.size(),
+                  published->activeTexels, published->samples);
+    PT_EXPECT(ctx, stops.size() >= 2 && published->activeTexels > 0 && published->samples == kAdaptiveCap, detail);
+}
+
+// Once every texel has stopped there is no pass left to run, so the driver idles below its cap and says so in its records.
+PT_CHECK(adaptive_driver_idles_once_every_texel_stops, Slow, Exact) {
+    ctx.plan(2);
+    std::unique_ptr<DriverFixture> fixture = makeFixture();
+    if (!fixture->valid()) {
+        PT_EXPECT(ctx, false, "scene/driver construction failed");
+        PT_EXPECT(ctx, false, "scene/driver construction failed");
+        return;
+    }
+    // Over the floor alone, so every texel's samples vary: replicates agreeing exactly never stop, as a black miss would.
+    const Camera floorOnly(glm::vec3(-10.0F, -10.0F, 5.0F), glm::vec3(0.0F), Camera::FilmBack{36.0F, 24.0F}, 50.0F, 0.01F, 1000.0F, 2.8F,
+                           1.0F / 125.0F, 100.0F);
+    // A threshold every estimate with spread meets, so the first checkpoint retires every texel.
+    const std::uint64_t generation = fixture->driver->requestTrace(makeAdaptiveRequest(std::numeric_limits<float>::max(), floorOnly));
+    const std::shared_ptr<const PathTraceResult> published = waitForSettled(*fixture->driver, generation);
+    // Long enough for a driver that failed to idle to run past the checkpoint; a hang detector, not a timing assertion.
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    const std::shared_ptr<const PathTraceResult> later = fixture->driver->latestResult();
+    char detail[160];
+    std::snprintf(detail, sizeof(detail), "published %d passes, %d after waiting, against a first checkpoint of %d",
+                  published == nullptr ? -1 : published->samples, later == nullptr ? -1 : later->samples, kAdaptiveMinSamples);
+    PT_EXPECT(ctx, published != nullptr && later != nullptr && later->samples == kAdaptiveMinSamples && later->activeTexels == 0, detail);
+    const pathtracer::debug::PassRecord record = fixture->driver->lastPassRecord();
+    PT_EXPECT(ctx, record.passIndex == kAdaptiveMinSamples && record.activeTexels == 0,
+              "the last pass record does not report the checkpoint that stopped every texel");
+}
+
 PT_CHECK_MAIN("driver")

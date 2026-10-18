@@ -460,7 +460,8 @@ void HeadlessRenderer::accumulatePathTraced(const Request& request) {
     std::fill(pathTraced_.replicateLuminance.begin(), pathTraced_.replicateLuminance.end(), 0.0F);
     std::fill(pathTraced_.texelSamples.begin(), pathTraced_.texelSamples.end(), 0);
     activeTexels_ = pathtracer::scene::allTexels(request.width, request.height);
-    for (int pass = 0; pass < request.samples; ++pass) {
+    // Ends at request.samples, or earlier once the stopping rule has retired every texel.
+    for (int pass = 0; pass < request.samples && !activeTexels_.empty(); ++pass) {
         // Only the trace is timed: the accumulation below it is O(pixels) and identical across revisions.
         const auto passStart = std::chrono::steady_clock::now();
         // scrambleSeed fixed, sampleBase advancing: the pair that keeps accumulated samples stratified rather than N independent draws.
@@ -474,7 +475,11 @@ void HeadlessRenderer::accumulatePathTraced(const Request& request) {
         stats_.passMilliseconds.push_back(
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - passStart).count());
         accumulatePass(request, pass, laneSources);
+        if (pathtracer::scene::adaptiveCheckpoint(pass + 1, baseSettings_)) {
+            pathtracer::scene::retireConvergedTexels(activeTexels_, pathTraced_.replicateLuminance.data(), baseSettings_, threadPool_);
+        }
     }
+    pathTraced_.activeTexels = activeTexels_.size();
     stats_.rays = stats.rays();
 }
 
