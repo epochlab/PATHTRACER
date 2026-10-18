@@ -19,11 +19,11 @@ namespace {
 constexpr std::chrono::milliseconds kBufferRetryInterval{5};
 
 // Incremental running mean computed in the fresh pass buffer, so the published set is only read and publish is a pointer swap.
-void accumulateMean(PathTraceResult& sample, const PathTraceResult& previousMean, int n,
+void accumulateMean(PathTraceResult& sample, const PathTraceResult& previousMean, int n, std::span<const std::uint32_t> texels,
                      ThreadPool& threadPool) {
     const float invN = 1.0F / static_cast<float>(n);
     const std::span<const pathtracer::debug::PathTracedLane> lanes = pathtracer::debug::pathTracedLanes();
-    const auto width = static_cast<std::size_t>(sample.beauty.width);
+    const auto width = static_cast<std::uint32_t>(sample.beauty.width);
     const auto beautyChannels = static_cast<std::size_t>(sample.beauty.channels);
     const int replicates = sample.replicates;
     // Pass n-1 (0-based) is replicate (n-1) mod K's ((n-1) div K + 1)th, the mapping renderPathTraced draws its sequence by.
@@ -31,18 +31,34 @@ void accumulateMean(PathTraceResult& sample, const PathTraceResult& previousMean
     const int count = ((n - 1) / replicates) + 1;
     const float invCount = 1.0F / static_cast<float>(count);
     const auto stride = static_cast<std::size_t>(replicates);
-    threadPool.parallelFor(sample.beauty.height, [&](int y) {
-        const std::size_t rowPixel = static_cast<std::size_t>(y) * width;
+    const auto fold = [&](std::uint32_t begin, std::uint32_t end) {
+        const std::size_t run = end - begin;
         // Before the lane folds overwrite it: `beauty` still holds this pass's own radiance.
-        foldReplicateLuminance(previousMean.replicateLuminance.data() + (rowPixel * stride),
-                               sample.beauty.texels.data() + (rowPixel * beautyChannels), beautyChannels,
-                               sample.replicateLuminance.data() + (rowPixel * stride), width, replicates, replicate, invCount);
+        foldReplicateLuminance(previousMean.replicateLuminance.data() + (begin * stride),
+                               sample.beauty.texels.data() + (begin * beautyChannels), beautyChannels,
+                               sample.replicateLuminance.data() + (begin * stride), run, replicates, replicate, invCount);
         for (const pathtracer::debug::PathTracedLane lane : lanes) {
             const auto channels = static_cast<std::size_t>((sample.*lane).channels);
-            float* destination = (sample.*lane).texels.data() + (rowPixel * channels);
-            foldRunningMean((previousMean.*lane).texels.data() + (rowPixel * channels), destination, destination,
-                            width * channels, invN);
+            float* destination = (sample.*lane).texels.data() + (begin * channels);
+            foldRunningMean((previousMean.*lane).texels.data() + (begin * channels), destination, destination, run * channels, invN);
         }
+        std::fill(sample.texelSamples.data() + begin, sample.texelSamples.data() + end, n);
+    };
+    // An untraced texel keeps its estimate: the fresh buffer holds a stale pass there, so every lane, mean and count is carried over.
+    const auto carry = [&](std::uint32_t begin, std::uint32_t end) {
+        const float* means = previousMean.replicateLuminance.data();
+        std::copy(means + (begin * stride), means + (end * stride), sample.replicateLuminance.data() + (begin * stride));
+        for (const pathtracer::debug::PathTracedLane lane : lanes) {
+            const auto channels = static_cast<std::size_t>((sample.*lane).channels);
+            const float* previous = (previousMean.*lane).texels.data();
+            std::copy(previous + (begin * channels), previous + (end * channels), (sample.*lane).texels.data() + (begin * channels));
+        }
+        const int* counts = previousMean.texelSamples.data();
+        std::copy(counts + begin, counts + end, sample.texelSamples.data() + begin);
+    };
+    threadPool.parallelFor(sample.beauty.height, [&](int y) {
+        const std::uint32_t rowBegin = static_cast<std::uint32_t>(y) * width;
+        forEachTracedRun(texels, rowBegin, rowBegin + width, fold, carry);
     });
 }
 
@@ -209,8 +225,8 @@ void PathTraceDriver::publishPassRecord(std::uint64_t generation, int passIndex,
                                             publishMs,
                                             passMs,
                                             passStats_.rays(),
-                                            passStats_.tilesCompleted(),
-                                            passStats_.tilesCancelled(),
+                                            passStats_.chunksCompleted(),
+                                            passStats_.chunksCancelled(),
                                             cancelled};
     const std::lock_guard<std::mutex> lock(statsMutex_);
     lastPass_ = record;
@@ -225,7 +241,7 @@ double PathTraceDriver::tracePass(const Request& request, int sampleBase, std::u
                           lights_);
     const auto traceStart = std::chrono::steady_clock::now();
     renderPathTraced(request.camera, accel_, shadingTriangles_, instances_,
-                     instanceLightIndex_, lights, volumes_, request.width, request.height,
+                     instanceLightIndex_, lights, volumes_, request.width, request.height, activeTexels_,
                      request.showSky, request.settings,
                      // The generation is the scramble seed: fixed per accumulation, changing exactly when the image restarts.
                      static_cast<std::uint32_t>(generation), sampleBase, request.maxSamples * request.settings.samplesPerPixel,
@@ -241,7 +257,7 @@ void PathTraceDriver::finishPass(const std::shared_ptr<PathTraceResult>& pass, s
     // passIndex == 1 leaves the pass as rendered: the running mean of one sample is that sample, and no previous mean exists.
     const auto accumulateStart = std::chrono::steady_clock::now();
     if (passIndex > 1) {
-        accumulateMean(*pass, *currentMean, passIndex, threadPool_);
+        accumulateMean(*pass, *currentMean, passIndex, activeTexels_, threadPool_);
     } else {
         // Replicate 0's first pass is its mean; the rest start at exactly zero, not at whatever the reused slot held, and are not read yet.
         std::fill(pass->replicateLuminance.begin(), pass->replicateLuminance.end(), 0.0F);
@@ -249,6 +265,7 @@ void PathTraceDriver::finishPass(const std::shared_ptr<PathTraceResult>& pass, s
                                static_cast<std::size_t>(pass->beauty.channels), pass->replicateLuminance.data(),
                                pass->beauty.texels.size() / static_cast<std::size_t>(pass->beauty.channels), pass->replicates,
                                /*replicate=*/0, /*invCount=*/1.0F);
+        std::fill(pass->texelSamples.begin(), pass->texelSamples.end(), 1);
     }
     const double accumulateMs = millisecondsSince(accumulateStart);
 
@@ -301,6 +318,7 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
             }
             activeGeneration = requestedGeneration;
             accumulated = 0;
+            activeTexels_ = allTexels(activeRequest->width, activeRequest->height);  // NOLINT(bugprone-unchecked-optional-access)
         }
 
         // Engaged: requestedGeneration goes non-zero only inside requestTrace(), under one lock.

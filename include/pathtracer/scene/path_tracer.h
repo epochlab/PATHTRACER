@@ -6,6 +6,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -22,10 +23,10 @@
 
 namespace pathtracer::scene {
 
-// Square tiles, one owner each; pixels are independent under filter importance sampling, so the size sets only scheduling granularity.
-inline constexpr int kPathTraceTileSize = 96;
-// Tiles per worker the split aims for: two leaves no worker idle and bounds the straggler tail at half a worker's share.
-inline constexpr int kTilesPerThread = 2;
+// Texels per work unit at full load, a 96 px tile's area: filter importance sampling makes texels independent, so it sets only granularity.
+inline constexpr int kPathTraceChunkTexels = 96 * 96;
+// Chunks per worker the split aims for: two leaves no worker idle and bounds the straggler tail at half a worker's share.
+inline constexpr int kChunksPerThread = 2;
 
 // Blackman-Harris (Harris 1978) at Arnold's default 1.5 px radius, importance-sampled (Ernst et al. 2006): pdf proportional to f, weight 1.
 inline constexpr float kFilterRadius = 1.5F;
@@ -42,8 +43,11 @@ struct AcceptanceSample {
 // The lobe's equivalent solid angle, 1 / its peak density 2 pi (1 - e^-2k) / k: pi rho^2 / (4 ln2) at small rho (Snyder 1977).
 [[nodiscard]] float acceptanceSolidAngle(float kappa);
 
-// Tile edge renderPathTraced splits `width` x `height` into for `threadCount` workers: kPathTraceTileSize unless that leaves the pool idle.
-[[nodiscard]] int pathTraceTileSize(int width, int height, unsigned int threadCount);
+// Chunk length renderPathTraced splits `texels` into for `threadCount` workers: kPathTraceChunkTexels unless that leaves the pool idle.
+[[nodiscard]] int pathTraceChunkTexels(int texels, unsigned int threadCount);
+
+// Every texel of a width x height image as ascending row-major indices: the work list of a pass that traces them all.
+[[nodiscard]] std::vector<std::uint32_t> allTexels(int width, int height);
 
 // samplesPerPixel is per renderPathTraced() call -- under PathTraceDriver, samples per accumulated pass (typically 1), not the total.
 struct PathTraceSettings {
@@ -128,6 +132,8 @@ struct PathTraceResult {
     // Running mean of each replicate's per-pass scene luminance, `replicates` floats per texel, pixel-major: the SNR's error estimate.
     std::vector<float> replicateLuminance;
     int replicates = 1;
+    // Passes folded into each texel, `samples` wherever every pass traced it; the driver and headless fold write it, not renderPathTraced.
+    std::vector<int> texelSamples;
 
     // Reduced from `beauty` immediately before publish, so it describes exactly the pixels published with it, unlike PassRecord.
     OverRangeStats overRange;
@@ -137,18 +143,18 @@ struct PathTraceResult {
     int samples = 0;  // passes averaged in, stamped with generation so image and count publish as one snapshot
 };
 
-// The 14 AOV lanes at their aovChannels counts, the 2 RGB denoise features, the 2 shadow means and the replicate means, zeroed.
+// The 14 AOV lanes at their aovChannels counts, the 2 RGB denoise features, the 2 shadow means, replicate means and counts, zeroed.
 [[nodiscard]] PathTraceResult makePathTraceResult(int width, int height, int replicates);
 
 // Whether a primary ray that misses returns environment radiance when nothing overrides it; viewer, driver and headless share it.
 inline constexpr bool kDefaultShowSky = false;
 
-// Blocking multithreaded path trace: BSDF bounces, NEE with MIS, RR; a worker drops its tile when generation != requestedGeneration.
+// Blocking multithreaded path trace of `texels` (row-major indices); other texels of `out` are not written. Stale chunks are dropped.
 void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                        const std::vector<ShadingTriangle>& shadingTriangles,
                        const std::vector<MeshInstance>& instances,
                        const std::vector<int>& instanceLightIndex, const LightSet& lights, const VolumeSet& volumes,
-                       int width, int height, bool showSky, const PathTraceSettings& settings,
+                       int width, int height, std::span<const std::uint32_t> texels, bool showSky, const PathTraceSettings& settings,
                        std::uint32_t scrambleSeed, int sampleBase, int sampleCount,
                        const std::atomic<std::uint64_t>& generation,
                        std::uint64_t requestedGeneration, ThreadPool& threadPool,

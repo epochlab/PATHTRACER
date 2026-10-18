@@ -3,6 +3,21 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Texel work list in balanced chunks
+
+`renderPathTraced` traces a list of texels, not a grid of tiles: ascending row-major indices split into
+`clamp(n / (2 threads), 1, 96^2)` chunks. A full list is the old frame, and adaptive sampling's shrinking list stays balanced over the
+pool wherever its texels lie. With tiles, the work left would collapse into a few dense tiles. Images are bit-identical.
+- `PathTraceResult::texelSamples` counts the passes in each texel. The driver and headless folds walk runs of listed texels
+  (`forEachTracedRun`). The driver carries untraced texels from the previous pool buffer, and headless leaves them in place.
+- Headless always folds the replicate means from the pass's own Beauty, so they exist whichever lanes are requested.
+- `PassStats` and `PassRecord` count chunks (`chunksCompleted`, `chunksCancelled`). The spec report prints the unit in texels.
+- **Measured** (256x128, 16 passes, 3 randomized rounds, paired per round): `pass_ms` B/A cornell 0.79-0.91, macbeth 0.69-1.01,
+  stump 0.60-0.63, with identical work. Row strips balance across the pool better than 24 px tiles of uneven cost. Viewer
+  accumulate is 0.96-1.01.
+- **Tests:** the chunk length stays within its unit and fills the pool; a subset pass is the full pass restricted, untraced texels
+  untouched; the render is invariant to chunk length; published counts equal the pass count.
+
 ## Bounded media and random-walk subsurface
 
 Closed objects now have interiors. A bulk material with `subsurface_weight` or `transmission_scatter` fills its object with a homogeneous

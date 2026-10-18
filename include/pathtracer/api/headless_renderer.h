@@ -136,9 +136,8 @@ private:
     void resizeBuffers(int width, int height);
     // Traces request.samples one-sample passes and folds each into accumulators_, the running means PathTraceDriver publishes.
     void accumulatePathTraced(const Request& request);
-    // Folds one pass into the means and the Beauty replicate means in place, through the driver's foldRunningMean/foldReplicateLuminance.
-    void accumulatePass(const Request& request, int pass, const std::vector<const std::vector<float>*>& laneSources,
-                        int beautyIndex);
+    // Folds one pass's traced texels into the means, replicate means and counts in place, through the driver's kernels.
+    void accumulatePass(const Request& request, int pass, const std::vector<const std::vector<float>*>& laneSources);
     // Ray-casts the G-buffer lanes, motion measured from request.previousCamera (camera itself when absent).
     void renderGBufferLanes(const Request& request);
     // Evaluates each distinct BeautyFilter AOV the request names once, over the accumulated Beauty.
@@ -161,6 +160,8 @@ private:
 
     // Reused across render() calls, reallocated only when the resolution changes; its replicateLuminance is the running replicate means.
     pathtracer::scene::PathTraceResult pathTraced_;
+    // Ascending texels the next pass traces, every one at a render's first pass, as the driver's list.
+    std::vector<std::uint32_t> activeTexels_;
     pathtracer::scene::GBuffer gbuffer_;
     // One running mean per path-traced lane this request needs, parallel to accumulatedLanes_.
     std::vector<pathtracer::debug::PathTracedLane> accumulatedLanes_;

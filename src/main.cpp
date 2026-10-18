@@ -428,7 +428,7 @@ void printStartupSpec(const AppScene& scene, const pathtracer::config::SceneConf
         // Both pools take ThreadPool's default; PathTraceDriver owns its own, unconstructed until AppResources is at its final address.
         pathtracer::scene::ThreadPool::defaultThreadCount(),
         pathtracer::scene::ThreadPool::defaultThreadCount(),
-        pathtracer::scene::kPathTraceTileSize,
+        pathtracer::scene::kPathTraceChunkTexels,
         static_cast<int>(scene.model.instances.size()),
         static_cast<int>(scene.lights.size()),
         scene.totalTriangles,

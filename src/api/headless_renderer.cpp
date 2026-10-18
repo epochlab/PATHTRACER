@@ -456,34 +456,30 @@ void HeadlessRenderer::accumulatePathTraced(const Request& request) {
     for (const PathTracedLane lane : accumulatedLanes_) {
         laneSources.push_back(&(pathTraced_.*lane).texels);
     }
-    // Only Beauty carries replicate means, and only where it is accumulated at all; -1 leaves the lane zero and SNR black.
-    const auto beautyLane = std::find(accumulatedLanes_.begin(), accumulatedLanes_.end(), &pathtracer::scene::PathTraceResult::beauty);
-    const auto beautyIndex = beautyLane == accumulatedLanes_.end()
-                                 ? -1
-                                 : static_cast<int>(beautyLane - accumulatedLanes_.begin());
-    // renderPathTraced writes images only, so pathTraced_ holds the replicate means across passes, folded in place from zero.
+    // renderPathTraced writes images only, so pathTraced_ holds the replicate means and counts across passes, folded in place from zero.
     std::fill(pathTraced_.replicateLuminance.begin(), pathTraced_.replicateLuminance.end(), 0.0F);
+    std::fill(pathTraced_.texelSamples.begin(), pathTraced_.texelSamples.end(), 0);
+    activeTexels_ = pathtracer::scene::allTexels(request.width, request.height);
     for (int pass = 0; pass < request.samples; ++pass) {
         // Only the trace is timed: the accumulation below it is O(pixels) and identical across revisions.
         const auto passStart = std::chrono::steady_clock::now();
         // scrambleSeed fixed, sampleBase advancing: the pair that keeps accumulated samples stratified rather than N independent draws.
         pathtracer::scene::renderPathTraced(request.camera, geometry_.accel, geometry_.model.shadingTriangles,
                                          geometry_.model.instances, geometry_.instanceLightIndex, lights, volumes_, request.width,
-                                         request.height,
+                                         request.height, activeTexels_,
                                          showSky, baseSettings_,
                                          request.scrambleSeed, /*sampleBase=*/pass,
                                          /*sampleCount=*/request.samples, generation,
                                          /*requestedGeneration=*/1U, threadPool_, stats, pathTraced_);
         stats_.passMilliseconds.push_back(
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - passStart).count());
-        accumulatePass(request, pass, laneSources, beautyIndex);
+        accumulatePass(request, pass, laneSources);
     }
     stats_.rays = stats.rays();
 }
 
-void HeadlessRenderer::accumulatePass(const Request& request, int pass,
-                                      const std::vector<const std::vector<float>*>& laneSources, int beautyIndex) {
-    const auto width = static_cast<std::size_t>(request.width);
+void HeadlessRenderer::accumulatePass(const Request& request, int pass, const std::vector<const std::vector<float>*>& laneSources) {
+    const auto width = static_cast<std::uint32_t>(request.width);
     // The driver's own arithmetic, folded in place: same kernels, same invN, same per-element order, so the two means are bit-identical.
     const float invN = 1.0F / static_cast<float>(pass + 1);
     const int replicates = baseSettings_.replicates;
@@ -492,29 +488,31 @@ void HeadlessRenderer::accumulatePass(const Request& request, int pass,
     const int count = (pass / replicates) + 1;
     const float invCount = 1.0F / static_cast<float>(count);
     const auto stride = static_cast<std::size_t>(replicates);
-    threadPool_.parallelFor(request.height, [&](int y) {
-        const std::size_t rowPixel = static_cast<std::size_t>(y) * width;
-        if (beautyIndex >= 0) {
-            const auto channels = static_cast<std::size_t>(pathTraced_.beauty.channels);
-            const float* drawn = laneSources[static_cast<std::size_t>(beautyIndex)]->data() + (rowPixel * channels);
-            float* means = pathTraced_.replicateLuminance.data() + (rowPixel * stride);
-            pathtracer::scene::foldReplicateLuminance(means, drawn, channels, means, width, replicates, replicate, invCount);
-        }
-        // The first pass is kept as drawn, as the driver keeps it: folding into a zero mean would turn -0 into +0.
-        if (pass == 0) {
-            for (std::size_t lane = 0; lane < laneSources.size(); ++lane) {
-                const auto channels = static_cast<std::size_t>(accumulators_[lane].channels);
-                const float* drawn = laneSources[lane]->data() + (rowPixel * channels);
-                std::copy(drawn, drawn + (width * channels), accumulators_[lane].texels.data() + (rowPixel * channels));
-            }
-            return;
-        }
+    const auto beautyChannels = static_cast<std::size_t>(pathTraced_.beauty.channels);
+    const auto fold = [&](std::uint32_t begin, std::uint32_t end) {
+        const std::size_t run = end - begin;
+        // From the pass's own Beauty, which renderPathTraced always writes, so the means exist whichever lanes are accumulated.
+        float* means = pathTraced_.replicateLuminance.data() + (begin * stride);
+        pathtracer::scene::foldReplicateLuminance(means, pathTraced_.beauty.texels.data() + (begin * beautyChannels), beautyChannels, means,
+                                                  run, replicates, replicate, invCount);
+        std::fill(pathTraced_.texelSamples.data() + begin, pathTraced_.texelSamples.data() + end, pass + 1);
         for (std::size_t lane = 0; lane < laneSources.size(); ++lane) {
             const auto channels = static_cast<std::size_t>(accumulators_[lane].channels);
-            float* mean = accumulators_[lane].texels.data() + (rowPixel * channels);
-            pathtracer::scene::foldRunningMean(mean, laneSources[lane]->data() + (rowPixel * channels), mean,
-                                               width * channels, invN);
+            const float* drawn = laneSources[lane]->data() + (begin * channels);
+            float* mean = accumulators_[lane].texels.data() + (begin * channels);
+            // The first pass is kept as drawn, as the driver keeps it: folding into a zero mean would turn -0 into +0.
+            if (pass == 0) {
+                std::copy(drawn, drawn + (run * channels), mean);
+            } else {
+                pathtracer::scene::foldRunningMean(mean, drawn, mean, run * channels, invN);
+            }
         }
+    };
+    // In place, an untraced texel's mean is already where it stays.
+    const auto carry = [](std::uint32_t, std::uint32_t) {};
+    threadPool_.parallelFor(request.height, [&](int y) {
+        const std::uint32_t rowBegin = static_cast<std::uint32_t>(y) * width;
+        pathtracer::scene::forEachTracedRun(activeTexels_, rowBegin, rowBegin + width, fold, carry);
     });
 }
 

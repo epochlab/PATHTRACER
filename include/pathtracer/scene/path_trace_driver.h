@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -9,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <stop_token>
 #include <thread>
 #include <vector>
@@ -97,12 +99,12 @@ private:
     // Bumped under requestMutex_ by anything that gives the driver work, so an idle driver waits on it instead of polling.
     std::uint64_t wakeEpoch_ = 0;
 
-    // Bumped by requestTrace, polled lock-free by the dispatch loop and by every in-flight pass's tile workers.
+    // Bumped by requestTrace, polled lock-free by the dispatch loop and by every in-flight pass's chunk workers.
     std::atomic<std::uint64_t> generation_{0};
     // Set by setSuspended; polled by driverLoop, which idles instead of dispatching while it is true.
     std::atomic<bool> suspended_{false};
 
-    // Ray/tile counters for the pass in flight, driver-thread-owned and reused, so a pass allocates nothing. Declared before thread_.
+    // Ray/chunk counters for the pass in flight, driver-thread-owned and reused, so a pass allocates nothing. Declared before thread_.
     pathtracer::debug::PassStats passStats_;
 
     // Republished every finished pass, cancelled included. Separate from resultMutex_ so a dashboard read never contends with publish.
@@ -119,6 +121,9 @@ private:
     static constexpr std::size_t kReaderHeldBuffers = 1;
     // Driver-thread-only rotation of buffer sets, reused for the process life, so renderPathTraced allocates no images per pass.
     std::array<std::shared_ptr<PathTraceResult>, kDriverHeldBuffers + kReaderHeldBuffers> bufferPool_;
+
+    // Driver-thread-only: ascending texels the next pass traces, every one at a generation's first pass.
+    std::vector<std::uint32_t> activeTexels_;
 
     // Per-chunk private accumulators for reduceOverRange, driver-thread-owned and reused across passes, as passStats_ and bufferPool_ are.
     std::vector<OverRangeHistogram> overRangeHistograms_;
@@ -137,5 +142,27 @@ void foldRunningMean(const float* previousMean, const float* drawn, float* mean,
 // Folds drawn Beauty's scene luminance into one replicate's running mean, carrying the rest; means may alias previousMeans.
 void foldReplicateLuminance(const float* previousMeans, const float* drawn, std::size_t channels, float* means, std::size_t pixels,
                             int replicates, int replicate, float invCount);
+
+// Splits [begin, end) into runs of consecutive texels in ascending `traced`, passed to fold(b, e), and the gaps, passed to carry(b, e).
+template <typename Fold, typename Carry>
+void forEachTracedRun(std::span<const std::uint32_t> traced, std::uint32_t begin, std::uint32_t end, Fold&& fold, Carry&& carry) {
+    auto it = std::lower_bound(traced.begin(), traced.end(), begin);
+    std::uint32_t cursor = begin;
+    while (it != traced.end() && *it < end) {
+        const std::uint32_t runBegin = *it;
+        std::uint32_t runEnd = runBegin + 1;
+        for (++it; it != traced.end() && *it == runEnd && runEnd < end; ++it) {
+            ++runEnd;
+        }
+        if (cursor < runBegin) {
+            carry(cursor, runBegin);
+        }
+        fold(runBegin, runEnd);
+        cursor = runEnd;
+    }
+    if (cursor < end) {
+        carry(cursor, end);
+    }
+}
 
 }  // namespace pathtracer::scene
