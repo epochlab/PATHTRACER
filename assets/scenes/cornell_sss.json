@@ -1,0 +1,25 @@
+{
+    "model": {
+        "gltfPath": "geometry/cornell/cornell_v001.gltf",
+        "position": [0.0, 0.0, 0.0],
+        "rotation": [0.0, 0.0, 0.0]
+    },
+    "environment": {
+        "hdriPath": "textures/republiqueHDR_2k.exr"
+    },
+    "materialPath": "materials/clay.json",
+    "materialOverrides": {
+        "sphere01": "materials/sss.json"
+    },
+    "lights": [
+        {
+            "type": "quad",
+            "position": [0.0, 0.49, 0.0],
+            "rotation": [-90.0, 0.0, 0.0],
+            "size": [0.3, 0.3],
+            "temperature": 4000,
+            "intensity": 15.0,
+            "twoSided": false
+        }
+    ]
+}

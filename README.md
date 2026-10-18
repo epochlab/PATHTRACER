@@ -85,10 +85,10 @@ Capability the renderer lacks, most valuable first.
 
 | Area | Item | Detail | Complexity | Status |
 | --- | --- | --- | --- | --- |
-| Transport | Bounded media | Light scattering inside closed objects such as frosted glass, milk or skin. Needs tracking which object a ray is inside when they nest. | high | ready |
 | Sampling | Many-light sampling | Lights are picked uniformly, so a small dim light gets as many shadow rays as a large bright one. A light tree would pick by power and orientation, and ReSTIR would reuse picks across pixels. | high | ready |
 | Sampling | Adaptive sampling | Spend more samples on noisy pixels and fewer on clean ones. The per-pixel noise estimate it needs already exists. | medium | ready |
 | Camera | Scene graph and instancing | Every copy of an object is stored separately. Keeping objects in a hierarchy would let copies share memory and enable motion blur. | high | ready |
+| Transport | Volume emission | Media that glow, such as fire or a lit gas, gathered where a ray collides inside them. OpenPBR's surface has no such input, so it would be a volume material key. | medium | ready |
 | Colour | Photometric calibration | Link the renderer's light values to real units (lux, candela), so exposure can be checked against a real light meter. | medium | ready |
 | Camera | Lens model | Most fisheye lenses are only approximated and lose accuracy near the edge. Real cameras also need an off-centre lens and non-square pixels. | medium | ready |
 

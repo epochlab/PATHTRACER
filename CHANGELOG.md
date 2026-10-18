@@ -3,6 +3,31 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Bounded media and random-walk subsurface
+
+Closed objects now have interiors. A bulk material with `subsurface_weight` or `transmission_scatter` fills its object with a homogeneous
+medium that light wanders through until it leaves: wax, skin, milk, jade. Both inputs were refused before; they now load as constants or
+textures. `assets/materials/sss.json` is a bulk subsurface (mean free path 5 / 2.5 / 1.25 cm), and `scenes/cornell_sss.json` puts it on
+the Cornell box's left sphere beside the clay one. Scenes without these materials render bit-identically, except for one-ulp glass rounding.
+- **Medium (OpenPBR 1.1.1):** subsurface `mu_t = 1 / (subsurface_radius * subsurface_radius_scale)`. Its single-scattering albedo is van
+  de Hulst's semi-infinite relation inverted, solved from his two coefficients. Transmission is `mu_t = -ln(T) / depth`, `mu_s = S / depth`.
+  Mixed weights blend by share of the dielectric, as Adobe's reference does; at a zero radius a channel takes the specification's
+  glossy-diffuse limit.
+- **Walk:** chromatic free flight by spectral MIS (Wilkie et al. 2014; Chiang et al. 2016). A channel is drawn in proportion to
+  throughput times albedo, with closed-form weights and no null collisions. The whole walk is one bounce: collisions and internal
+  reflections consume no `maxBounces`, Russian roulette runs at every walk event, and light is gathered where the walk leaves.
+- **Nesting:** a medium stack tracks what each path is inside, so objects can sit in other objects. Every index (base, coat, thin film) is
+  a ratio to the enclosing medium's (Schmidt and Budge 2002). Shadow rays from inside a medium are attenuated by it.
+- **AOVs:** `directSubsurface` and `indirectSubsurface` (37 AOVs) isolate light that took a walk; Beauty still sums every bucket.
+- **Measured** (256x128, 16 passes, 3 paired rounds; noise floor 2%): cornell, stump and cloud within noise; macbeth 4% (0.2 ms/pass).
+  At 64 passes the walk's exit lighting is visibly noisier than the thin sheet's; Denoised resolves it. See `results/subsurface/`.
+- **Tests:**
+  - `integrator_validate`: a white furnace closed sphere renders 1; a half-space matches Chandrasekhar's exact albedo
+    `1 - sqrt(1 - alpha) H(mu)`; nested absorbers multiply exactly; an object in a medium of its own index vanishes; the bucket partition.
+  - `volume_validate`: free flight is unbiased per channel; the limits are exact.
+  - `bsdf_validate`: the interface identities, the zero-radius limit, and the ambient index as a ratio.
+  - `openpbr_reference_validate`: the interior medium against Adobe's volumes, including the depth-0 tint blend.
+
 ## Compound-eye optics
 
 A camera can now model an insect's compound eye. Each pixel becomes a facet that sees a soft cone of directions, whose half-maximum
