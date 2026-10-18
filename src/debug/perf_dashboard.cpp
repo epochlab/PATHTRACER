@@ -290,8 +290,8 @@ void PerfDashboard::drawStageRows(const DashboardFrame& frame) {
     appendStageCell("histogram", mean(sums_.histogramMs), cpu);
     append("  --------------------------------\n");
     appendStageCell("over-range", mean(sums_.overRangeMs), cpu);
-    append("  tiles     %5llu / %-5llu %-6s\n", static_cast<unsigned long long>(pass.tilesCompleted),
-           static_cast<unsigned long long>(pass.tilesCompleted + pass.tilesCancelled), pass.cancelled ? "CANCEL" : "");
+    append("  chunks    %5llu / %-5llu %-6s\n", static_cast<unsigned long long>(pass.chunksCompleted),
+           static_cast<unsigned long long>(pass.chunksCompleted + pass.chunksCancelled), pass.cancelled ? "CANCEL" : "");
     appendStageCell("pixel probe", mean(sums_.probeMs), cpu);
     append("  samples   %5d / %s\n", frame.accumulatedSamples, frame.maxSamples > 0 ? "capped" : "unbounded");
     appendStageCell("hud build", hudBuildMs, cpu);

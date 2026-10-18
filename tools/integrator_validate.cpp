@@ -309,7 +309,8 @@ pathtracer::scene::PathTraceResult renderPass(const TestScene& scene, const Envi
     const pathtracer::scene::LightSet lights(&env, /*envRotationDegrees=*/glm::vec3(0.0F), /*envExposure=*/1.0F, noLights);
     pathtracer::debug::PassStats stats;  // required by renderPathTraced; this tool checks radiance, not throughput
     pathtracer::scene::renderPathTraced(camera, accel, scene.shadingTriangles, scene.instances,
-                                     instanceLightIndex, lights, pathtracer::scene::VolumeSet{}, width, height, showSky,
+                                     instanceLightIndex, lights, pathtracer::scene::VolumeSet{}, width, height,
+                                     pathtracer::scene::allTexels(width, height), showSky,
                                      settings, scrambleSeed, /*sampleBase=*/0,
                                      /*sampleCount=*/settings.samplesPerPixel, generation,
                                      /*requestedGeneration=*/1U, pool, stats, result);
@@ -1662,7 +1663,8 @@ pathtracer::scene::PathTraceResult renderPassWithLights(const TestScene& scene,
     const pathtracer::scene::LightSet lights(env, /*envRotationDegrees=*/glm::vec3(0.0F), /*envExposure=*/1.0F, quads);
     pathtracer::debug::PassStats stats;  // required by renderPathTraced; this tool checks radiance, not throughput
     pathtracer::scene::renderPathTraced(camera, accel, scene.shadingTriangles, scene.instances,
-                                     instanceLightIndex, lights, pathtracer::scene::VolumeSet{}, width, height, showSky,
+                                     instanceLightIndex, lights, pathtracer::scene::VolumeSet{}, width, height,
+                                     pathtracer::scene::allTexels(width, height), showSky,
                                      settings, scrambleSeed, /*sampleBase=*/0,
                                      /*sampleCount=*/settings.samplesPerPixel, generation,
                                      /*requestedGeneration=*/1U, pool, stats, result);
@@ -3242,7 +3244,8 @@ PT_CHECK(omnidirectional_film_filter_reaches_across_the_seam, Fast, Exact) {
         const pathtracer::scene::LightSet lights(&env, /*envRotationDegrees=*/glm::vec3(0.0F), /*envExposure=*/1.0F, noLights);
         pathtracer::debug::PassStats stats;
         pathtracer::scene::renderPathTraced(camera, *accel, {}, {}, {}, lights, pathtracer::scene::VolumeSet{}, kWidth, kHeight,
-                                            /*showSky=*/true, settings, 7U, /*sampleBase=*/0, settings.samplesPerPixel, generation,
+                                            pathtracer::scene::allTexels(kWidth, kHeight), /*showSky=*/true, settings, 7U,
+                                            /*sampleBase=*/0, settings.samplesPerPixel, generation,
                                             /*requestedGeneration=*/1U, pool, stats, result);
         // The column across the seam, within the filter's 1.5 px of the band, and the next one in, beyond it.
         const int seamSide = litColumn == 0 ? kWidth - 1 : 0;

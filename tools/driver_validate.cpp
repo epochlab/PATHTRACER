@@ -229,7 +229,8 @@ OracleMean oracleBatchMean(DriverFixture& fixture, const Camera& camera, int pas
         stats.reset();
         pathtracer::scene::renderPathTraced(camera, *fixture.accel, fixture.scene.shadingTriangles,
                                          fixture.scene.instances, fixture.scene.instanceLightIndex, lights, pathtracer::scene::VolumeSet{},
-                                         kImageSize, kImageSize, /*showSky=*/false, settings, scrambleSeed, /*sampleBase=*/p,
+                                         kImageSize, kImageSize, pathtracer::scene::allTexels(kImageSize, kImageSize),
+                                         /*showSky=*/false, settings, scrambleSeed, /*sampleBase=*/p,
                                          /*sampleCount=*/passes, generation, scrambleSeed, fixture.pool, stats,
                                          pass);
         const double k = p + 1;
@@ -470,6 +471,26 @@ PT_CHECK(max_samples_cap_is_respected, Slow, Exact) {
     char detail[128];
     std::snprintf(detail, sizeof(detail), "published %d samples against a cap of %d", samples, kCap);
     PT_EXPECT(ctx, samples == kCap, detail);
+}
+
+// Every texel is traced every pass without a stopping rule, so each published count is the pass count, carried across pool buffers.
+PT_CHECK(texel_samples_count_every_pass, Slow, Exact) {
+    constexpr int kPasses = 6;
+    ctx.plan(1);
+    std::unique_ptr<DriverFixture> fixture = makeFixture();
+    if (!fixture->valid()) {
+        PT_EXPECT(ctx, false, "scene/driver construction failed");
+        return;
+    }
+    const std::uint64_t generation = fixture->driver->requestTrace(makeRequest(kPasses, makeCamera()));
+    const std::shared_ptr<const PathTraceResult> published = waitForPublished(*fixture->driver, generation, kPasses);
+    const std::size_t off =
+        published == nullptr ? 0 : static_cast<std::size_t>(std::count_if(published->texelSamples.begin(), published->texelSamples.end(),
+                                                                           [](int count) { return count != kPasses; }));
+    char detail[128];
+    std::snprintf(detail, sizeof(detail), "%zu texels count other than %d passes, or nothing was published", off, kPasses);
+    PT_EXPECT(ctx, published != nullptr && published->texelSamples.size() == static_cast<std::size_t>(kImageSize * kImageSize) && off == 0,
+              detail);
 }
 
 // The returned generation is the one its passes carry, so records are attributable; a request replaced before pickup never runs.
@@ -717,59 +738,96 @@ PT_CHECK(over_range_stats_match_serial_scan, Slow, Exact) {
     PT_EXPECT(ctx, stats.rawPeak == serialPeak, peakDetail);
 }
 
-// The tiling is a work split, so it must cover the target exactly and never hand the pool fewer tiles than it can use.
-PT_CHECK(tile_size_covers_the_target_and_fills_the_pool, Fast, Exact) {
-    using pathtracer::scene::kPathTraceTileSize;
-    using pathtracer::scene::kTilesPerThread;
-    using pathtracer::scene::pathTraceTileSize;
-    constexpr std::array<int, 9> kExtents{0, 1, 8, 32, 96, 115, 205, 1152, 2048};
+// The chunking is a work split, so it must stay within its unit ceiling and never hand the pool fewer chunks than it can use.
+PT_CHECK(chunk_length_bounds_the_unit_and_fills_the_pool, Fast, Exact) {
+    using pathtracer::scene::kChunksPerThread;
+    using pathtracer::scene::kPathTraceChunkTexels;
+    using pathtracer::scene::pathTraceChunkTexels;
+    constexpr std::array<int, 9> kTexels{0, 1, 8, 32, 96, 115, 9216, 1152 * 205, 2048 * 1024};
     constexpr std::array<unsigned int, 5> kThreads{1, 2, 8, 64, 4096};
-    ctx.plan(static_cast<int>(kExtents.size() * kExtents.size() * kThreads.size() * 3));
-    for (const int width : kExtents) {
-        for (const int height : kExtents) {
-            for (const unsigned int threads : kThreads) {
-                const int size = pathTraceTileSize(width, height, threads);
-                char detail[192];
-                std::snprintf(detail, sizeof(detail), "%dx%d on %u threads gave tile %d, outside [1, %d]", width, height, threads,
-                              size, kPathTraceTileSize);
-                PT_EXPECT(ctx, size >= 1 && size <= kPathTraceTileSize, detail);
+    ctx.plan(static_cast<int>(kTexels.size() * kThreads.size() * 2));
+    for (const int texels : kTexels) {
+        for (const unsigned int threads : kThreads) {
+            const int chunk = pathTraceChunkTexels(texels, threads);
+            char detail[192];
+            std::snprintf(detail, sizeof(detail), "%d texels on %u threads gave chunk %d, outside [1, %d]", texels, threads, chunk,
+                          kPathTraceChunkTexels);
+            PT_EXPECT(ctx, chunk >= 1 && chunk <= kPathTraceChunkTexels, detail);
 
-                // Ceiling division must reach every pixel: a grid short of the target would silently drop a strip.
-                const int tilesX = (width + size - 1) / size;
-                const int tilesY = (height + size - 1) / size;
-                std::snprintf(detail, sizeof(detail), "%dx%d tile %d leaves %dx%d uncovered", width, height, size,
-                              width - (tilesX * size), height - (tilesY * size));
-                PT_EXPECT(ctx, tilesX * size >= width && tilesY * size >= height, detail);
-
-                // Largest such tile: shrinking is only justified where the next size up could not fill the pool.
-                const bool wantedMet = static_cast<long long>(tilesX) * tilesY >=
-                                        static_cast<long long>(threads) * kTilesPerThread;
-                const bool atFloor = size == 1;
-                const bool atCeiling = size == kPathTraceTileSize;
-                std::snprintf(detail, sizeof(detail), "%dx%d on %u threads shrank to %d without needing to", width,
-                              height, threads, size);
-                PT_EXPECT(ctx, atCeiling || atFloor || wantedMet, detail);
-            }
+            // Fewer chunks than the pool wants is justified only by the unit ceiling, or by a list shorter than the pool.
+            const long long chunks = (static_cast<long long>(texels) + chunk - 1) / chunk;
+            const long long wanted = static_cast<long long>(threads) * kChunksPerThread;
+            std::snprintf(detail, sizeof(detail), "%d texels on %u threads split into %lld chunks of %d, short of %lld", texels, threads,
+                          chunks, chunk, wanted);
+            PT_EXPECT(ctx, chunks >= wanted || chunk == kPathTraceChunkTexels || texels < wanted, detail);
         }
     }
 }
 
-// The load-bearing property of a resolution-derived tile size: it partitions the work, it must not change the result.
-PT_CHECK(render_is_invariant_to_tile_size, Slow, Exact) {
+// Untraced texels are left as they were and traced ones match the full render: a subset pass is the full pass, restricted.
+PT_CHECK(render_of_a_texel_subset_is_the_full_render_restricted, Slow, Exact) {
     ctx.plan(2);
     std::unique_ptr<DriverFixture> fixture = makeFixture();
     if (!fixture->valid()) {
         PT_EXPECT(ctx, false, "scene construction failed");
         return;
     }
-    // Chosen so the two thread counts resolve to different tiles on any host: the counts are explicit, not hardware_concurrency.
-    constexpr int kTiledImageSize = 96;
+    const Camera camera = makeCamera();
+    const pathtracer::scene::LightSet lights(&fixture->environment, glm::vec3(0.0F), 1.0F, fixture->scene.lights);
+    const std::atomic<std::uint64_t> generation{1};
+    pathtracer::debug::PassStats stats;
+    const auto renderOf = [&](std::span<const std::uint32_t> texels) {
+        PathTraceResult out = pathtracer::scene::makePathTraceResult(kImageSize, kImageSize, makeSettings().replicates);
+        // A sentinel no sample produces, so an untouched texel is told from a traced one.
+        std::fill(out.beauty.texels.begin(), out.beauty.texels.end(), -1.0F);
+        stats.reset();
+        pathtracer::scene::renderPathTraced(camera, *fixture->accel, fixture->scene.shadingTriangles, fixture->scene.instances,
+                                            fixture->scene.instanceLightIndex, lights, pathtracer::scene::VolumeSet{}, kImageSize, kImageSize,
+                                            texels, /*showSky=*/true, makeSettings(), /*scrambleSeed=*/1U, /*sampleBase=*/0,
+                                            /*sampleCount=*/1, generation, 1U, fixture->pool, stats, out);
+        return out.beauty;
+    };
+    const std::vector<std::uint32_t> all = pathtracer::scene::allTexels(kImageSize, kImageSize);
+    // Every third texel: runs of one with gaps, the shape an adaptive list takes, crossing rows.
+    std::vector<std::uint32_t> subset;
+    for (std::size_t i = 0; i < all.size(); i += 3) {
+        subset.push_back(all[i]);
+    }
+    const pathtracer::gfx::HdrImage full = renderOf(all);
+    const pathtracer::gfx::HdrImage partial = renderOf(subset);
+    std::size_t tracedDiffering = 0;
+    std::size_t untracedWritten = 0;
+    for (std::size_t texel = 0; texel < all.size(); ++texel) {
+        const bool traced = texel % 3 == 0;
+        for (int c = 0; c < partial.channels; ++c) {
+            const std::size_t i = (texel * static_cast<std::size_t>(partial.channels)) + static_cast<std::size_t>(c);
+            tracedDiffering += traced && partial.texels[i] != full.texels[i] ? 1 : 0;
+            untracedWritten += !traced && partial.texels[i] != -1.0F ? 1 : 0;
+        }
+    }
+    char detail[160];
+    std::snprintf(detail, sizeof(detail), "%zu floats of traced texels differ from the full render", tracedDiffering);
+    PT_EXPECT(ctx, tracedDiffering == 0, detail);
+    std::snprintf(detail, sizeof(detail), "%zu floats of untraced texels were written", untracedWritten);
+    PT_EXPECT(ctx, untracedWritten == 0, detail);
+}
+
+// The load-bearing property of a list-derived chunk length: it partitions the work, it must not change the result.
+PT_CHECK(render_is_invariant_to_chunk_length, Slow, Exact) {
+    ctx.plan(2);
+    std::unique_ptr<DriverFixture> fixture = makeFixture();
+    if (!fixture->valid()) {
+        PT_EXPECT(ctx, false, "scene construction failed");
+        return;
+    }
+    // Chosen so the two thread counts resolve to different chunks on any host: the counts are explicit, not hardware_concurrency.
+    constexpr int kChunkedImageSize = 96;
     constexpr unsigned int kFewThreads = 1;
     constexpr unsigned int kManyThreads = 8;
-    const int coarse = pathtracer::scene::pathTraceTileSize(kTiledImageSize, kTiledImageSize, kFewThreads);
-    const int fine = pathtracer::scene::pathTraceTileSize(kTiledImageSize, kTiledImageSize, kManyThreads);
+    const int coarse = pathtracer::scene::pathTraceChunkTexels(kChunkedImageSize * kChunkedImageSize, kFewThreads);
+    const int fine = pathtracer::scene::pathTraceChunkTexels(kChunkedImageSize * kChunkedImageSize, kManyThreads);
     char sizes[160];
-    std::snprintf(sizes, sizeof(sizes), "both thread counts resolved to tile %d, so this check would prove nothing", coarse);
+    std::snprintf(sizes, sizeof(sizes), "both thread counts resolved to chunk %d, so this check would prove nothing", coarse);
     PT_EXPECT(ctx, coarse != fine, sizes);
 
     const Camera camera = makeCamera();
@@ -778,12 +836,12 @@ PT_CHECK(render_is_invariant_to_tile_size, Slow, Exact) {
     pathtracer::debug::PassStats stats;
     const auto renderWith = [&](unsigned int threads) {
         pathtracer::scene::ThreadPool pool(threads);
-        PathTraceResult out = pathtracer::scene::makePathTraceResult(kTiledImageSize, kTiledImageSize, makeSettings().replicates);
+        PathTraceResult out = pathtracer::scene::makePathTraceResult(kChunkedImageSize, kChunkedImageSize, makeSettings().replicates);
         stats.reset();
         pathtracer::scene::renderPathTraced(camera, *fixture->accel, fixture->scene.shadingTriangles,
                                          fixture->scene.instances, fixture->scene.instanceLightIndex, lights, pathtracer::scene::VolumeSet{},
-                                         kTiledImageSize, kTiledImageSize, /*showSky=*/true, makeSettings(), /*scrambleSeed=*/1U,
-                                         /*sampleBase=*/0,
+                                         kChunkedImageSize, kChunkedImageSize, pathtracer::scene::allTexels(kChunkedImageSize, kChunkedImageSize),
+                                         /*showSky=*/true, makeSettings(), /*scrambleSeed=*/1U, /*sampleBase=*/0,
                                          /*sampleCount=*/1, generation, 1U, pool, stats, out);
         return out.beauty.texels;
     };
@@ -794,12 +852,12 @@ PT_CHECK(render_is_invariant_to_tile_size, Slow, Exact) {
         differing += coarseImage[i] != fineImage[i] ? 1 : 0;
     }
     char detail[192];
-    std::snprintf(detail, sizeof(detail), "%zu of %zu floats differ between a %d px and a %d px tile grid", differing,
+    std::snprintf(detail, sizeof(detail), "%zu of %zu floats differ between %d- and %d-texel chunks", differing,
                   coarseImage.size(), coarse, fine);
     PT_EXPECT(ctx, differing == 0, detail);
 }
 
-// Thread-count invariance on renderPathTraced (the pool is private): bit-identical, as tiles are owned outright and sample order is fixed.
+// Thread-count invariance on renderPathTraced (the pool is private): bit-identical, as chunks are owned outright and sample order is fixed.
 PT_CHECK(render_is_invariant_to_thread_count, Slow, Exact) {
     ctx.plan(1);
     std::unique_ptr<DriverFixture> fixture = makeFixture();
@@ -818,7 +876,8 @@ PT_CHECK(render_is_invariant_to_thread_count, Slow, Exact) {
         stats.reset();
         pathtracer::scene::renderPathTraced(camera, *fixture->accel, fixture->scene.shadingTriangles,
                                          fixture->scene.instances, fixture->scene.instanceLightIndex, lights, pathtracer::scene::VolumeSet{},
-                                         kImageSize, kImageSize, /*showSky=*/true, makeSettings(), /*scrambleSeed=*/1U, /*sampleBase=*/0,
+                                         kImageSize, kImageSize, pathtracer::scene::allTexels(kImageSize, kImageSize),
+                                         /*showSky=*/true, makeSettings(), /*scrambleSeed=*/1U, /*sampleBase=*/0,
                                          /*sampleCount=*/1, generation, 1U, pool, stats, out);
         return out.beauty.texels;
     };
@@ -881,7 +940,8 @@ PT_CHECK(replicate_means_match_batch_means, Slow, Exact) {
         stats.reset();
         pathtracer::scene::renderPathTraced(camera, *fixture->accel, fixture->scene.shadingTriangles,
                                          fixture->scene.instances, fixture->scene.instanceLightIndex, lights, pathtracer::scene::VolumeSet{},
-                                         kImageSize, kImageSize, /*showSky=*/false, makeSettings(), scrambleSeed, /*sampleBase=*/p,
+                                         kImageSize, kImageSize, pathtracer::scene::allTexels(kImageSize, kImageSize),
+                                         /*showSky=*/false, makeSettings(), scrambleSeed, /*sampleBase=*/p,
                                          /*sampleCount=*/kPasses, oracleGeneration, scrambleSeed, fixture->pool,
                                          stats, pass);
         const auto slot = static_cast<std::size_t>(p % replicates);

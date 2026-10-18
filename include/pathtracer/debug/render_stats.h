@@ -7,7 +7,7 @@
 
 namespace pathtracer::debug {
 
-// Ray counts per path/tile/pass, never atomic. tracePath takes `RayCounts& __restrict`: +4.6% by value, +0.3% by plain reference (noise).
+// Ray counts per path/chunk/pass, never atomic. tracePath takes `RayCounts& __restrict`: +4.6% by value, +0.3% by plain reference (noise).
 struct RayCounts {
     std::uint64_t primary = 0;  // one per sample: the camera ray at bounce 0
     std::uint64_t bounce = 0;   // BSDF-sampled continuation rays, bounce >= 1
@@ -24,7 +24,7 @@ struct RayCounts {
     [[nodiscard]] std::uint64_t total() const { return primary + bounce + ao + shadow; }
 };
 
-// Concurrent ray/tile accumulator for one renderPathTraced() call. Workers merge once per tile: a fetch_add per ray is ~15M contended RMWs.
+// Concurrent ray/chunk accumulator for one renderPathTraced() call. Workers merge once per chunk: a fetch_add per ray is ~15M RMWs.
 class PassStats {
 public:
     // Driver thread only, before dispatch.
@@ -33,21 +33,21 @@ public:
         bounce_.store(0, std::memory_order_relaxed);
         ao_.store(0, std::memory_order_relaxed);
         shadow_.store(0, std::memory_order_relaxed);
-        tilesCompleted_.store(0, std::memory_order_relaxed);
-        tilesCancelled_.store(0, std::memory_order_relaxed);
+        chunksCompleted_.store(0, std::memory_order_relaxed);
+        chunksCancelled_.store(0, std::memory_order_relaxed);
     }
 
-    // Worker threads, once per completed tile.
-    void addTile(const RayCounts& counts) {
+    // Worker threads, once per completed chunk.
+    void addChunk(const RayCounts& counts) {
         primary_.fetch_add(counts.primary, std::memory_order_relaxed);
         bounce_.fetch_add(counts.bounce, std::memory_order_relaxed);
         ao_.fetch_add(counts.ao, std::memory_order_relaxed);
         shadow_.fetch_add(counts.shadow, std::memory_order_relaxed);
-        tilesCompleted_.fetch_add(1, std::memory_order_relaxed);
+        chunksCompleted_.fetch_add(1, std::memory_order_relaxed);
     }
 
     // Worker threads, on the stale-generation early-out: no rays, but still counted, or a cancelled pass reads as a short one.
-    void addCancelledTile() { tilesCancelled_.fetch_add(1, std::memory_order_relaxed); }
+    void addCancelledChunk() { chunksCancelled_.fetch_add(1, std::memory_order_relaxed); }
 
     // Valid only once parallelFor has returned -- see the ordering argument above.
     [[nodiscard]] RayCounts rays() const {
@@ -55,16 +55,16 @@ public:
                 ao_.load(std::memory_order_relaxed), shadow_.load(std::memory_order_relaxed)};
     }
 
-    [[nodiscard]] std::uint64_t tilesCompleted() const { return tilesCompleted_.load(std::memory_order_relaxed); }
-    [[nodiscard]] std::uint64_t tilesCancelled() const { return tilesCancelled_.load(std::memory_order_relaxed); }
+    [[nodiscard]] std::uint64_t chunksCompleted() const { return chunksCompleted_.load(std::memory_order_relaxed); }
+    [[nodiscard]] std::uint64_t chunksCancelled() const { return chunksCancelled_.load(std::memory_order_relaxed); }
 
 private:
     std::atomic<std::uint64_t> primary_{0};
     std::atomic<std::uint64_t> bounce_{0};
     std::atomic<std::uint64_t> ao_{0};
     std::atomic<std::uint64_t> shadow_{0};
-    std::atomic<std::uint64_t> tilesCompleted_{0};
-    std::atomic<std::uint64_t> tilesCancelled_{0};
+    std::atomic<std::uint64_t> chunksCompleted_{0};
+    std::atomic<std::uint64_t> chunksCancelled_{0};
 };
 
 // Immutable snapshot of one finished or cancelled pass, copied wholesale under statsMutex_ exactly as result_ is under resultMutex_.
@@ -79,8 +79,8 @@ struct PassRecord {
     double publishMs = 0.0;     // resultMutex_ hold
     double passMs = 0.0;        // the whole iteration, including buffer acquisition
     RayCounts rays;
-    std::uint64_t tilesCompleted = 0;
-    std::uint64_t tilesCancelled = 0;
+    std::uint64_t chunksCompleted = 0;
+    std::uint64_t chunksCancelled = 0;
     bool cancelled = false;  // superseded mid-flight and discarded; its rays were still traced and paid for
 };
 

@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <limits>
 #include <numbers>
+#include <numeric>
 #include <optional>
 #include <vector>
 
@@ -157,17 +158,16 @@ float acceptanceSolidAngle(float kappa) {
     return 2.0F * std::numbers::pi_v<float> * -std::expm1(-2.0F * kappa) / kappa;
 }
 
-// Largest tile at or below kPathTraceTileSize still giving the pool kTilesPerThread each: at interactive scale 96 leaves most workers idle.
-int pathTraceTileSize(int width, int height, unsigned int threadCount) {
-    const auto tileCount = [width, height](int size) {
-        return ((width + size - 1) / size) * ((height + size - 1) / size);
-    };
-    const int wanted = static_cast<int>(threadCount) * kTilesPerThread;
-    int size = kPathTraceTileSize;
-    while (size > 1 && tileCount(size) < wanted) {
-        size /= 2;
-    }
-    return size;
+// floor(texels / wanted) keeps the chunk count at or above wanted; the ceiling caps unit size, the floor of 1 handles tiny lists.
+int pathTraceChunkTexels(int texels, unsigned int threadCount) {
+    const int wanted = static_cast<int>(threadCount) * kChunksPerThread;
+    return std::clamp(texels / wanted, 1, kPathTraceChunkTexels);
+}
+
+std::vector<std::uint32_t> allTexels(int width, int height) {
+    std::vector<std::uint32_t> texels(static_cast<std::size_t>(width) * static_cast<std::size_t>(height));
+    std::iota(texels.begin(), texels.end(), 0U);
+    return texels;
 }
 
 namespace {
@@ -908,6 +908,7 @@ PathTraceResult makePathTraceResult(int width, int height, int replicates) {
                                          static_cast<std::size_t>(replicates),
                                      0.0F);
     result.replicates = replicates;
+    result.texelSamples.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height), 0);
     return result;
 }
 
@@ -915,7 +916,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                        const std::vector<ShadingTriangle>& shadingTriangles,
                        const std::vector<MeshInstance>& instances,
                        const std::vector<int>& instanceLightIndex, const LightSet& lights, const VolumeSet& volumes,
-                       int width, int height, bool showSky, const PathTraceSettings& settings,
+                       int width, int height, std::span<const std::uint32_t> texels, bool showSky, const PathTraceSettings& settings,
                        std::uint32_t scrambleSeed, int sampleBase, int sampleCount,
                        const std::atomic<std::uint64_t>& generation,
                        std::uint64_t requestedGeneration, ThreadPool& threadPool,
@@ -948,10 +949,10 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
     const std::uint32_t seed = replicateSeed(scrambleSeed, pass % settings.replicates);
     const int replicateBase = (pass / settings.replicates) * settings.samplesPerPixel;
     const int replicateCount = sampleCount > 0 ? (sampleCount + settings.replicates - 1) / settings.replicates : sampleCount;
-    // Derived from the target, not fixed: the interactive scale renders a fraction of the frame, where a 96 px grid is only a few tiles.
-    const int tileSize = pathTraceTileSize(width, height, threadPool.threadCount());
-    const int tilesX = (width + tileSize - 1) / tileSize;
-    const int tilesY = (height + tileSize - 1) / tileSize;
+    // Chunks of the list, not of the frame: as texels converge the work left stays split evenly over the pool, wherever it lies.
+    const auto texelCount = static_cast<int>(texels.size());
+    const int chunkTexels = pathTraceChunkTexels(texelCount, threadPool.threadCount());
+    const int chunks = (texelCount + chunkTexels - 1) / chunkTexels;
     const std::vector<std::uint8_t> mayPassThrough = passThroughInstances(instances);
     const PassThroughScene scene{accel, shadingTriangles, instances, mayPassThrough,
                                  std::any_of(mayPassThrough.begin(), mayPassThrough.end(), [](std::uint8_t may) { return may != 0; }),
@@ -963,133 +964,130 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                (!isConstant(material.transmissionWeight, 0.0F) || !isConstant(material.subsurfaceWeight, 0.0F));
     }));
 
-    // One worker owns one tile: filter importance sampling keeps each sample in its own pixel's estimate, so tiles share no work.
-    const auto renderTile = [&](int tileIndex) {
-        const int tileX0 = (tileIndex % tilesX) * tileSize;
-        const int tileY0 = (tileIndex / tilesX) * tileSize;
-        const int tileX1 = std::min(tileX0 + tileSize, width);
-        const int tileY1 = std::min(tileY0 + tileSize, height);
+    // One worker owns one chunk: filter importance sampling keeps each sample in its own pixel's estimate, so chunks share no work.
+    const auto renderChunk = [&](int chunkIndex) {
+        const auto chunkBegin = static_cast<std::size_t>(chunkIndex) * static_cast<std::size_t>(chunkTexels);
+        const std::size_t chunkEnd = std::min(chunkBegin + static_cast<std::size_t>(chunkTexels), texels.size());
 
-        // Stack-local, not thread_local: zeroed by construction, so the reset boundary is the tile boundary with no bookkeeping.
-        pathtracer::debug::RayCounts tileRays;
-        // Reserved once per tile: a path's pushes never exceed it, so no path allocates.
+        // Stack-local, not thread_local: zeroed by construction, so the reset boundary is the chunk boundary with no bookkeeping.
+        pathtracer::debug::RayCounts chunkRays;
+        // Reserved once per chunk: a path's pushes never exceed it, so no path allocates.
         std::vector<MediumEntry> mediumStack;
         mediumStack.reserve(interiors);
 
         const auto samples = static_cast<float>(settings.samplesPerPixel);
-        for (int y = tileY0; y < tileY1; ++y) {
-            for (int x = tileX0; x < tileX1; ++x) {
-                const glm::vec2 centre = pathtracer::gfx::pixelCentre(lattice, x, y);
-                // The facet's optical axis, once per pixel; nullopt past a fisheye's image circle, where the facet sees nothing.
-                const glm::vec2 centreNdc = ndcOf(centre);
-                const std::optional<Camera::RayDifferential> axis =
-                    kappa > 0.0F ? camera.primaryRayDifferential(basis, centreNdc.x, centreNdc.y) : std::nullopt;
-                std::array<float, kSampleLanes> sum{};
-                for (int s = 0; s < settings.samplesPerPixel; ++s) {
-                    // replicateBase + s is this sample's position in its replicate's sequence: it must advance across passes to stratify.
-                    const int sampleIndex = replicateBase + s;
-                    Sampler sampler(x, y, sampleIndex, replicateCount, seed, lattice);
-                    // Dimension set 0 places the sample: on film through the filter, or on the sphere through the facet's lobe.
-                    const glm::vec2 placement = sampler.next2D();
-                    std::optional<Camera::RayDifferential> primary;
-                    glm::mat2x3 dirFootprint(0.0F);
-                    if (kappa > 0.0F) {
-                        if (axis) {
-                            const AcceptanceSample facet = sampleAcceptance(axis->ray.dir, kappa, placement);
-                            primary = axis;
-                            primary->ray.dir = facet.dir;
-                            // Each sample's share of the lobe, 1 / (N pdf) sr (Suykens & Willems 2001), at most the whole sphere.
-                            const float spread = std::sqrt(std::min(4.0F * std::numbers::pi_v<float>, 1.0F / (estimateSamples * facet.pdf)));
-                            const glm::mat3 tangents = glm::transpose(toFrameAbout(facet.dir));
-                            dirFootprint = glm::mat2x3(tangents[0] * spread, tangents[1] * spread);
-                        }
-                    } else {
-                        // Reaches past the frame: rectilinear extrapolates, fisheye is rayless past its circle, lat-long wraps seam, pole.
-                        const glm::vec2 ndc = ndcOf(centre + sampleFilmOffset(lattice, placement));
-                        primary = camera.primaryRayDifferential(basis, ndc.x, ndc.y);
-                        dirFootprint = primary ? primary->dirPerNdc * ndcPerStratum : glm::mat2x3(0.0F);
+        for (std::size_t i = chunkBegin; i < chunkEnd; ++i) {
+            const int x = static_cast<int>(texels[i] % static_cast<std::uint32_t>(width));
+            const int y = static_cast<int>(texels[i] / static_cast<std::uint32_t>(width));
+            const glm::vec2 centre = pathtracer::gfx::pixelCentre(lattice, x, y);
+            // The facet's optical axis, once per pixel; nullopt past a fisheye's image circle, where the facet sees nothing.
+            const glm::vec2 centreNdc = ndcOf(centre);
+            const std::optional<Camera::RayDifferential> axis =
+                kappa > 0.0F ? camera.primaryRayDifferential(basis, centreNdc.x, centreNdc.y) : std::nullopt;
+            std::array<float, kSampleLanes> sum{};
+            for (int s = 0; s < settings.samplesPerPixel; ++s) {
+                // replicateBase + s is this sample's position in its replicate's sequence: it must advance across passes to stratify.
+                const int sampleIndex = replicateBase + s;
+                Sampler sampler(x, y, sampleIndex, replicateCount, seed, lattice);
+                // Dimension set 0 places the sample: on film through the filter, or on the sphere through the facet's lobe.
+                const glm::vec2 placement = sampler.next2D();
+                std::optional<Camera::RayDifferential> primary;
+                glm::mat2x3 dirFootprint(0.0F);
+                if (kappa > 0.0F) {
+                    if (axis) {
+                        const AcceptanceSample facet = sampleAcceptance(axis->ray.dir, kappa, placement);
+                        primary = axis;
+                        primary->ray.dir = facet.dir;
+                        // Each sample's share of the lobe, 1 / (N pdf) sr (Suykens & Willems 2001), at most the whole sphere.
+                        const float spread = std::sqrt(std::min(4.0F * std::numbers::pi_v<float>, 1.0F / (estimateSamples * facet.pdf)));
+                        const glm::mat3 tangents = glm::transpose(toFrameAbout(facet.dir));
+                        dirFootprint = glm::mat2x3(tangents[0] * spread, tangents[1] * spread);
                     }
-                    // AO and Fresnel draw from their own stream: taking dimensions from `sampler` would shift every later dimension.
-                    Sampler aoSampler(x, y, sampleIndex, replicateCount, seed ^ kAoSeedOffset, lattice);
-                    const glm::vec2 aoSample = aoSampler.next2D();
-                    Sampler fresnelSampler(x, y, sampleIndex, replicateCount, seed ^ kFresnelSeedOffset, lattice);
-                    const glm::vec2 fresnelSample = fresnelSampler.next2D();
-                    Sampler volumeSampler(x, y, sampleIndex, replicateCount, seed ^ kVolumeSeedOffset, lattice);
-                    Sampler walkSampler(x, y, sampleIndex, replicateCount, seed ^ kWalkSeedOffset, lattice);
-                    // The pixel's footprint on the unit sphere, read only by the feature chain where a ray exists; a facet's is its lobe's.
-                    const auto pixelSolidAngle = [&] {
-                        if (kappa > 0.0F) {
-                            return lobeSolidAngle;
-                        }
-                        const glm::mat2x3 dirPerPixel = primary->dirPerNdc * ndcPerPixel;
-                        return glm::length(glm::cross(dirPerPixel[0], dirPerPixel[1]));
-                    };
-                    // Nullopt is a fisheye sample outside the image circle: no ray exists, so every lane reads zero for it.
-                    const TraceResult trace =
-                        primary ? tracePath(primary->ray, dirFootprint,
-                                            settings.denoiseFeatures ? pixelSolidAngle() : 0.0F, scene, instanceLightIndex, lights,
-                                            showSky, settings, sampler, volumeSampler, walkSampler, aoSample, fresnelSample, mediumStack,
-                                            tileRays)
-                                : TraceResult{};
-                    const std::array<float, kSampleLanes> values{
-                        trace.radiance.x,          trace.radiance.y,
-                        trace.radiance.z,          static_cast<float>(trace.terminationBounce),
-                        trace.shadowLost,          trace.directDiffuse.x,
-                        trace.directDiffuse.y,     trace.directDiffuse.z,
-                        trace.indirectDiffuse.x,   trace.indirectDiffuse.y,
-                        trace.indirectDiffuse.z,   trace.directSpecular.x,
-                        trace.directSpecular.y,    trace.directSpecular.z,
-                        trace.indirectSpecular.x,  trace.indirectSpecular.y,
-                        trace.indirectSpecular.z,  trace.refraction.x,
-                        trace.refraction.y,        trace.refraction.z,
-                        trace.ao,                  trace.fresnel.x,
-                        trace.fresnel.y,           trace.fresnel.z,
-                        trace.alpha,               trace.denoiseAlbedo.x,
-                        trace.denoiseAlbedo.y,     trace.denoiseAlbedo.z,
-                        trace.denoiseNormal.x,     trace.denoiseNormal.y,
-                        trace.denoiseNormal.z,     trace.directVolume.x,
-                        trace.directVolume.y,      trace.directVolume.z,
-                        trace.indirectVolume.x,    trace.indirectVolume.y,
-                        trace.indirectVolume.z,    trace.directSubsurface.x,
-                        trace.directSubsurface.y,  trace.directSubsurface.z,
-                        trace.indirectSubsurface.x, trace.indirectSubsurface.y,
-                        trace.indirectSubsurface.z, trace.shadowUnoccluded};
-                    for (int lane = 0; lane < kSampleLanes; ++lane) {
-                        sum[lane] += values[lane];
-                    }
+                } else {
+                    // Reaches past the frame: rectilinear extrapolates, fisheye is rayless past its circle, lat-long wraps seam, pole.
+                    const glm::vec2 ndc = ndcOf(centre + sampleFilmOffset(lattice, placement));
+                    primary = camera.primaryRayDifferential(basis, ndc.x, ndc.y);
+                    dirFootprint = primary ? primary->dirPerNdc * ndcPerStratum : glm::mat2x3(0.0F);
                 }
-                // Unit weights make the estimate the plain mean; divided, not scaled by fl(1/n), so all-0 or all-1 samples read exactly.
-                writeTexel(out.beauty, x, y, glm::vec3(sum[0], sum[1], sum[2]) / samples);
-                writeTexel(out.bounceHeatmap, x, y, sum[3] / samples);
-                writeTexel(out.shadowLost, x, y, sum[4] / samples);
-                writeTexel(out.directDiffuse, x, y, glm::vec3(sum[5], sum[6], sum[7]) / samples);
-                writeTexel(out.indirectDiffuse, x, y, glm::vec3(sum[8], sum[9], sum[10]) / samples);
-                writeTexel(out.directSpecular, x, y, glm::vec3(sum[11], sum[12], sum[13]) / samples);
-                writeTexel(out.indirectSpecular, x, y, glm::vec3(sum[14], sum[15], sum[16]) / samples);
-                writeTexel(out.refraction, x, y, glm::vec3(sum[17], sum[18], sum[19]) / samples);
-                writeTexel(out.ao, x, y, sum[20] / samples);
-                writeTexel(out.fresnel, x, y, glm::vec3(sum[21], sum[22], sum[23]) / samples);
-                writeTexel(out.alpha, x, y, sum[24] / samples);
-                writeTexel(out.denoiseAlbedo, x, y, glm::vec3(sum[25], sum[26], sum[27]) / samples);
-                writeTexel(out.denoiseNormal, x, y, glm::vec3(sum[28], sum[29], sum[30]) / samples);
-                writeTexel(out.directVolume, x, y, glm::vec3(sum[31], sum[32], sum[33]) / samples);
-                writeTexel(out.indirectVolume, x, y, glm::vec3(sum[34], sum[35], sum[36]) / samples);
-                writeTexel(out.directSubsurface, x, y, glm::vec3(sum[37], sum[38], sum[39]) / samples);
-                writeTexel(out.indirectSubsurface, x, y, glm::vec3(sum[40], sum[41], sum[42]) / samples);
-                writeTexel(out.shadowUnoccluded, x, y, sum[43] / samples);
+                // AO and Fresnel draw from their own stream: taking dimensions from `sampler` would shift every later dimension.
+                Sampler aoSampler(x, y, sampleIndex, replicateCount, seed ^ kAoSeedOffset, lattice);
+                const glm::vec2 aoSample = aoSampler.next2D();
+                Sampler fresnelSampler(x, y, sampleIndex, replicateCount, seed ^ kFresnelSeedOffset, lattice);
+                const glm::vec2 fresnelSample = fresnelSampler.next2D();
+                Sampler volumeSampler(x, y, sampleIndex, replicateCount, seed ^ kVolumeSeedOffset, lattice);
+                Sampler walkSampler(x, y, sampleIndex, replicateCount, seed ^ kWalkSeedOffset, lattice);
+                // The pixel's footprint on the unit sphere, read only by the feature chain where a ray exists; a facet's is its lobe's.
+                const auto pixelSolidAngle = [&] {
+                    if (kappa > 0.0F) {
+                        return lobeSolidAngle;
+                    }
+                    const glm::mat2x3 dirPerPixel = primary->dirPerNdc * ndcPerPixel;
+                    return glm::length(glm::cross(dirPerPixel[0], dirPerPixel[1]));
+                };
+                // Nullopt is a fisheye sample outside the image circle: no ray exists, so every lane reads zero for it.
+                const TraceResult trace =
+                    primary ? tracePath(primary->ray, dirFootprint,
+                                        settings.denoiseFeatures ? pixelSolidAngle() : 0.0F, scene, instanceLightIndex, lights,
+                                        showSky, settings, sampler, volumeSampler, walkSampler, aoSample, fresnelSample, mediumStack,
+                                        chunkRays)
+                            : TraceResult{};
+                const std::array<float, kSampleLanes> values{
+                    trace.radiance.x,          trace.radiance.y,
+                    trace.radiance.z,          static_cast<float>(trace.terminationBounce),
+                    trace.shadowLost,          trace.directDiffuse.x,
+                    trace.directDiffuse.y,     trace.directDiffuse.z,
+                    trace.indirectDiffuse.x,   trace.indirectDiffuse.y,
+                    trace.indirectDiffuse.z,   trace.directSpecular.x,
+                    trace.directSpecular.y,    trace.directSpecular.z,
+                    trace.indirectSpecular.x,  trace.indirectSpecular.y,
+                    trace.indirectSpecular.z,  trace.refraction.x,
+                    trace.refraction.y,        trace.refraction.z,
+                    trace.ao,                  trace.fresnel.x,
+                    trace.fresnel.y,           trace.fresnel.z,
+                    trace.alpha,               trace.denoiseAlbedo.x,
+                    trace.denoiseAlbedo.y,     trace.denoiseAlbedo.z,
+                    trace.denoiseNormal.x,     trace.denoiseNormal.y,
+                    trace.denoiseNormal.z,     trace.directVolume.x,
+                    trace.directVolume.y,      trace.directVolume.z,
+                    trace.indirectVolume.x,    trace.indirectVolume.y,
+                    trace.indirectVolume.z,    trace.directSubsurface.x,
+                    trace.directSubsurface.y,  trace.directSubsurface.z,
+                    trace.indirectSubsurface.x, trace.indirectSubsurface.y,
+                    trace.indirectSubsurface.z, trace.shadowUnoccluded};
+                for (int lane = 0; lane < kSampleLanes; ++lane) {
+                    sum[lane] += values[lane];
+                }
             }
+            // Unit weights make the estimate the plain mean; divided, not scaled by fl(1/n), so all-0 or all-1 samples read exactly.
+            writeTexel(out.beauty, x, y, glm::vec3(sum[0], sum[1], sum[2]) / samples);
+            writeTexel(out.bounceHeatmap, x, y, sum[3] / samples);
+            writeTexel(out.shadowLost, x, y, sum[4] / samples);
+            writeTexel(out.directDiffuse, x, y, glm::vec3(sum[5], sum[6], sum[7]) / samples);
+            writeTexel(out.indirectDiffuse, x, y, glm::vec3(sum[8], sum[9], sum[10]) / samples);
+            writeTexel(out.directSpecular, x, y, glm::vec3(sum[11], sum[12], sum[13]) / samples);
+            writeTexel(out.indirectSpecular, x, y, glm::vec3(sum[14], sum[15], sum[16]) / samples);
+            writeTexel(out.refraction, x, y, glm::vec3(sum[17], sum[18], sum[19]) / samples);
+            writeTexel(out.ao, x, y, sum[20] / samples);
+            writeTexel(out.fresnel, x, y, glm::vec3(sum[21], sum[22], sum[23]) / samples);
+            writeTexel(out.alpha, x, y, sum[24] / samples);
+            writeTexel(out.denoiseAlbedo, x, y, glm::vec3(sum[25], sum[26], sum[27]) / samples);
+            writeTexel(out.denoiseNormal, x, y, glm::vec3(sum[28], sum[29], sum[30]) / samples);
+            writeTexel(out.directVolume, x, y, glm::vec3(sum[31], sum[32], sum[33]) / samples);
+            writeTexel(out.indirectVolume, x, y, glm::vec3(sum[34], sum[35], sum[36]) / samples);
+            writeTexel(out.directSubsurface, x, y, glm::vec3(sum[37], sum[38], sum[39]) / samples);
+            writeTexel(out.indirectSubsurface, x, y, glm::vec3(sum[40], sum[41], sum[42]) / samples);
+            writeTexel(out.shadowUnoccluded, x, y, sum[43] / samples);
         }
 
-        stats.addTile(tileRays);
+        stats.addChunk(chunkRays);
     };
 
-    threadPool.parallelFor(tilesX * tilesY, [&renderTile, &generation, requestedGeneration,
-                                              &stats](int tileIndex) {
+    threadPool.parallelFor(chunks, [&renderChunk, &generation, requestedGeneration, &stats](int chunkIndex) {
         if (generation.load(std::memory_order_relaxed) != requestedGeneration) {
-            stats.addCancelledTile();  // counted, not ignored: a cancelled pass must not read as a short one
+            stats.addCancelledChunk();  // counted, not ignored: a cancelled pass must not read as a short one
             return;  // stale -- caller discards this pass's result entirely
         }
-        renderTile(tileIndex);
+        renderChunk(chunkIndex);
     });
 }
 

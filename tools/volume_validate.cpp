@@ -569,7 +569,7 @@ PathTraceResult render(const Surfaces& surfaces, const VolumeSet& volumes, const
     pathtracer::debug::PassStats stats;
     PathTraceResult result = pathtracer::scene::makePathTraceResult(kImage, kImage, settings.replicates);
     pathtracer::scene::renderPathTraced(camera, *accel, surfaces.shading, surfaces.instances, instanceLightIndex, lights, volumes, kImage,
-                                        kImage, showSky, settings, seed, 0, settings.samplesPerPixel, generation, 1U,
+                                        kImage, pathtracer::scene::allTexels(kImage, kImage), showSky, settings, seed, 0, settings.samplesPerPixel, generation, 1U,
                                         sharedPool(ctx.threads()), stats, result);
     return result;
 }
