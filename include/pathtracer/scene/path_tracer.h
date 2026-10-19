@@ -43,6 +43,13 @@ struct AcceptanceSample {
 // The lobe's equivalent solid angle, 1 / its peak density 2 pi (1 - e^-2k) / k: pi rho^2 / (4 ln2) at small rho (Snyder 1977).
 [[nodiscard]] float acceptanceSolidAngle(float kappa);
 
+// A cone's spread past a drawn direction: spread^2 plus its share of the density, 1 / (N pdf) sr (Suykens & Willems 2001), in 4 pi.
+[[nodiscard]] float lobeSpread(float spread, float share);
+
+// Spread leaving along wi a cone met width wide along d: Igehy's transfer about n (facing -d, curvature h, eta), then share (0: delta).
+[[nodiscard]] float scatteredSpread(float spread, float width, const glm::vec3& d, const glm::vec3& wi, const glm::vec3& n, float h,
+                                    float eta, float share);
+
 // Chunk length renderPathTraced splits `texels` into for `threadCount` workers: kPathTraceChunkTexels unless that leaves the pool idle.
 [[nodiscard]] int pathTraceChunkTexels(int texels, unsigned int threadCount);
 

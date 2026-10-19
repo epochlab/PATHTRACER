@@ -158,6 +158,28 @@ float acceptanceSolidAngle(float kappa) {
     return 2.0F * std::numbers::pi_v<float> * -std::expm1(-2.0F * kappa) / kappa;
 }
 
+float lobeSpread(float spread, float share) {
+    // Variances add under the lobe's convolution (Belcour et al. 2013); no density, an infinite share, spans the sphere.
+    return std::sqrt(std::min(4.0F * std::numbers::pi_v<float>, (spread * spread) + share));
+}
+
+float scatteredSpread(float spread, float width, const glm::vec3& d, const glm::vec3& wi, const glm::vec3& n, float h, float eta,
+                      float share) {
+    const float cosI = -glm::dot(d, n);
+    const float wiDotN = glm::dot(wi, n);
+    const float cosO = std::abs(wiDotN);
+    const float sphere = std::sqrt(4.0F * std::numbers::pi_v<float>);
+    // Grazing in or out, etendue and the curvature term diverge: the limit is the whole sphere.
+    if (!(cosI * cosO > 0.0F)) {
+        return sphere;
+    }
+    // Igehy 1999: wi = eta d + mu n, so a normal turned by h width turns wi by mu h width; mu = 2 cos on reflection.
+    const float mu = (eta * cosI) + wiDotN;
+    // Etendue n^2 cos dOmega is invariant; in- and out-of-plane terms differ by cosI/cosO, the isotropic cone takes their geometric mean.
+    const float transferred = (eta * std::sqrt(cosI / cosO) * spread) + (mu * h * width / std::sqrt(cosI * cosO));
+    return share > 0.0F ? lobeSpread(transferred, share) : std::clamp(transferred, -sphere, sphere);
+}
+
 // floor(texels / wanted) keeps the chunk count at or above wanted; the ceiling caps unit size, the floor of 1 handles tiny lists.
 int pathTraceChunkTexels(int texels, unsigned int threadCount) {
     const int wanted = static_cast<int>(threadCount) * kChunksPerThread;
@@ -171,6 +193,18 @@ std::vector<std::uint32_t> allTexels(int width, int height) {
 }
 
 namespace {
+
+// Two offsets of length |spread| across unit dir, a direction footprint whose solid angle is spread^2.
+glm::mat2x3 spreadAcross(const glm::vec3& dir, float spread) {
+    const glm::mat3 across = glm::transpose(toFrameAbout(dir));
+    return {across[0] * std::abs(spread), across[1] * std::abs(spread)};
+}
+
+// The index ratio etaI/etaT a crossing bends by, from wo's side: the base dielectric's, 1 through a thin wall.
+float bendRatio(const NormalMappedBsdf& bsdf) {
+    const BsdfClosure& base = !bsdf.perturbed || bsdf.lambdaP > 0.0F ? bsdf.facet : bsdf.viaWall;
+    return base.thinWalled ? 1.0F : base.dielectric.etaI / base.dielectric.etaT;
+}
 
 struct TraceResult {
     glm::vec3 radiance;
@@ -343,9 +377,9 @@ float obscuranceAlong(Ray ray, const PassThroughScene& scene, float maxDistance)
     return ao + transmittance;
 }
 
-// dirFootprint: the primary ray's direction offsets across its sample's stratum, filtering bounce 0's lookups; deeper ones point-sample.
-TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, float pixelSolidAngle, const PassThroughScene& scene,
-                       const std::vector<int>& instanceLightIndex, const LightSet& lights,
+// dirFootprint: the primary ray's direction offsets across its stratum, filtering bounce 0; a ray cone carries it on over N = 1/invSamples.
+TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, float invSamples, float pixelSolidAngle,
+                       const PassThroughScene& scene, const std::vector<int>& instanceLightIndex, const LightSet& lights,
                        bool showSky, const PathTraceSettings& settings,
                        Sampler& sampler, Sampler& volumeSampler, Sampler& walkSampler, glm::vec2 aoSample, glm::vec2 fresnelSample,
                        std::vector<MediumEntry>& mediumStack, pathtracer::debug::RayCounts& __restrict rays) {
@@ -354,6 +388,9 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
     glm::vec3 throughput(1.0F);
     Ray ray = primaryRay;
     int bounce = 0;
+    // The ray cone (Amanatides 1984): width at ray.origin, spread^2 one sample's solid angle; a pinhole's starts at width 0.
+    float coneWidth = 0.0F;
+    float coneSpread = std::sqrt(glm::length(glm::cross(dirFootprint[0], dirFootprint[1])));
     // Where the ray's current segment began: a ray continued past an absent surface or through a window keeps its origin.
     float segmentStart = 0.0F;
     // Past an absent surface or through a window's undeviated share: the same ray strictly past the hit, with no change to MIS state.
@@ -558,6 +595,8 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
             if (!survivesRoulette(false)) {
                 break;
             }
+            coneWidth += coneSpread * flight->t;
+            coneSpread = lobeSpread(coneSpread, invSamples / lastBsdfPdf);
             ray = Ray{position, wi, 0.0F, std::numeric_limits<float>::max()};
             segmentStart = 0.0F;
             continue;
@@ -571,12 +610,15 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
             }
             const glm::vec3 position = ray.origin + (*walkCollision * ray.dir);
             // The phase sample weighs f/pdf = 1; with no NEE beside it, its miss or emitter hit takes full weight.
-            const glm::vec3 wi = sampleHenyeyGreenstein(glm::normalize(ray.dir), medium->anisotropy, sampler.next2D());
+            const glm::vec3 dir = glm::normalize(ray.dir);
+            const glm::vec3 wi = sampleHenyeyGreenstein(dir, medium->anisotropy, sampler.next2D());
             lastSampleWasDelta = true;
             lastShadingPosition = position;
             if (!survivesRoulette(true)) {
                 break;
             }
+            coneWidth += coneSpread * *walkCollision;
+            coneSpread = lobeSpread(coneSpread, invSamples / henyeyGreenstein(glm::dot(dir, wi), medium->anisotropy));
             ray = Ray{position, wi, 0.0F, std::numeric_limits<float>::max()};
             segmentStart = 0.0F;
             // The walk is one bounce, counted at its entry: its collisions consume none of maxBounces.
@@ -589,8 +631,11 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
             if (bounce == 0 && !showSky) {
                 break;
             }
+            // Filtered only at full MIS weight: NEE reads the sky at a point, and the strategies MIS blends must estimate one integrand.
             const glm::vec3 envRadiance =
-                bounce == 0 ? lights.environmentRadiance(ray.dir, dirFootprint) : lights.environmentRadiance(ray.dir);
+                bounce == 0          ? lights.environmentRadiance(ray.dir, dirFootprint)
+                : lastSampleWasDelta ? lights.environmentRadiance(ray.dir, spreadAcross(glm::normalize(ray.dir), coneSpread))
+                                     : lights.environmentRadiance(ray.dir);
             // Power heuristic (Veach 1997): full weight after the camera or a delta sample, neither having a density to balance.
             float misWeight = 1.0F;
             if (!lastSampleWasDelta) {
@@ -632,9 +677,10 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
         const ShadingTriangle& triangle = scene.shadingTriangles[static_cast<std::size_t>(hit->triangleIndex)];
         const auto instance = static_cast<std::size_t>(triangle.instanceIndex);
         const Material& material = scene.instances[instance].material;
-        // Secondary vertices lack propagated differentials (Igehy's BSDF transfer), so they read level 0 as a zero footprint does.
+        // Bounce 0 keeps the stratum's anisotropic differentials; later vertices read the cone, |width| across the ray at the hit.
+        const float hitWidth = coneWidth + (coneSpread * hit->t);
         const pathtracer::gfx::TextureFootprint footprint =
-            bounce == 0 ? primaryHitFootprint(triangle, ray, hit->t, dirFootprint) : pathtracer::gfx::TextureFootprint{};
+            bounce == 0 ? primaryHitFootprint(triangle, ray, hit->t, dirFootprint) : coneHitFootprint(triangle, ray, hitWidth);
         const ShadingVertex shading = interpolateShading(triangle, hit->u, hit->v);
 
         // OpenPBR's presence, mix(ambient, surface, alpha) (spec eq. 23): absent, the same ray continues, no bounce and no vertex.
@@ -876,6 +922,14 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
             continue;
         }
 
+        // The cone through the shading normal facing the ray, curvature signed on the ray's side: convex spreads it, concave focuses it.
+        const glm::vec3 incident = glm::normalize(ray.dir);
+        const glm::vec3 facing = glm::dot(incident, frame[2]) < 0.0F ? frame[2] : -frame[2];
+        const float curvature = glm::dot(incident, shading.normal) < 0.0F ? meanCurvature(triangle) : -meanCurvature(triangle);
+        coneSpread = scatteredSpread(coneSpread, hitWidth, incident, wiWorld, facing, curvature, crosses ? bendRatio(closure) : 1.0F,
+                                     sample->delta ? 0.0F : invSamples / sample->pdf);
+        coneWidth = hitWidth;
+
         // On wi's side for every lobe: an unmirrored terminator lift desynced the medium stack on 0.93% of cornell's glass entries.
         const glm::vec3 origin = spawnOrigin(triangle, hit->u, hit->v, geoNormal, glm::dot(wiWorld, geoNormal) > 0.0F);
         ray = Ray{origin, wiWorld, 0.0F, std::numeric_limits<float>::max()};
@@ -999,9 +1053,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                         primary = axis;
                         primary->ray.dir = facet.dir;
                         // Each sample's share of the lobe, 1 / (N pdf) sr (Suykens & Willems 2001), at most the whole sphere.
-                        const float spread = std::sqrt(std::min(4.0F * std::numbers::pi_v<float>, 1.0F / (estimateSamples * facet.pdf)));
-                        const glm::mat3 tangents = glm::transpose(toFrameAbout(facet.dir));
-                        dirFootprint = glm::mat2x3(tangents[0] * spread, tangents[1] * spread);
+                        dirFootprint = spreadAcross(facet.dir, lobeSpread(0.0F, 1.0F / (estimateSamples * facet.pdf)));
                     }
                 } else {
                     // Reaches past the frame: rectilinear extrapolates, fisheye is rayless past its circle, lat-long wraps seam, pole.
@@ -1026,7 +1078,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                 };
                 // Nullopt is a fisheye sample outside the image circle: no ray exists, so every lane reads zero for it.
                 const TraceResult trace =
-                    primary ? tracePath(primary->ray, dirFootprint,
+                    primary ? tracePath(primary->ray, dirFootprint, 1.0F / estimateSamples,
                                         settings.denoiseFeatures ? pixelSolidAngle() : 0.0F, scene, instanceLightIndex, lights,
                                         showSky, settings, sampler, volumeSampler, walkSampler, aoSample, fresnelSample, mediumStack,
                                         chunkRays)
