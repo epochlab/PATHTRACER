@@ -407,6 +407,23 @@ PT_CHECK(sample_count_display_matches_the_turbo_colormap, Fast, Exact) {
               "Sample Count pre-mapped with no pass to scale by");
 }
 
+// Visibility's ramp is log10 V over [1/S, S]: invisible at the floor, threshold at the centre, Barten's ceiling S at the top.
+PT_CHECK(contrast_sensitivity_display_is_a_log_turbo_ramp_about_threshold, Fast, Exact) {
+    const auto ceiling = static_cast<float>(pathtracer::debug::bartenSensitivityBound());
+    const std::vector<float> visibility{0.0F, 1.0F / ceiling, 1.0F, ceiling};
+    const std::vector<float> positions{0.0F, 0.0F, 0.5F, 1.0F};
+    ctx.plan(static_cast<int>(visibility.size()));
+    const pathtracer::debug::AovDisplay display = pathtracer::debug::aovDisplay(AovId::ContrastSensitivity, frame(1, visibility), {});
+    for (std::size_t i = 0; i < visibility.size(); ++i) {
+        const glm::vec3 expected = pathtracer::debug::turbo(positions[i]);
+        const glm::vec3 got{displayLane(display, i * 3), displayLane(display, (i * 3) + 1), displayLane(display, (i * 3) + 2)};
+        // log10 of a float ceiling and its reciprocal lands within a few ulp of the ramp's ends, where turbo is continuous.
+        PT_EXPECT(ctx, glm::all(glm::lessThanEqual(glm::abs(got - expected), glm::vec3(16.0F * 0x1p-23F))),
+                  "visibility " + std::to_string(visibility[i]) + " displayed (" + std::to_string(got.r) + ", " + std::to_string(got.g) +
+                      ", " + std::to_string(got.b) + "), not turbo(" + std::to_string(positions[i]) + ")");
+    }
+}
+
 // Raw metres quantize to white and farClip is a ray bound rather than a depth span, so Depth's gain comes from the depth present.
 PT_CHECK(depth_display_ranges_to_its_own_maximum, Fast, Exact) {
     // Powers of two, so 1/max is exact and the product with the maximum must be exactly 1 rather than within a rounding.
@@ -462,11 +479,12 @@ PT_CHECK(the_exposure_reaches_only_radiance_lanes, Fast, Exact) {
 }
 
 // A nonlinear pre-map costs a full frame copy, so it must apply only where the affine map genuinely cannot express the display.
-PT_CHECK(display_premap_applies_to_exactly_three_aovs, Fast, Exact) {
+PT_CHECK(display_premap_applies_to_exactly_four_aovs, Fast, Exact) {
     ctx.plan(kAovCount);
     for (int i = 0; i < kAovCount; ++i) {
         const auto aov = static_cast<AovId>(i);
-        const bool premapped = aov == AovId::SNR || aov == AovId::BounceCount || aov == AovId::SampleCount;
+        const bool premapped =
+            aov == AovId::SNR || aov == AovId::BounceCount || aov == AovId::SampleCount || aov == AovId::ContrastSensitivity;
         PT_EXPECT(ctx, pathtracer::debug::aovDisplay(aov, aovFrame(aov), {1024, 8, kAovFrameMax}).mapped.texels.empty() != premapped,
                       std::string(pathtracer::debug::kAovNames[i]) +
                           (premapped ? " lost its pre-map" : " gained a pre-map it does not need"));
@@ -840,6 +858,9 @@ PT_CHECK(aov_filter_dispatch_is_total, Fast, Exact) {
         counts[texel] = 1 + static_cast<int>(texel % kWidth);
     }
     input.texelSamples = counts.data();
+    // Contrast Sensitivity's angular pitch: a 35 mm lens on a full-frame back.
+    const pathtracer::scene::Camera camera{glm::vec3(0.0F), glm::vec3(0.0F), {36.0F, 24.0F}, 35.0F, 0.01F, 100.0F, 2.8F, 0.008F, 400.0F};
+    input.camera = &camera;
 
     std::vector<HdrImage> outputs;
     outputs.reserve(filters.size());

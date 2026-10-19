@@ -1,5 +1,6 @@
 #include "pathtracer/debug/aov.h"
 
+#include "pathtracer/debug/aov_filters.h"
 #include "pathtracer/debug/aov_routing.h"
 #include "pathtracer/debug/colormap.h"
 
@@ -38,6 +39,7 @@ AovSource aovSource(AovId aov) {
         case AovId::Gabor:
         case AovId::DoG:
         case AovId::ColourOpponent:
+        case AovId::ContrastSensitivity:
         case AovId::SNR:
         case AovId::SampleCount:
         case AovId::Shadow:
@@ -83,6 +85,7 @@ int aovChannels(AovId aov) {
         case AovId::Sobel:
         case AovId::Gabor:
         case AovId::DoG:
+        case AovId::ContrastSensitivity:
             return 1;
 
         // Two-component lanes: UV and image-plane motion have no third axis; Colour Opponent spans the two cardinal chromatic axes only.
@@ -141,6 +144,7 @@ bool aovCarriesRadiance(AovId aov) {
         // Ratios, reflectances, counts, lengths, directions and frequencies: scaling any of them by an exposure means nothing.
         case AovId::HSV:
         case AovId::ColourOpponent:
+        case AovId::ContrastSensitivity:
         case AovId::MotionVector:
         case AovId::Wireframe:
         case AovId::Alpha:
@@ -197,6 +201,7 @@ bool aovIsColour(AovId aov) {
         case AovId::DoG:
         case AovId::HSV:
         case AovId::ColourOpponent:
+        case AovId::ContrastSensitivity:
         case AovId::MotionVector:
         case AovId::Wireframe:
         case AovId::Alpha:
@@ -230,6 +235,7 @@ bool aovIsBipolar(AovId aov) {
             return true;
 
         // Signed but not bipolar: a normal spans a sphere; motion's two signed lanes share one unit, so it takes its own display.
+        case AovId::ContrastSensitivity:
         case AovId::MotionVector:
         case AovId::Beauty:
         case AovId::Wireframe:
@@ -350,6 +356,21 @@ void mapCountForDisplay(const pathtracer::gfx::HdrImage& counts, float ceiling, 
     }
 }
 
+// Visibility on a log10 turbo ramp over [1/S, S], S Barten's ceiling: threshold at the centre, a full-contrast grating at the top.
+void mapVisibilityForDisplay(const pathtracer::gfx::HdrImage& visibility, pathtracer::gfx::HdrImage& out) {
+    const double inverseSpan = 1.0 / (2.0 * std::log10(bartenSensitivityBound()));
+    out = pathtracer::gfx::makeImage(visibility.width, visibility.height, pathtracer::gfx::kRgbChannels);
+    for (std::size_t pixel = 0; pixel < visibility.texels.size(); ++pixel) {
+        // Nothing visible, V = 0, has no logarithm and takes the ramp's floor, as any V below 1/S does.
+        const float value = visibility.texels[pixel];
+        const glm::vec3 mapped = turbo(value > 0.0F ? static_cast<float>(0.5 + (std::log10(static_cast<double>(value)) * inverseSpan)) : 0.0F);
+        float* texel = out.texels.data() + (pixel * pathtracer::gfx::kRgbChannels);
+        texel[0] = mapped.r;
+        texel[1] = mapped.g;
+        texel[2] = mapped.b;
+    }
+}
+
 }  // namespace
 
 AovDisplay aovDisplay(AovId aov, const pathtracer::gfx::HdrImage& image, const AovDisplayContext& context) {
@@ -377,6 +398,9 @@ AovDisplay aovDisplay(AovId aov, const pathtracer::gfx::HdrImage& image, const A
             if (context.samples >= 1) {
                 mapCountForDisplay(image, static_cast<float>(context.samples), display.mapped);
             }
+            return display;
+        case AovId::ContrastSensitivity:
+            mapVisibilityForDisplay(image, display.mapped);
             return display;
         // dx and dy share the pixel, so one pooled range keeps the direction; the swizzle's zero third lane stays black.
         case AovId::MotionVector: {
@@ -489,6 +513,7 @@ bool aovSupportsLattice(AovId aov, pathtracer::gfx::PixelLattice lattice) {
         case AovId::UV:
         case AovId::MotionVector:
         case AovId::ColourOpponent:
+        case AovId::ContrastSensitivity:
         case AovId::Normal:
         case AovId::GeomNormal:
         case AovId::Albedo:

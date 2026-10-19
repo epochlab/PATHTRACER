@@ -557,7 +557,8 @@ void HeadlessRenderer::evaluateFilters(const Request& request) {
                                                      denoises ? &accumulatedImage(pathtracer::debug::kDenoiseFeatureLanes[1]) : nullptr,
                                                      denoiser_.get(),
                                                      shadows ? &accumulatedImage(pathtracer::debug::kShadowLanes[0]) : nullptr,
-                                                     shadows ? &accumulatedImage(pathtracer::debug::kShadowLanes[1]) : nullptr};
+                                                     shadows ? &accumulatedImage(pathtracer::debug::kShadowLanes[1]) : nullptr,
+                                                     &request.camera};
     for (const AovId aov : request.aovs) {
         if (pathtracer::debug::aovSource(aov) != AovSource::BeautyFilter ||
             std::find(filteredAovs_.begin(), filteredAovs_.end(), aov) != filteredAovs_.end()) {

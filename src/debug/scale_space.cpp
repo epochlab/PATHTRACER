@@ -234,6 +234,27 @@ float innerScaleVariance(PixelLattice lattice) {
     return static_cast<float>(-0.5 * std::log(kFloat32Roundoff));
 }
 
+double rowAxisSymbol(double omega, PixelLattice lattice) {
+    if (lattice == PixelLattice::Hexagonal) {
+        // Three T(.;2t/3) passes; a row-axis wave has phase omega on the 0 degree axis and +/- omega/2 on the 60 and 120 degree ones.
+        return (2.0 / 3.0) * ((1.0 - std::cos(omega)) + (2.0 * (1.0 - std::cos(0.5 * omega))));
+    }
+    return 1.0 - std::cos(omega);
+}
+
+double rowAxisBoundary(PixelLattice lattice) {
+    return lattice == PixelLattice::Hexagonal ? 4.0 * std::numbers::pi / 3.0 : std::numbers::pi;
+}
+
+double rowAxisFrequency(double a, PixelLattice lattice) {
+    if (lattice == PixelLattice::Hexagonal) {
+        // With c = cos(omega/2) the symbol is (4/3)(2 - c - c^2), a quadratic whose root in [-1/2, 1] spans the axis to K.
+        const double c = 0.5 * (std::sqrt(9.0 - (3.0 * a)) - 1.0);
+        return 2.0 * std::acos(c);
+    }
+    return std::acos(1.0 - a);
+}
+
 glm::ivec2 diffusionReach(float t, PixelLattice lattice) {
     if (lattice == PixelLattice::Hexagonal) {
         return hexagonalReach(static_cast<int>(discreteGaussianKernel(static_cast<float>((2.0 * static_cast<double>(t)) / 3.0)).size()) - 1);

@@ -983,6 +983,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
     const Camera::ViewBasis basis = camera.viewBasis(aspect);
     out.wrapsHorizontally = wrapsHorizontally(basis.lens.projection);
     out.pixelLattice = lattice;
+    out.camera = camera;
     const float pixelSide = pathtracer::gfx::pixelSide(lattice);
     // Samples in a pixel's estimate; unbounded N as Sampler's.
     const auto estimateSamples = static_cast<float>(std::max(sampleCount, sampleBase + settings.samplesPerPixel));

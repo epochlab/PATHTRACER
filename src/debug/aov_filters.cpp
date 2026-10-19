@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstddef>
 #include <numbers>
+#include <optional>
 #include <stdexcept>
 #include <vector>
 
@@ -79,6 +80,18 @@ void hexagonalSobel(const std::vector<float>& plane, HdrImage& out, bool wrapsHo
         }
     });
 }
+
+// Barten 1999 standard observer as ITU-R BT.2246 and Cowan et al. 2004 tabulate it, in the model's degrees, seconds and trolands.
+constexpr double kBartenSignalToNoise = 3.0;  // k, the detection signal-to-noise ratio
+constexpr double kBartenIntegrationSeconds = 0.1;  // T, the eye's integration time
+constexpr double kBartenQuantumEfficiency = 0.03;  // eta
+constexpr double kBartenPhotonsPerTroland = 1.2274e6;  // p, photons / (s deg^2 Td)
+constexpr double kBartenNeuralNoise = 3e-8;  // Phi0, neural noise spectral density, s deg^2
+constexpr double kBartenInhibitionCyclesPerDegree = 7.0;  // u0, lateral inhibition's spatial frequency
+constexpr double kBartenSigma0Degrees = 0.5 / 60.0;  // optical line spread with no pupil aberration, 0.5 arcmin
+constexpr double kBartenAberrationDegreesPerMm = 0.08 / 60.0;  // Cab, line-spread growth per mm of pupil, 0.08 arcmin/mm
+constexpr double kBartenMaxFieldDegrees = 12.0;  // Xmax, the largest angle the eye integrates over
+constexpr double kBartenMaxCycles = 15.0;  // Nmax, the most cycles the eye integrates over
 
 // The filter's output image, zeroed at the channel count aovChannels declares for it.
 [[nodiscard]] HdrImage makeAovImage(AovId aov, int width, int height) {
@@ -327,6 +340,179 @@ HdrImage colourOpponentAov(const HdrImage& beauty, ThreadPool& threadPool) {
     return out;
 }
 
+double bartenPupilDiameter(double luminance, double fieldDegrees) {
+    // Barten 1999: the field's luminous size L X0^2 against his 40-degree reference field sets the light-adapted pupil.
+    return 5.0 - (3.0 * std::tanh(0.4 * std::log10((luminance * fieldDegrees * fieldDegrees) / (40.0 * 40.0))));
+}
+
+BartenObserver bartenObserver(double luminance, double fieldDegrees) {
+    const double pupil = bartenPupilDiameter(luminance, fieldDegrees);
+    const double spread = kBartenAberrationDegreesPerMm * pupil;
+    // Stiles-Crawford: off-axis rays through a wide pupil are less effective, 1 - (d/9.7)^2 + (d/12.4)^4 (Barten 1999).
+    const double stilesCrawford = 1.0 - std::pow(pupil / 9.7, 2.0) + std::pow(pupil / 12.4, 4.0);
+    return {(kBartenSigma0Degrees * kBartenSigma0Degrees) + (spread * spread),
+            (std::numbers::pi * pupil * pupil / 4.0) * stilesCrawford,
+            (1.0 / (fieldDegrees * fieldDegrees)) + (1.0 / (kBartenMaxFieldDegrees * kBartenMaxFieldDegrees))};
+}
+
+double bartenSensitivity(const BartenObserver& observer, double cyclesPerDegree, double luminance) {
+    const double u = cyclesPerDegree;
+    const double opticalMtf = std::exp(-2.0 * std::numbers::pi * std::numbers::pi * observer.sigmaSquared * u * u);
+    const double integrationArea = observer.fieldTerm + ((u * u) / (kBartenMaxCycles * kBartenMaxCycles));
+    // M_lat^2 = 1 - exp(-(u/u0)^2), by expm1 so a low frequency keeps its digits.
+    const double inhibition = -std::expm1(-(u * u) / (kBartenInhibitionCyclesPerDegree * kBartenInhibitionCyclesPerDegree));
+    const double photons = kBartenQuantumEfficiency * kBartenPhotonsPerTroland * observer.trolandsPerLuminance * luminance;
+    // Barten's 1/(eta p E) + Phi0/M_lat^2 noise sum multiplied through by eta p E M_lat^2, so E = 0 gives 0 with no division by zero.
+    return (opticalMtf / kBartenSignalToNoise) *
+           std::sqrt((photons * inhibition) /
+                     ((2.0 / kBartenIntegrationSeconds) * integrationArea * (inhibition + (photons * kBartenNeuralNoise))));
+}
+
+double bartenSensitivityBound() {
+    return std::sqrt((kBartenIntegrationSeconds * kBartenMaxFieldDegrees * kBartenMaxFieldDegrees) / (2.0 * kBartenNeuralNoise)) /
+           kBartenSignalToNoise;
+}
+
+std::vector<float> texelAngularPitch(const pathtracer::scene::Camera& camera, int width, int height, ThreadPool& threadPool) {
+    const PixelLattice lattice = camera.pixelLattice();
+    const glm::vec2 frame = pathtracer::gfx::frameExtent(lattice, width, height);
+    const pathtracer::scene::Camera::ViewBasis basis = camera.viewBasis(frame.x / frame.y);
+    // d(ndc) per column pitch along each film axis: two NDC units span the film, and +Y flips because row 0 is the top.
+    const glm::mat2 ndcPerPitch(2.0F / frame.x, 0.0F, 0.0F, -2.0F / frame.y);
+    std::vector<float> pitch(static_cast<std::size_t>(width) * static_cast<std::size_t>(height));
+    threadPool.parallelFor(height, [&](int y) {
+        for (int x = 0; x < width; ++x) {
+            const glm::vec2 centre = pathtracer::gfx::pixelCentre(lattice, x, y);
+            const glm::vec2 ndc(((centre.x / frame.x) * 2.0F) - 1.0F, 1.0F - ((centre.y / frame.y) * 2.0F));
+            const std::optional<pathtracer::scene::Camera::RayDifferential> ray = camera.primaryRayDifferential(basis, ndc.x, ndc.y);
+            const glm::mat2x3 dirPerPitch = ray ? ray->dirPerNdc * ndcPerPitch : glm::mat2x3(0.0F);
+            pitch[(static_cast<std::size_t>(y) * static_cast<std::size_t>(width)) + static_cast<std::size_t>(x)] =
+                std::sqrt(glm::length(glm::cross(dirPerPitch[0], dirPerPitch[1])));
+        }
+    });
+    return pitch;
+}
+
+namespace {
+
+// The observer's field is the frame: its solid angle and mean luminance, each texel weighted by its cell's pitch^2 rowPitch sr.
+[[nodiscard]] std::optional<BartenObserver> frameObserver(const std::vector<float>& luminance, std::span<const float> angularPitch,
+                                                          PixelLattice lattice) {
+    double solidAngle = 0.0;
+    double weightedLuminance = 0.0;
+    for (std::size_t pixel = 0; pixel < luminance.size(); ++pixel) {
+        const double cell = static_cast<double>(angularPitch[pixel]) * static_cast<double>(angularPitch[pixel]);
+        solidAngle += cell;
+        weightedLuminance += cell * static_cast<double>(luminance[pixel]);
+    }
+    // A black field adapts no pupil and shows no detail.
+    if (!(weightedLuminance > 0.0)) {
+        return std::nullopt;
+    }
+    // The square of equal solid angle, exact for the pupil, which reads only the area X0 Y0; rowPitch cancels from the mean.
+    const double fieldDegrees = std::sqrt(solidAngle * static_cast<double>(pathtracer::gfx::rowPitch(lattice))) * (180.0 / std::numbers::pi);
+    return bartenObserver(weightedLuminance / solidAngle, fieldDegrees);
+}
+
+// One octave G(t_f) - G(t_c): the row-axis frequency its discrete transfer peaks at, and that peak gain.
+struct OctaveBand {
+    double cyclesPerPitch = 0.0;
+    double gain = 0.0;
+};
+
+[[nodiscard]] OctaveBand octaveBand(double fineVariance, double coarseVariance, PixelLattice lattice) {
+    const double boundary = rowAxisBoundary(lattice);
+    const double peakSymbol = rowAxisSymbol(boundary, lattice);
+    // H = exp(-t_f a) - exp(-t_c a) peaks at a = ln(t_c/t_f)/(t_c - t_f); the highpass (t_f = 0) and any later peak clamp to the boundary.
+    const double symbol =
+        fineVariance > 0.0 ? std::min(std::log(coarseVariance / fineVariance) / (coarseVariance - fineVariance), peakSymbol) : peakSymbol;
+    const double omega = symbol < peakSymbol ? rowAxisFrequency(symbol, lattice) : boundary;
+    // The peak gain, so a grating at the band's frequency reads its own amplitude.
+    return {omega / (2.0 * std::numbers::pi), std::exp(-fineVariance * symbol) - std::exp(-coarseVariance * symbol)};
+}
+
+// Raises each texel's visibility to this band's RMS contrast `energy` times Barten's sensitivity at the texel's own luminance.
+void foldBandVisibility(const std::vector<float>& luminance, const std::vector<float>& energy, std::span<const float> angularPitch,
+                        const OctaveBand& band, const BartenObserver& observer, int width, int height, std::vector<float>& visibility,
+                        ThreadPool& threadPool) {
+    threadPool.parallelFor(height, [&](int y) {
+        const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
+        for (int x = 0; x < width; ++x) {
+            const std::size_t pixel = row + static_cast<std::size_t>(x);
+            // Photoreceptors adapt to the light reaching them, not to a lowpass tail; at threshold the two agree to first order in m.
+            const auto adaptation = static_cast<double>(luminance[pixel]);
+            const double pitchDegrees = static_cast<double>(angularPitch[pixel]) * (180.0 / std::numbers::pi);
+            // No ray, or no light to adapt to: nothing there is visible.
+            if (!(pitchDegrees > 0.0) || !(adaptation > 0.0)) {
+                continue;
+            }
+            // Centre-relative accumulation can round a vanishing mean power a few ulp below zero.
+            const double contrast = std::sqrt(2.0 * std::max(static_cast<double>(energy[pixel]), 0.0)) / band.gain;
+            const double sensitivity = bartenSensitivity(observer, band.cyclesPerPitch / pitchDegrees, adaptation);
+            visibility[pixel] = std::max(visibility[pixel], static_cast<float>(contrast * sensitivity));
+        }
+    });
+}
+
+// Contrast Sensitivity at the angular pitch of the camera Beauty was traced through.
+[[nodiscard]] HdrImage tracedContrastSensitivity(const FilterInput& input, ThreadPool& threadPool) {
+    if (input.camera == nullptr) {
+        throw std::invalid_argument("contrastSensitivity: needs the camera Beauty was traced through");
+    }
+    return contrastSensitivityAov(input.beauty, texelAngularPitch(*input.camera, input.beauty.width, input.beauty.height, threadPool),
+                                  threadPool, input.wrapsHorizontally, input.lattice);
+}
+
+}  // namespace
+
+HdrImage contrastSensitivityAov(const HdrImage& beauty, std::span<const float> angularPitch, ThreadPool& threadPool,
+                                bool wrapsHorizontally, PixelLattice lattice) {
+    const int width = beauty.width;
+    const int height = beauty.height;
+    HdrImage out = makeAovImage(AovId::ContrastSensitivity, width, height);
+    const std::vector<float> luminance = luminancePlane(beauty, threadPool);
+    const std::optional<BartenObserver> observer = frameObserver(luminance, angularPitch, lattice);
+    if (!observer) {
+        return out;
+    }
+    // Octaves t_k = t0 4^k under a highpass band from t = 0, t0 placing band 0's peak at half the row axis' zone boundary.
+    double fineVariance = 0.0;
+    double coarseVariance = std::log(4.0) / (3.0 * rowAxisSymbol(0.5 * rowAxisBoundary(lattice), lattice));
+    std::vector<float> fine = luminance;
+    std::vector<float> coarse(fine.size());
+    std::vector<float> energy(fine.size());
+    std::vector<float> visibility(fine.size(), 0.0F);
+    // A band whose window outreaches the frame would measure the mirror, not the image (dogAov's rule); a periodic width has no mirror.
+    for (glm::ivec2 reach = diffusionReach(static_cast<float>(coarseVariance), lattice);
+         (2 * reach.y) + 1 <= height && (wrapsHorizontally || (2 * reach.x) + 1 <= width);
+         reach = diffusionReach(static_cast<float>(coarseVariance), lattice)) {
+        coarse = fine;
+        diffuse(coarse, width, height, static_cast<float>(coarseVariance - fineVariance), threadPool, wrapsHorizontally, lattice);
+        threadPool.parallelFor(height, [&](int y) {
+            const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
+            for (int x = 0; x < width; ++x) {
+                const std::size_t pixel = row + static_cast<std::size_t>(x);
+                // Peli's pointwise contrast b / l, bounded where both fade together; undefined with no light to adapt to, so zero.
+                const float contrast = coarse[pixel] > 0.0F ? (fine[pixel] - coarse[pixel]) / coarse[pixel] : 0.0F;
+                energy[pixel] = contrast * contrast;
+            }
+        });
+        // Its power over the band's window: sqrt(2 mean c^2) of a grating is its amplitude contrast, with no zero-crossing ripple.
+        diffuse(energy, width, height, static_cast<float>(coarseVariance), threadPool, wrapsHorizontally, lattice);
+        foldBandVisibility(luminance, energy, angularPitch, octaveBand(fineVariance, coarseVariance, lattice), *observer, width, height,
+                           visibility, threadPool);
+        fine.swap(coarse);
+        fineVariance = coarseVariance;
+        coarseVariance *= 4.0;
+    }
+    threadPool.parallelFor(height, [&](int y) {
+        for (int x = 0; x < width; ++x) {
+            writeTexel(out, x, y, visibility[(static_cast<std::size_t>(y) * static_cast<std::size_t>(width)) + static_cast<std::size_t>(x)]);
+        }
+    });
+    return out;
+}
+
 HdrImage snrAov(int width, int height, const float* replicateLuminance, int replicates, int samples, ThreadPool& threadPool) {
     HdrImage out = makeAovImage(AovId::SNR, width, height);
     // Replicates not yet drawn hold no estimate; fewer than two populated carry no spread, so the ratio is undefined and reads zero.
@@ -385,6 +571,7 @@ HdrImage evaluateFilterAov(AovId aov, const FilterInput& input, ThreadPool& thre
         case AovId::Gabor:     return gaborAov(input.beauty, threadPool, input.wrapsHorizontally, input.lattice);
         case AovId::DoG:       return dogAov(input.beauty, threadPool, input.wrapsHorizontally, input.lattice);
         case AovId::ColourOpponent:  return colourOpponentAov(input.beauty, threadPool);
+        case AovId::ContrastSensitivity: return tracedContrastSensitivity(input, threadPool);
         case AovId::SNR:
             return snrAov(input.beauty.width, input.beauty.height, input.replicateLuminance, input.replicates, input.samples, threadPool);
         case AovId::SampleCount:
