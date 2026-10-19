@@ -152,6 +152,7 @@ struct BenchCapture {
     // Per frame, not in config: a measurement of the display link's period, so it differs run to run, where config demands equality.
     std::vector<float> refreshHz;
     std::vector<float> uploadMs;  // one entry per display-texture upload, not per frame
+    std::pair<int, int> framebuffer{};  // the last captured frame's window, in pixels: what clear, ring and blit cover
     bool complete = false;
 
     void restart(std::uint64_t requestGeneration) {
@@ -263,6 +264,9 @@ struct AppResources {
     // Async path-traced view, selected by `aov`; requestTrace() is called only from requestPathTraceIfTriggerChanged.
     int maxSamples;  // accumulated-pass cap for PathTraceDriver; 0 = unbounded
     pathtracer::gfx::ScalarType displayFormat;  // pathTraceDisplayTexture's component type (profile.json displayBitDepth)
+    // Display zoom, fit at launch; Cmd+/- queue steps the next frame applies against its frame extent and viewport.
+    pathtracer::gfx::ZoomLevel zoomLevel{};
+    int zoomSteps = 0;
     // Constructed in main() right after initializeApp(): its reference members must bind to objects at their final address.
     std::unique_ptr<pathtracer::scene::PathTraceDriver> pathTraceDriver{};
     std::optional<pathtracer::gfx::Texture> pathTraceDisplayTexture{};
@@ -526,11 +530,20 @@ void endOrbit(pathtracer::platform::Window& window, AppResources& app) {
 
 // Debug-only: 'L' cycles the viewer LUT (sRGB -> Rec709 -> Raw); 'R'/'G'/'B' isolate a channel, pressing the active one again clearing it.
 void wireCallbacks(pathtracer::platform::Window& window, AppResources& app) {
-    window.setKeyCallback([&app, &window](int key, int action) {
+    window.setKeyCallback([&app, &window](int key, int action, int mods) {
         if (action != GLFW_PRESS) {
             return;
         }
         using Lut = pathtracer::gfx::OcioDisplayTransform::Lut;
+        // Cmd with =/+ or -, the macOS zoom chord; checked first so Cmd never also fires the bare key's binding.
+        if ((mods & GLFW_MOD_SUPER) != 0) {
+            if (key == GLFW_KEY_EQUAL || key == GLFW_KEY_KP_ADD) {
+                ++app.zoomSteps;
+            } else if (key == GLFW_KEY_MINUS || key == GLFW_KEY_KP_SUBTRACT) {
+                --app.zoomSteps;
+            }
+            return;
+        }
         if (key == GLFW_KEY_L) {
             app.userLut = app.userLut == Lut::SRGB     ? Lut::Rec709
                           : app.userLut == Lut::Rec709 ? Lut::Raw
@@ -780,6 +793,7 @@ void presentFrame(AppResources& app,
     if (source.image == nullptr) {
         return;
     }
+    pathtracer::gfx::drawImageBounds(imageRect, 0);
     ensurePathTraceDisplayTexture(app, source, pathTraceSnapshot != nullptr ? pathTraceSnapshot->samples : 0);
     const bool isPicture = pathtracer::debug::aovIsPicture(aovId);
     app.ocioTransform.setActiveLut(isPicture ? app.userLut
@@ -1068,6 +1082,7 @@ void captureBenchFrame(pathtracer::platform::Window& window, AppResources& app, 
     bench.frameMs.push_back(frameMs);
     bench.presentGpuMs.push_back(app.postTimer.millisecondsElapsed());
     bench.refreshHz.push_back(static_cast<float>(app.refreshHz));
+    bench.framebuffer = window.framebufferSize();
     // Only uploads the displayed AOV's producer issued: a superseded request can still publish; a G-buffer upload is never the driver's.
     const bool ourUpload = !aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(app.aov)) ||
                            (snapshot != nullptr && snapshot->generation == bench.generation);
@@ -1130,6 +1145,10 @@ nlohmann::json benchConfig(const AppResources& app, const BenchCapture& bench) {
     // Only with -bench-aovs, so a single-stage record stays comparable with every one logged before this existed.
     if (!schedule.empty()) {
         config["aov_schedule"] = schedule;
+    }
+    // Only when the window is not the image's size, which every record before render.displayWidth/Height had, for the same reason.
+    if (bench.framebuffer != std::pair{app.imageWidth, app.imageHeight}) {
+        config["framebuffer"] = {bench.framebuffer.first, bench.framebuffer.second};
     }
     // Only off the square lattice, for the same reason.
     if (camera.pixelLattice() != pathtracer::gfx::PixelLattice::Square) {
@@ -1275,9 +1294,13 @@ void renderFrame(pathtracer::platform::Window& window, pathtracer::platform::Dis
         return updateCamera(window, app, dtSeconds);
     }();
     const auto [viewportWidth, viewportHeight] = window.framebufferSize();
-    // The window only frames the image; what is traced is the authored resolution, so a resize never restarts an accumulation.
+    // The window only frames the image; what is traced is the authored resolution, so a resize or zoom never restarts an accumulation.
     const glm::vec2 frame = pathtracer::gfx::frameExtent(camera.pixelLattice(), app.imageWidth, app.imageHeight);
-    const pathtracer::gfx::ViewportRect imageRect = pathtracer::gfx::fitAspect(frame.x, frame.y, viewportWidth, viewportHeight);
+    // Re-clamped every frame, steps or not, so a window resize that outgrows the level returns it to fit.
+    app.zoomLevel = pathtracer::gfx::stepZoom(app.zoomLevel, std::exchange(app.zoomSteps, 0), frame.x, frame.y, viewportWidth,
+                                              viewportHeight);
+    const pathtracer::gfx::ViewportRect imageRect =
+        pathtracer::gfx::zoomedRect(frame.x, frame.y, viewportWidth, viewportHeight, app.zoomLevel);
 
     requestPathTraceIfTriggerChanged(app, camera, frameNow);
 
@@ -1324,7 +1347,7 @@ struct Options {
     std::string benchLogPath;
     // -bench-aovs A,B,C: AovId sequence the run walks, one stage per entry. Empty = today's single-stage capture.
     std::vector<int> benchAovs;
-    // -size WxH and -max-samples N replace profile.json's render.width/height and maxSamples, and -bench's defaults, without editing it.
+    // -size WxH and -max-samples N replace profile.json's render.width/height (not the window), maxSamples and -bench's defaults.
     std::optional<std::pair<int, int>> size;
     std::optional<int> maxSamples;
 };
@@ -1485,7 +1508,7 @@ void configureBench(AppResources& app, const Options& options, int argc, char** 
 int runApp(const Options& options, const pathtracer::config::SceneConfig& sceneConfig,
            const pathtracer::config::ProfileConfig& profileConfig, int argc, char** argv) {
     // Window construction creates the GL 4.1 core context and makes it current; a fatal failure inside exits the process.
-    pathtracer::platform::Window window(profileConfig.render.width, profileConfig.render.height, "PATHTRACER");
+    pathtracer::platform::Window window(profileConfig.render.displayWidth, profileConfig.render.displayHeight, "PATHTRACER");
 
     glewExperimental = GL_TRUE;
     const GLenum glewStatus = glewInit();

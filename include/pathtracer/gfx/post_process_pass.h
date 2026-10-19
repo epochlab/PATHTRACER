@@ -24,4 +24,10 @@ private:
     unsigned int vao_ = 0;
 };
 
+// Faint white display code value of the bounds ring, written raw: the default framebuffer takes code values, not radiance.
+inline constexpr float kImageBoundsCode = 0.25F;
+
+// Clears the 1 px ring just outside imageRect to kImageBoundsCode; GL clips sides off the framebuffer. Draw the image after it.
+void drawImageBounds(ViewportRect imageRect, unsigned int framebuffer);
+
 }  // namespace pathtracer::gfx

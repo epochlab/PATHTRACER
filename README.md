@@ -46,6 +46,7 @@ The `display_gl` tests open a hidden OpenGL window and report Not Run where none
 | `R` / `G` / `B` | Isolate a channel; the active one again clears it |
 | `I` | Invert the display |
 | `H` | Toggle the HUD |
+| `Cmd` + `-` / `=` | Zoom the image out / in by powers of two; it opens fitted to the window and never zooms past fit |
 | `Esc` | Quit |
 
 ## Python
