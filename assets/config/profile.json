@@ -1,6 +1,6 @@
 {
     "camera": {
-        "position": [0.0, 0.0, 0.25],
+        "position": [0.0, 0.0, 6.0],
         "rotation": [0.0, 0.0, 0.0],
         "filmBackPreset": "ARRI Alexa XT (16:9)",
         "focalLengthMm": 70.0,
@@ -10,11 +10,11 @@
         "shutterSeconds": 0.008,
         "iso": 400.0,
         "lens": {
-            "projection": "omnidirectional",
+            "projection": "rectilinear",
             "maxFieldOfViewDegrees": 180.0,
             "radialCoefficients": [0.0, 0.0, 0.0, 0.0]
         },
-        "pixelLattice": "hexagonal",
+        "pixelLattice": "square",
         "acceptanceAngleDegrees": 0.0
     },
     "controls": {
