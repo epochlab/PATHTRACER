@@ -822,6 +822,327 @@ PT_CHECK(colour_opponent_separates_the_rec709_primaries, Fast, Exact) {
     PT_EXPECT(ctx, blue > 0.0F, "Rec.709 blue reads B-Y " + std::to_string(blue));
 }
 
+// Row-axis plane waves are diffusion's eigenfunctions, so its symbol must reproduce the shipped kernels' transfer on both lattices.
+PT_CHECK(row_axis_symbol_is_the_diffusion_transfer, Fast, Exact) {
+    const std::vector<double> fractions{0.0, 0.125, 0.25, 0.5, 0.75, 0.9, 1.0};
+    ctx.plan(static_cast<int>(3 * fractions.size()));
+    const double t = 2.0;
+    const std::vector<float> squareKernel = pathtracer::debug::discreteGaussianKernel(static_cast<float>(t));
+    const std::vector<float> axisKernel = pathtracer::debug::discreteGaussianKernel(static_cast<float>((2.0 * t) / 3.0));
+    for (const double fraction : fractions) {
+        const double square = fraction * pathtracer::debug::rowAxisBoundary(PixelLattice::Square);
+        const double hexagonal = fraction * pathtracer::debug::rowAxisBoundary(PixelLattice::Hexagonal);
+        // Each pass carries truncation 2^-24 plus an ulp of storage, as discrete_gaussian_transfer_is_exact bounds.
+        const double bound = pathtracer::debug::kFloat32Roundoff + static_cast<double>(kFloatEpsilon);
+        const double squareError =
+            std::abs(measuredTransfer(squareKernel, square) - std::exp(-t * pathtracer::debug::rowAxisSymbol(square, PixelLattice::Square)));
+        const double hexagonalError = std::abs(hexagonalTransfer(axisKernel, glm::dvec2(hexagonal, 0.0)) -
+                                               std::exp(-t * pathtracer::debug::rowAxisSymbol(hexagonal, PixelLattice::Hexagonal)));
+        PT_EXPECT(ctx, squareError <= bound, "square w/pi=" + std::to_string(fraction) + " transfer error " + std::to_string(squareError));
+        PT_EXPECT(ctx, hexagonalError <= 3.0 * bound,
+                  "hexagonal w/K=" + std::to_string(fraction) + " transfer error " + std::to_string(hexagonalError));
+        // The inverse is acos of the symbol: its conditioning sin(w) vanishes at the ends, so it is checked forward, in symbol space.
+        double worst = 0.0;
+        for (const PixelLattice lattice : {PixelLattice::Square, PixelLattice::Hexagonal}) {
+            const double omega = fraction * pathtracer::debug::rowAxisBoundary(lattice);
+            const double a = pathtracer::debug::rowAxisSymbol(omega, lattice);
+            worst = std::max(worst, std::abs(pathtracer::debug::rowAxisSymbol(pathtracer::debug::rowAxisFrequency(a, lattice), lattice) - a));
+        }
+        // A handful of double operations each way, on symbols at most 3.
+        PT_EXPECT(ctx, worst <= 64.0 * std::numeric_limits<double>::epsilon(),
+                  "w/boundary=" + std::to_string(fraction) + " inverse misses by " + std::to_string(worst));
+    }
+}
+
+// colour-science 0.4.6 (results/contrast_sensitivity/barten_reference.py): L cd/m^2, X0 deg, u cycles/deg, pupil mm, sensitivity.
+constexpr std::array<std::array<double, 5>, 48> kBartenReference{{
+    {0.01, 10.0, 0.5, 7.570770130708059, 50.643133515859006},
+    {0.01, 10.0, 2.0, 7.570770130708059, 36.91862906512951},
+    {0.01, 10.0, 8.0, 7.570770130708059, 10.24484700811024},
+    {0.01, 10.0, 32.0, 7.570770130708059, 0.10236209216367767},
+    {0.01, 40.0, 0.5, 6.992110310803547, 70.7875915666346},
+    {0.01, 40.0, 2.0, 6.992110310803547, 41.863383960856645},
+    {0.01, 40.0, 8.0, 6.992110310803547, 10.263178230655962},
+    {0.01, 40.0, 32.0, 6.992110310803547, 0.134211584257269},
+    {0.01, 60.0, 0.5, 6.733346411225377, 71.03060450918636},
+    {0.01, 60.0, 2.0, 6.733346411225377, 41.43129444759229},
+    {0.01, 60.0, 8.0, 6.733346411225377, 10.168704153255602},
+    {0.01, 60.0, 32.0, 6.733346411225377, 0.149793896320777},
+    {1.0, 10.0, 0.5, 6.342687385490272, 206.06414763016508},
+    {1.0, 10.0, 2.0, 6.342687385490272, 301.28509678655035},
+    {1.0, 10.0, 8.0, 6.342687385490272, 96.64118095620103},
+    {1.0, 10.0, 32.0, 6.342687385490272, 1.7239479761531373},
+    {1.0, 40.0, 0.5, 5.0, 287.891971108829},
+    {1.0, 40.0, 2.0, 5.0, 312.74996120965403},
+    {1.0, 40.0, 8.0, 5.0, 87.59967327046563},
+    {1.0, 40.0, 32.0, 5.0, 2.5693071526506164},
+    {1.0, 60.0, 0.5, 4.5801546165686595, 289.126241386437},
+    {1.0, 60.0, 2.0, 4.5801546165686595, 298.37703371488925},
+    {1.0, 60.0, 8.0, 4.5801546165686595, 82.9717607179329},
+    {1.0, 60.0, 32.0, 4.5801546165686595, 2.7841461227414994},
+    {100.0, 10.0, 0.5, 4.075951886659953, 227.870280923516},
+    {100.0, 10.0, 2.0, 4.075951886659953, 621.633397822374},
+    {100.0, 10.0, 8.0, 4.075951886659953, 466.1220609717308},
+    {100.0, 10.0, 32.0, 4.075951886659953, 20.125311819962086},
+    {100.0, 40.0, 0.5, 3.007889689196453, 328.1845818655644},
+    {100.0, 40.0, 2.0, 3.007889689196453, 713.4431083919145},
+    {100.0, 40.0, 8.0, 3.007889689196453, 429.0388591331311},
+    {100.0, 40.0, 32.0, 3.007889689196453, 23.072921202226855},
+    {100.0, 60.0, 0.5, 2.7931307084858403, 334.78453885875086},
+    {100.0, 60.0, 2.0, 2.7931307084858403, 713.4270204895842},
+    {100.0, 60.0, 8.0, 2.7931307084858403, 415.6138081601761},
+    {100.0, 60.0, 32.0, 2.7931307084858403, 23.174647608300816},
+    {10000.0, 10.0, 0.5, 2.5790152167839246, 228.36061742208275},
+    {10000.0, 10.0, 2.0, 2.5790152167839246, 641.9854056746868},
+    {10000.0, 10.0, 8.0, 2.5790152167839246, 599.967509049232},
+    {10000.0, 10.0, 32.0, 2.5790152167839246, 38.59436085429881},
+    {10000.0, 40.0, 0.5, 2.234994336780586, 329.3463489354062},
+    {10000.0, 40.0, 2.0, 2.234994336780586, 751.3932544929431},
+    {10000.0, 40.0, 8.0, 2.234994336780586, 610.5363378048489},
+    {10000.0, 40.0, 32.0, 2.234994336780586, 40.888108470058384},
+    {10000.0, 60.0, 0.5, 2.179016589937908, 336.13741334923964},
+    {10000.0, 60.0, 2.0, 2.179016589937908, 756.5840343659006},
+    {10000.0, 60.0, 8.0, 2.179016589937908, 610.976463419274},
+    {10000.0, 60.0, 32.0, 2.179016589937908, 41.230218491732586},
+}};
+
+// An independent implementation of Barten 1999's pupil, retinal illuminance and CSF, so a transcription slip in any one shows here.
+PT_CHECK(barten_csf_matches_colour_science, Fast, Exact) {
+    ctx.plan(2);
+    double worstPupil = 0.0;
+    double worstSensitivity = 0.0;
+    for (const std::array<double, 5>& row : kBartenReference) {
+        const double pupil = pathtracer::debug::bartenPupilDiameter(row[0], row[1]);
+        const double sensitivity = pathtracer::debug::bartenSensitivity(pathtracer::debug::bartenObserver(row[0], row[1]), row[2], row[0]);
+        worstPupil = std::max(worstPupil, std::abs(pupil - row[3]) / row[3]);
+        worstSensitivity = std::max(worstSensitivity, std::abs(sensitivity - row[4]) / row[4]);
+    }
+    // Both sides evaluate ~40 double operations in a different order; exp's argument reaches 2 pi^2 sigma^2 u^2 < 2, doubling its ulps.
+    const double bound = 2.0 * 40.0 * std::numeric_limits<double>::epsilon();
+    PT_EXPECT(ctx, worstPupil <= bound, "pupil diameter relative error " + std::to_string(worstPupil));
+    PT_EXPECT(ctx, worstSensitivity <= bound, "sensitivity relative error " + std::to_string(worstSensitivity));
+}
+
+// Closed forms: the lat-long's pitch^2 is (2 pi / W)(pi / H) sin(colatitude); the pinhole's on-axis pitch is 2 tan(vfov/2) / H.
+PT_CHECK(texel_angular_pitch_matches_the_lens, Fast, Exact) {
+    ctx.plan(3);
+    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    using pathtracer::scene::Camera;
+    using pathtracer::scene::Lens;
+    using pathtracer::scene::LensProjection;
+    const Camera::FilmBack fullFrame{36.0F, 24.0F};
+    constexpr int kWidth = 33;
+    constexpr int kHeight = 17;
+    const Camera latLong{glm::vec3(0.0F), glm::vec3(0.0F), fullFrame, 35.0F, 0.01F, 100.0F, 2.8F, 0.008F, 400.0F,
+                         Lens{LensProjection::Omnidirectional}};
+    const std::vector<float> latLongPitch = pathtracer::debug::texelAngularPitch(latLong, kWidth, kHeight, pool);
+    double worstLatLong = 0.0;
+    for (int y = 0; y < kHeight; ++y) {
+        const double colatitude = std::numbers::pi * (static_cast<double>(y) + 0.5) / kHeight;
+        const double expected = std::sqrt((2.0 * std::numbers::pi / kWidth) * (std::numbers::pi / kHeight) * std::sin(colatitude));
+        for (int x = 0; x < kWidth; ++x) {
+            const auto measured = static_cast<double>(latLongPitch[(static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x)]);
+            worstLatLong = std::max(worstLatLong, std::abs(measured - expected) / expected);
+        }
+    }
+    // The differential's closed form is a few float trig calls and products deep, as camera_validate's 16-ulp budget allows.
+    PT_EXPECT(ctx, worstLatLong <= 16.0 * static_cast<double>(kFloatEpsilon), "lat-long pitch relative error " + std::to_string(worstLatLong));
+
+    const Camera pinhole{glm::vec3(0.0F), glm::vec3(0.0F), fullFrame, 35.0F, 0.01F, 100.0F, 2.8F, 0.008F, 400.0F};
+    const std::vector<float> pinholePitch = pathtracer::debug::texelAngularPitch(pinhole, kWidth, kHeight, pool);
+    const double axial = static_cast<double>(pinholePitch[((kHeight / 2) * kWidth) + (kWidth / 2)]);
+    const double expectedAxial = 2.0 * std::tan(0.5 * static_cast<double>(pinhole.verticalFovRadians())) / kHeight;
+    PT_EXPECT(ctx, std::abs(axial - expectedAxial) <= 16.0 * static_cast<double>(kFloatEpsilon) * expectedAxial,
+              "pinhole on-axis pitch " + std::to_string(axial) + " expected " + std::to_string(expectedAxial));
+
+    // An 8 mm lens' 180-degree circle has a 12.6 mm radius, inside the gate's 21.6 mm corners, so they see nothing.
+    const Camera fisheye{glm::vec3(0.0F), glm::vec3(0.0F), fullFrame, 8.0F, 0.01F, 100.0F, 2.8F, 0.008F, 400.0F,
+                         Lens{LensProjection::FisheyePolynomial, {}, 180.0F}};
+    const std::vector<float> fisheyePitch = pathtracer::debug::texelAngularPitch(fisheye, kWidth, kHeight, pool);
+    PT_EXPECT(ctx, fisheyePitch.front() == 0.0F && fisheyePitch[((kHeight / 2) * kWidth) + (kWidth / 2)] > 0.0F,
+              "fisheye corner pitch " + std::to_string(fisheyePitch.front()) + ", centre " +
+                  std::to_string(fisheyePitch[((kHeight / 2) * kWidth) + (kWidth / 2)]));
+}
+
+// Diffusion leaves a constant exactly, so every band and its contrast vanish: nothing in a uniform field is visible.
+PT_CHECK(contrast_sensitivity_reads_zero_on_a_uniform_field, Fast, Exact) {
+    ctx.plan(4);
+    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    constexpr int kWidth = 64;
+    constexpr int kHeight = 48;
+    const HdrImage grey = greyImage(kWidth, kHeight, std::vector<float>(static_cast<std::size_t>(kWidth) * kHeight, 37.0F));
+    const std::vector<float> pitch(static_cast<std::size_t>(kWidth) * kHeight, 0.001F);
+    for (const PixelLattice lattice : {PixelLattice::Square, PixelLattice::Hexagonal}) {
+        for (const bool wraps : {false, true}) {
+            const HdrImage out = pathtracer::debug::contrastSensitivityAov(grey, pitch, pool, wraps, lattice);
+            const float peak = *std::max_element(out.texels.begin(), out.texels.end());
+            PT_EXPECT(ctx, peak == 0.0F, std::string(pathtracer::gfx::kPixelLatticeNames[static_cast<int>(lattice)]) +
+                                             (wraps ? " wrapped" : "") + " uniform field reads " + std::to_string(peak));
+        }
+    }
+}
+
+namespace {
+
+// A wrapped row diffused in double: its DFT times the square lattice's exact transfer exp(-t (1 - cos w_j)).
+[[nodiscard]] std::vector<double> diffusedRow(const std::vector<double>& row, double t) {
+    const std::size_t width = row.size();
+    std::vector<double> out(width, 0.0);
+    for (std::size_t j = 0; j < width; ++j) {
+        const double omega = 2.0 * std::numbers::pi * static_cast<double>(j) / static_cast<double>(width);
+        double cosine = 0.0;
+        double sine = 0.0;
+        for (std::size_t m = 0; m < width; ++m) {
+            cosine += row[m] * std::cos(omega * static_cast<double>(m));
+            sine += row[m] * std::sin(omega * static_cast<double>(m));
+        }
+        const double transfer = analyticTransfer(t, omega) / static_cast<double>(width);
+        for (std::size_t n = 0; n < width; ++n) {
+            out[n] += transfer * ((cosine * std::cos(omega * static_cast<double>(n))) + (sine * std::sin(omega * static_cast<double>(n))));
+        }
+    }
+    return out;
+}
+
+// Rounding bound of one square diffusion of a field bounded by one: per pass, truncation 2^-24, a storage ulp and gamma_(2r+1).
+[[nodiscard]] double squareDiffusionBound(double t) {
+    const auto taps = static_cast<double>((2 * pathtracer::debug::discreteGaussianKernel(static_cast<float>(t)).size()) - 1);
+    return 2.0 * (pathtracer::debug::kFloat32Roundoff + static_cast<double>(kFloatEpsilon) + (taps * static_cast<double>(kFloatEpsilon)));
+}
+
+// The texel-wise closed form of contrastSensitivityAov on a wrapped, row-constant square field, and its rounding bound.
+struct VisibilityReference {
+    std::vector<double> visibility;
+    std::vector<double> bound;
+};
+
+[[nodiscard]] VisibilityReference visibilityReference(const std::vector<double>& luminance, int height, float pitch) {
+    const std::size_t width = luminance.size();
+    const double peakLuminance = *std::max_element(luminance.begin(), luminance.end());
+    double meanLuminance = 0.0;
+    for (const double value : luminance) {
+        meanLuminance += value;
+    }
+    meanLuminance /= static_cast<double>(width);
+    const auto cell = static_cast<double>(pitch) * static_cast<double>(pitch);
+    const double field = std::sqrt(cell * static_cast<double>(width) * height) * (180.0 / std::numbers::pi);
+    const pathtracer::debug::BartenObserver observer = pathtracer::debug::bartenObserver(meanLuminance, field);
+    const double pitchDegrees = static_cast<double>(pitch) * (180.0 / std::numbers::pi);
+    const auto eps = static_cast<double>(kFloatEpsilon);
+    VisibilityReference reference{std::vector<double>(width, 0.0), std::vector<double>(width, 0.0)};
+    std::vector<double> fine = luminance;
+    double fineError = 0.0;
+    double fineVariance = 0.0;
+    double coarseVariance = std::log(4.0) / 3.0;
+    while ((2 * pathtracer::debug::diffusionReach(static_cast<float>(coarseVariance), PixelLattice::Square).y) + 1 <= height) {
+        const auto step = static_cast<double>(static_cast<float>(coarseVariance - fineVariance));
+        const std::vector<double> coarse = diffusedRow(fine, step);
+        const double coarseError = fineError + (peakLuminance * squareDiffusionBound(step));
+        const double symbol = fineVariance > 0.0 ? std::log(coarseVariance / fineVariance) / (coarseVariance - fineVariance) : 2.0;
+        const double omega = std::acos(1.0 - symbol);
+        const double gain = std::exp(-fineVariance * symbol) - std::exp(-coarseVariance * symbol);
+        const double sensitivityFrequency = omega / (2.0 * std::numbers::pi * pitchDegrees);
+        std::vector<double> power(width);
+        double peakContrast = 0.0;
+        double minCoarse = coarse.front();
+        for (std::size_t x = 0; x < width; ++x) {
+            const double contrast = (fine[x] - coarse[x]) / coarse[x];
+            power[x] = contrast * contrast;
+            peakContrast = std::max(peakContrast, std::abs(contrast));
+            minCoarse = std::min(minCoarse, coarse[x]);
+        }
+        const std::vector<double> pooled = diffusedRow(power, static_cast<double>(static_cast<float>(coarseVariance)));
+        // Contrast error from both lowpasses' error and the float subtract and divide; squared, then pooled with its own rounding.
+        const double contrastError = ((fineError + coarseError + (peakContrast * coarseError)) / minCoarse) + (2.0 * eps * peakContrast);
+        const double powerError = (2.0 * peakContrast * contrastError) + (contrastError * contrastError) +
+                                  (peakContrast * peakContrast * (eps + squareDiffusionBound(static_cast<double>(static_cast<float>(coarseVariance)))));
+        for (std::size_t x = 0; x < width; ++x) {
+            const double sensitivity = pathtracer::debug::bartenSensitivity(observer, sensitivityFrequency, luminance[x]);
+            const double envelope = std::sqrt(2.0 * pooled[x]);
+            const double visibility = (envelope / gain) * sensitivity;
+            // |sqrt a - sqrt b| <= min(sqrt|a-b|, |a-b| / sqrt a); the sensitivity reads the exact float luminance both sides share.
+            const double envelopeError = std::min(std::sqrt(2.0 * powerError), (2.0 * powerError) / std::max(envelope, 0x1p-1074));
+            const double error = ((envelopeError / gain) * sensitivity) + (visibility * eps);
+            if (visibility > reference.visibility[x]) {
+                reference.visibility[x] = visibility;
+            }
+            reference.bound[x] = std::max(reference.bound[x], error);
+        }
+        fine = coarse;
+        fineError = coarseError;
+        fineVariance = coarseVariance;
+        coarseVariance *= 4.0;
+    }
+    return reference;
+}
+
+// The float luminance row contrastSensitivityAov reads from a row-constant grating L0 (1 + m cos w x), w = 2 pi n / W.
+[[nodiscard]] std::vector<double> gratingLuminance(int width, int height, double modulation, int cycles, ThreadPool& pool, HdrImage& image) {
+    std::vector<float> plane(static_cast<std::size_t>(width) * height);
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const double phase = 2.0 * std::numbers::pi * cycles * x / width;
+            plane[(static_cast<std::size_t>(y) * width) + static_cast<std::size_t>(x)] = static_cast<float>(40.0 * (1.0 + (modulation * std::cos(phase))));
+        }
+    }
+    image = greyImage(width, height, plane);
+    const HdrImage luminance = pathtracer::debug::luminanceAov(image, pool);
+    return {luminance.texels.begin(), luminance.texels.begin() + width};
+}
+
+}  // namespace
+
+// A wrapped grating has a closed form at every texel: exact transfers for the cascade, the contrast power's pooling and Barten's CSF.
+PT_CHECK(contrast_sensitivity_matches_the_closed_form_on_a_grating, Fast, Exact) {
+    ctx.plan(3);
+    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    constexpr int kWidth = 64;
+    constexpr int kHeight = 64;
+    constexpr int kCycles = 8;
+    // 3 arcmin a texel puts the grating at 2.5 cycles/deg, near the CSF's peak, and the frame's Nyquist at 10.
+    const auto pitchRadians = static_cast<float>(0.05 * std::numbers::pi / 180.0);
+    const std::vector<float> pitch(static_cast<std::size_t>(kWidth) * kHeight, pitchRadians);
+    struct Comparison {
+        double worst = 0.0;  // largest deviation as a fraction of its texel's bound
+        double measuredPeak = 0.0;
+        double expectedPeak = 0.0;
+        double peakBound = 0.0;
+    };
+    const auto compare = [&](double modulation) {
+        HdrImage image;
+        const std::vector<double> row = gratingLuminance(kWidth, kHeight, modulation, kCycles, pool, image);
+        const VisibilityReference reference = visibilityReference(row, kHeight, pitchRadians);
+        const HdrImage out = pathtracer::debug::contrastSensitivityAov(image, pitch, pool, true);
+        Comparison result;
+        for (int y = 0; y < kHeight; ++y) {
+            for (int x = 0; x < kWidth; ++x) {
+                const auto column = static_cast<std::size_t>(x);
+                const auto measured = static_cast<double>(texelAt(out, x, y, 0));
+                result.worst = std::max(result.worst, std::abs(measured - reference.visibility[column]) / reference.bound[column]);
+                result.measuredPeak = std::max(result.measuredPeak, measured);
+                if (reference.visibility[column] > result.expectedPeak) {
+                    result.expectedPeak = reference.visibility[column];
+                    result.peakBound = reference.bound[column];
+                }
+            }
+        }
+        return result;
+    };
+    const Comparison grating = compare(0.25);
+    PT_EXPECT(ctx, grating.worst <= 1.0, "m=0.25 grating deviates by " + std::to_string(grating.worst) + " of its bound");
+    // Visibility is m times a factor varying at first order in m, so one rescale m = m0 / V(m0) lands within 2 m0 of the threshold.
+    constexpr double kProbe = 0.01;
+    HdrImage probeImage;
+    const VisibilityReference probe =
+        visibilityReference(gratingLuminance(kWidth, kHeight, kProbe, kCycles, pool, probeImage), kHeight, pitchRadians);
+    const double modulation = kProbe / *std::max_element(probe.visibility.begin(), probe.visibility.end());
+    const Comparison threshold = compare(modulation);
+    PT_EXPECT(ctx, threshold.worst <= 1.0, "threshold grating deviates by " + std::to_string(threshold.worst) + " of its bound");
+    // The lowpass and the adapting luminance each move by at most a factor 1 +/- m0, which the rescale leaves; then the peak's rounding.
+    PT_EXPECT(ctx, std::abs(threshold.measuredPeak - 1.0) <= (2.0 * kProbe) + threshold.peakBound,
+              "threshold grating (m=" + std::to_string(modulation) + ") peaks at " + std::to_string(threshold.measuredPeak));
+}
+
 // Replicate means mu +/- delta over an even K sum K delta^2 of squared deviations, so the ratio mu sqrt(K-1) / delta is exact.
 PT_CHECK(snr_matches_the_closed_form_of_alternating_replicates, Fast, Exact) {
     const std::array<int, 5> counts{2, 4, 8, 16, 64};

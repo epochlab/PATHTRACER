@@ -3,6 +3,31 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Contrast sensitivity AOV
+
+New AOV `contrastSensitivity` (Contrast Sensitivity), after Colour Opponent. Each texel holds its local contrast in multiples of the human
+detection threshold, for an observer standing at the camera: 1 is just visible, 0 invisible. Evidence is in `results/contrast_sensitivity`.
+- **Bands:** octaves of the discrete scale space, t_k = t0 4^k under a highpass band from t = 0. t0 = ln4 / (3 a(boundary/2)) puts band 0's
+  peak at half the row axis' zone boundary on either lattice. Each band's frequency is the exact peak of its discrete transfer, and its gain at
+  that peak normalises a grating to its amplitude. Bands whose window outreaches the frame are dropped, as DoG's rule does.
+- **Contrast (Peli 1990):** the pointwise band / lowpass, squared and pooled over the band's own window, gives the envelope sqrt(2 mean c^2).
+  Pooling the band's power over the lowpass instead diverged in dark surrounds.
+- **Threshold (Barten 1999):** the standard observer of ITU-R BT.2246, with Stiles-Crawford correction. The pupil comes from the frame's
+  solid-angle-weighted mean luminance and solid angle. Cycles/deg come from each texel's angular pitch, sqrt |d(dir)/dx x d(dir)/dy| of the
+  camera's ray differentials, so fisheye, lat-long and hexagonal frames are exact. The CSF adapts to the texel's own luminance in cd/m^2.
+  Adapting to the lowpass lit a halo about 4 sigma deep around objects on black.
+- **Output:** the maximum over bands. The display is log10 V on turbo over [1/S, S], where S = sqrt(T Xmax^2 / 2 Phi0) / k = 5164 is
+  Barten's ceiling, so threshold sits at the centre.
+- **Plumbing:** `PathTraceResult` carries the camera it was traced through, and `FilterInput::camera` passes it to the filter.
+- **Image and time** (256x128, 16 passes): Beauty, Alpha and AO are pixel-identical to main on 5 scenes. Pass time B/A is 0.98 (cornell)
+  and 0.99 (stump), with identical work. The filter takes 3.7-3.9 ms, against Gabor's 5-8 ms.
+- **Tests:** `filter_validate`:
+  - `barten_csf_matches_colour_science` checks 48 points against colour-science 0.4.6.
+  - `contrast_sensitivity_matches_the_closed_form_on_a_grating` checks every texel against exact transfers, with a derived rounding bound.
+    A threshold grating reads 1.
+  - The uniform-field, row-axis-symbol and angular-pitch (lat-long, pinhole, fisheye circle) checks.
+  - `api_validate` checks the display ramp. Seven code mutations each fail one of these.
+
 ## Ray-cone footprints after bounces
 
 Texture lookups after the first bounce read the full-resolution image at a point, so they shimmered and pulled 4K tiles off disk

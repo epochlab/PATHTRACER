@@ -9,6 +9,7 @@
 #include "pathtracer/debug/aov.h"
 #include "pathtracer/debug/denoiser.h"
 #include "pathtracer/gfx/hdr_image.h"
+#include "pathtracer/scene/camera.h"
 #include "pathtracer/scene/thread_pool.h"
 
 namespace pathtracer::debug {
@@ -89,6 +90,34 @@ void demodulate(std::span<const float> plane, const MorletPlaneWave& wave, int w
 // Each texel's pass count as a float, the samples its estimate averages; null counts, before any pass, read zero.
 [[nodiscard]] pathtracer::gfx::HdrImage sampleCountAov(int width, int height, const int* texelSamples, pathtracer::scene::ThreadPool& threadPool);
 
+// Barten's (1999) standard observer adapted to one field: the pupil and field-size terms its CSF shares across every texel and band.
+struct BartenObserver {
+    double sigmaSquared = 0.0;  // squared optical line-spread sigma, deg^2: sigma0^2 + (Cab d)^2
+    double trolandsPerLuminance = 0.0;  // retinal illuminance per cd/m^2: pupil area pi d^2/4 with the Stiles-Crawford correction
+    double fieldTerm = 0.0;  // 1/X0^2 + 1/Xmax^2, deg^-2: the spatial integration area's frequency-independent part
+};
+
+// Barten 1999 pupil diameter in mm for field luminance L in cd/m^2 subtending X0 x X0 degrees: 5 - 3 tanh(0.4 log10(L X0^2 / 40^2)).
+[[nodiscard]] double bartenPupilDiameter(double luminance, double fieldDegrees);
+
+// The observer for a field of mean luminance L > 0 over X0 x X0 degrees, its pupil from bartenPupilDiameter.
+[[nodiscard]] BartenObserver bartenObserver(double luminance, double fieldDegrees);
+
+// Barten 1999 contrast sensitivity, 1 / threshold modulation, at u > 0 cycles/deg and local luminance L cd/m^2; 0 at L = 0.
+[[nodiscard]] double bartenSensitivity(const BartenObserver& observer, double cyclesPerDegree, double luminance);
+
+// Barten's ceiling over every u, L and field: M_opt <= 1, saturated inhibition, no photon noise, X0 -> inf: sqrt(T Xmax^2 / 2 Phi0) / k.
+[[nodiscard]] double bartenSensitivityBound();
+
+// Isotropic angle per lattice pitch at each texel centre, radians: sqrt |d(dir)/dx x d(dir)/dy|; 0 where the lens casts no ray.
+[[nodiscard]] std::vector<float> texelAngularPitch(const pathtracer::scene::Camera& camera, int width, int height,
+                                                   pathtracer::scene::ThreadPool& threadPool);
+
+// Max over octave bands of Peli's (1990) local band contrast times Barten's sensitivity, one channel: 1 is threshold, 0 invisible.
+[[nodiscard]] pathtracer::gfx::HdrImage contrastSensitivityAov(const pathtracer::gfx::HdrImage& beauty, std::span<const float> angularPitch,
+                                                               pathtracer::scene::ThreadPool& threadPool, bool wrapsHorizontally = false,
+                                                               pathtracer::gfx::PixelLattice lattice = pathtracer::gfx::PixelLattice::Square);
+
 // 1 - direct luminance / unoccluded direct luminance at the primary vertex, as a ratio of means; 0 where no direct light arrives.
 [[nodiscard]] pathtracer::gfx::HdrImage shadowAov(const pathtracer::gfx::HdrImage& lost, const pathtracer::gfx::HdrImage& unoccluded,
                                                pathtracer::scene::ThreadPool& threadPool);
@@ -110,6 +139,7 @@ struct FilterInput {
     // Shadow's two accumulated means, the occluded share's numerator and its denominator; Shadow needs both.
     const pathtracer::gfx::HdrImage* shadowLost = nullptr;
     const pathtracer::gfx::HdrImage* shadowUnoccluded = nullptr;
+    const pathtracer::scene::Camera* camera = nullptr;  // the camera Beauty was traced through, for Contrast Sensitivity's angular pitch
 };
 
 // The one dispatch for every BeautyFilter AOV; a non-filter id yields an empty image. No default arm, so a new filter must be routed.

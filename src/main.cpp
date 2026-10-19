@@ -642,7 +642,8 @@ const pathtracer::gfx::HdrImage* ensureFilterImage(
         aov,
         pathtracer::debug::FilterInput{snapshot->beauty, snapshot->replicateLuminance.data(), snapshot->replicates, snapshot->samples,
                                        snapshot->texelSamples.data(), snapshot->wrapsHorizontally, snapshot->pixelLattice, &snapshot->denoiseAlbedo, &snapshot->denoiseNormal,
-                                       app.denoiser.get(), &snapshot->shadowLost, &snapshot->shadowUnoccluded},
+                                       app.denoiser.get(), &snapshot->shadowLost, &snapshot->shadowUnoccluded,
+                                       snapshot->camera ? &*snapshot->camera : nullptr},
         *app.gbufferThreadPool);
     cache.aov = aov;
     cache.generation = snapshot->generation;

@@ -79,9 +79,8 @@ frame["depth"]    # (64, 128, 1) float32, camera-space Z
 | Sampling | Many-light sampling | Lights are picked uniformly, so a small dim light gets as many shadow rays as a large bright one. A light tree would pick by power and orientation, and ReSTIR would reuse picks across pixels. | high | ready |
 | Sampling | Foveated sampling | Spend fewer samples away from where the viewer is looking, by loosening each pixel's noise target with its distance from the gaze point (Guenter et al. 2012; Koskela et al. 2019). Needs a gaze input and the viewing distance, to turn pixels into degrees of vision. | medium | ready |
 | Colour | Measured-observer cones | Model colour vision from measured human eye response. Needs light tracked by wavelength, so it waits for spectral rendering. | high | blocked |
-| AOV | Contrast sensitivity | An output showing which detail a human can actually see, from the beauty's luminance in cd/m^2. | high | ready |
 | Camera | Multi-viewpoint compound eyes | Facets share one viewpoint and one acceptance angle. CompoundRay (Millward et al. 2022) places each on its own eye surface with its own axis and angle, from measured eye data. | high | ready |
 | Camera | Lens model | Most fisheye lenses are only approximated and lose accuracy near the edge. Real cameras also need an off-centre lens and non-square pixels. | medium | ready |
 | Camera | Anamorphic and distortion | Stretched widescreen lenses and real lens distortion. Each needs an inverse to keep motion vectors and texture filtering right. | high | ready |
-| Camera | Subdivision surfaces | Smooth curved surfaces from coarse meshes, subdivided at load. Needs a scene-file flag and waits for the scene graph. | high | blocked |
+| Camera | Subdivision surfaces | Smooth curved surfaces from coarse meshes, subdivided at load. OpenSubDiv. Needs a scene-file flag and waits for the scene graph. | high | blocked |
 | Camera | Scene graph and instancing | Every copy of an object is stored separately. Keeping objects in a hierarchy would let copies share memory and enable motion blur. | high | ready |
