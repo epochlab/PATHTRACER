@@ -1433,7 +1433,7 @@ PT_CHECK(primary_hit_footprint_is_the_plane_transfer, Fast, Exact) {
     constexpr float kUvPerMetre = 3.0F;
     const Ray ray{glm::vec3(0.0F), glm::vec3(0.0F, 0.0F, -1.0F), 0.0F, 100.0F};
     const glm::mat2x3 dirFootprint(glm::vec3(kStep, 0.0F, 0.0F), glm::vec3(0.0F, kStep, 0.0F));
-    ctx.plan(2);
+    ctx.plan(4);
     for (const float tiltDegrees : {0.0F, 60.0F}) {
         // Tilted about y: the footprint's x step runs along along = (cos a, 0, -sin a), foreshortened by 1/cos a; y stays t * step.
         const float tilt = glm::radians(tiltDegrees);
@@ -1456,7 +1456,43 @@ PT_CHECK(primary_hit_footprint_is_the_plane_transfer, Fast, Exact) {
         std::snprintf(detail, sizeof(detail), "tilt %.0f: footprint is %.3g from the plane's foreshortened step, over %.3g",
                       static_cast<double>(tiltDegrees), static_cast<double>(error), static_cast<double>(bound));
         PT_EXPECT(ctx, error <= bound, detail);
+        // A cone kDistance * kStep wide covers the same square: across -z its axes are x and -y, so each step keeps its length.
+        const pathtracer::gfx::TextureFootprint cone = coneHitFootprint(triangle, ray, kDistance * kStep);
+        const float coneError = std::max(glm::length(glm::abs(cone.dx) - expectedDx), glm::length(glm::abs(cone.dy) - expectedDy));
+        std::snprintf(detail, sizeof(detail), "tilt %.0f: cone footprint is %.3g from the plane's foreshortened step, over %.3g",
+                      static_cast<double>(tiltDegrees), static_cast<double>(coneError), static_cast<double>(bound));
+        PT_EXPECT(ctx, coneError <= bound, detail);
     }
+}
+
+PT_CHECK(mean_curvature_fits_the_sphere_and_plane, Fast, Exact) {
+    constexpr float kRadius = 2.0F;
+    // The sphere's octant: vertex normals p / R, so dn = e / R along every edge and dn/dp = I / R exactly.
+    const auto octant = [&](float normalSign) {
+        const auto corner = [&](const glm::vec3& axis) {
+            return ShadingVertex{kRadius * axis, normalSign * axis, glm::vec2(0.0F), glm::vec4(1.0F, 0.0F, 0.0F, 1.0F)};
+        };
+        return ShadingTriangle{corner({1.0F, 0.0F, 0.0F}), corner({0.0F, 1.0F, 0.0F}), corner({0.0F, 0.0F, 1.0F}), 0};
+    };
+    // Edges at 60 degrees give a Gram condition of 3, over ~20 roundings of u = eps/2: 30 eps of 1/R.
+    const float bound = 30.0F * std::numeric_limits<float>::epsilon() / kRadius;
+    const float outward = meanCurvature(octant(1.0F));
+    const float inward = meanCurvature(octant(-1.0F));
+    ShadingTriangle flat = octant(1.0F);
+    const glm::vec3 faceNormal = glm::normalize(glm::vec3(1.0F));
+    flat.v0.normal = flat.v1.normal = flat.v2.normal = faceNormal;
+    const float plane = meanCurvature(flat);
+    ctx.plan(3);
+    char detail[160];
+    std::snprintf(detail, sizeof(detail), "outward normals: H %.9g, expected 1/R = %.9g within %.3g", static_cast<double>(outward),
+                  static_cast<double>(1.0F / kRadius), static_cast<double>(bound));
+    PT_EXPECT(ctx, std::abs(outward - (1.0F / kRadius)) <= bound, detail);
+    std::snprintf(detail, sizeof(detail), "inward normals: H %.9g, expected -1/R = %.9g within %.3g", static_cast<double>(inward),
+                  static_cast<double>(-1.0F / kRadius), static_cast<double>(bound));
+    PT_EXPECT(ctx, std::abs(inward + (1.0F / kRadius)) <= bound, detail);
+    // Equal normals leave every dn exactly zero, so the trace and H are exactly zero.
+    std::snprintf(detail, sizeof(detail), "equal normals: H %.9g, expected exactly 0", static_cast<double>(plane));
+    PT_EXPECT(ctx, plane == 0.0F, detail);
 }
 
 PT_CHECK_MAIN("gbuffer")

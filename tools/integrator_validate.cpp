@@ -55,10 +55,12 @@ using pathtracer::scene::Constant;
 using pathtracer::scene::EnvironmentMap;
 using pathtracer::scene::forEachInput;
 using pathtracer::scene::InputSpec;
+using pathtracer::scene::lobeSpread;
 using pathtracer::scene::Material;
 using pathtracer::scene::OpenPbrInputs;
 using pathtracer::scene::MeshInstance;
 using pathtracer::scene::PathTraceSettings;
+using pathtracer::scene::scatteredSpread;
 using pathtracer::scene::ShadingTriangle;
 using pathtracer::scene::ShadingVertex;
 using pathtracer::scene::TextureHandle;
@@ -3303,6 +3305,144 @@ PT_CHECK(primary_hits_filter_minified_textures, Fast, Exact) {
     std::snprintf(detail, sizeof(detail), "%d of %d pixels read specular_roughness as a single texel; a lobe-shaping input was filtered",
                   unfilteredRoughness, kImageSize * kImageSize);
     PT_EXPECT(ctx, unfilteredRoughness == kImageSize * kImageSize, detail);
+}
+
+PT_CHECK(bounced_hits_filter_minified_textures, Fast, Exact) {
+    constexpr int kChecker = 64;
+    constexpr float kTexelsPerPixel = 64.0F;
+    constexpr float kEmitterZ = 15.0F;
+    std::vector<float> checker;
+    for (int y = 0; y < kChecker; ++y) {
+        for (int x = 0; x < kChecker; ++x) {
+            const auto texel = static_cast<float>((x + y) % 2);
+            checker.insert(checker.end(), {texel, texel, texel});
+        }
+    }
+    const Camera camera = makeCamera();
+    const Camera::ViewBasis basis = camera.viewBasis(1.0F);
+    const float cameraZ = camera.position().z;
+    // A flat mirror at z = 0 images the plane at kEmitterZ from cameraZ + kEmitterZ away, so a pixel spans that distance's width.
+    const float pixelMetres = 2.0F * (cameraZ + kEmitterZ) * std::min(basis.halfWidth, basis.halfHeight) / static_cast<float>(kImageSize);
+    const float uvPerMetre = kTexelsPerPixel / (static_cast<float>(kChecker) * pixelMetres);
+    const glm::vec3 normal(0.0F, 0.0F, 1.0F);
+    const glm::vec4 tangent(1.0F, 0.0F, 0.0F, 1.0F);
+    // Half a texel over, so a pixel centre's reflection lands on a texel centre: 0 or 1 to a point lookup.
+    const glm::vec2 halfTexel(0.5F / static_cast<float>(kChecker));
+    const auto vertex = [&](float x, float y, float z) {
+        return ShadingVertex{glm::vec3(x, y, z), normal, (glm::vec2(x, y) * uvPerMetre) + halfTexel, tangent};
+    };
+    // The mirror covers the frame and its filter taps as the primary test's plane does; the emitter covers the mirror's image of it.
+    const float emitterExtent = 1.0F + (kEmitterZ / cameraZ);
+    TestScene scene;
+    const auto addQuad = [&](float extent, float z, int instance) {
+        const ShadingVertex v0 = vertex(-extent, -extent, z);
+        const ShadingVertex v1 = vertex(extent, -extent, z);
+        const ShadingVertex v2 = vertex(extent, extent, z);
+        const ShadingVertex v3 = vertex(-extent, extent, z);
+        scene.worldTriangles.insert(scene.worldTriangles.end(),
+                                    {Triangle{v0.position, v1.position, v2.position}, Triangle{v0.position, v2.position, v3.position}});
+        scene.shadingTriangles.insert(scene.shadingTriangles.end(), {ShadingTriangle{v0, v1, v2, instance}, ShadingTriangle{v0, v2, v3, instance}});
+    };
+    addQuad(1.0F, 0.0F, 0);
+    addQuad(emitterExtent, kEmitterZ, 1);
+    Material mirror = makeMaterial(0.0F);
+    mirror.baseMetalness = 1.0F;
+    // A thin wall emits from both faces, so the emitter needs no winding toward the mirror; it reflects nothing.
+    Material emitter = makeMaterial(1.0F);
+    emitter.baseWeight = 0.0F;
+    emitter.specularWeight = 0.0F;
+    emitter.geometryThinWalled = true;
+    emitter.emissionLuminance = 1.0F;
+    emitter.emissionColor = tools::fixtures::makeTexture(kChecker, kChecker, pathtracer::gfx::kRgbChannels, checker);
+    scene.instances = {MeshInstance{mirror, glm::mat4(1.0F), ""}, MeshInstance{emitter, glm::mat4(1.0F), ""}};
+    // The checker's mean as a constant: the mirror's Fresnel scales both alike, so only the lookup differs.
+    TestScene meanScene = scene;
+    meanScene.instances[1].material.emissionColor = glm::vec3(0.5F);
+    std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+    const EnvironmentMap env = makeUniformEnvironment();
+    PathTraceSettings settings = makeSettings(0, 1);
+    settings.samplesPerPixel = 16;
+    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    const pathtracer::scene::PathTraceResult traced = renderPass(scene, env, settings, *accel, pool, /*showSky=*/false);
+    const pathtracer::scene::PathTraceResult mean = renderPass(meanScene, env, settings, *accel, pool, /*showSky=*/false);
+    // The flat mirror keeps the cone, 16 texels per stratum at levels 3-4, every one exactly 0.5: a few ulp of blend and mean.
+    const float bound = 8.0F * std::numeric_limits<float>::epsilon() * 0.5F;
+    float worst = 0.0F;
+    for (std::size_t pixel = 0; pixel < static_cast<std::size_t>(kImageSize) * kImageSize; ++pixel) {
+        const glm::vec3 difference = glm::abs(traced.beauty.rgb(pixel) - mean.beauty.rgb(pixel));
+        worst = std::max({worst, difference.r, difference.g, difference.b});
+    }
+    ctx.plan(1);
+    char detail[160];
+    // Point lookups after the bounce would leave 16 samples' mean about 1/8 from the constant's render.
+    std::snprintf(detail, sizeof(detail), "the mirrored checker is %.3g from its mean's render, over %.3g", static_cast<double>(worst),
+                  static_cast<double>(bound));
+    PT_EXPECT(ctx, worst <= bound, detail);
+}
+
+PT_CHECK(ray_cone_transfer, Fast, Exact) {
+    constexpr float kSpread = 1.0e-3F;
+    constexpr float kWidth = 2.0e-2F;
+    constexpr float kCurvature = 2.0F;
+    constexpr float kEta = 1.0F / 1.5F;
+    const glm::vec3 n(0.0F, 0.0F, 1.0F);
+    const float incidence = glm::radians(35.0F);
+    const glm::vec3 d(std::sin(incidence), 0.0F, -std::cos(incidence));
+    const float cosI = -d.z;
+    const glm::vec3 reflected = glm::reflect(d, n);
+    const glm::vec3 refracted = glm::refract(d, n, kEta);
+    // A dozen products, a quotient and two square roots: 16 u = 8 eps of relative rounding.
+    const float relative = 8.0F * std::numeric_limits<float>::epsilon();
+    // |dwi| per radian of normal tilt in and across the plane of incidence, central differences in double: their error is O(1e-12).
+    const auto tiltRates = [&](bool refracts) {
+        const glm::dvec3 dd(d);
+        const auto leave = [&](const glm::dvec3& normal) {
+            return refracts ? glm::refract(dd, normal, static_cast<double>(kEta)) : glm::reflect(dd, normal);
+        };
+        constexpr double kTilt = 1.0e-6;
+        const double inPlane = glm::length(leave({std::sin(kTilt), 0.0, std::cos(kTilt)}) - leave({-std::sin(kTilt), 0.0, std::cos(kTilt)}));
+        const double across = glm::length(leave({0.0, std::sin(kTilt), std::cos(kTilt)}) - leave({0.0, -std::sin(kTilt), std::cos(kTilt)}));
+        return glm::dvec2(inPlane, across) / (2.0 * kTilt);
+    };
+    // The footprint spans width / cosI in the plane and width across it, the normal turning by curvature times each.
+    const auto curvatureTerm = [&](bool refracts) {
+        const glm::dvec2 rates = tiltRates(refracts);
+        return std::sqrt(rates.x * rates.y) * kCurvature * kWidth / std::sqrt(static_cast<double>(cosI));
+    };
+    const auto within = [&](double got, double expected) { return std::abs(got - expected) <= relative * std::abs(expected); };
+    ctx.plan(7);
+    char detail[200];
+    const float flat = scatteredSpread(kSpread, kWidth, d, reflected, n, 0.0F, 1.0F, 0.0F);
+    std::snprintf(detail, sizeof(detail), "flat mirror: spread %.9g, expected %.9g kept", static_cast<double>(flat), static_cast<double>(kSpread));
+    PT_EXPECT(ctx, within(flat, kSpread), detail);
+    const float convex = scatteredSpread(0.0F, kWidth, d, reflected, n, kCurvature, 1.0F, 0.0F);
+    std::snprintf(detail, sizeof(detail), "convex mirror: spread %.9g, Igehy's tilt %.9g, which is 2 h width", static_cast<double>(convex),
+                  curvatureTerm(false));
+    PT_EXPECT(ctx, within(convex, curvatureTerm(false)) && within(convex, 2.0 * kCurvature * kWidth), detail);
+    const float lens = scatteredSpread(0.0F, kWidth, d, refracted, n, kCurvature, kEta, 0.0F);
+    std::snprintf(detail, sizeof(detail), "convex surface into glass: spread %.9g, Igehy's tilt %.9g, converging", static_cast<double>(lens),
+                  -curvatureTerm(true));
+    PT_EXPECT(ctx, within(lens, -curvatureTerm(true)), detail);
+    // Etendue n^2 cos dOmega is invariant across the interface: cosO spread_o^2 = eta^2 cosI spread_i^2.
+    const float bent = scatteredSpread(kSpread, 0.0F, d, refracted, n, 0.0F, kEta, 0.0F);
+    const double outgoing = static_cast<double>(-refracted.z) * bent * bent;
+    const double incoming = static_cast<double>(kEta * kEta * cosI) * kSpread * kSpread;
+    std::snprintf(detail, sizeof(detail), "refraction: cosO spread^2 %.9g against eta^2 cosI spread^2 %.9g", outgoing, incoming);
+    PT_EXPECT(ctx, std::abs(outgoing - incoming) <= 2.0 * relative * incoming, detail);
+    // A drawn lobe from a point cone: the spread is the sample's share alone, and an infinite share spans the sphere.
+    constexpr float kShare = 3.0e-4F;
+    const float drawn = scatteredSpread(0.0F, 0.0F, d, reflected, n, kCurvature, 1.0F, kShare);
+    std::snprintf(detail, sizeof(detail), "drawn lobe: spread^2 %.9g, share %.9g", static_cast<double>(drawn * drawn), static_cast<double>(kShare));
+    PT_EXPECT(ctx, within(drawn * drawn, kShare), detail);
+    const float sphere = std::sqrt(4.0F * std::numbers::pi_v<float>);
+    const float unbounded = scatteredSpread(kSpread, kWidth, d, reflected, n, 0.0F, 1.0F, std::numeric_limits<float>::infinity());
+    std::snprintf(detail, sizeof(detail), "no density: spread %.9g, the sphere's %.9g", static_cast<double>(unbounded), static_cast<double>(sphere));
+    PT_EXPECT(ctx, unbounded == sphere, detail);
+    // Spreads add in quadrature, a lobe's convolution of the cone arriving.
+    const float added = lobeSpread(kSpread, kShare);
+    std::snprintf(detail, sizeof(detail), "quadrature: spread^2 %.9g, expected %.9g", static_cast<double>(added * added),
+                  static_cast<double>((kSpread * kSpread) + kShare));
+    PT_EXPECT(ctx, within(added * added, (kSpread * kSpread) + kShare), detail);
 }
 
 // Radiance only inside one end column, 1/8 px clear of its edges: the column across the seam is lit if, and only if, the filter wraps.

@@ -22,6 +22,12 @@ struct LineProximity {
 [[nodiscard]] pathtracer::gfx::TextureFootprint primaryHitFootprint(const ShadingTriangle& triangle, const Ray& ray, float t,
                                                                     const glm::mat2x3& dirFootprint);
 
+// A ray cone's st footprint (Amanatides 1984): |width| across the ray each way, moved onto the hit plane like a primary hit's.
+[[nodiscard]] pathtracer::gfx::TextureFootprint coneHitFootprint(const ShadingTriangle& triangle, const Ray& ray, float width);
+
+// Mean curvature of the triangle's interpolated vertex normals, half their surface divergence: +1/R on a sphere seen from outside.
+[[nodiscard]] float meanCurvature(const ShadingTriangle& triangle);
+
 // The surface inputs at a shading point, filtered ones prefiltered over footprint; COLOR_0 tints base_color. Others keep defaults.
 [[nodiscard]] OpenPbrInputs<Constant> resolveInputs(const Material& material, glm::vec2 uv,
                                                    const pathtracer::gfx::TextureFootprint& footprint, const glm::vec3& vertexColour);

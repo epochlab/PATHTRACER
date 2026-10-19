@@ -7,6 +7,7 @@
 #include <variant>
 
 #include "microfacet.h"
+#include "shading_math.h"
 
 namespace pathtracer::scene {
 
@@ -31,15 +32,18 @@ T evaluate(const MaterialInput<T>& input, glm::vec2 uv, const pathtracer::gfx::T
 
 }  // namespace
 
-pathtracer::gfx::TextureFootprint primaryHitFootprint(const ShadingTriangle& triangle, const Ray& ray, float t,
-                                                      const glm::mat2x3& dirFootprint) {
+namespace {
+
+// Offsets across a ray, scaled, moved along it onto the hit plane (Igehy 1999), then into uv by a Gram solve needing no dP/duv inverse.
+pathtracer::gfx::TextureFootprint planeFootprint(const ShadingTriangle& triangle, const glm::vec3& dir, float scale,
+                                                 const glm::mat2x3& offsets) {
     const glm::vec3 edge1 = triangle.v1.position - triangle.v0.position;
     const glm::vec3 edge2 = triangle.v2.position - triangle.v0.position;
     const glm::vec3 normal = glm::cross(edge1, edge2);
-    // A pinhole's origin is fixed, so dP = t dD + dt D with dt = -t (dD.n)/(D.n): the offset ray meets the same plane.
-    const float dirDotNormal = glm::dot(ray.dir, normal);
-    const auto onPlane = [&](const glm::vec3& dirRate) {
-        return t * (dirRate - ((glm::dot(dirRate, normal) / dirDotNormal) * ray.dir));
+    // dP = scale * (o - ((o.n)/(D.n)) D): the offset ray meets the same plane, along D from where it crossed the ray.
+    const float dirDotNormal = glm::dot(dir, normal);
+    const auto onPlane = [&](const glm::vec3& offset) {
+        return scale * (offset - ((glm::dot(offset, normal) / dirDotNormal) * dir));
     };
     // dP in the edges' basis by its Gram system, whose determinant is |n|^2: the uvs then carry it, whatever their orientation.
     const float e11 = glm::dot(edge1, edge1);
@@ -53,7 +57,35 @@ pathtracer::gfx::TextureFootprint primaryHitFootprint(const ShadingTriangle& tri
         const float p2 = glm::dot(edge2, dP);
         return ((((e22 * p1) - (e12 * p2)) * uv1) + (((e11 * p2) - (e12 * p1)) * uv2)) * inverseDet;
     };
-    return {toUv(onPlane(dirFootprint[0])), toUv(onPlane(dirFootprint[1]))};
+    return {toUv(onPlane(offsets[0])), toUv(onPlane(offsets[1]))};
+}
+
+}  // namespace
+
+pathtracer::gfx::TextureFootprint primaryHitFootprint(const ShadingTriangle& triangle, const Ray& ray, float t,
+                                                      const glm::mat2x3& dirFootprint) {
+    // A pinhole's origin is fixed, so the direction offsets times t are the offset rays' displacement across the ray at the hit.
+    return planeFootprint(triangle, ray.dir, t, dirFootprint);
+}
+
+pathtracer::gfx::TextureFootprint coneHitFootprint(const ShadingTriangle& triangle, const Ray& ray, float width) {
+    const glm::vec3 dir = glm::normalize(ray.dir);
+    const glm::mat3 across = glm::transpose(toFrameAbout(dir));
+    return planeFootprint(triangle, dir, std::abs(width), glm::mat2x3(across[0], across[1]));
+}
+
+float meanCurvature(const ShadingTriangle& triangle) {
+    const glm::vec3 edge1 = triangle.v1.position - triangle.v0.position;
+    const glm::vec3 edge2 = triangle.v2.position - triangle.v0.position;
+    const glm::vec3 turn1 = triangle.v1.normal - triangle.v0.normal;
+    const glm::vec3 turn2 = triangle.v2.normal - triangle.v0.normal;
+    // H = div(n) / 2 for the interpolated normals: dn/dp is exact from two edges, its trace tr(G^-1 D) with G the edges' Gram matrix.
+    const float e11 = glm::dot(edge1, edge1);
+    const float e12 = glm::dot(edge1, edge2);
+    const float e22 = glm::dot(edge2, edge2);
+    const float trace =
+        (e22 * glm::dot(turn1, edge1)) - (e12 * (glm::dot(turn1, edge2) + glm::dot(turn2, edge1))) + (e11 * glm::dot(turn2, edge2));
+    return 0.5F * trace / ((e11 * e22) - (e12 * e12));
 }
 
 LineProximity nearLineSegmentPx(glm::vec2 p, glm::vec2 a, glm::vec2 b, float thicknessPx) {

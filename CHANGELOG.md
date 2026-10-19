@@ -3,6 +3,40 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Ray-cone footprints after bounces
+
+Texture lookups after the first bounce read the full-resolution image at a point, so they shimmered and pulled 4K tiles off disk
+from all over the map. Every path now carries a ray cone, so the colour lookups and the sky after a bounce read the MIP level
+their sample covers. Evidence is in `results/texture_lookup_cost`.
+- **The cone (Amanatides 1984):** a width at the ray's origin and a spread, spread^2 being one sample's solid angle. It starts as
+  the camera stratum's (bounce 0 keeps its anisotropic differentials and is bit-identical), widens by spread x distance, and at a
+  hit gives |width| across the ray, moved onto the triangle and into uv as the primary footprint is (`coneHitFootprint`).
+- **Mirrors and glass:** Igehy's transfer about the shading normal. Etendue n^2 cos dOmega scales the spread, and the curvature
+  term mu h width turns it, mu = eta cosI + wi.n (2 cosI on reflection), so a convex mirror spreads the cone and a convex lens
+  focuses it. The isotropic cone takes the geometric mean of the in- and out-of-plane terms.
+- **Curvature:** `meanCurvature` is half the surface divergence of the triangle's interpolated vertex normals, tr(G^-1 D) over two
+  edges: exactly 1/R on a sphere and 0 on a plane, signed on the ray's side.
+- **Rough lobes and media:** the drawn direction's share of its density, 1 / (N pdf) sr (Suykens and Willems 2001), adds in
+  quadrature (variances add under the lobe's convolution, Belcour et al. 2013), capped at the sphere's 4 pi. Phase and walk
+  scattering add theirs the same way. N is the pixel's sample count, so the prefilter blur vanishes as N grows.
+- **What filters:** the inputs bounce 0 already filtered (base colour, specular colour, emission, opacity and the other linear
+  ones). Normal, bump and roughness stay point-sampled at every bounce. The sky filters only where its hit takes full MIS weight:
+  after the camera or a delta lobe. Elsewhere NEE reads it at a point, and filtering the BSDF side alone added 16% on the stump
+  (2.2% on cornell), because the blurred sun took BSDF weight where NEE's density is low.
+- **Image** (256x128, 16 passes, same seeds before and after): macbeth, cornell_sss and cloud are bit-identical. Stump changes
+  4.7% of pixels by 0.03 of one render's seed noise (RMS), mean -0.065% against a 1.4% seed spread. Cornell changes 13.7%,
+  the sky in the chrome and glass spheres, by 0.075 of seed noise, mean +0.06%.
+- **I/O** on the stump: base colour reads 287 tiles (6.7 MB) where it read 2201 (51.6 MB), its level-0 tiles 1930 -> 3. In all,
+  8637 tiles and 121 MB per render instead of 10523 and 165 MB (-27%). The 102 MB left is the point-sampled normal, bump and
+  roughness maps; the README roadmap's "Minification filtering" row now carries that cost.
+- **Time:** `bench_compare`, 3 rounds: stump B/A 1.003, cornell 1.053, macbeth 1.037, none resolved at n = 3 (macbeth computes
+  identical work). Sampled profiles put cold tile reads at about 60% of the stump's render threads before and after, and the
+  cone's footprint at 0.9% of cornell's.
+- **Tests:** `integrator_validate bounced_hits_filter_minified_textures` reflects a 64:1-minified checker in a flat mirror and
+  matches its mean's render to 8 ulp; point lookups miss by 0.143. `ray_cone_transfer` checks a flat mirror, a convex mirror and a
+  convex refraction against central differences of Igehy's directions, etendue, the lobe share and the sphere cap.
+  `gbuffer_validate` checks the cone footprint against the plane transfer and `meanCurvature` on a sphere's octant and a plane.
+
 ## Photometric calibration
 
 Light values are now real units, so a render's exposure can be checked against a real light meter. One scene-linear luminance unit
