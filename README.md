@@ -85,4 +85,3 @@ frame["depth"]    # (64, 128, 1) float32, camera-space Z
 | Camera | Anamorphic and distortion | Stretched widescreen lenses and real lens distortion. Each needs an inverse to keep motion vectors and texture filtering right. | high | ready |
 | Camera | Subdivision surfaces | Smooth curved surfaces from coarse meshes, subdivided at load. Needs a scene-file flag and waits for the scene graph. | high | blocked |
 | Camera | Scene graph and instancing | Every copy of an object is stored separately. Keeping objects in a hierarchy would let copies share memory and enable motion blur. | high | ready |
-| Transport | Volume emission | Media that glow, such as fire or a lit gas, gathered where a ray collides inside them. OpenPBR's surface has no such input, so it would be a volume material key. | medium | ready |
