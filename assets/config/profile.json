@@ -1,6 +1,6 @@
 {
     "camera": {
-        "position": [0.0, 0.0, 0.25],
+        "position": [0.0, 0.0, 6.0],
         "rotation": [0.0, 0.0, 0.0],
         "filmBackPreset": "ARRI Alexa XT (16:9)",
         "focalLengthMm": 70.0,
@@ -10,11 +10,11 @@
         "shutterSeconds": 0.008,
         "iso": 400.0,
         "lens": {
-            "projection": "omnidirectional",
+            "projection": "rectilinear",
             "maxFieldOfViewDegrees": 180.0,
             "radialCoefficients": [0.0, 0.0, 0.0, 0.0]
         },
-        "pixelLattice": "hexagonal",
+        "pixelLattice": "square",
         "acceptanceAngleDegrees": 0.0
     },
     "controls": {
@@ -22,12 +22,12 @@
         "orbitSensitivityDegPerPixel": 0.25
     },
     "render": {
-        "width": 64,
-        "height": 32,
+        "width": 1024,
+        "height": 512,
         "displayWidth": 2048,
         "displayHeight": 1152,
         "renderScale": 1.0,
-        "interactiveRenderScale": 1.0,
+        "interactiveRenderScale": 0.1,
         "defaultAOV": 0,
         "defaultLUT": "sRGB",
         "vsync": true,
@@ -39,7 +39,7 @@
         "samplesPerPixel": 1,
         "maxBounces": 8,
         "russianRouletteStartBounce": 3,
-        "maxSamples": 16,
+        "maxSamples": 64,
         "aoMaxDistance": 1.0,
         "lookaheadDistance": 10.0,
         "replicates": 4,
