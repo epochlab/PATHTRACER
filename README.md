@@ -2,7 +2,7 @@
 
 *A physically-based unidirectional Monte Carlo path tracer with progressive sampling: Embree-accelerated, stochastic BSDF combined with environment and area-light NEE via MIS, behind a thin OpenGL display/HUD layer.*
 
-![Sample render](sample.png)
+![Sample](sample.png)
 
 ## Build
 
