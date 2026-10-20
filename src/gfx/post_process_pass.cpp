@@ -47,4 +47,14 @@ void PostProcessPass::draw(unsigned int hdrColorTexture, const ShaderProgram& di
     glBindVertexArray(0);
 }
 
+// Not wrapped in GL_CALL: it runs every frame. One scissored clear of the grown rect; the image draw then overwrites its interior.
+void drawImageBounds(ViewportRect imageRect, unsigned int framebuffer) {
+    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(imageRect.x - 1, imageRect.y - 1, imageRect.width + 2, imageRect.height + 2);
+    glClearColor(kImageBoundsCode, kImageBoundsCode, kImageBoundsCode, 1.0F);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDisable(GL_SCISSOR_TEST);
+}
+
 }  // namespace pathtracer::gfx

@@ -35,8 +35,8 @@ public:
     // {width, height} in screen points, the units cursorPosition() uses. Never divide cursorPosition() by the framebuffer size.
     [[nodiscard]] std::pair<int, int> windowSize() const;
 
-    // Invoked on GLFW key events; scancode and mods are not forwarded because no consumer needs them. One slot for every hotkey.
-    using KeyCallback = std::function<void(int key, int action)>;
+    // Invoked on GLFW key events with GLFW_MOD_* bits; scancode is not forwarded because no consumer needs it. One slot for every hotkey.
+    using KeyCallback = std::function<void(int key, int action, int mods)>;
     void setKeyCallback(KeyCallback callback);
 
     // Polled key state (glfwGetKey), for continuous movement (WASD/QE) where an edge-triggered callback would only fire once per press.

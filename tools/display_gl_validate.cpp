@@ -791,6 +791,59 @@ PT_CHECK(histogram_bins_the_drawn_frame, Fast, Exact) {
     PT_EXPECT(ctx, counted == 3ULL * Histogram::kWidth * Histogram::kHeight, "the bins do not hold every pixel once per channel");
 }
 
+// The viewer's order, ring then image: only the 1 px border outside the rect reads the code, its off-target sides clipped by GL.
+PT_CHECK(image_bounds_ring_is_one_pixel_outside_the_rect, Fast, Exact) {
+    if (glContext() == nullptr) {
+        ctx.skip("no GL context on this host");
+        return;
+    }
+    struct Case {
+        const char* name;
+        ViewportRect rect;
+    };
+    // Centred leaves a margin on all four sides; flush to the corner puts the left and bottom of the ring off the target.
+    constexpr std::array<Case, 2> kCases{{{"centred", {4, 3, 8, 6}}, {"flush to the corner", {0, 0, 12, 9}}}};
+    constexpr int kWidth = 16;
+    constexpr int kHeight = 12;
+    std::optional<DisplayPath> path = makeDisplayPath();
+    ctx.plan(1 + (2 * static_cast<int>(kCases.size())));
+    PT_EXPECT(ctx, path.has_value(), "the display shaders did not build");
+    if (!path) {
+        return;
+    }
+    // White through Raw lands near 1, far from the ring's code, so an interior texel the ring overwrote cannot pass.
+    HdrImage white = pathtracer::gfx::makeImage(2, 2, pathtracer::gfx::kRgbChannels);
+    std::fill(white.texels.begin(), white.texels.end(), 1.0F);
+    const pathtracer::gfx::Texture texture =
+        pathtracer::gfx::Texture::createFromFloatPixels(white.width, white.height, 3, white.texels.data(), ScalarType::Float32);
+    for (const Case& testCase : kCases) {
+        const RenderTarget target(kWidth, kHeight, GL_RGBA32F);
+        pathtracer::gfx::drawImageBounds(testCase.rect, target.fbo());
+        const bool scissorLeftOn = glIsEnabled(GL_SCISSOR_TEST) == GL_TRUE;
+        present(*path, texture, white.width, white.height, ScalarType::Float32, DisplayState{.lut = Lut::Raw}, testCase.rect, target);
+        const std::vector<float> texels = target.read<float>(GL_RGBA, 4);
+        const ViewportRect r = testCase.rect;
+        int wrong = 0;
+        for (int y = 0; y < kHeight; ++y) {
+            for (int x = 0; x < kWidth; ++x) {
+                const bool inside = x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height;
+                const bool ring = !inside && x >= r.x - 1 && x <= r.x + r.width && y >= r.y - 1 && y <= r.y + r.height;
+                for (int c = 0; c < 3; ++c) {
+                    const float v = texels[(static_cast<std::size_t>((y * kWidth) + x) * 4) + static_cast<std::size_t>(c)];
+                    const bool ok = inside ? std::fabs(v - 1.0F) < 0.5F : v == (ring ? pathtracer::gfx::kImageBoundsCode : 0.0F);
+                    wrong += ok ? 0 : 1;
+                }
+            }
+        }
+        char detail[160];
+        std::snprintf(detail, sizeof(detail), "%s: %d channel(s) off the ring/image/black partition", testCase.name, wrong);
+        PT_EXPECT(ctx, wrong == 0, detail);
+        char state[160];
+        std::snprintf(state, sizeof(state), "%s: scissor test left enabled or a GL error raised", testCase.name);
+        PT_EXPECT(ctx, !scissorLeftOn && glGetError() == GL_NO_ERROR, state);
+    }
+}
+
 }  // namespace
 
 PT_CHECK_MAIN("display_gl")

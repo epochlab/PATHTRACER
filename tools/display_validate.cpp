@@ -950,6 +950,75 @@ PT_CHECK(viewport_fit_preserves_aspect_and_centres, Fast, Exact) {
     }
 }
 
+// Cmd+/- zoom: powers of two strictly below fit, the short side spanning >= 1 px; past fit, a resize outgrowing it, or no level is fit.
+PT_CHECK(zoom_steps_by_powers_of_two_below_fit, Fast, Exact) {
+    using pathtracer::gfx::ZoomLevel;
+    struct Case {
+        const char* name;
+        double imageWidth;
+        double imageHeight;
+        int viewportWidth;
+        int viewportHeight;
+        ZoomLevel level;
+        int steps;
+        ZoomLevel expectedLevel;
+        pathtracer::gfx::ViewportRect expected;
+    };
+    const std::vector<Case> cases = {
+        {"launch fits", 1024, 512, 2048, 1152, std::nullopt, 0, std::nullopt, {0, 64, 2048, 1024}},
+        {"fit 2 steps out to 1:1", 1024, 512, 2048, 1152, std::nullopt, -1, 0, {512, 320, 1024, 512}},
+        {"two steps out is 1:2", 1024, 512, 2048, 1152, std::nullopt, -2, -1, {768, 448, 512, 256}},
+        {"in from the top level is fit", 1024, 512, 2048, 1152, 0, 1, std::nullopt, {0, 64, 2048, 1024}},
+        {"in past fit stays fit", 1024, 512, 2048, 1152, std::nullopt, 3, std::nullopt, {0, 64, 2048, 1024}},
+        // fit = 2.048, so the level below it is 2^1, not 2^2.
+        {"non-power-of-two fit", 1000, 500, 2048, 1152, std::nullopt, -1, 1, {24, 76, 2000, 1000}},
+        // -ilogb(512) = -9: 1024 x 512 at 1/512 is 2 x 1 pixels.
+        {"out clamps at a one-pixel short side", 1024, 512, 2048, 1152, std::nullopt, -50, -9, {1023, 575, 2, 1}},
+        {"a shrink outgrowing the level is fit", 1024, 512, 1024, 576, 1, 0, std::nullopt, {0, 32, 1024, 512}},
+        // fit = 1/2 exactly, so the level below it is 1/4.
+        {"image larger than the window", 2048, 1024, 1024, 576, std::nullopt, -1, -2, {256, 160, 512, 256}},
+        {"non-positive viewport keeps the level", 1024, 512, 0, 576, 0, -1, 0, {0, 0, 0, 0}},
+        // 256 x 110.85 pitches, fit 8: level 2 is 1024 x 443.4, rounded to 443.
+        {"hexagonal film's fractional height", 256, 128.0 * std::sqrt(3.0) / 2.0, 2048, 1024, 2, 0, 2, {512, 290, 1024, 443}},
+        // fit 1/1024 puts the level below at -11, under the one-pixel floor of -9.
+        {"no level spans a pixel", 1024, 512, 1, 1, std::nullopt, -1, std::nullopt, {0, 0, 1, 1}},
+    };
+    const auto levelName = [](ZoomLevel level) { return level.has_value() ? std::to_string(*level) : std::string("fit"); };
+    ctx.plan(static_cast<int>(cases.size()) * 4);
+    for (const Case& testCase : cases) {
+        const ZoomLevel level = pathtracer::gfx::stepZoom(testCase.level, testCase.steps, testCase.imageWidth, testCase.imageHeight,
+                                                          testCase.viewportWidth, testCase.viewportHeight);
+        const pathtracer::gfx::ViewportRect rect = pathtracer::gfx::zoomedRect(
+            testCase.imageWidth, testCase.imageHeight, testCase.viewportWidth, testCase.viewportHeight, level);
+        char levelDetail[224];
+        std::snprintf(levelDetail, sizeof(levelDetail), "%s: level %s, expected %s", testCase.name, levelName(level).c_str(),
+                      levelName(testCase.expectedLevel).c_str());
+        PT_EXPECT(ctx, level == testCase.expectedLevel, levelDetail);
+        char detail[224];
+        std::snprintf(detail, sizeof(detail), "%s: got {%d,%d,%d,%d}, expected {%d,%d,%d,%d}", testCase.name, rect.x,
+                      rect.y, rect.width, rect.height, testCase.expected.x, testCase.expected.y,
+                      testCase.expected.width, testCase.expected.height);
+        PT_EXPECT(ctx, rect.x == testCase.expected.x && rect.y == testCase.expected.y &&
+                           rect.width == testCase.expected.width && rect.height == testCase.expected.height,
+                  detail);
+        char bounds[224];
+        std::snprintf(bounds, sizeof(bounds), "%s: rect {%d,%d,%d,%d} escapes a %dx%d viewport", testCase.name, rect.x,
+                      rect.y, rect.width, rect.height, testCase.viewportWidth, testCase.viewportHeight);
+        PT_EXPECT(ctx, rect.x >= 0 && rect.y >= 0 && rect.x + rect.width <= std::max(0, testCase.viewportWidth) &&
+                           rect.y + rect.height <= std::max(0, testCase.viewportHeight),
+                  bounds);
+        // The same half-pixel rounding bound as the fit: d(w/h) <= (0.5 + 0.5*aspect)/h.
+        const bool degenerate = rect.width == 0 || rect.height == 0;
+        const double imageAspect = degenerate ? 0.0 : testCase.imageWidth / testCase.imageHeight;
+        const double rectAspect = degenerate ? 0.0 : static_cast<double>(rect.width) / rect.height;
+        const double allowed = degenerate ? 0.0 : (0.5 + (0.5 * imageAspect)) / rect.height;
+        char aspect[224];
+        std::snprintf(aspect, sizeof(aspect), "%s: aspect %.6f against the image's %.6f", testCase.name, rectAspect,
+                      imageAspect);
+        PT_EXPECT(ctx, std::fabs(rectAspect - imageAspect) <= allowed, aspect);
+    }
+}
+
 
 // --- HUD histogram: the binning and curve shapes the panel draws, on bins whose answers follow from the definitions in closed form.
 

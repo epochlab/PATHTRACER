@@ -105,7 +105,7 @@ std::optional<pathtracer::debug::PixelProbeReadout> parsePixelProbe(const nlohma
     return std::nullopt;
 }
 
-// The render block's output fields: display LUT, bit depth, image size, bloom and probe. Scales, AOV and vsync are read after controls.
+// The render block's output fields: LUT, bit depth, image and window size, bloom, probe. Scales, AOV and vsync are read after controls.
 std::optional<RenderConfig> parseRenderOutput(const nlohmann::json& render, const std::string& path) {
     const std::string defaultLutName = render.at("defaultLUT").get<std::string>();
     const std::optional<pathtracer::gfx::OcioDisplayTransform::Lut> defaultLut =
@@ -133,7 +133,10 @@ std::optional<RenderConfig> parseRenderOutput(const nlohmann::json& render, cons
     }
     const int width = render.at("width").get<int>();
     const int height = render.at("height").get<int>();
-    return RenderConfig{width, height, 0.0F, 0.0F, 0, *defaultLut, false, *displayFormat, toFloat(render.at("bloomStrength")), *pixelProbe};
+    const int displayWidth = render.at("displayWidth").get<int>();
+    const int displayHeight = render.at("displayHeight").get<int>();
+    return RenderConfig{width, height, displayWidth, displayHeight, 0.0F, 0.0F, 0, *defaultLut, false, *displayFormat,
+                        toFloat(render.at("bloomStrength")), *pixelProbe};
 }
 
 // The camera block in field order, then lens, lattice and acceptance. Ranges need the film back, so Camera::validate runs on the whole.
@@ -281,6 +284,9 @@ bool validCounts(const RenderConfig& render, const PathTracerConfig& pathTracer,
     // The traced image the render scale multiplies, and the denominator of the primary ray's aspect ratio.
     atLeast("render.width", render.width, 1);
     atLeast("render.height", render.height, 1);
+    // The window's framebuffer: GLFW cannot create a window with no pixels.
+    atLeast("render.displayWidth", render.displayWidth, 1);
+    atLeast("render.displayHeight", render.displayHeight, 1);
     return ok;
 }
 

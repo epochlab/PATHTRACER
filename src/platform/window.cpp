@@ -103,11 +103,10 @@ void Window::setKeyCallback(KeyCallback callback) {
     keyCallback_ = std::move(callback);
 }
 
-void Window::keyCallback(GLFWwindow* window, int key, int /*scancode*/, int action,
-                          int /*mods*/) {
+void Window::keyCallback(GLFWwindow* window, int key, int /*scancode*/, int action, int mods) {
     auto* self = static_cast<Window*>(glfwGetWindowUserPointer(window));
     if (self != nullptr && self->keyCallback_) {
-        self->keyCallback_(key, action);
+        self->keyCallback_(key, action, mods);
     }
 }
 

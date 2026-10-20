@@ -3,6 +3,26 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Display window and zoom
+
+The window has its own size, `render.displayWidth`/`displayHeight` in framebuffer pixels. It no longer takes the size of the render, so a
+1024x512 render now opens in the shipped 2048x1152 window. Evidence is in `results/display_window`.
+- **Zoom:** the image opens fitted to the window. Cmd- and Cmd+ step it through powers of two strictly below the fit scale, so nearest
+  magnification gives uniform blocks and 1:2 is an exact 2x2 box. Stepping in past fit returns to fit, and so does a window shrink that
+  outgrows the current level. The image never leaves the window, so it needs no panning, and the probe, histogram and dither keep their
+  inside-the-framebuffer rect. Zoom out stops at the level where the short side is 1 px.
+- **Bounds ring:** a scissored clear of the image rect grown by 1 px, to code 0.25, before the image draw covers the interior. The ring
+  never touches an image texel, and GL clips any side that falls on the window edge.
+- **Config:** the shipped profile is a 1024x512 render in a 2048x1152 window. `-size` still sets only the render. Bench records gain a
+  `framebuffer` key only when the window is not the render's size, so earlier records stay comparable.
+- **Image and time** (256x128, 16 samples, 3 runs): the beauty crc32 is identical to main. pass_ms B/A is 1.00 (cornell) and 0.97
+  (macbeth), and present_gpu_ms B/A is 1.00 and 1.02. The ring's own cost is within noise at 2048x1152.
+- **Tests:**
+  - `display.zoom_steps_by_powers_of_two_below_fit`: 12 hand-checked rows.
+  - `display_gl.image_bounds_ring_is_one_pixel_outside_the_rect`: ring, then image, centred and flush to the edge.
+  - `io.profile_config_integer_counts`: now covers the display keys.
+  - Four code mutations each fail one of these.
+
 ## Contrast sensitivity AOV
 
 New AOV `contrastSensitivity` (Contrast Sensitivity), after Colour Opponent. Each texel holds its local contrast in multiples of the human

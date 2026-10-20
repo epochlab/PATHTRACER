@@ -38,9 +38,12 @@ struct ControlsConfig {
 };
 
 struct RenderConfig {
-    // The authored image, in pixels. Independent of the window: the display viewport letterboxes and magnifies it.
+    // The authored image, in pixels. Independent of the window, which fits it at launch and zooms it by powers of two.
     int width;
     int height;
+    // The window's framebuffer, in pixels (2x its points on Retina); the image is drawn inside it with a 1 px bounds ring.
+    int displayWidth;
+    int displayHeight;
     // Fraction of width x height traced, magnified to the viewport by the display draw. Both in (0,1].
     float renderScale;
     float interactiveRenderScale;  // the same, while the camera is moving
