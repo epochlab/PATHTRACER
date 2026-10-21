@@ -172,9 +172,36 @@ struct ReplicateEstimate {
 // Whether pass n is a checkpoint, n = K 2^j >= minSamples, where every replicate holds a power-of-two prefix of its own sequence.
 [[nodiscard]] bool adaptiveCheckpoint(int n, const PathTraceSettings& settings);
 
-// Drops the texels of ascending `active` the step-up procedure finds converged at 1 - confidence, keeping the rest ascending.
+// Foveal minimum angle of resolution, degrees: the intercept Guenter et al. 2012 fit their linear MAR model w = w0 + m e with.
+inline constexpr float kFovealMarDegrees = 1.0F / 48.0F;
+
+// Per-texel factor on the adaptive threshold for an observer at the camera fixating the frame centre (Guenter et al. 2012).
+class FoveatedThreshold {
+public:
+    // marSlope 0 is the uniform threshold; the camera must outlive this.
+    FoveatedThreshold(const Camera& camera, int width, int height, float marSlope);
+
+    // sqrt(N / N_gaze): the MAR w(e) pools N = max(1, w^2 / Omega) texels of solid angle Omega, dividing their noise by sqrt(N).
+    [[nodiscard]] float scale(std::uint32_t texel) const;
+
+private:
+    // The MAR in texel sides, max(1, w / sqrt(Omega)), for a texel-centre ray and its differential; 1 where no ray exists.
+    [[nodiscard]] float pooledSpan(const std::optional<Camera::RayDifferential>& ray) const;
+
+    const Camera& camera_;
+    pathtracer::gfx::PixelLattice lattice_;
+    glm::vec2 frame_;
+    Camera::ViewBasis basis_;
+    glm::mat2 ndcPerPixel_;
+    std::uint32_t width_;
+    float marSlope_;
+    glm::vec3 gaze_{0.0F};
+    float gazeSpan_ = 1.0F;
+};
+
+// Drops the texels of ascending `active` the step-up procedure finds converged at 1 - confidence each at its foveated threshold.
 void retireConvergedTexels(std::vector<std::uint32_t>& active, const float* replicateLuminance, const PathTraceSettings& settings,
-                           ThreadPool& threadPool);
+                           const FoveatedThreshold& fovea, ThreadPool& threadPool);
 
 // Splits [begin, end) into runs of consecutive texels in ascending `traced`, passed to fold(b, e), and the gaps, passed to carry(b, e).
 template <typename Fold, typename Carry>

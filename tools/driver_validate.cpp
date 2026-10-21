@@ -1143,7 +1143,8 @@ PathTraceResult sequentialAdaptiveFold(DriverFixture& fixture, const PathTraceDr
             pathtracer::scene::forEachTracedRun(active, rowBegin, rowBegin + kImageSize, fold, [](std::uint32_t, std::uint32_t) {});
         }
         if (pathtracer::scene::adaptiveCheckpoint(p + 1, settings)) {
-            pathtracer::scene::retireConvergedTexels(active, mean.replicateLuminance.data(), settings, fixture.pool);
+            const pathtracer::scene::FoveatedThreshold fovea(request.camera, kImageSize, kImageSize, settings.adaptive.marSlope);
+            pathtracer::scene::retireConvergedTexels(active, mean.replicateLuminance.data(), settings, fovea, fixture.pool);
         }
     }
     mean.samples = p;
@@ -1155,60 +1156,73 @@ PathTraceResult sequentialAdaptiveFold(DriverFixture& fixture, const PathTraceDr
 PT_CHECK(adaptive_driver_matches_the_sequential_fold, Slow, Exact) {
     // Chosen on this fixture so texels stop at several checkpoints and some reach the cap; the last assertion holds it to that.
     constexpr float kThreshold = 0.5F;
-    ctx.plan(4);
+    // Uniform, then foveated steeply enough that the 8-texel frame's 3.4-degree texels pool off-centre.
+    constexpr std::array<float, 2> kMarSlopes{0.0F, 1.0F};
+    ctx.plan(static_cast<int>(kMarSlopes.size()) * 4 + 1);
     std::unique_ptr<DriverFixture> fixture = makeFixture();
     if (!fixture->valid()) {
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < static_cast<int>(kMarSlopes.size()) * 4 + 1; ++i) {
             PT_EXPECT(ctx, false, "scene/driver construction failed");
         }
         return;
     }
-    const PathTraceDriver::Request request = makeAdaptiveRequest(kThreshold, makeCamera());
-    const std::uint64_t generation = fixture->driver->requestTrace(request);
-    const std::shared_ptr<const PathTraceResult> published = waitForSettled(*fixture->driver, generation);
-    if (published == nullptr) {
-        for (int i = 0; i < 4; ++i) {
-            PT_EXPECT(ctx, false, "driver never settled");
+    for (const float marSlope : kMarSlopes) {
+        PathTraceDriver::Request request = makeAdaptiveRequest(kThreshold, makeCamera());
+        request.settings.adaptive.marSlope = marSlope;
+        const std::uint64_t generation = fixture->driver->requestTrace(request);
+        const std::shared_ptr<const PathTraceResult> published = waitForSettled(*fixture->driver, generation);
+        if (published == nullptr) {
+            for (int i = 0; i < (marSlope > 0.0F ? 5 : 4); ++i) {
+                PT_EXPECT(ctx, false, "driver never settled");
+            }
+            continue;
         }
-        return;
-    }
-    const PathTraceResult expected = sequentialAdaptiveFold(*fixture, request, static_cast<std::uint32_t>(generation));
-    std::size_t differing = 0;
-    for (const Lane& lane : kLanes) {
-        const std::vector<float>& image = ((*published).*lane.image).texels;
-        for (std::size_t i = 0; i < image.size(); ++i) {
-            differing += std::bit_cast<std::uint32_t>(image[i]) != std::bit_cast<std::uint32_t>((expected.*lane.image).texels[i]) ? 1 : 0;
+        const PathTraceResult expected = sequentialAdaptiveFold(*fixture, request, static_cast<std::uint32_t>(generation));
+        std::size_t differing = 0;
+        for (const Lane& lane : kLanes) {
+            const std::vector<float>& image = ((*published).*lane.image).texels;
+            for (std::size_t i = 0; i < image.size(); ++i) {
+                const float folded = (expected.*lane.image).texels[i];
+                differing += std::bit_cast<std::uint32_t>(image[i]) != std::bit_cast<std::uint32_t>(folded) ? 1 : 0;
+            }
+        }
+        for (std::size_t i = 0; i < published->replicateLuminance.size(); ++i) {
+            differing += std::bit_cast<std::uint32_t>(published->replicateLuminance[i]) !=
+                                 std::bit_cast<std::uint32_t>(expected.replicateLuminance[i])
+                             ? 1
+                             : 0;
+        }
+        char detail[192];
+        std::snprintf(detail, sizeof(detail), "%zu lane and replicate floats differ from the sequential adaptive fold", differing);
+        PT_EXPECT(ctx, differing == 0, detail);
+        std::snprintf(detail, sizeof(detail), "driver ended at %d passes with %zu active, the fold at %d with %zu", published->samples,
+                      published->activeTexels, expected.samples, expected.activeTexels);
+        PT_EXPECT(ctx, published->samples == expected.samples && published->activeTexels == expected.activeTexels &&
+                           published->texelSamples == expected.texelSamples,
+                  detail);
+        // Every count is a checkpoint a texel stopped at, or the final pass of one still sampling.
+        const auto checkpoint = [&](int n) { return pathtracer::scene::adaptiveCheckpoint(n, request.settings); };
+        const bool countsValid = std::all_of(published->texelSamples.begin(), published->texelSamples.end(),
+                                             [&](int n) { return checkpoint(n) || n == published->samples; });
+        PT_EXPECT(ctx, countsValid, "a texel stopped between checkpoints");
+        // Non-vacuous: stops at two or more checkpoints, and texels still sampling at the cap, or the check exercised no carry or no fold.
+        std::vector<int> stops;
+        for (const int n : published->texelSamples) {
+            if (n < published->samples && std::find(stops.begin(), stops.end(), n) == stops.end()) {
+                stops.push_back(n);
+            }
+        }
+        std::snprintf(detail, sizeof(detail), "texels stopped at %zu distinct checkpoints with %zu still active at %d passes", stops.size(),
+                      published->activeTexels, published->samples);
+        PT_EXPECT(ctx, stops.size() >= 2 && published->activeTexels > 0 && published->samples == kAdaptiveCap, detail);
+        if (marSlope > 0.0F) {
+            // The same scramble uniform: generation seeds the sampler, so only the same seed isolates foveation's effect.
+            PathTraceDriver::Request uniform = request;
+            uniform.settings.adaptive.marSlope = 0.0F;
+            const PathTraceResult unfoveated = sequentialAdaptiveFold(*fixture, uniform, static_cast<std::uint32_t>(generation));
+            PT_EXPECT(ctx, unfoveated.texelSamples != published->texelSamples, "foveation left every texel's sample count unchanged");
         }
     }
-    for (std::size_t i = 0; i < published->replicateLuminance.size(); ++i) {
-        differing += std::bit_cast<std::uint32_t>(published->replicateLuminance[i]) !=
-                             std::bit_cast<std::uint32_t>(expected.replicateLuminance[i])
-                         ? 1
-                         : 0;
-    }
-    char detail[192];
-    std::snprintf(detail, sizeof(detail), "%zu lane and replicate floats differ from the sequential adaptive fold", differing);
-    PT_EXPECT(ctx, differing == 0, detail);
-    std::snprintf(detail, sizeof(detail), "driver ended at %d passes with %zu active, the fold at %d with %zu", published->samples,
-                  published->activeTexels, expected.samples, expected.activeTexels);
-    PT_EXPECT(ctx, published->samples == expected.samples && published->activeTexels == expected.activeTexels &&
-                       published->texelSamples == expected.texelSamples,
-              detail);
-    // Every count is a checkpoint a texel stopped at, or the final pass of one still sampling.
-    const auto checkpoint = [&](int n) { return pathtracer::scene::adaptiveCheckpoint(n, request.settings); };
-    const bool countsValid = std::all_of(published->texelSamples.begin(), published->texelSamples.end(),
-                                         [&](int n) { return checkpoint(n) || n == published->samples; });
-    PT_EXPECT(ctx, countsValid, "a texel stopped between checkpoints");
-    // Non-vacuous: stops at two or more checkpoints, and texels still sampling at the cap, or the check exercised no carry or no fold.
-    std::vector<int> stops;
-    for (const int n : published->texelSamples) {
-        if (n < published->samples && std::find(stops.begin(), stops.end(), n) == stops.end()) {
-            stops.push_back(n);
-        }
-    }
-    std::snprintf(detail, sizeof(detail), "texels stopped at %zu distinct checkpoints with %zu still active at %d passes", stops.size(),
-                  published->activeTexels, published->samples);
-    PT_EXPECT(ctx, stops.size() >= 2 && published->activeTexels > 0 && published->samples == kAdaptiveCap, detail);
 }
 
 // Once every texel has stopped there is no pass left to run, so the driver idles below its cap and says so in its records.

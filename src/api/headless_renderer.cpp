@@ -482,7 +482,10 @@ void HeadlessRenderer::accumulatePathTraced(const Request& request) {
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - passStart).count());
         accumulatePass(request, pass, laneSources);
         if (pathtracer::scene::adaptiveCheckpoint(pass + 1, baseSettings_)) {
-            pathtracer::scene::retireConvergedTexels(activeTexels_, pathTraced_.replicateLuminance.data(), baseSettings_, threadPool_);
+            const pathtracer::scene::FoveatedThreshold fovea(request.camera, request.width, request.height,
+                                                             baseSettings_.adaptive.marSlope);
+            pathtracer::scene::retireConvergedTexels(activeTexels_, pathTraced_.replicateLuminance.data(), baseSettings_, fovea,
+                                                     threadPool_);
         }
     }
     pathTraced_.activeTexels = activeTexels_.size();

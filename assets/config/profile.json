@@ -47,7 +47,10 @@
         "adaptive": {
             "threshold": 0.02,
             "confidence": 0.95,
-            "minSamples": 8
+            "minSamples": 8,
+            "foveation": {
+                "marSlope": 0.022
+            }
         }
     },
     "denoiser": {

@@ -62,6 +62,7 @@ struct AdaptiveSampling {
     float threshold = 0.0F;  // relative standard error of scene luminance a texel stops at, 1/SNR; 0 traces every texel every pass
     float confidence = 0.0F;  // 1 - the false discovery rate: the expected share of stopped texels whose error is within threshold
     int minSamples = 0;  // first checkpoint, replicates times a power of two
+    float marSlope = 0.0F;  // foveation: MAR growth per degree of eccentricity (Guenter et al. 2012 measured 0.022-0.0275); 0 is off
 };
 
 // samplesPerPixel is per renderPathTraced() call -- under PathTraceDriver, samples per accumulated pass (typically 1), not the total.

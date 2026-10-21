@@ -176,9 +176,50 @@ bool adaptiveCheckpoint(int n, const PathTraceSettings& settings) {
            std::has_single_bit(static_cast<unsigned int>(n / settings.replicates));
 }
 
+FoveatedThreshold::FoveatedThreshold(const Camera& camera, int width, int height, float marSlope)
+    : camera_(camera),
+      lattice_(camera.pixelLattice()),
+      frame_(pathtracer::gfx::frameExtent(lattice_, width, height)),
+      basis_(camera.viewBasis(frame_.x / frame_.y)),
+      // d(ndc) across a pixel side, a square of the cell's area: renderPathTraced's footprint, so lattices compare by solid angle.
+      ndcPerPixel_((2.0F * pathtracer::gfx::pixelSide(lattice_)) / frame_.x, 0.0F, 0.0F,
+                   (-2.0F * pathtracer::gfx::pixelSide(lattice_)) / frame_.y),
+      width_(static_cast<std::uint32_t>(width)),
+      marSlope_(marSlope) {
+    if (marSlope_ > 0.0F) {
+        // The frame centre lies inside every projection's image, a fisheye's circle included, so the gaze ray exists.
+        const std::optional<Camera::RayDifferential> gaze = camera.primaryRayDifferential(basis_, 0.0F, 0.0F);
+        gaze_ = gaze->ray.dir;  // NOLINT(bugprone-unchecked-optional-access)
+        gazeSpan_ = pooledSpan(gaze);
+    }
+}
+
+float FoveatedThreshold::pooledSpan(const std::optional<Camera::RayDifferential>& ray) const {
+    if (!ray) {
+        return 1.0F;
+    }
+    const glm::mat2x3 dirPerPixel = ray->dirPerNdc * ndcPerPixel_;
+    const float solidAngle = glm::length(glm::cross(dirPerPixel[0], dirPerPixel[1]));
+    // atan2 of |sin| and cos keeps the angle exact near the gaze, where acos of a dot product loses half its digits.
+    const float eccentricity = std::atan2(glm::length(glm::cross(ray->ray.dir, gaze_)), glm::dot(ray->ray.dir, gaze_));
+    // The slope is degrees per degree, so only the intercept converts to radians.
+    const float mar = glm::radians(kFovealMarDegrees) + (marSlope_ * eccentricity);
+    return std::max(1.0F, mar / std::sqrt(solidAngle));
+}
+
+float FoveatedThreshold::scale(std::uint32_t texel) const {
+    if (marSlope_ == 0.0F) {
+        return 1.0F;
+    }
+    const glm::vec2 centre =
+        pathtracer::gfx::pixelCentre(lattice_, static_cast<int>(texel % width_), static_cast<int>(texel / width_));
+    const glm::vec2 ndc(((centre.x / frame_.x) * 2.0F) - 1.0F, 1.0F - ((centre.y / frame_.y) * 2.0F));
+    return pooledSpan(camera_.primaryRayDifferential(basis_, ndc.x, ndc.y)) / gazeSpan_;
+}
+
 // Texels are independent under filter importance sampling, so the step-up holds the stopped set's false share to 1 - confidence.
 void retireConvergedTexels(std::vector<std::uint32_t>& active, const float* replicateLuminance, const PathTraceSettings& settings,
-                           ThreadPool& threadPool) {
+                           const FoveatedThreshold& fovea, ThreadPool& threadPool) {
     const auto stride = static_cast<std::size_t>(settings.replicates);
     const double alpha = 1.0 - static_cast<double>(settings.adaptive.confidence);
     const boost::math::chi_squared_distribution<double> chiSquared(static_cast<double>(settings.replicates) - 1.0);
@@ -192,7 +233,7 @@ void retireConvergedTexels(std::vector<std::uint32_t>& active, const float* repl
         const std::size_t end = std::min(begin + static_cast<std::size_t>(chunkTexels), active.size());
         for (std::size_t i = begin; i < end; ++i) {
             const ReplicateEstimate estimate = replicateEstimate(replicateLuminance + (active[i] * stride), settings.replicates);
-            statistics[i] = convergenceStatistic(estimate, settings.replicates, settings.adaptive.threshold);
+            statistics[i] = convergenceStatistic(estimate, settings.replicates, settings.adaptive.threshold * fovea.scale(active[i]));
         }
     });
     std::vector<double> candidates;
@@ -356,7 +397,8 @@ void PathTraceDriver::finishPass(const std::shared_ptr<PathTraceResult>& pass, s
         std::fill(pass->texelSamples.begin(), pass->texelSamples.end(), 1);
     }
     if (adaptiveCheckpoint(passIndex, settings)) {
-        retireConvergedTexels(activeTexels_, pass->replicateLuminance.data(), settings, threadPool_);
+        const FoveatedThreshold fovea(request.camera, pass->beauty.width, pass->beauty.height, settings.adaptive.marSlope);
+        retireConvergedTexels(activeTexels_, pass->replicateLuminance.data(), settings, fovea, threadPool_);
     }
     pass->activeTexels = activeTexels_.size();
     const double accumulateMs = millisecondsSince(accumulateStart);
