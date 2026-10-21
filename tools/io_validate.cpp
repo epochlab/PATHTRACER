@@ -950,7 +950,9 @@ PT_CHECK(profile_config_default_aov_is_in_range, Fast, Exact) {
 
     const std::filesystem::path shippedPath = std::filesystem::path(ASSET_ROOT_DIR) / "config" / "profile.json";
     std::ifstream shippedFile(shippedPath);
-    const nlohmann::json shipped = nlohmann::json::parse(shippedFile);
+    nlohmann::json shipped = nlohmann::json::parse(shippedFile);
+    // Denoised rows need the square lattice, whatever the shipped profile authors.
+    shipped["camera"]["pixelLattice"] = "square";
     ctx.plan(static_cast<int>(cases.size()) + 1);
     PT_EXPECT(ctx, pathtracer::config::loadProfileConfig(shippedPath.string()).has_value(),
                   "the shipped profile does not load, so no row below means anything");
@@ -1902,7 +1904,9 @@ PT_CHECK(profile_config_denoiser, Fast, Exact) {
     };
     const std::filesystem::path shippedPath = std::filesystem::path(ASSET_ROOT_DIR) / "config" / "profile.json";
     std::ifstream shippedFile(shippedPath);
-    const nlohmann::json shipped = nlohmann::json::parse(shippedFile);
+    nlohmann::json shipped = nlohmann::json::parse(shippedFile);
+    // Denoised rows need the square lattice, whatever the shipped profile authors.
+    shipped["camera"]["pixelLattice"] = "square";
     const nlohmann::json block = shipped["denoiser"];
     const auto with = [&](const char* key, const nlohmann::json& value) {
         nlohmann::json edited = block;

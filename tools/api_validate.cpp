@@ -617,7 +617,7 @@ PT_CHECK(every_aov_renders_finite, Slow, Exact) {
     constexpr int kHeight = 18;
     // Every AOV through every projection: no producer is lens-specific, so a fisheye and the lat-long must serve each one too.
     const std::array<pathtracer::scene::Camera, 3> cameras{
-        renderer->defaultCamera(),
+        withLens(renderer->defaultCamera(), {pathtracer::scene::LensProjection::Rectilinear}),
         withLens(renderer->defaultCamera(), {pathtracer::scene::LensProjection::FisheyePolynomial, {}, 180.0F}),
         withLens(renderer->defaultCamera(), {pathtracer::scene::LensProjection::Omnidirectional})};
     for (int i = 0; i < static_cast<int>(cameras.size()) * kAovCount; ++i) {
@@ -754,9 +754,14 @@ PT_CHECK(show_sky_changes_only_the_background, Slow, Exact) {
 
     constexpr int kWidth = 64;
     constexpr int kHeight = 36;
+    // Outside the box looking at it through a square pinhole, whatever the profile authors.
+    const pathtracer::scene::Camera& authored = renderer->defaultCamera();
+    const pathtracer::scene::Camera camera{glm::vec3(0.0F, 0.0F, 6.0F), glm::vec3(0.0F), authored.filmBack(),
+                                           authored.focalLengthMm(), authored.nearClip(), authored.farClip(), authored.aperture(),
+                                           authored.shutterSeconds(), authored.iso(), {pathtracer::scene::LensProjection::Rectilinear}};
     const auto render = [&](std::optional<bool> showSky, std::vector<float>& out) {
         const pathtracer::api::HeadlessRenderer::Request request{
-            .camera = renderer->defaultCamera(),
+            .camera = camera,
             .width = kWidth,
             .height = kHeight,
             .samples = 2,
@@ -901,7 +906,7 @@ PT_CHECK(gbuffer_depth_agrees_across_lenses_on_the_axis, Fast, Exact) {
         error.clear();
         return renderer->render(request, error) ? renderer->lastImage(AovId::Depth).texels[kCentre] : -1.0F;
     };
-    const float rectilinear = centreDepth(renderer->defaultCamera());
+    const float rectilinear = centreDepth(withLens(renderer->defaultCamera(), {pathtracer::scene::LensProjection::Rectilinear}));
     const float fisheye =
         centreDepth(withLens(renderer->defaultCamera(), {pathtracer::scene::LensProjection::FisheyePolynomial, {}, 180.0F}));
     PT_EXPECT(ctx, rectilinear > 0.0F, "the rectilinear centre ray hit nothing: " + error);

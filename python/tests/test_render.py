@@ -136,8 +136,9 @@ def test_gbuffer_only_request_skips_the_path_tracer(renderer: Renderer) -> None:
 
 
 def test_every_aov_renders(renderer: Renderer) -> None:
+    camera = dataclasses.replace(renderer.default_camera, pixel_lattice="square")
     for name in AOVS:
-        array = renderer.render(aovs=(name,), width=32, height=32, samples=2)[name]
+        array = renderer.render(aovs=(name,), camera=camera, width=32, height=32, samples=2)[name]
         assert array.shape == (32, 32, aov_channels(name))
         # SNR's +inf is a positive signal every replicate agreed on exactly, its true value; any other non-finite texel is a defect.
         admitted = np.isposinf(array) if name == "snr" else np.zeros_like(array, dtype=bool)
@@ -212,7 +213,7 @@ def test_fisheye_gbuffer_depth_is_the_ray_distance(renderer: Renderer) -> None:
 def test_omnidirectional_pixels_are_the_documented_longitude_and_latitude(renderer: Renderer) -> None:
     """Each hit's direction from the eye lands at its own pixel centre under Camera's lat-long formula, so the docstring is the code."""
     # Pitched, yawed and rolled at once, so the frame is the documented Rz @ Ry @ Rx and not merely the identity.
-    camera = dataclasses.replace(renderer.default_camera, lens="omnidirectional", rotation=(20.0, 30.0, 40.0))
+    camera = dataclasses.replace(renderer.default_camera, lens="omnidirectional", rotation=(20.0, 30.0, 40.0), pixel_lattice="square")
     width, height = 64, 32
     frame = renderer.render(aovs=("worldPos", "depth"), camera=camera, width=width, height=height)
     hit = frame["depth"][..., 0] > 0.0
@@ -259,7 +260,8 @@ def test_hexagonal_lattice_refuses_denoised_by_name(renderer: Renderer) -> None:
 
 
 def test_pixel_lattice_round_trips_and_rejects_unknown_names(renderer: Renderer) -> None:
-    assert renderer.default_camera.pixel_lattice == "square"
+    authored = json.loads((REPO_ROOT / "assets" / "config" / "profile.json").read_text())["camera"]["pixelLattice"]
+    assert renderer.default_camera.pixel_lattice == authored
     assert PIXEL_LATTICES == ("square", "hexagonal")
     with pytest.raises(ValueError, match="triangular"):
         renderer.render(aovs=("beauty",), camera=dataclasses.replace(renderer.default_camera, pixel_lattice="triangular"),
@@ -355,7 +357,7 @@ def test_unbounded_far_clip_renders(renderer: Renderer) -> None:
 
 def test_default_camera_reports_the_profile_lens(renderer: Renderer) -> None:
     camera = renderer.default_camera
-    assert camera.lens == "rectilinear"
+    assert camera.lens == json.loads((REPO_ROOT / "assets" / "config" / "profile.json").read_text())["camera"]["lens"]["projection"]
     assert len(camera.fisheye_coefficients) == 4
     assert 0.0 < camera.fisheye_field_of_view_degrees <= 360.0
 
@@ -525,7 +527,10 @@ def test_display_encode_accepts_a_non_contiguous_view() -> None:
 
 def test_show_sky_blackens_only_the_background(renderer: Renderer) -> None:
     """showSky gates the primary ray's own miss, so it must change the background and nothing the camera hits."""
-    common = {"aovs": ("beauty",), "width": 64, "height": 36, "samples": 2, "seed": 1}
+    # Outside the box looking at it through a square pinhole, whatever the profile authors.
+    camera = dataclasses.replace(renderer.default_camera, position=(0.0, 0.0, 6.0), rotation=(0.0, 0.0, 0.0), lens="rectilinear",
+                                 pixel_lattice="square")
+    common = {"aovs": ("beauty",), "width": 64, "height": 36, "samples": 2, "seed": 1, "camera": camera}
     sky = renderer.render(**common, show_sky=True)["beauty"]
     without = renderer.render(**common, show_sky=False)["beauty"]
 
