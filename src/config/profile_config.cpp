@@ -105,7 +105,20 @@ std::optional<pathtracer::debug::PixelProbeReadout> parsePixelProbe(const nlohma
     return std::nullopt;
 }
 
-// The render block's output fields: LUT, bit depth, image and window size, bloom, probe. Scales, AOV and vsync are read after controls.
+// The presentation by name; nullopt logs any other.
+std::optional<pathtracer::debug::RenderMode> parseRenderMode(const nlohmann::json& mode, const std::string& path) {
+    const std::string name = mode.get<std::string>();
+    if (name == "progressive") {
+        return pathtracer::debug::RenderMode::Progressive;
+    }
+    if (name == "offline") {
+        return pathtracer::debug::RenderMode::Offline;
+    }
+    std::cerr << "loadProfileConfig: " << path << " has render.renderMode " << name << ", expected progressive or offline\n";
+    return std::nullopt;
+}
+
+// The render block's output fields: LUT, bit depth, sizes, bloom, probe, mode. Scales, AOV and vsync are read after controls.
 std::optional<RenderConfig> parseRenderOutput(const nlohmann::json& render, const std::string& path) {
     const std::string defaultLutName = render.at("defaultLUT").get<std::string>();
     const std::optional<pathtracer::gfx::OcioDisplayTransform::Lut> defaultLut =
@@ -131,12 +144,16 @@ std::optional<RenderConfig> parseRenderOutput(const nlohmann::json& render, cons
     if (!pixelProbe.has_value()) {
         return std::nullopt;
     }
+    const std::optional<pathtracer::debug::RenderMode> renderMode = parseRenderMode(render.at("renderMode"), path);
+    if (!renderMode.has_value()) {
+        return std::nullopt;
+    }
     const int width = render.at("width").get<int>();
     const int height = render.at("height").get<int>();
     const int displayWidth = render.at("displayWidth").get<int>();
     const int displayHeight = render.at("displayHeight").get<int>();
     return RenderConfig{width, height, displayWidth, displayHeight, 0.0F, 0.0F, 0, *defaultLut, false, *displayFormat,
-                        toFloat(render.at("bloomStrength")), *pixelProbe};
+                        toFloat(render.at("bloomStrength")), *pixelProbe, *renderMode};
 }
 
 // The camera block in field order, then lens, lattice and acceptance. Ranges need the film back, so Camera::validate runs on the whole.
@@ -279,6 +296,11 @@ bool validCounts(const RenderConfig& render, const PathTracerConfig& pathTracer,
     // One replicate leaves no spread to bound the error by, so no texel could ever stop.
     if (pathTracer.adaptiveThreshold > 0.0F && pathTracer.replicates < 2) {
         std::cerr << "loadProfileConfig: " << source << ": adaptive sampling needs replicates >= 2, has " << pathTracer.replicates << "\n";
+        ok = false;
+    }
+    // Offline shows only a finished accumulation, and adaptive stopping alone need not finish one: a zero-mean texel never retires.
+    if (render.renderMode == pathtracer::debug::RenderMode::Offline && pathTracer.maxSamples == 0) {
+        std::cerr << "loadProfileConfig: " << source << ": render.renderMode offline needs maxSamples > 0\n";
         ok = false;
     }
     // The traced image the render scale multiplies, and the denominator of the primary ray's aspect ratio.

@@ -45,10 +45,19 @@ struct PathTracedStatus {
     int maxSamples = 0;  // 0 = unbounded
     bool adaptive = false;  // profile.json's adaptive.threshold is positive, so texels stop on their own error
     double samplingFraction = 1.0;  // texels the next pass traces over all texels; 0 once every one has stopped
+    std::optional<double> readyMs;  // input change to the swap first showing its finished accumulation; nullopt while in flight
 };
 
 // What the bottom-right probe shows: the cursor texel's RGBA, its luminance as a spot meter, or nothing, neither sampled nor drawn.
 enum class PixelProbeReadout { Colour, Photometric, None };
+
+// Progressive shows every accumulated pass; Offline holds the last finished image on screen until the next one finishes.
+enum class RenderMode { Progressive, Offline, Count };
+
+// Index-parallel with RenderMode, so the HUD dropdown and the bench log name a mode from one table.
+inline constexpr const char* kRenderModeNames[] = {"Progressive", "Offline"};
+static_assert(sizeof(kRenderModeNames) / sizeof(kRenderModeNames[0]) == static_cast<int>(RenderMode::Count),
+              "kRenderModeNames must stay index-parallel with RenderMode");
 
 // Pixel under the cursor (samplePixelProbe): the display-transformed texel for Beauty, the raw texel for any other AOV.
 struct PixelProbeSample {
@@ -97,7 +106,7 @@ public:
     void beginFrame() const;
 
     // Call after beginFrame(), before render(). Editable fields are passed by reference and written back in place, so nothing is returned.
-    void draw(const HudFrameData& frame, int& aov, float& focalLengthMm, float& aperture,
+    void draw(const HudFrameData& frame, int& renderMode, int& aov, float& focalLengthMm, float& aperture,
               float& shutterSeconds, float& iso, int& filmBackPresetIndex,
               const std::vector<const char*>& filmBackPresetNames, int& lensProjection, int& pixelLattice,
               float& acceptanceAngleDegrees, bool& showSky, bool& envLightEnabled, int& envRotationDegrees, float& envExposureStops,

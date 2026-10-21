@@ -999,6 +999,90 @@ PT_CHECK(replicate_means_match_batch_means, Slow, Exact) {
     PT_EXPECT(ctx, largestSpread > 0.0, detail);
 }
 
+// A cap no check reaches before parking the driver, so offline accumulations are sampled mid-flight; a multiple of every replicate count.
+constexpr int kLongCap = 1 << 16;
+
+// Parks the driver once `generation` has run `passes` passes, then lets the pass in flight land; returns the parked index, 0 on timeout.
+int parkAfter(PathTraceDriver& driver, std::uint64_t generation, int passes) {
+    const bool reached = waitFor([&] {
+        const pathtracer::debug::PassRecord pass = driver.lastPassRecord();
+        return pass.generation == generation && pass.passIndex >= passes;
+    });
+    driver.setSuspended(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    return reached ? driver.lastPassRecord().passIndex : 0;
+}
+
+// Offline folds every pass but publishes none before the last: parked mid-accumulation, passes have run and nothing is on screen.
+PT_CHECK(offline_publishes_nothing_mid_accumulation, Slow, Exact) {
+    ctx.plan(1);
+    std::unique_ptr<DriverFixture> fixture = makeFixture();
+    if (!fixture->valid()) {
+        PT_EXPECT(ctx, false, "scene/driver construction failed");
+        return;
+    }
+    fixture->driver->setPublishesFinalOnly(true);
+    const std::uint64_t generation = fixture->driver->requestTrace(makeRequest(kLongCap, makeCamera()));
+    const int parked = parkAfter(*fixture->driver, generation, 2);
+    const std::shared_ptr<const PathTraceResult> shown = fixture->driver->latestResult();
+    char detail[160];
+    std::snprintf(detail, sizeof(detail), "parked after %d of %d passes with %d published", parked, kLongCap,
+                  shown == nullptr ? 0 : shown->samples);
+    PT_EXPECT(ctx, parked >= 2 && parked < kLongCap && shown == nullptr, detail);
+}
+
+// The finished frame stays on screen while the next accumulation runs, and only it: a new request does not clear the hold.
+PT_CHECK(offline_holds_the_previous_frame_until_the_next_finishes, Slow, Exact) {
+    ctx.plan(2);
+    std::unique_ptr<DriverFixture> fixture = makeFixture();
+    if (!fixture->valid()) {
+        PT_EXPECT(ctx, false, "scene/driver construction failed");
+        PT_EXPECT(ctx, false, "scene/driver construction failed");
+        return;
+    }
+    fixture->driver->setPublishesFinalOnly(true);
+    const std::uint64_t first = fixture->driver->requestTrace(makeRequest(4, makeCamera()));
+    const std::shared_ptr<const PathTraceResult> finished = waitForPublished(*fixture->driver, first, 4);
+    PT_EXPECT(ctx, finished != nullptr && finished->samples == 4, "offline never published the finished first accumulation");
+    const std::uint64_t second = fixture->driver->requestTrace(makeRequest(kLongCap, makeCamera()));
+    const int parked = parkAfter(*fixture->driver, second, 2);
+    char detail[160];
+    std::snprintf(detail, sizeof(detail), "parked %d passes into the second accumulation; the held frame was %s", parked,
+                  fixture->driver->latestResult() == finished ? "kept" : "replaced");
+    PT_EXPECT(ctx, finished != nullptr && parked >= 2 && fixture->driver->latestResult() == finished, detail);
+}
+
+// The mode is no part of the request: a switch either way neither restarts the accumulation nor loses a pass, it gates the next publish.
+PT_CHECK(render_mode_switch_keeps_the_accumulation, Slow, Exact) {
+    ctx.plan(3);
+    std::unique_ptr<DriverFixture> fixture = makeFixture();
+    if (!fixture->valid()) {
+        for (int i = 0; i < 3; ++i) {
+            PT_EXPECT(ctx, false, "scene/driver construction failed");
+        }
+        return;
+    }
+    const std::uint64_t generation = fixture->driver->requestTrace(makeRequest(kLongCap, makeCamera()));
+    const int progressive = parkAfter(*fixture->driver, generation, 2);
+    const std::shared_ptr<const PathTraceResult> held = fixture->driver->latestResult();
+    PT_EXPECT(ctx, progressive >= 2 && held != nullptr && held->generation == generation && held->samples == progressive,
+              "progressive did not publish its latest pass before the switch");
+    // Switched while parked, so no pass straddles the switch and both halves are exact.
+    fixture->driver->setPublishesFinalOnly(true);
+    fixture->driver->setSuspended(false);
+    const int offline = parkAfter(*fixture->driver, generation, progressive + 2);
+    char detail[192];
+    std::snprintf(detail, sizeof(detail), "offline continued %d -> %d passes and %s the frame", progressive, offline,
+                  fixture->driver->latestResult() == held ? "held" : "replaced");
+    PT_EXPECT(ctx, offline >= progressive + 2 && fixture->driver->latestResult() == held, detail);
+    fixture->driver->setPublishesFinalOnly(false);
+    fixture->driver->setSuspended(false);
+    const std::shared_ptr<const PathTraceResult> resumed = waitForPublished(*fixture->driver, generation, offline + 1);
+    std::snprintf(detail, sizeof(detail), "back in progressive, published %d samples after %d offline passes",
+                  resumed == nullptr ? 0 : resumed->samples, offline);
+    PT_EXPECT(ctx, resumed != nullptr && resumed->samples > offline, detail);
+}
+
 // Adaptive sampling on the driver fixture: a cap of 32 passes at K = 4 checks at 4, 8, 16 and 32, the first from minSamples.
 constexpr int kAdaptiveCap = 32;
 constexpr int kAdaptiveMinSamples = 4;
@@ -1152,6 +1236,65 @@ PT_CHECK(adaptive_driver_idles_once_every_texel_stops, Slow, Exact) {
     const pathtracer::debug::PassRecord record = fixture->driver->lastPassRecord();
     PT_EXPECT(ctx, record.passIndex == kAdaptiveMinSamples && record.activeTexels == 0,
               "the last pass record does not report the checkpoint that stopped every texel");
+}
+
+// Offline changes when a frame is published, never what it holds: the finished frame equals progressive's bit for bit, stats included.
+PT_CHECK(offline_final_frame_is_bit_identical_to_progressive, Slow, Exact) {
+    // The threshold the sequential-fold check uses, so texels stop at several checkpoints and the carry path is exercised.
+    constexpr float kThreshold = 0.5F;
+    ctx.plan(2);
+    std::unique_ptr<DriverFixture> progressive = makeFixture();
+    std::unique_ptr<DriverFixture> offline = makeFixture();
+    if (!progressive->valid() || !offline->valid()) {
+        PT_EXPECT(ctx, false, "scene/driver construction failed");
+        PT_EXPECT(ctx, false, "scene/driver construction failed");
+        return;
+    }
+    offline->driver->setPublishesFinalOnly(true);
+    const PathTraceDriver::Request request = makeAdaptiveRequest(kThreshold, makeCamera());
+    const std::shared_ptr<const PathTraceResult> a = waitForSettled(*progressive->driver, progressive->driver->requestTrace(request));
+    const std::shared_ptr<const PathTraceResult> b = waitForSettled(*offline->driver, offline->driver->requestTrace(request));
+    if (a == nullptr || b == nullptr) {
+        PT_EXPECT(ctx, false, "a driver never settled");
+        PT_EXPECT(ctx, false, "a driver never settled");
+        return;
+    }
+    std::size_t differing = 0;
+    const auto compare = [&](const std::vector<float>& x, const std::vector<float>& y) {
+        for (std::size_t i = 0; i < x.size(); ++i) {
+            differing += std::bit_cast<std::uint32_t>(x[i]) != std::bit_cast<std::uint32_t>(y[i]) ? 1 : 0;
+        }
+    };
+    for (const Lane& lane : kLanes) {
+        compare(((*a).*lane.image).texels, ((*b).*lane.image).texels);
+    }
+    compare(a->replicateLuminance, b->replicateLuminance);
+    char detail[192];
+    std::snprintf(detail, sizeof(detail), "%zu lane and replicate floats differ; %d vs %d passes", differing, a->samples, b->samples);
+    PT_EXPECT(ctx, differing == 0 && a->samples == b->samples && a->texelSamples == b->texelSamples && a->activeTexels == b->activeTexels,
+              detail);
+    PT_EXPECT(ctx, a->overRange.rawPeak == b->overRange.rawPeak && a->overRange.aboveBin == b->overRange.aboveBin,
+              "the finished frame's over-range statistics differ between the modes");
+}
+
+// Offline finishes on adaptive stopping as on the cap: with every texel retired at the first checkpoint, that pass is published.
+PT_CHECK(offline_publishes_once_adaptive_stops_every_texel, Slow, Exact) {
+    ctx.plan(1);
+    std::unique_ptr<DriverFixture> fixture = makeFixture();
+    if (!fixture->valid()) {
+        PT_EXPECT(ctx, false, "scene/driver construction failed");
+        return;
+    }
+    fixture->driver->setPublishesFinalOnly(true);
+    // The floor-only view and saturating threshold of adaptive_driver_idles_once_every_texel_stops: all retire at the first checkpoint.
+    const Camera floorOnly(glm::vec3(-10.0F, -10.0F, 5.0F), glm::vec3(0.0F), Camera::FilmBack{36.0F, 24.0F}, 50.0F, 0.01F, 1000.0F, 2.8F,
+                           1.0F / 125.0F, 100.0F);
+    const std::uint64_t generation = fixture->driver->requestTrace(makeAdaptiveRequest(std::numeric_limits<float>::max(), floorOnly));
+    const std::shared_ptr<const PathTraceResult> published = waitForSettled(*fixture->driver, generation);
+    char detail[160];
+    std::snprintf(detail, sizeof(detail), "published %d passes with %zu active, against a first checkpoint of %d",
+                  published == nullptr ? -1 : published->samples, published == nullptr ? 0 : published->activeTexels, kAdaptiveMinSamples);
+    PT_EXPECT(ctx, published != nullptr && published->samples == kAdaptiveMinSamples && published->activeTexels == 0, detail);
 }
 
 PT_CHECK_MAIN("driver")

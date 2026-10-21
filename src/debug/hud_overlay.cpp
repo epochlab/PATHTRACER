@@ -137,7 +137,21 @@ void drawGpuSection(const HudFrameData& frame) {
     ImGui::Separator();
 }
 
-void drawFrameSection(const HudFrameData& frame) {
+// Offline needs a pass cap to finish on, so it is greyed while maxSamples is unbounded.
+void drawRenderModeCombo(int& renderMode, int maxSamples) {
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+    if (ImGui::BeginCombo("##renderMode", kRenderModeNames[renderMode])) {
+        for (int i = 0; i < static_cast<int>(RenderMode::Count); ++i) {
+            const bool available = static_cast<RenderMode>(i) != RenderMode::Offline || maxSamples > 0;
+            if (ImGui::Selectable(kRenderModeNames[i], i == renderMode, available ? 0 : ImGuiSelectableFlags_Disabled)) {
+                renderMode = i;
+            }
+        }
+        ImGui::EndCombo();
+    }
+}
+
+void drawFrameSection(const HudFrameData& frame, int& renderMode) {
     ImGui::TextColored(kCyan, "Frame");
     ImGui::Text("%.0f FPS  avg %.2f ms", frame.frameStats.fps(), frame.frameStats.avgMs());
     ImGui::PlotLines("##frametime", frame.frameStats.history().data(), FrameStats::kHistoryLength,
@@ -147,6 +161,7 @@ void drawFrameSection(const HudFrameData& frame) {
     ImGui::Text("GPU  post %.2f ms", frame.postMs);
     ImGui::Text("Cap  %s", frame.vsync ? "vsync" : "off");
     ImGui::Text("LUT  %s", frame.lutName);
+    drawRenderModeCombo(renderMode, frame.pathTraced.maxSamples);
     if (frame.pathTraced.hasResult) {
         if (frame.pathTraced.maxSamples > 0) {
             ImGui::Text("path-traced  %d / %d samples  %.2f s/pass", frame.pathTraced.accumulatedSamples,
@@ -157,6 +172,11 @@ void drawFrameSection(const HudFrameData& frame) {
         }
         if (frame.pathTraced.adaptive) {
             ImGui::Text("adaptive  %.1f%% of texels sampling", 100.0 * frame.pathTraced.samplingFraction);
+        }
+        if (frame.pathTraced.readyMs.has_value()) {
+            ImGui::Text("ready  %.0f ms", *frame.pathTraced.readyMs);
+        } else {
+            ImGui::TextDisabled("ready  rendering");
         }
     } else {
         ImGui::TextDisabled("path-traced: no render yet");
@@ -382,7 +402,7 @@ void HudOverlay::beginFrame() const {
     ImGui::NewFrame();
 }
 
-void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm, float& aperture,
+void HudOverlay::draw(const HudFrameData& frame, int& renderMode, int& aov, float& focalLengthMm, float& aperture,
                        float& shutterSeconds, float& iso, int& filmBackPresetIndex,
                        const std::vector<const char*>& filmBackPresetNames, int& lensProjection, int& pixelLattice,
                        float& acceptanceAngleDegrees, bool& showSky, bool& envLightEnabled, int& envRotationDegrees, float& envExposureStops,
@@ -397,7 +417,7 @@ void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm,
     ImGui::Begin("##hud", nullptr, flags);
 
     drawGpuSection(frame);
-    drawFrameSection(frame);
+    drawFrameSection(frame, renderMode);
     drawMemorySection(frame);
     drawResolutionAndSceneSection(frame);
 

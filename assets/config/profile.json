@@ -33,7 +33,8 @@
         "vsync": true,
         "displayBitDepth": 16,
         "bloomStrength": 0.0,
-        "pixelProbe": "colour"
+        "pixelProbe": "colour",
+        "renderMode": "progressive"
     },
     "pathTracer": {
         "samplesPerPixel": 1,

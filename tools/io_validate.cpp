@@ -997,6 +997,50 @@ PT_CHECK(profile_config_reads_the_pixel_probe_readout, Fast, Exact) {
     }
 }
 
+// render.renderMode names one of two presentations; offline needs a pass cap to finish on, at load and under the -max-samples override.
+PT_CHECK(profile_config_reads_the_render_mode, Fast, Exact) {
+    using pathtracer::debug::RenderMode;
+    const std::vector<std::pair<nlohmann::json, std::optional<RenderMode>>> cases = {
+        {"progressive", RenderMode::Progressive}, {"offline", RenderMode::Offline}, {"Offline", std::nullopt},
+        {1, std::nullopt},                        {nullptr, std::nullopt},
+    };
+    std::ifstream shippedFile(std::filesystem::path(ASSET_ROOT_DIR) / "config" / "profile.json");
+    const nlohmann::json shipped = nlohmann::json::parse(shippedFile);
+    ctx.plan(static_cast<int>(cases.size()) + 3);
+    const auto load = [](const nlohmann::json& edited) {
+        const std::filesystem::path path = writeJson("engine_io_profile_render_mode.json", edited.dump());
+        std::optional<pathtracer::config::ProfileConfig> loaded = pathtracer::config::loadProfileConfig(path.string());
+        std::filesystem::remove(path);
+        return loaded;
+    };
+    for (const auto& [value, expected] : cases) {
+        nlohmann::json edited = shipped;
+        if (value.is_null()) {
+            edited["render"].erase("renderMode");
+        } else {
+            edited["render"]["renderMode"] = value;
+        }
+        const std::optional<pathtracer::config::ProfileConfig> loaded = load(edited);
+        PT_EXPECT(ctx, expected ? loaded && loaded->render.renderMode == *expected : !loaded,
+                  "render.renderMode " + (value.is_null() ? std::string("missing") : value.dump()) + " did not read as expected");
+    }
+    nlohmann::json offline = shipped;
+    offline["render"]["renderMode"] = "offline";
+    offline["pathTracer"]["maxSamples"] = 0;
+    PT_EXPECT(ctx, !load(offline), "an offline profile with unbounded maxSamples loaded");
+    offline["render"]["renderMode"] = "progressive";
+    PT_EXPECT(ctx, load(offline).has_value(), "a progressive profile with unbounded maxSamples was refused");
+    // The viewer's -max-samples 0 lands after loading, so the exported check must refuse it for an offline profile too.
+    offline["render"]["renderMode"] = "offline";
+    offline["pathTracer"]["maxSamples"] = shipped["pathTracer"]["maxSamples"];
+    std::optional<pathtracer::config::ProfileConfig> loaded = load(offline);
+    if (loaded) {
+        loaded->pathTracer.maxSamples = 0;
+    }
+    PT_EXPECT(ctx, loaded && !pathtracer::config::validCounts(loaded->render, loaded->pathTracer, "test"),
+              "validCounts accepted offline under a maxSamples override of 0");
+}
+
 // render.bloomStrength is an energy fraction, so [0,1] closed: both ends and an interior value load, one step past either end does not.
 PT_CHECK(profile_config_bloom_strength_is_in_range, Fast, Exact) {
     const std::vector<std::pair<nlohmann::json, bool>> cases = {
