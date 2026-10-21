@@ -231,6 +231,7 @@ PathTracerConfig parsePathTracer(const nlohmann::json& pathTracer) {
         toFloat(adaptive.at("threshold")),
         toFloat(adaptive.at("confidence")),
         adaptive.at("minSamples").get<int>(),
+        toFloat(adaptive.at("foveation").at("marSlope")),
     };
 }
 
@@ -253,6 +254,11 @@ bool validPathTracer(const PathTracerConfig& pathTracer, const std::string& path
     // The false discovery rate is 1 - confidence: at confidence 1 nothing could stop, at 0 every texel with spread would.
     if (!(pathTracer.adaptiveConfidence > 0.0F && pathTracer.adaptiveConfidence < 1.0F)) {
         std::cerr << "loadProfileConfig: " << path << " has an adaptive.confidence outside (0, 1)\n";
+        return false;
+    }
+    // A negative slope would tighten the periphery below the gaze's threshold; NaN or infinity would scale every target to it.
+    if (!std::isfinite(pathTracer.adaptiveMarSlope) || pathTracer.adaptiveMarSlope < 0.0F) {
+        std::cerr << "loadProfileConfig: " << path << " has an adaptive.foveation.marSlope outside [0, inf)\n";
         return false;
     }
     return true;

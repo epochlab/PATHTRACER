@@ -1174,6 +1174,10 @@ PT_CHECK(profile_config_integer_counts, Fast, Exact) {
         cases.push_back({"adaptive.minSamples " + std::to_string(count) + " at replicates 4",
                          pathTracer({{"replicates", 4}, {"adaptive", {{"minSamples", count}}}}), accepted});
     }
+    cases.push_back({"adaptive.foveation missing", pathTracer({{"adaptive", {{"foveation", nullptr}}}}), false});
+    cases.push_back({"adaptive.foveation.marSlope missing", pathTracer({{"adaptive", {{"foveation", {{"marSlope", nullptr}}}}}}), false});
+    cases.push_back({"adaptive.foveation.marSlope 0", pathTracer({{"adaptive", {{"foveation", {{"marSlope", 0.0}}}}}}), true});
+    cases.push_back({"adaptive.foveation.marSlope -0.01", pathTracer({{"adaptive", {{"foveation", {{"marSlope", -0.01}}}}}}), false});
     cases.push_back({"adaptive on at replicates 1", pathTracer({{"replicates", 1}, {"adaptive", {{"threshold", 0.02}, {"minSamples", 1}}}}),
                      false});
 

@@ -1156,6 +1156,7 @@ nlohmann::json benchConfig(const AppResources& app, const BenchCapture& bench) {
             {"adaptive_threshold", app.scene.baseSettings.adaptive.threshold},
             {"adaptive_confidence", app.scene.baseSettings.adaptive.confidence},
             {"adaptive_min_samples", app.scene.baseSettings.adaptive.minSamples},
+            {"adaptive_mar_slope", app.scene.baseSettings.adaptive.marSlope},
             {"denoise_features", app.scene.baseSettings.denoiseFeatures},
             {"denoiser_quality", pathtracer::debug::kDenoiseQualityNames[static_cast<int>(app.denoiserConfig.options.quality)]},
             {"denoiser_prefilter_auxiliary", app.denoiserConfig.options.prefilterAuxiliary},

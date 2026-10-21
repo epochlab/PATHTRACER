@@ -1366,6 +1366,9 @@ PT_CHECK(retirement_holds_the_false_discovery_rate, Fast, Statistical) {
     pathtracer::scene::PathTraceSettings settings{};
     settings.replicates = kReplicates;
     settings.adaptive = {kThreshold, kConfidence, kReplicates};
+    // marSlope 0: the uniform threshold the guarantee is stated at, so the camera is never read.
+    const pathtracer::scene::Camera camera{glm::vec3(0.0F), glm::vec3(0.0F), {36.0F, 24.0F}, 35.0F, 0.01F, 100.0F, 2.8F, 0.008F, 400.0F};
+    const pathtracer::scene::FoveatedThreshold fovea(camera, kTexels, 1, settings.adaptive.marSlope);
     std::mt19937_64 rng(ctx.seed());
     const double boundarySpread = static_cast<double>(kThreshold) * std::sqrt(static_cast<double>(kReplicates));
     std::normal_distribution<double> unconverged(1.0, boundarySpread);
@@ -1379,7 +1382,7 @@ PT_CHECK(retirement_holds_the_false_discovery_rate, Fast, Statistical) {
         }
         std::vector<std::uint32_t> active(kTexels);
         std::iota(active.begin(), active.end(), 0U);
-        pathtracer::scene::retireConvergedTexels(active, means.data(), settings, pool);
+        pathtracer::scene::retireConvergedTexels(active, means.data(), settings, fovea, pool);
         // Survivors are ascending, so the stopped nulls are the null indices missing from them.
         const auto nullsKept = static_cast<double>(std::count_if(active.begin(), active.end(), [](std::uint32_t texel) {
             return static_cast<double>(texel) < kNullShare * kTexels;
@@ -1392,6 +1395,86 @@ PT_CHECK(retirement_holds_the_false_discovery_rate, Fast, Statistical) {
     char detail[192];
     std::snprintf(detail, sizeof(detail), "mean false share %.5f +/- %.5f against pi0 * alpha = %.5f", falseShare.mean(), half, expected);
     PT_EXPECT(ctx, std::fabs(falseShare.mean() - expected) <= half, detail);
+}
+
+// Pinhole closed form: e = atan(r), Omega = s_x s_y cos^3 e, scale = max(1, w(e)/sqrt(Omega)) / max(1, w0/sqrt(Omega_gaze)).
+PT_CHECK(foveated_threshold_matches_the_pinhole_closed_form, Fast, Exact) {
+    using pathtracer::scene::Camera;
+    using pathtracer::scene::FoveatedThreshold;
+    constexpr float kMarSlope = 0.022F;
+    // Texels coarser than w0, where the gaze pools nothing, and finer, where it pools several; strided so the fine frame stays fast.
+    constexpr std::array<std::array<int, 3>, 2> kFrames{{{33, 17, 1}, {4096, 2731, 97}}};
+    ctx.plan(static_cast<int>(kFrames.size()) + 1);
+    const Camera pinhole{glm::vec3(0.0F), glm::vec3(0.0F), {36.0F, 24.0F}, 35.0F, 0.01F, 100.0F, 2.8F, 0.008F, 400.0F};
+    const double w0 = static_cast<double>(pathtracer::scene::kFovealMarDegrees) * std::numbers::pi / 180.0;
+    for (const auto& [width, height, stride] : kFrames) {
+        const FoveatedThreshold fovea(pinhole, width, height, kMarSlope);
+        const double halfHeight = std::tan(0.5 * static_cast<double>(pinhole.verticalFovRadians()));
+        const double halfWidth = halfHeight * width / height;
+        const double cell = (2.0 * halfWidth / width) * (2.0 * halfHeight / height);
+        const double gazeSpan = std::max(1.0, w0 / std::sqrt(cell));
+        double worst = 0.0;
+        for (int texel = 0; texel < width * height; texel += stride) {
+            const double u = (((texel % width) + 0.5) / width * 2.0 - 1.0) * halfWidth;
+            const double v = (1.0 - ((texel / width) + 0.5) / height * 2.0) * halfHeight;
+            const double eccentricity = std::atan(std::hypot(u, v));
+            const double solidAngle = cell * std::pow(std::cos(eccentricity), 3.0);
+            const double mar = w0 + (static_cast<double>(kMarSlope) * eccentricity);
+            const double expected = std::max(1.0, mar / std::sqrt(solidAngle)) / gazeSpan;
+            const auto measured = static_cast<double>(fovea.scale(static_cast<std::uint32_t>(texel)));
+            worst = std::max(worst, std::abs(measured - expected) / expected);
+        }
+        // A handful of float trig, cross products and a square root deep: well inside 16 ulp of the double reference.
+        PT_EXPECT(ctx, worst <= 16.0 * static_cast<double>(kFloatEpsilon),
+                  std::to_string(width) + "x" + std::to_string(height) + " scale relative error " + std::to_string(worst));
+    }
+    const FoveatedThreshold off(pinhole, 33, 17, 0.0F);
+    bool uniform = true;
+    for (std::uint32_t texel = 0; texel < 33U * 17U; ++texel) {
+        uniform = uniform && off.scale(texel) == 1.0F;
+    }
+    PT_EXPECT(ctx, uniform, "marSlope 0 scaled a texel's threshold");
+}
+
+// Equal replicate spread everywhere, twice the gaze's tolerance: only texels loosened past it stop, outermost first.
+PT_CHECK(retirement_loosens_with_eccentricity, Fast, Exact) {
+    constexpr int kWidth = 64;
+    constexpr int kHeight = 43;
+    constexpr int kReplicates = 4;
+    constexpr float kThreshold = 0.01F;
+    ctx.plan(3);
+    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
+    pathtracer::scene::PathTraceSettings settings{};
+    settings.replicates = kReplicates;
+    // Steep, so a 64-texel frame's 0.6-degree texels pool well inside its 27-degree half-width.
+    settings.adaptive = {kThreshold, 0.95F, kReplicates, 0.5F};
+    const pathtracer::scene::Camera camera{glm::vec3(0.0F), glm::vec3(0.0F), {36.0F, 24.0F}, 35.0F, 0.01F, 100.0F, 2.8F, 0.008F, 400.0F};
+    const pathtracer::scene::FoveatedThreshold fovea(camera, kWidth, kHeight, settings.adaptive.marSlope);
+    // Means 1 -+ a give SD(mbar) = a / sqrt(3); a = 2 sqrt(3) threshold puts it at twice the unscaled tolerance.
+    const float a = 2.0F * std::sqrt(3.0F) * kThreshold;
+    std::vector<float> means(static_cast<std::size_t>(kWidth) * kHeight * kReplicates);
+    for (std::size_t i = 0; i < means.size(); ++i) {
+        means[i] = (i % 2 == 0) ? 1.0F - a : 1.0F + a;
+    }
+    std::vector<std::uint32_t> active = pathtracer::scene::allTexels(kWidth, kHeight);
+    pathtracer::scene::retireConvergedTexels(active, means.data(), settings, fovea, pool);
+    std::vector<bool> kept(static_cast<std::size_t>(kWidth) * kHeight, false);
+    for (const std::uint32_t texel : active) {
+        kept[texel] = true;
+    }
+    float maxKept = 0.0F;
+    float minStopped = std::numeric_limits<float>::infinity();
+    for (std::uint32_t texel = 0; texel < kept.size(); ++texel) {
+        if (kept[texel]) {
+            maxKept = std::max(maxKept, fovea.scale(texel));
+        } else {
+            minStopped = std::min(minStopped, fovea.scale(texel));
+        }
+    }
+    const auto centre = static_cast<std::uint32_t>(((kHeight / 2) * kWidth) + (kWidth / 2));
+    PT_EXPECT(ctx, kept[centre], "the gaze texel stopped at twice its tolerance");
+    PT_EXPECT(ctx, !kept.front() && !kept.back(), "a corner texel kept sampling under foveation");
+    PT_EXPECT(ctx, maxKept < minStopped, "kept scale " + std::to_string(maxKept) + " not below stopped " + std::to_string(minStopped));
 }
 
 // The Morlet bank's admissibility term is a 2-D blur written as two 1-D ones, which is only sound if the mirror separates too.

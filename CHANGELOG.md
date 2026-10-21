@@ -3,6 +3,31 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Foveated sampling
+
+Adaptive sampling now loosens each texel's noise target with its angle from the frame centre, so the periphery stops sooner. The new
+profile key is `pathTracer.adaptive.foveation.marSlope` (shipped 0.022; 0 is off). Evidence is in `results/foveated_sampling`.
+- **Observer:** stands at the camera and fixates the frame centre, as for the Contrast Sensitivity AOV. Camera rays give each texel's
+  eccentricity and solid angle directly, so no viewing distance is needed and every lens and lattice is covered.
+- **Model:** the minimum angle of resolution grows linearly, w(e) = w0 + m e with w0 = 1/48 deg (Guenter et al. 2012, whose study
+  measured m = 0.022-0.0275; the shipped slope is the conservative end).
+- **Threshold:** the eye pools N = max(1, w^2 / Omega) texels of solid angle Omega, dividing their noise by sqrt(N). Each texel's
+  threshold is the configured one times sqrt(N / N_gaze), so the gaze keeps it exactly and sample cost falls as Omega / w^2, Guenter's
+  density. The Benjamini-Hochberg step-up is unchanged: each texel tests against its own tolerance.
+- **Cost:** computed only at checkpoints, only for texels still sampling: one ray differential each.
+- **Results** (256x128, 16 passes):
+  - With the slope at 0, Beauty and Sample Count are bit-identical to main on cornell, macbeth and stump.
+  - At the shipped slope, rays and trace time match main within noise. The periphery's target is loosened at most 3.4x, but the step-up
+    needs a texel's error well below its target, which 16 samples do not reach.
+  - A steep demonstration slope of 1.0 does stop the periphery early: at threshold 0.05, cornell traces 0.80x the samples.
+  - Once every texel is held only by its own target, the shipped slope needs 0.39 of the samples at 256x128 and 0.032 at the profile's
+    2048x1024, where texels are finer than the foveal MAR.
+- **Tests:**
+  - `filter.foveated_threshold_matches_the_pinhole_closed_form`
+  - `filter.retirement_loosens_with_eccentricity`
+  - `driver.adaptive_driver_matches_the_sequential_fold`, now also run foveated
+  - `io.profile_config_integer_counts`, foveation keys
+
 ## Render mode: progressive or offline
 
 New HUD dropdown in the Frame section, starting from `render.renderMode` (`"progressive"` or `"offline"`). Evidence is in
