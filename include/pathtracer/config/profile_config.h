@@ -57,6 +57,7 @@ struct RenderConfig {
     // The glare PSF's scattered fraction in [0,1], 0 = off: the HUD Bloom slider's starting value, applied to picture AOVs only.
     float bloomStrength;
     pathtracer::debug::PixelProbeReadout pixelProbe;  // profile.json "colour", "photometric" or "none"
+    pathtracer::debug::RenderMode renderMode;  // profile.json "progressive" or "offline": the HUD dropdown's starting value
 };
 
 struct PathTracerConfig {

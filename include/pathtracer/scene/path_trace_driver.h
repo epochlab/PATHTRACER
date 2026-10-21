@@ -64,6 +64,9 @@ public:
     // Render-thread-only. Parks the driver at the next pass boundary. Non-destructive: generation_ is also the sampler scramble seed.
     void setSuspended(bool suspended);
 
+    // Render-thread-only. While set only a finished accumulation is published; every pass still folds, so a switch never restarts one.
+    void setPublishesFinalOnly(bool finalOnly);
+
     // Render-thread-only. The most recent pass's timings and ray counts, cancelled included; generation is 0 before the first pass.
     [[nodiscard]] pathtracer::debug::PassRecord lastPassRecord() const;
 
@@ -81,7 +84,7 @@ private:
     std::shared_ptr<PathTraceResult> acquireFreeBuffer(int width, int height, int replicates);
     double tracePass(const Request& request, int sampleBase, std::uint64_t generation, PathTraceResult& pass);
     void finishPass(const std::shared_ptr<PathTraceResult>& pass, std::shared_ptr<PathTraceResult>& currentMean,
-                    const PathTraceSettings& settings, int passIndex, std::uint64_t generation, double traceMs,
+                    const Request& request, int passIndex, std::uint64_t generation, double traceMs,
                     std::chrono::steady_clock::time_point passStart);
 
     const EmbreeAccel& accel_;
@@ -104,6 +107,8 @@ private:
     std::atomic<std::uint64_t> generation_{0};
     // Set by setSuspended; polled by driverLoop, which idles instead of dispatching while it is true.
     std::atomic<bool> suspended_{false};
+    // Set by setPublishesFinalOnly; read once per finished pass, so a switch takes effect at the next pass boundary.
+    std::atomic<bool> publishesFinalOnly_{false};
 
     // Ray/chunk counters for the pass in flight, driver-thread-owned and reused, so a pass allocates nothing. Declared before thread_.
     pathtracer::debug::PassStats passStats_;
@@ -136,6 +141,11 @@ private:
     // Declared last: constructed last, so driverLoop starts once every member exists, and destroyed first, jthread stopping and joining.
     std::jthread thread_;
 };
+
+// Finished at the pass cap (0 = unbounded) or once adaptive sampling has stopped every texel; the driver then idles.
+[[nodiscard]] constexpr bool accumulationComplete(int samples, std::size_t activeTexels, int maxSamples) {
+    return activeTexels == 0 || (maxSamples > 0 && samples >= maxSamples);
+}
 
 // Running mean m_n = m_{n-1} + (x_n - m_{n-1}) * invN over count floats; `mean` may alias either input. HeadlessRenderer shares it.
 void foldRunningMean(const float* previousMean, const float* drawn, float* mean, std::size_t count, float invN);

@@ -3,6 +3,35 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Render mode: progressive or offline
+
+New HUD dropdown in the Frame section, starting from `render.renderMode` (`"progressive"` or `"offline"`). Evidence is in
+`results/render_mode`.
+- **Offline:** every pass still folds into the running mean, but the driver reduces and publishes only a finished accumulation: at the
+  pass cap, or once adaptive sampling has stopped every texel. The screen holds the last finished frame until the next one is ready.
+  The display upload, filters, OIDN and bloom therefore run once per accumulation instead of once per pass. The trace always runs at
+  `renderScale`, since an `interactiveRenderScale` preview would never be shown.
+- **Switching:** the mode is a driver flag, not part of the request, so a switch never restarts or loses an accumulation. It gates the
+  next publish.
+- **Constraint:** offline needs `maxSamples > 0`, both at load and under `-max-samples`. Adaptive stopping alone need not finish, because
+  a zero-mean texel never retires. The HUD greys the entry out with an unbounded cap.
+- **Readiness:** the HUD shows `ready N ms`, the time from the input change to the swap that first shows the finished accumulation.
+  `-bench` logs it as `ready_ms`, and adds a `render_mode` config key only when offline, so earlier records stay comparable.
+- **Image and time** (16 samples, 5 interleaved rounds):
+  - The beauty crc32 is identical across modes and against main.
+  - ready_ms O/P is 0.83-0.97 on cornell and 0.84-1.01 on macbeth. The largest gains are with Denoised, where progressive denoised every
+    pass on cores the trace needs: at 1024x512, filter time drops from 5146 to 189 ms.
+  - Progressive pass_ms against main is 1.022 (cornell) and 1.016 (macbeth); both intervals contain 1.
+- **Tests:**
+  - `driver.offline_publishes_nothing_mid_accumulation`
+  - `driver.offline_holds_the_previous_frame_until_the_next_finishes`
+  - `driver.render_mode_switch_keeps_the_accumulation`
+  - `driver.offline_final_frame_is_bit_identical_to_progressive`
+  - `driver.offline_publishes_once_adaptive_stops_every_texel`
+  - `io.profile_config_reads_the_render_mode`
+  - Four driver mutations (always publish, never publish, cap-only finish, skipped final over-range) and one config mutation each fail
+    at least one of these.
+
 ## Display window and zoom
 
 The window has its own size, `render.displayWidth`/`displayHeight` in framebuffer pixels. It no longer takes the size of the render, so a

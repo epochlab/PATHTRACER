@@ -152,6 +152,7 @@ struct BenchCapture {
     // Per frame, not in config: a measurement of the display link's period, so it differs run to run, where config demands equality.
     std::vector<float> refreshHz;
     std::vector<float> uploadMs;  // one entry per display-texture upload, not per frame
+    std::vector<float> readyMs;  // one entry: the captured accumulation's input-to-photon latency
     std::pair<int, int> framebuffer{};  // the last captured frame's window, in pixels: what clear, ring and blit cover
     bool complete = false;
 
@@ -286,7 +287,12 @@ struct AppResources {
     // Fraction of imageWidth x imageHeight traced: renderScale settled, interactiveRenderScale while input changes.
     float renderScale;
     float interactiveRenderScale;
+    // HUD Frame dropdown, starting at profile.json renderMode: Offline publishes and shows only finished accumulations.
+    pathtracer::debug::RenderMode renderMode;
     std::chrono::steady_clock::time_point lastInputChange{};
+    // The latest request; readyMs is set from lastInputChange at the swap that first shows its accumulation finished.
+    std::uint64_t traceGeneration = 0;
+    std::optional<double> readyMs{};
 
     // Synchronous pool for the 14 G-buffer AOVs and the Beauty filters. unique_ptr: ThreadPool owns threads and cannot move.
     std::unique_ptr<pathtracer::scene::ThreadPool> gbufferThreadPool = std::make_unique<pathtracer::scene::ThreadPool>();
@@ -514,6 +520,7 @@ std::optional<AppResources> initializeApp(const pathtracer::config::SceneConfig&
         .imageHeight = profileConfig.render.height,
         .renderScale = profileConfig.render.renderScale,
         .interactiveRenderScale = profileConfig.render.interactiveRenderScale,
+        .renderMode = profileConfig.render.renderMode,
         .sceneName = std::filesystem::path(scenePath).filename().string(),
         .refreshHz = refreshHz,
     };
@@ -847,17 +854,23 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const pathtracer::scene
     }
     const bool settled =
         std::chrono::duration<double>(now - app.lastInputChange).count() >= kInteractiveSettleSeconds;
-    const float renderScale = settled ? app.renderScale : app.interactiveRenderScale;
+    const bool offline = app.renderMode == pathtracer::debug::RenderMode::Offline;
+    // Offline never shows a reduced-scale accumulation, so tracing one would be pure waste.
+    const float renderScale = settled || offline ? app.renderScale : app.interactiveRenderScale;
     const int traceWidth = scaledExtent(app.imageWidth, renderScale);
     const int traceHeight = scaledExtent(app.imageHeight, renderScale);
     const bool needsLightTransport = aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(app.aov));
 
     // Park the driver when the selected AOV is not its own: otherwise it accumulates an off-screen image on every core.
     app.pathTraceDriver->setSuspended(!needsLightTransport);
+    app.pathTraceDriver->setPublishesFinalOnly(offline);
 
     const PathTraceTriggerState pathTrace{input, renderScale};
     if (pathTrace != app.lastPathTraceTrigger) {
         const std::uint64_t generation = requestPathTrace(app, camera, traceWidth, traceHeight);
+        // A settle promotion re-traces the same pose, so readiness still runs from the input change that moved it.
+        app.traceGeneration = generation;
+        app.readyMs.reset();
         // Only an accumulation at the settled scale is the workload: an interactive one can converge before the settle promotes it.
         if (app.bench && renderScale == app.renderScale) {
             app.bench->restart(generation);
@@ -934,19 +947,34 @@ void applyCameraEdits(AppResources& app, const CameraEdits& edits) {
     app.debugCamera.setFilmBack(app.filmBackPresets[static_cast<std::size_t>(edits.filmBackPresetIndex)].filmBack);
 }
 
+// The Frame section's accumulation readout; offline counts the accumulation in flight, progressive the one on screen.
+pathtracer::debug::PathTracedStatus pathTracedStatusOf(const AppResources& app,
+                                                       const std::shared_ptr<const pathtracer::scene::PathTraceResult>& pathTraceSnapshot) {
+    const pathtracer::debug::PassRecord lastPass = app.pathTraceDriver->lastPassRecord();
+    // Offline always shows a finished image, so its counters follow the accumulation in flight, whose latest pass is lastPass.
+    const bool offline = app.renderMode == pathtracer::debug::RenderMode::Offline;
+    bool hasResult = offline;  // before its first pass the accumulation in flight reads 0, not "no render yet"
+    int samples = 0;
+    double samplingFraction = 1.0;
+    if (offline && lastPass.generation == app.traceGeneration) {
+        samples = lastPass.passIndex;
+        samplingFraction = static_cast<double>(lastPass.activeTexels) / (static_cast<double>(lastPass.width) * lastPass.height);
+    } else if (!offline && pathTraceSnapshot != nullptr) {
+        hasResult = true;
+        samples = pathTraceSnapshot->samples;
+        samplingFraction =
+            static_cast<double>(pathTraceSnapshot->activeTexels) / static_cast<double>(pathTraceSnapshot->texelSamples.size());
+    }
+    // PassRecord is the single source of truth for pass timing; the HUD wants seconds, the record carries milliseconds.
+    return {hasResult, lastPass.passMs / 1000.0, samples, app.maxSamples, app.scene.baseSettings.adaptive.threshold > 0.0F,
+            samplingFraction, app.readyMs};
+}
+
 void updateHud(AppResources& app, const pathtracer::platform::Window& window,
                const pathtracer::scene::Camera& camera,
                const std::shared_ptr<const pathtracer::scene::PathTraceResult>& pathTraceSnapshot,
                pathtracer::gfx::ViewportRect imageRect) {
-    const pathtracer::debug::PathTracedStatus pathTracedStatus{
-        pathTraceSnapshot != nullptr,
-        // PassRecord is the single source of truth for pass timing now; the HUD wants seconds, the record carries milliseconds.
-        app.pathTraceDriver != nullptr ? app.pathTraceDriver->lastPassRecord().passMs / 1000.0 : 0.0,
-        pathTraceSnapshot != nullptr ? pathTraceSnapshot->samples : 0, app.maxSamples,
-        app.scene.baseSettings.adaptive.threshold > 0.0F,
-        pathTraceSnapshot != nullptr ? static_cast<double>(pathTraceSnapshot->activeTexels) /
-                                           static_cast<double>(pathTraceSnapshot->texelSamples.size())
-                                     : 1.0};
+    const pathtracer::debug::PathTracedStatus pathTracedStatus = pathTracedStatusOf(app, pathTraceSnapshot);
     const pathtracer::debug::SceneStats sceneStats{
         static_cast<int>(app.scene.model.instances.size()),
         app.scene.totalTriangles,
@@ -977,6 +1005,7 @@ void updateHud(AppResources& app, const pathtracer::platform::Window& window,
         app.pixelProbeReadout,
     };
     CameraEdits edits = cameraEditsOf(app);
+    int renderMode = static_cast<int>(app.renderMode);
     // Only the HUD reads it, so with the HUD hidden or the probe off the fetch is skipped rather than computed and thrown away.
     const pathtracer::debug::PixelProbeSample pixelProbe =
         app.showHud && app.pixelProbeReadout != pathtracer::debug::PixelProbeReadout::None
@@ -985,13 +1014,14 @@ void updateHud(AppResources& app, const pathtracer::platform::Window& window,
             : pathtracer::debug::PixelProbeSample{};
     const pathtracer::debug::ScopedCpuTimer hudTimer(app.stages.hudMs);
     if (app.showHud) {
-        app.hud.draw(hudFrameData, app.aov, edits.focalLengthMm, edits.aperture, edits.shutterSeconds, edits.iso,
+        app.hud.draw(hudFrameData, renderMode, app.aov, edits.focalLengthMm, edits.aperture, edits.shutterSeconds, edits.iso,
                      edits.filmBackPresetIndex, app.filmBackPresetNames, edits.lensProjection, edits.pixelLattice,
                      edits.acceptanceAngleDegrees, app.showSky,
                      app.envLightEnabled, app.envRotationDegrees, app.envExposureStops, app.aberrationStrength,
                      app.bloomStrength, app.framingState, pixelProbe);
     }
     applyCameraEdits(app, edits);
+    app.renderMode = static_cast<pathtracer::debug::RenderMode>(renderMode);
     {
         const pathtracer::debug::ScopedCpuTimer hudRenderTimer(app.stages.hudRenderMs);
         app.hud.render();
@@ -1063,9 +1093,8 @@ bool stageComplete(const AppResources& app, const BenchCapture& bench) {
     if (!aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(app.aov))) {
         return app.gbuffer->generation != 0;
     }
-    // At the cap, or earlier once adaptive sampling has stopped every texel and the driver idles.
     return !bench.passes.empty() && bench.passes.back().generation == bench.generation &&
-           (bench.passes.back().passIndex == app.maxSamples || bench.passes.back().activeTexels == 0);
+           pathtracer::scene::accumulationComplete(bench.passes.back().passIndex, bench.passes.back().activeTexels, app.maxSamples);
 }
 
 // Appends this frame's stage times and its finished passes. `passes` were taken before this frame's snapshot, the driver publishing first.
@@ -1093,7 +1122,10 @@ void captureBenchFrame(pathtracer::platform::Window& window, AppResources& app, 
     if (!stageComplete(app, bench)) {
         return;
     }
-    if (bench.stage > 0) {
+    // Stage 0 holds the accumulation, whose final snapshot this frame's recordReadiness timed; later stages only switch the AOV.
+    if (bench.stage == 0) {
+        bench.readyMs.push_back(static_cast<float>(*app.readyMs));  // NOLINT(bugprone-unchecked-optional-access)
+    } else {
         bench.stageWallMs.push_back(std::chrono::duration<float, std::milli>(now - bench.stageStart).count());
     }
     // An empty schedule leaves stage at 0 and ends here, which is the single-stage capture unchanged.
@@ -1150,6 +1182,10 @@ nlohmann::json benchConfig(const AppResources& app, const BenchCapture& bench) {
     if (bench.framebuffer != std::pair{app.imageWidth, app.imageHeight}) {
         config["framebuffer"] = {bench.framebuffer.first, bench.framebuffer.second};
     }
+    // Only offline, for the same reason.
+    if (app.renderMode == pathtracer::debug::RenderMode::Offline) {
+        config["render_mode"] = pathtracer::debug::kRenderModeNames[static_cast<int>(app.renderMode)];
+    }
     // Only off the square lattice, for the same reason.
     if (camera.pixelLattice() != pathtracer::gfx::PixelLattice::Square) {
         config["camera"]["pixel_lattice"] = pathtracer::gfx::kPixelLatticeNames[static_cast<int>(camera.pixelLattice())];
@@ -1198,6 +1234,7 @@ nlohmann::json benchSamples(const BenchCapture& bench) {
             {"hud_ms", frameColumn(&Stages::hudMs)},
             {"hud_render_ms", frameColumn(&Stages::hudRenderMs)},
             {"swap_ms", frameColumn(&Stages::swapMs)},
+            {"ready_ms", bench.readyMs},
             {"pass_trace_ms", passColumn(&Pass::traceMs)},
             {"pass_accumulate_ms", passColumn(&Pass::accumulateMs)},
             {"pass_over_range_ms", passColumn(&Pass::overRangeMs)},
@@ -1284,6 +1321,16 @@ float beginFrame(pathtracer::platform::Window& window, pathtracer::platform::Dis
     return dtSeconds;
 }
 
+// Input-to-photon: from the input change the latest request answers to the swap that first shows its accumulation finished.
+void recordReadiness(AppResources& app, const std::shared_ptr<const pathtracer::scene::PathTraceResult>& pathTraceSnapshot) {
+    if (app.readyMs.has_value() || !aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(app.aov)) ||
+        pathTraceSnapshot == nullptr || pathTraceSnapshot->generation != app.traceGeneration ||
+        !pathtracer::scene::accumulationComplete(pathTraceSnapshot->samples, pathTraceSnapshot->activeTexels, app.maxSamples)) {
+        return;
+    }
+    app.readyMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - app.lastInputChange).count();
+}
+
 // One frame: vblank -> previous GPU completion -> poll -> camera -> retrace if changed -> orbit-pick -> blit -> swap.
 void renderFrame(pathtracer::platform::Window& window, pathtracer::platform::DisplayLink& displayLink, AppResources& app) {
     const float dtSeconds = beginFrame(window, displayLink, app);
@@ -1329,6 +1376,7 @@ void renderFrame(pathtracer::platform::Window& window, pathtracer::platform::Dis
         window.swapBuffers();
     }
     GL_CALL(app.frameFence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0));
+    recordReadiness(app, pathTraceSnapshot);
 
     if (app.statsEnabled) {
         // After swapBuffers, so the dashboard's write(2) lands in the frame's slack. It times its own draw, the stages being zeroed first.

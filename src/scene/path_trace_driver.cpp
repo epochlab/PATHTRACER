@@ -256,6 +256,10 @@ void PathTraceDriver::setSuspended(bool suspended) {
     wakeCv_.notify_all();
 }
 
+void PathTraceDriver::setPublishesFinalOnly(bool finalOnly) {
+    publishesFinalOnly_.store(finalOnly, std::memory_order_relaxed);
+}
+
 void PathTraceDriver::idleUntilWake(const std::stop_token& stopToken, std::uint64_t seen) {
     std::unique_lock<std::mutex> lock(requestMutex_);
     wakeCv_.wait(lock, stopToken, [this, seen] { return wakeEpoch_ != seen; });
@@ -333,10 +337,11 @@ double PathTraceDriver::tracePass(const Request& request, int sampleBase, std::u
     return millisecondsSince(traceStart);
 }
 
-// Driver-thread-only. Folds a completed pass into the running mean, reduces its over-range stats, then publishes it and its record.
+// Driver-thread-only. Folds a completed pass into the running mean, then reduces and publishes it unless only a finished one is shown.
 void PathTraceDriver::finishPass(const std::shared_ptr<PathTraceResult>& pass, std::shared_ptr<PathTraceResult>& currentMean,
-                                 const PathTraceSettings& settings, int passIndex, std::uint64_t generation, double traceMs,
+                                 const Request& request, int passIndex, std::uint64_t generation, double traceMs,
                                  std::chrono::steady_clock::time_point passStart) {
+    const PathTraceSettings& settings = request.settings;
     // passIndex == 1 leaves the pass as rendered: the running mean of one sample is that sample, and no previous mean exists.
     const auto accumulateStart = std::chrono::steady_clock::now();
     if (passIndex > 1) {
@@ -355,21 +360,27 @@ void PathTraceDriver::finishPass(const std::shared_ptr<PathTraceResult>& pass, s
     }
     pass->activeTexels = activeTexels_.size();
     const double accumulateMs = millisecondsSince(accumulateStart);
-
-    // After the mean, before the publish: the statistics must describe the image about to go on screen.
-    const auto overRangeStart = std::chrono::steady_clock::now();
-    reduceOverRange(*pass, overRangeHistograms_, overRangePeaks_, threadPool_);
-    const double overRangeMs = millisecondsSince(overRangeStart);
     pass->generation = generation;
     pass->samples = passIndex;
     currentMean = pass;
 
-    const auto publishStart = std::chrono::steady_clock::now();
-    {
-        const std::lock_guard<std::mutex> lock(resultMutex_);
-        result_ = currentMean;
+    double overRangeMs = 0.0;
+    double publishMs = 0.0;
+    // Held back, result_ keeps the last finished image on screen; a reader a frame behind it costs at most one buffer retry.
+    if (!publishesFinalOnly_.load(std::memory_order_relaxed) ||
+        accumulationComplete(passIndex, activeTexels_.size(), request.maxSamples)) {
+        // After the mean, before the publish: the statistics must describe the image about to go on screen.
+        const auto overRangeStart = std::chrono::steady_clock::now();
+        reduceOverRange(*pass, overRangeHistograms_, overRangePeaks_, threadPool_);
+        overRangeMs = millisecondsSince(overRangeStart);
+
+        const auto publishStart = std::chrono::steady_clock::now();
+        {
+            const std::lock_guard<std::mutex> lock(resultMutex_);
+            result_ = currentMean;
+        }
+        publishMs = millisecondsSince(publishStart);
     }
-    const double publishMs = millisecondsSince(publishStart);
 
     publishPassRecord(generation, passIndex, pass->beauty.width, pass->beauty.height, traceMs,
                       accumulateMs, overRangeMs, publishMs, millisecondsSince(passStart),
@@ -411,7 +422,7 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
         // Engaged: requestedGeneration goes non-zero only inside requestTrace(), under one lock.
         const Request& request = *activeRequest;  // NOLINT(bugprone-unchecked-optional-access)
         // A zero-size view, capped or every texel stopped: nothing changes until a new request or a suspend, both bumping the epoch.
-        if (request.width <= 0 || request.height <= 0 || activeTexels_.empty() || (request.maxSamples > 0 && accumulated >= request.maxSamples)) {
+        if (request.width <= 0 || request.height <= 0 || accumulationComplete(accumulated, activeTexels_.size(), request.maxSamples)) {
             idleUntilWake(stopToken, wakeSeen);
             continue;
         }
@@ -434,7 +445,7 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
                                /*cancelled=*/true);
             continue;  // superseded mid-pass -- discard, next iteration picks up the new request
         }
-        finishPass(pass, currentMean, request.settings, passIndex, activeGeneration, traceMs, passStart);
+        finishPass(pass, currentMean, request, passIndex, activeGeneration, traceMs, passStart);
         accumulated = passIndex;
     }
 }
