@@ -22,12 +22,12 @@
         "orbitSensitivityDegPerPixel": 0.25
     },
     "render": {
-        "width": 64,
-        "height": 32,
+        "width": 2048,
+        "height": 1024,
         "displayWidth": 2048,
         "displayHeight": 1152,
         "renderScale": 1.0,
-        "interactiveRenderScale": 1.0,
+        "interactiveRenderScale": 0.1,
         "defaultAOV": 0,
         "defaultLUT": "sRGB",
         "vsync": true,
