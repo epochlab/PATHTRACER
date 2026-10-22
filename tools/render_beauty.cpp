@@ -166,7 +166,6 @@ bool appendTimingRecord(const Options& options, int argc, char** argv, int width
                    {"seed", options.scrambleSeed},
                    {"aov", aovName},
                    {"env_light", envLightEnabled},
-                   {"spp_per_pass", settings.samplesPerPixel},
                    {"replicates", settings.replicates},
                    {"adaptive_threshold", settings.adaptive.threshold},
                    {"adaptive_confidence", settings.adaptive.confidence},

@@ -224,7 +224,6 @@ PathTracerConfig parsePathTracer(const nlohmann::json& pathTracer) {
         pathTracer.at("samplesPerPixel").get<int>(),
         pathTracer.at("maxBounces").get<int>(),
         pathTracer.at("russianRouletteStartBounce").get<int>(),
-        pathTracer.at("maxSamples").get<int>(),
         toFloat(pathTracer.at("aoMaxDistance")),
         toFloat(pathTracer.at("lookaheadDistance")),
         pathTracer.at("replicates").get<int>(),
@@ -275,20 +274,18 @@ bool validCounts(const RenderConfig& render, const PathTracerConfig& pathTracer,
             ok = false;
         }
     };
-    // At zero the per-sample loop never runs, so renderPathTraced divides by a zero filter weight and writes NaN to every AOV texel.
-    atLeast("samplesPerPixel", pathTracer.samplesPerPixel, 1);
     // Zero is direct lighting only, a legitimate render; negative makes the depth cap reject the primary hit before it is shaded.
     atLeast("maxBounces", pathTracer.maxBounces, 0);
     // Negative starts roulette before the primary ray, killing paths at full throughput.
     atLeast("russianRouletteStartBounce", pathTracer.russianRouletteStartBounce, 0);
-    // Zero is the documented unbounded case; negative would cap accumulation below the first pass.
-    atLeast("maxSamples", pathTracer.maxSamples, 0);
+    // Zero is the documented unbounded case; negative would cap accumulation below the first sample.
+    atLeast("samplesPerPixel", pathTracer.samplesPerPixel, 0);
     // One replicate is one sequence, a valid render whose SNR is undefined; zero would divide the pass index.
     atLeast("replicates", pathTracer.replicates, 1);
-    // A capped accumulation must end on a complete round, or its replicates settle at unequal counts.
-    if (pathTracer.replicates >= 1 && pathTracer.maxSamples % pathTracer.replicates != 0) {
-        std::cerr << "loadProfileConfig: " << source << ": maxSamples " << pathTracer.maxSamples << " is not a multiple of replicates "
-                  << pathTracer.replicates << "\n";
+    // Sample n feeds replicate n mod K, so a capped frame must end on a complete round or its replicates settle at unequal counts.
+    if (pathTracer.replicates >= 1 && pathTracer.samplesPerPixel % pathTracer.replicates != 0) {
+        std::cerr << "loadProfileConfig: " << source << ": samplesPerPixel " << pathTracer.samplesPerPixel
+                  << " is not a multiple of replicates " << pathTracer.replicates << ", each of which needs an equal share of samples\n";
         ok = false;
     }
     // Checkpoints fall where every replicate holds a power-of-two prefix of its sequence, so the first must be one of them.
@@ -305,8 +302,8 @@ bool validCounts(const RenderConfig& render, const PathTracerConfig& pathTracer,
         ok = false;
     }
     // Offline shows only a finished accumulation, and adaptive stopping alone need not finish one: a zero-mean texel never retires.
-    if (render.renderMode == pathtracer::debug::RenderMode::Offline && pathTracer.maxSamples == 0) {
-        std::cerr << "loadProfileConfig: " << source << ": render.renderMode offline needs maxSamples > 0\n";
+    if (render.renderMode == pathtracer::debug::RenderMode::Offline && pathTracer.samplesPerPixel == 0) {
+        std::cerr << "loadProfileConfig: " << source << ": render.renderMode offline needs samplesPerPixel > 0\n";
         ok = false;
     }
     // The traced image the render scale multiplies, and the denominator of the primary ray's aspect ratio.

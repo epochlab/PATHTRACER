@@ -33,7 +33,7 @@ namespace pathtracer::scene {
 // scene.json's model placement: translate * rotationXyz, the order every caller places the scene in.
 [[nodiscard]] glm::mat4 rootTransformOf(const pathtracer::config::ModelConfig& model);
 
-// The profile's integrator limits; samplesPerPixel is the caller's, interactive or headless.
-[[nodiscard]] PathTraceSettings baseSettingsOf(const pathtracer::config::ProfileConfig& profile, int samplesPerPixel);
+// The profile's integrator limits at one sample per pass, so passes count samples for the cap, replicates and checkpoints alike.
+[[nodiscard]] PathTraceSettings baseSettingsOf(const pathtracer::config::ProfileConfig& profile);
 
 }  // namespace pathtracer::scene

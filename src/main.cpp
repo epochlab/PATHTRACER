@@ -263,7 +263,7 @@ struct AppResources {
     // The bloom pyramid no longer matches pathTraceDisplayTexture: set by each upload, cleared by the next build.
     bool bloomStale = true;
     // Async path-traced view, selected by `aov`; requestTrace() is called only from requestPathTraceIfTriggerChanged.
-    int maxSamples;  // accumulated-pass cap for PathTraceDriver; 0 = unbounded
+    int samplesPerPixel;  // PathTraceDriver's sample cap; 0 = unbounded
     pathtracer::gfx::ScalarType displayFormat;  // pathTraceDisplayTexture's component type (profile.json displayBitDepth)
     // Display zoom, fit at launch; Cmd+/- queue steps the next frame applies against its frame extent and viewport.
     pathtracer::gfx::ZoomLevel zoomLevel{};
@@ -421,7 +421,7 @@ std::optional<AppScene> loadAppScene(const pathtracer::config::SceneConfig& scen
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - accelBuildStart).count();
 
     const pathtracer::scene::PathTraceSettings baseSettings =
-        pathtracer::scene::baseSettingsOf(profileConfig, profileConfig.pathTracer.samplesPerPixel);
+        pathtracer::scene::baseSettingsOf(profileConfig);
     return AppScene{std::move(*model), std::move(instanceLightIndex), std::move(*lights),
                     std::move(environmentMap), std::move(*accel), std::move(*volumes), baseSettings,
                     std::move(instanceBounds), totalTriangles, loadMs, accelBuildMs};
@@ -439,10 +439,9 @@ void printStartupSpec(const AppScene& scene, const pathtracer::config::SceneConf
         profileConfig.render.height,
         profileConfig.render.renderScale,
         profileConfig.render.interactiveRenderScale,
-        scene.baseSettings.samplesPerPixel,
         scene.baseSettings.maxBounces,
         scene.baseSettings.russianRouletteStartBounce,
-        profileConfig.pathTracer.maxSamples,
+        profileConfig.pathTracer.samplesPerPixel,
         scene.baseSettings.aoMaxDistance,
         // Both pools take ThreadPool's default; PathTraceDriver owns its own, unconstructed until AppResources is at its final address.
         pathtracer::scene::ThreadPool::defaultThreadCount(),
@@ -513,7 +512,7 @@ std::optional<AppResources> initializeApp(const pathtracer::config::SceneConfig&
         .vsync = profileConfig.render.vsync,
         .bloomStrength = profileConfig.render.bloomStrength,
         .pixelProbeReadout = profileConfig.render.pixelProbe,
-        .maxSamples = profileConfig.pathTracer.maxSamples,
+        .samplesPerPixel = profileConfig.pathTracer.samplesPerPixel,
         .displayFormat = profileConfig.render.displayFormat,
         .previousFrameCamera = initialCamera,
         .imageWidth = profileConfig.render.width,
@@ -836,7 +835,7 @@ std::uint64_t requestPathTrace(AppResources& app, const pathtracer::scene::Camer
     return app.pathTraceDriver->requestTrace(pathtracer::scene::PathTraceDriver::Request{
         camera, traceWidth, traceHeight, glm::vec3(0.0F, static_cast<float>(app.envRotationDegrees), 0.0F),
         app.showSky, app.envLightEnabled, std::exp2(app.envExposureStops), app.scene.baseSettings,
-        app.maxSamples});
+        app.samplesPerPixel});
 }
 
 // Once per frame, re-tracing on any input that changes the image. The G-buffer is synchronous, so it stays gated on its own trigger.
@@ -966,7 +965,7 @@ pathtracer::debug::PathTracedStatus pathTracedStatusOf(const AppResources& app,
             static_cast<double>(pathTraceSnapshot->activeTexels) / static_cast<double>(pathTraceSnapshot->texelSamples.size());
     }
     // PassRecord is the single source of truth for pass timing; the HUD wants seconds, the record carries milliseconds.
-    return {hasResult, lastPass.passMs / 1000.0, samples, app.maxSamples, app.scene.baseSettings.adaptive.threshold > 0.0F,
+    return {hasResult, lastPass.passMs / 1000.0, samples, app.samplesPerPixel, app.scene.baseSettings.adaptive.threshold > 0.0F,
             samplingFraction, app.readyMs};
 }
 
@@ -1062,7 +1061,7 @@ void updateDashboard(AppResources& app,
         frameMs,
         app.postTimer.millisecondsElapsed(),
         pathTraceSnapshot != nullptr ? pathTraceSnapshot->samples : 0,
-        app.maxSamples,
+        app.samplesPerPixel,
         !aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(app.aov)),
         app.ramBytes,
         pathtracer::debug::gpuAllocatedBytes(),
@@ -1094,7 +1093,7 @@ bool stageComplete(const AppResources& app, const BenchCapture& bench) {
         return app.gbuffer->generation != 0;
     }
     return !bench.passes.empty() && bench.passes.back().generation == bench.generation &&
-           pathtracer::scene::accumulationComplete(bench.passes.back().passIndex, bench.passes.back().activeTexels, app.maxSamples);
+           pathtracer::scene::accumulationComplete(bench.passes.back().passIndex, bench.passes.back().activeTexels, app.samplesPerPixel);
 }
 
 // Appends this frame's stage times and its finished passes. `passes` were taken before this frame's snapshot, the driver publishing first.
@@ -1150,8 +1149,7 @@ nlohmann::json benchConfig(const AppResources& app, const BenchCapture& bench) {
     nlohmann::json config = {{"scene", app.sceneName},
             {"width", bench.passes.back().width},
             {"height", bench.passes.back().height},
-            {"max_samples", app.maxSamples},
-            {"spp_per_pass", app.scene.baseSettings.samplesPerPixel},
+            {"samples_per_pixel", app.samplesPerPixel},
             {"replicates", app.scene.baseSettings.replicates},
             {"adaptive_threshold", app.scene.baseSettings.adaptive.threshold},
             {"adaptive_confidence", app.scene.baseSettings.adaptive.confidence},
@@ -1326,7 +1324,7 @@ float beginFrame(pathtracer::platform::Window& window, pathtracer::platform::Dis
 void recordReadiness(AppResources& app, const std::shared_ptr<const pathtracer::scene::PathTraceResult>& pathTraceSnapshot) {
     if (app.readyMs.has_value() || !aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(app.aov)) ||
         pathTraceSnapshot == nullptr || pathTraceSnapshot->generation != app.traceGeneration ||
-        !pathtracer::scene::accumulationComplete(pathTraceSnapshot->samples, pathTraceSnapshot->activeTexels, app.maxSamples)) {
+        !pathtracer::scene::accumulationComplete(pathTraceSnapshot->samples, pathTraceSnapshot->activeTexels, app.samplesPerPixel)) {
         return;
     }
     app.readyMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - app.lastInputChange).count();
@@ -1396,9 +1394,9 @@ struct Options {
     std::string benchLogPath;
     // -bench-aovs A,B,C: AovId sequence the run walks, one stage per entry. Empty = today's single-stage capture.
     std::vector<int> benchAovs;
-    // -size WxH and -max-samples N replace profile.json's render.width/height (not the window), maxSamples and -bench's defaults.
+    // -size WxH and -spp N replace profile.json's render.width/height (not the window), samplesPerPixel and -bench's defaults.
     std::optional<std::pair<int, int>> size;
-    std::optional<int> maxSamples;
+    std::optional<int> samplesPerPixel;
 };
 
 // True when `digits` is a whole decimal integer of at least `minimum`, nothing else: the bounds profile.json applies to the same keys.
@@ -1484,24 +1482,24 @@ std::optional<Options> parseOptions(int argc, char** argv) {
             if (!options.size) {
                 return std::nullopt;
             }
-        } else if (std::strcmp(argv[i], "-max-samples") == 0) {
-            int maxSamples = 0;
-            if (i + 1 >= argc || !parseInteger(argv[i + 1], 0, maxSamples)) {
-                std::cerr << "pathtracer: -max-samples expects a non-negative integer, 0 for unbounded\n";
+        } else if (std::strcmp(argv[i], "-spp") == 0) {
+            int samplesPerPixel = 0;
+            if (i + 1 >= argc || !parseInteger(argv[i + 1], 0, samplesPerPixel)) {
+                std::cerr << "pathtracer: -spp expects a non-negative integer, 0 for unbounded\n";
                 return std::nullopt;
             }
-            options.maxSamples = maxSamples;
+            options.samplesPerPixel = samplesPerPixel;
             ++i;
         } else {
             std::cerr << "pathtracer: unknown flag " << argv[i]
                        << "\n  usage: pathtracer [-scene path/to/scene.json] [-stats] [-bench log.jsonl] [-bench-aovs beauty,normal,...]"
-                       << " [-size WxH] [-max-samples N]\n";
+                       << " [-size WxH] [-spp N]\n";
             return std::nullopt;
         }
     }
     if (!options.benchLogPath.empty()) {
         options.size = options.size.value_or(std::pair{pathtracer::debug::kBenchWidth, pathtracer::debug::kBenchHeight});
-        options.maxSamples = options.maxSamples.value_or(pathtracer::debug::kBenchSamples);
+        options.samplesPerPixel = options.samplesPerPixel.value_or(pathtracer::debug::kBenchSamples);
     }
     return options;
 }
@@ -1513,7 +1511,7 @@ bool validStartup(const Options& options, const std::optional<pathtracer::config
         std::cerr << "main: scene/profile config load failed, aborting startup\n";
         return false;
     }
-    // -size and -max-samples replaced counts loadProfileConfig validated, so their cross-constraints are checked again.
+    // -size and -spp replaced counts loadProfileConfig validated, so their cross-constraints are checked again.
     if (!pathtracer::config::validCounts(profileConfig->render, profileConfig->pathTracer, "profile.json under command-line overrides")) {
         return false;
     }
@@ -1522,11 +1520,11 @@ bool validStartup(const Options& options, const std::optional<pathtracer::config
         return false;
     }
     if (!options.benchLogPath.empty() &&
-        (profileConfig->pathTracer.maxSamples <= 0 ||
+        (profileConfig->pathTracer.samplesPerPixel <= 0 ||
          !aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(
              options.benchAovs.empty() ? profileConfig->render.defaultAov : options.benchAovs.front())))) {
         // An unbounded accumulation never ends and a G-buffer AOV parks the driver, so neither is a benchmark workload.
-        std::cerr << "main: -bench needs maxSamples > 0 and a path-traced first AOV\n";
+        std::cerr << "main: -bench needs samplesPerPixel > 0 and a path-traced first AOV\n";
         return false;
     }
     if (!profileConfig->denoiser.enabled && std::find(options.benchAovs.begin(), options.benchAovs.end(),
@@ -1616,8 +1614,8 @@ int main(int argc, char** argv) {
         profileConfig->render.width = options->size->first;
         profileConfig->render.height = options->size->second;
     }
-    if (profileConfig && options->maxSamples) {
-        profileConfig->pathTracer.maxSamples = *options->maxSamples;
+    if (profileConfig && options->samplesPerPixel) {
+        profileConfig->pathTracer.samplesPerPixel = *options->samplesPerPixel;
     }
     if (profileConfig && sceneConfig) {
         pathtracer::config::applySceneCamera(*sceneConfig, *profileConfig);

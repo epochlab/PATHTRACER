@@ -302,8 +302,7 @@ std::unique_ptr<HeadlessRenderer> HeadlessRenderer::open(const std::string& asse
         return nullptr;
     }
 
-    // One sample per pass: convergence comes from accumulating passes, as the driver and render_beauty both drive the integrator.
-    const pathtracer::scene::PathTraceSettings baseSettings = pathtracer::scene::baseSettingsOf(inputs->profile, /*samplesPerPixel=*/1);
+    const pathtracer::scene::PathTraceSettings baseSettings = pathtracer::scene::baseSettingsOf(inputs->profile);
 
     return std::unique_ptr<HeadlessRenderer>(new HeadlessRenderer(
         assetRoot, std::move(inputs->profile), std::move(inputs->scene), std::move(*geometry), std::move(*volumes),

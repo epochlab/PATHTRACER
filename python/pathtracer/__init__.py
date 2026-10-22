@@ -322,6 +322,16 @@ class Renderer:
         return (_LIB.pt_renderer_default_width(self._handle), _LIB.pt_renderer_default_height(self._handle))
 
     @property
+    def default_samples(self) -> int:
+        """profile.json's ``pathTracer.samplesPerPixel``, the viewer's finished frame and ``render(samples=None)``; 0 is unbounded."""
+        return _LIB.pt_renderer_default_samples(self._handle)
+
+    @property
+    def default_bloom_strength(self) -> float:
+        """profile.json's ``render.bloomStrength``: the glare ``render(bloom_strength=None)`` takes."""
+        return float(_LIB.pt_renderer_default_bloom_strength(self._handle))
+
+    @property
     def default_root_rotation(self) -> tuple[float, float, float]:
         """scene.json's ``model.rotation`` in XYZ degrees: the pose ``render(root_rotation=None)`` keeps."""
         out = (ctypes.c_float * 3)()
@@ -342,7 +352,7 @@ class Renderer:
         aovs: Iterable[str] = ("beauty",),
         width: int | None = None,
         height: int | None = None,
-        samples: int = 1,
+        samples: int | None = None,
         seed: int = 1,
         camera: Camera | None = None,
         previous_camera: Camera | None = None,
@@ -352,7 +362,7 @@ class Renderer:
         light_rotations: Sequence[Sequence[float]] | None = None,
         light_temperatures: Sequence[float] | None = None,
         env_rotation: Sequence[float] = (0.0, 0.0, 0.0),
-        bloom_strength: float = 0.0,
+        bloom_strength: float | None = None,
         aberration: float = 0.0,
     ) -> Mapping[str, np.ndarray]:
         """Renders the requested AOVs and returns them keyed by the names given.
@@ -361,8 +371,9 @@ class Renderer:
         them separately: the 13 path-traced lanes share one sample set, the 14 G-buffer lanes share one set of
         pixel-centre rays, and the Beauty filters share the one accumulated Beauty.
 
-        ``samples`` is the number of one-sample passes averaged. The sampler's scramble is fixed by ``seed`` and its
-        sequence index advances per pass, so the same arguments always reproduce the same floats exactly.
+        ``samples`` is samples per pixel, one per pass; ``None`` is profile.json's ``samplesPerPixel``, the viewer's finished frame.
+        The sampler's scramble is fixed by ``seed`` and its sequence index advances per pass, so the same arguments always
+        reproduce the same floats exactly.
 
         ``show_sky`` decides whether a camera ray that hits nothing returns environment radiance. It gates the
         primary miss only -- indirect bounces and next-event estimation sample the environment either way -- so
@@ -387,11 +398,12 @@ class Renderer:
         gamut (blue turns negative) is refused rather than clamped. ``None`` keeps the authored colours.
         Only the lights' radiance changes, so it never rebuilds the BVH. The environment keeps its measured colour.
 
-        ``bloom_strength`` and ``aberration`` are the viewer's lens optics, both 0 (off) by default, applied in scene-linear to
+        ``bloom_strength`` and ``aberration`` are the viewer's lens optics, applied in scene-linear to
         ``beauty`` and ``denoised`` only, after every filter has read the clean beauty; data AOVs are never touched. The result
         is the viewer's frame at one texel per pixel: ``(1 - k) * fringed + k * glare`` with ``k = bloom_strength``.
-        ``bloom_strength`` in ``[0, 1]`` is the fraction of energy a glare PSF scatters: an equal-weight Gaussian pyramid whose
-        octaves reach the frame, so it falls off as ``1 / r**2``; the hexagonal lattice builds it by Loop subdivision of its own cells.
+        ``bloom_strength`` in ``[0, 1]`` is the fraction of energy a glare PSF scatters, ``None`` being profile.json's
+        ``bloomStrength``: an equal-weight Gaussian pyramid whose octaves reach the frame,
+        so it falls off as ``1 / r**2``; the hexagonal lattice builds it by Loop subdivision of its own cells.
         ``aberration`` in ``[0, 1)`` reads red at the film point scaled ``1 - aberration`` about the frame centre and blue at
         ``1 + aberration``, each from its nearest pixel; green stays. On the lat-long both wrap across the seam.
 
@@ -400,6 +412,10 @@ class Renderer:
         names = tuple(aovs)
         if not names:
             raise ValueError("at least one AOV is required")
+        if samples is None:
+            samples = self.default_samples
+            if samples == 0:
+                raise ValueError("profile.json samplesPerPixel is 0 (unbounded), so render needs an explicit samples")
         if samples < 1:
             raise ValueError(f"samples must be at least 1, got {samples}")
 
@@ -445,7 +461,7 @@ class Renderer:
         if kelvin is not None:
             request.light_temperature_kelvin = kelvin.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
         request.env_rotation_degrees = (ctypes.c_float * 3)(*env)
-        request.bloom_strength = bloom_strength
+        request.bloom_strength = self.default_bloom_strength if bloom_strength is None else bloom_strength
         request.aberration = aberration
 
         error = _ffi.make_error_buffer()

@@ -65,10 +65,12 @@ typedef struct {
     float acceptance_angle_degrees;
 } PtCamera;
 
-/* profile.json's authored camera and window size -- the defaults a caller overrides one field at a time. */
+/* profile.json's authored camera, image size, samplesPerPixel and bloomStrength -- the defaults a caller overrides one field at a time. */
 void pt_renderer_default_camera(const PtRenderer* renderer, PtCamera* out);
 int pt_renderer_default_width(const PtRenderer* renderer);
 int pt_renderer_default_height(const PtRenderer* renderer);
+int pt_renderer_default_samples(const PtRenderer* renderer);
+float pt_renderer_default_bloom_strength(const PtRenderer* renderer);
 
 /* Every light in the scene, any shape, 3 floats each in light_rotation_degrees. Every rotation is XYZ degrees as Rz*Ry*Rx, X first. */
 int pt_renderer_light_count(const PtRenderer* renderer);

@@ -356,9 +356,9 @@ glm::mat4 rootTransformOf(const pathtracer::config::ModelConfig& model) {
     return placementTransform(model.position, model.rotation);
 }
 
-PathTraceSettings baseSettingsOf(const pathtracer::config::ProfileConfig& profile, int samplesPerPixel) {
+PathTraceSettings baseSettingsOf(const pathtracer::config::ProfileConfig& profile) {
     return PathTraceSettings{
-        .samplesPerPixel = samplesPerPixel,
+        .samplesPerPass = 1,
         .maxBounces = profile.pathTracer.maxBounces,
         .russianRouletteStartBounce = profile.pathTracer.russianRouletteStartBounce,
         .aoMaxDistance = profile.pathTracer.aoMaxDistance,

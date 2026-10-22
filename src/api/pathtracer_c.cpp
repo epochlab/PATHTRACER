@@ -271,6 +271,14 @@ int pt_renderer_default_height(const PtRenderer* renderer) {
     return renderer == nullptr ? 0 : reinterpret_cast<const HeadlessRenderer*>(renderer)->defaultHeight();
 }
 
+int pt_renderer_default_samples(const PtRenderer* renderer) {
+    return renderer == nullptr ? 0 : reinterpret_cast<const HeadlessRenderer*>(renderer)->defaultSamples();
+}
+
+float pt_renderer_default_bloom_strength(const PtRenderer* renderer) {
+    return renderer == nullptr ? 0.0F : reinterpret_cast<const HeadlessRenderer*>(renderer)->defaultBloomStrength();
+}
+
 int pt_renderer_light_count(const PtRenderer* renderer) {
     return renderer == nullptr ? 0 : static_cast<int>(reinterpret_cast<const HeadlessRenderer*>(renderer)->scene().lights.size());
 }

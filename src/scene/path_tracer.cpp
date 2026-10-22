@@ -986,7 +986,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
     out.camera = camera;
     const float pixelSide = pathtracer::gfx::pixelSide(lattice);
     // Samples in a pixel's estimate; unbounded N as Sampler's.
-    const auto estimateSamples = static_cast<float>(std::max(sampleCount, sampleBase + settings.samplesPerPixel));
+    const auto estimateSamples = static_cast<float>(std::max(sampleCount, sampleBase + settings.samplesPerPass));
     // Sample spacing pixelSide/sqrt(N) (pbrt-v4's differential scale), so prefilter blur vanishes as N grows.
     const float strataPerAxis = std::sqrt(estimateSamples) / pixelSide;
     // d(ndc) across that spacing: two NDC units span the film, and +Y flips because row 0 is the top.
@@ -1000,9 +1000,9 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
     // Film point to NDC: two units span the film, and +Y flips because HdrImage row 0 is the top (EXR/glTF convention).
     const auto ndcOf = [&frame](glm::vec2 film) { return glm::vec2(((film.x / frame.x) * 2.0F) - 1.0F, 1.0F - ((film.y / frame.y) * 2.0F)); };
     // Replicated RQMC: pass p draws from replicate p mod K at its position p div K, so each replicate is a prefix of its own sequence.
-    const int pass = sampleBase / settings.samplesPerPixel;
+    const int pass = sampleBase / settings.samplesPerPass;
     const std::uint32_t seed = replicateSeed(scrambleSeed, pass % settings.replicates);
-    const int replicateBase = (pass / settings.replicates) * settings.samplesPerPixel;
+    const int replicateBase = (pass / settings.replicates) * settings.samplesPerPass;
     const int replicateCount = sampleCount > 0 ? (sampleCount + settings.replicates - 1) / settings.replicates : sampleCount;
     // Chunks of the list, not of the frame: as texels converge the work left stays split evenly over the pool, wherever it lies.
     const auto texelCount = static_cast<int>(texels.size());
@@ -1030,7 +1030,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
         std::vector<MediumEntry> mediumStack;
         mediumStack.reserve(interiors);
 
-        const auto samples = static_cast<float>(settings.samplesPerPixel);
+        const auto samples = static_cast<float>(settings.samplesPerPass);
         for (std::size_t i = chunkBegin; i < chunkEnd; ++i) {
             const int x = static_cast<int>(texels[i] % static_cast<std::uint32_t>(width));
             const int y = static_cast<int>(texels[i] / static_cast<std::uint32_t>(width));
@@ -1040,7 +1040,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
             const std::optional<Camera::RayDifferential> axis =
                 kappa > 0.0F ? camera.primaryRayDifferential(basis, centreNdc.x, centreNdc.y) : std::nullopt;
             std::array<float, kSampleLanes> sum{};
-            for (int s = 0; s < settings.samplesPerPixel; ++s) {
+            for (int s = 0; s < settings.samplesPerPass; ++s) {
                 // replicateBase + s is this sample's position in its replicate's sequence: it must advance across passes to stratify.
                 const int sampleIndex = replicateBase + s;
                 Sampler sampler(x, y, sampleIndex, replicateCount, seed, lattice);

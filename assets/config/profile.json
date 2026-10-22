@@ -37,10 +37,9 @@
         "renderMode": "progressive"
     },
     "pathTracer": {
-        "samplesPerPixel": 3,
+        "samplesPerPixel": 64,
         "maxBounces": 8,
         "russianRouletteStartBounce": 3,
-        "maxSamples": 16,
         "aoMaxDistance": 1.0,
         "lookaheadDistance": 2.0,
         "replicates": 4,

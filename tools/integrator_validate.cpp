@@ -239,7 +239,7 @@ TestScene makeTwoInstanceScene(float roughness) {
 // The integrator's limits alone: a check's surface is its scene's per-instance materials, as a scene file's is.
 PathTraceSettings makeSettings(int maxBounces, int rrStartBounce) {
     PathTraceSettings settings{};
-    settings.samplesPerPixel = kSamplesPerPixel;
+    settings.samplesPerPass = kSamplesPerPixel;
     settings.maxBounces = maxBounces;
     settings.russianRouletteStartBounce = rrStartBounce;
     settings.denoiseFeatures = true;  // the shipped profile's default
@@ -314,7 +314,7 @@ pathtracer::scene::PathTraceResult renderPass(const TestScene& scene, const Envi
                                      instanceLightIndex, lights, pathtracer::scene::VolumeSet{}, width, height,
                                      pathtracer::scene::allTexels(width, height), showSky,
                                      settings, scrambleSeed, /*sampleBase=*/0,
-                                     /*sampleCount=*/settings.samplesPerPixel, generation,
+                                     /*sampleCount=*/settings.samplesPerPass, generation,
                                      /*requestedGeneration=*/1U, pool, stats, result);
     return result;
 }
@@ -420,7 +420,7 @@ PT_CHECK(transmissive_slab_energy, Slow, Statistical) {
     const EnvironmentMap env = makeUniformEnvironment();
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     PathTraceSettings settings = makeSettings(kSlabBounces, 999);
-    settings.samplesPerPixel = kSamplesPerPixel / tools::stats::kReplicates;
+    settings.samplesPerPass = kSamplesPerPixel / tools::stats::kReplicates;
 
     std::cout << "integrator_validate: white non-absorbing slab, uniform L0=1, Embree render vs BSDF-only walk\n";
     for (float roughness : roughnesses) {
@@ -568,7 +568,7 @@ std::vector<int> rimBinOf(const Camera& camera) {
     return bins;
 }
 
-// Per-bin mean of kReplicates independent scrambles at settings.samplesPerPixel each, so each bin's band has kReplicates - 1 dof.
+// Per-bin mean of kReplicates independent scrambles at settings.samplesPerPass each, so each bin's band has kReplicates - 1 dof.
 RimEnergy rimEnergy(const TestScene& scene, const EnvironmentMap& env, const PathTraceSettings& settings, EmbreeAccel& accel,
                     pathtracer::scene::ThreadPool& pool, std::uint64_t rowSeed) {
     const Camera camera = makeDiscCamera();
@@ -615,7 +615,7 @@ PT_CHECK(transmissive_sphere_energy_radial, Slow, Statistical) {
     const EnvironmentMap env = makeUniformEnvironment();
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     PathTraceSettings settings = makeSettings(kRimBounces, 999);
-    settings.samplesPerPixel = 1;  // kReplicates scrambles of one sample: 256x128 at 16 samples per pixel in all
+    settings.samplesPerPass = 1;  // kReplicates scrambles of one sample: 256x128 at 16 samples per pixel in all
     const double t = tools::stats::studentTTwoSided(ctx.alpha(), tools::stats::kReplicates - 1);
     std::printf("integrator_validate: white non-absorbing glass sphere, uniform L0=1, mean(SE) per b/R bin (1.0 = invisible)\n  b/R      ");
     for (std::size_t b = 0; b < kRimBins; ++b) {
@@ -703,7 +703,7 @@ PT_CHECK(beer_lambert_absorption, Slow, Statistical) {
     const EnvironmentMap env = makeUniformEnvironment();
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     PathTraceSettings settings = makeSettings(kBounces, 999);
-    settings.samplesPerPixel = kSamplesPerPixel / tools::stats::kReplicates;
+    settings.samplesPerPass = kSamplesPerPixel / tools::stats::kReplicates;
     ctx.plan(static_cast<int>(cases.size()) * 4);
     const double t = tools::stats::studentTTwoSided(ctx.alpha(), tools::stats::kReplicates - 1);
 
@@ -786,7 +786,7 @@ PT_CHECK(subsurface_white_furnace, Slow, Statistical) {
     const EnvironmentMap env = makeUniformEnvironment();
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     PathTraceSettings settings = makeSettings(/*maxBounces=*/1, 999);
-    settings.samplesPerPixel = kSamplesPerPixel / tools::stats::kReplicates;
+    settings.samplesPerPass = kSamplesPerPixel / tools::stats::kReplicates;
     ctx.plan(static_cast<int>(cases.size()) * 3);
     const double t = tools::stats::studentTTwoSided(ctx.alpha(), tools::stats::kReplicates - 1);
     std::cout << "integrator_validate: white subsurface sphere, uniform L0 = 1 (1.0 = energy conserved)\n";
@@ -864,7 +864,7 @@ PT_CHECK(subsurface_half_space_albedo, Slow, Statistical) {
     const EnvironmentMap env = makeUniformEnvironment();
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     PathTraceSettings settings = makeSettings(/*maxBounces=*/1, 999);
-    settings.samplesPerPixel = kSamplesPerPixel / tools::stats::kReplicates;
+    settings.samplesPerPass = kSamplesPerPixel / tools::stats::kReplicates;
     std::array<tools::stats::Welford, 3> readings;
     for (int r = 0; accel && r < tools::stats::kReplicates; ++r) {
         const glm::vec3 mean =
@@ -909,7 +909,7 @@ PT_CHECK(nested_media_attenuate_in_turn, Slow, Statistical) {
     const EnvironmentMap env = makeUniformEnvironment();
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     PathTraceSettings settings = makeSettings(/*maxBounces=*/8, 999);
-    settings.samplesPerPixel = kSamplesPerPixel / tools::stats::kReplicates;
+    settings.samplesPerPass = kSamplesPerPixel / tools::stats::kReplicates;
     std::array<tools::stats::Welford, 3> readings;
     for (int r = 0; accel && r < tools::stats::kReplicates; ++r) {
         const glm::vec3 mean =
@@ -964,7 +964,7 @@ PT_CHECK(embedded_object_of_its_ambient_index_is_invisible, Slow, Statistical) {
 
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     PathTraceSettings settings = makeSettings(/*maxBounces=*/16, 999);
-    settings.samplesPerPixel = kSamplesPerPixel / tools::stats::kReplicates;
+    settings.samplesPerPass = kSamplesPerPixel / tools::stats::kReplicates;
     const auto replicates = [&](const TestScene& scene, const char* name) {
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         std::array<tools::stats::Welford, 3> readings;
@@ -1131,7 +1131,7 @@ PT_CHECK(emission_returns_luminance_times_colour, Fast, Exact) {
     }
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     PathTraceSettings base = makeSettings(1, 999);
-    base.samplesPerPixel = kTexelSamples;
+    base.samplesPerPass = kTexelSamples;
 
     const EnvironmentMap black = tools::fixtures::makeEnvironment(
         kEnvWidth, kEnvHeight, std::vector<float>(static_cast<std::size_t>(kEnvWidth) * kEnvHeight * pathtracer::gfx::kRgbChannels, 0.0F));
@@ -1220,7 +1220,7 @@ PT_CHECK(emission_reaches_indirect, Slow, Statistical) {
     const EnvironmentMap env = makeUniformEnvironment();
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     PathTraceSettings settings = makeSettings(1, 999);
-    settings.samplesPerPixel = kSamplesPerPixel / tools::stats::kReplicates;
+    settings.samplesPerPass = kSamplesPerPixel / tools::stats::kReplicates;
 
     const std::uint64_t rowSeed = ctx.subSeed("emitting ceiling");
     tools::stats::Welford enclosedMean;
@@ -1720,7 +1720,7 @@ pathtracer::scene::PathTraceResult renderPassWithLights(const TestScene& scene,
                                      instanceLightIndex, lights, pathtracer::scene::VolumeSet{}, width, height,
                                      pathtracer::scene::allTexels(width, height), showSky,
                                      settings, scrambleSeed, /*sampleBase=*/0,
-                                     /*sampleCount=*/settings.samplesPerPixel, generation,
+                                     /*sampleCount=*/settings.samplesPerPass, generation,
                                      /*requestedGeneration=*/1U, pool, stats, result);
     return result;
 }
@@ -1878,7 +1878,7 @@ PT_CHECK(curved_glass_scale_invariance, Slow, Exact) {
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     // Eight bounces carry a path through the sphere twice and onto the floor; 256x128 at 16 samples per pixel.
     PathTraceSettings settings = makeSettings(8, 999);
-    settings.samplesPerPixel = 16;
+    settings.samplesPerPass = 16;
     const auto seed = static_cast<std::uint32_t>(ctx.subSeed("glass stage scales"));
     const auto render = [&](float scale) -> std::optional<pathtracer::gfx::HdrImage> {
         std::vector<int> lightIndex;
@@ -2303,7 +2303,7 @@ PT_CHECK(emission_sidedness, Fast, Exact) {
     }
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     PathTraceSettings settings = makeSettings(1, 999);
-    settings.samplesPerPixel = 16;
+    settings.samplesPerPass = 16;
     const EnvironmentMap black = tools::fixtures::makeEnvironment(
         kEnvWidth, kEnvHeight, std::vector<float>(static_cast<std::size_t>(kEnvWidth) * kEnvHeight * pathtracer::gfx::kRgbChannels, 0.0F));
     TestScene thin = scene;
@@ -2366,7 +2366,7 @@ PT_CHECK(area_lights_show_le_to_the_camera, Fast, Exact) {
     };
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     PathTraceSettings settings = makeSettings(0, 999);
-    settings.samplesPerPixel = 4;
+    settings.samplesPerPass = 4;
     ctx.plan(static_cast<int>(rows.size()));
     for (const Row& row : rows) {
         const std::vector<pathtracer::scene::AreaLight> lights{row.light};
@@ -2871,7 +2871,7 @@ bool checkAoRow(const char* label, const TestScene& scene, const EnvironmentMap&
                  float aoMaxDistance, float expected, EmbreeAccel& accel,
                  pathtracer::scene::ThreadPool& pool) {
     PathTraceSettings settings = makeSettings(/*maxBounces=*/0, 999);
-    settings.samplesPerPixel = kAoSamplesPerPixel;
+    settings.samplesPerPass = kAoSamplesPerPixel;
     settings.aoMaxDistance = aoMaxDistance;
     const pathtracer::gfx::HdrImage& ao = renderPass(scene, env, settings, accel, pool, true).ao;
     const float measured = regionMean(ao, 0, 0, kImageSize, kImageSize).x;
@@ -2970,7 +2970,7 @@ PT_CHECK(alpha_is_filtered_primary_coverage, Fast, Exact) {
     const EnvironmentMap env = makeUniformEnvironment();
     PathTraceSettings settings = makeSettings(1, 1);
     // N shifted strata put a sample in any u-interval of length 2/N: 32 covers the 11.9% filter tail past an edge pixel's 0.5 px.
-    settings.samplesPerPixel = 32;
+    settings.samplesPerPass = 32;
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     const pathtracer::scene::PathTraceResult hidden = renderPass(scene, env, settings, *accel, pool, /*showSky=*/false);
     const pathtracer::scene::PathTraceResult shown = renderPass(scene, env, settings, *accel, pool, /*showSky=*/true);
@@ -3020,7 +3020,7 @@ PT_CHECK(film_offsets_follow_the_filter_cdf, Fast, Exact) {
     std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
     const EnvironmentMap env = makeUniformEnvironment();
     PathTraceSettings settings = makeSettings(0, 1);
-    settings.samplesPerPixel = kSamples;
+    settings.samplesPerPass = kSamples;
     const pathtracer::scene::PathTraceResult traced =
         renderPass(scene, env, settings, *accel, sharedPool(ctx.threads()), /*showSky=*/false);
     double worst = 0.0;
@@ -3107,7 +3107,7 @@ PT_CHECK(hexagonal_film_offsets_follow_the_radial_filter, Fast, Statistical) {
     std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
     const EnvironmentMap env = makeUniformEnvironment();
     PathTraceSettings settings = makeSettings(0, 1);
-    settings.samplesPerPixel = 64;
+    settings.samplesPerPass = 64;
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     const Camera base = makeCamera();
     const auto hexagonal = [&base](glm::vec3 rotationDegrees) {
@@ -3165,7 +3165,7 @@ PT_CHECK(acceptance_coverage_follows_the_lobe, Fast, Statistical) {
     std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
     const EnvironmentMap env = makeUniformEnvironment();
     PathTraceSettings settings = makeSettings(0, 1);
-    settings.samplesPerPixel = 64;
+    settings.samplesPerPass = 64;
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     const Camera base = makeCamera();
     struct Case {
@@ -3273,7 +3273,7 @@ PT_CHECK(primary_hits_filter_minified_textures, Fast, Exact) {
     std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
     const EnvironmentMap env = makeUniformEnvironment();
     PathTraceSettings settings = makeSettings(0, 1);
-    settings.samplesPerPixel = 16;
+    settings.samplesPerPass = 16;
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     const pathtracer::scene::PathTraceResult traced = renderPass(scene, env, settings, *accel, pool, /*showSky=*/false);
     pathtracer::scene::GBuffer gbuffer;
@@ -3361,7 +3361,7 @@ PT_CHECK(bounced_hits_filter_minified_textures, Fast, Exact) {
     std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
     const EnvironmentMap env = makeUniformEnvironment();
     PathTraceSettings settings = makeSettings(0, 1);
-    settings.samplesPerPixel = 16;
+    settings.samplesPerPass = 16;
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     const pathtracer::scene::PathTraceResult traced = renderPass(scene, env, settings, *accel, pool, /*showSky=*/false);
     const pathtracer::scene::PathTraceResult mean = renderPass(meanScene, env, settings, *accel, pool, /*showSky=*/false);
@@ -3458,7 +3458,7 @@ PT_CHECK(omnidirectional_film_filter_reaches_across_the_seam, Fast, Exact) {
     // Value-initialized: maxBounces 0 traces the primary ray alone, and no field is left indeterminate for the path loop to read.
     PathTraceSettings settings{};
     // N shifted strata put a sample in any u-interval of length 2/N: 32 covers the 6.8% of filter mass that reaches the band.
-    settings.samplesPerPixel = 32;
+    settings.samplesPerPass = 32;
     // Yaw 180 faces +Z with -X on the right, the map's own frame, so the image's u is the map's u.
     const Camera camera(glm::vec3(0.0F), glm::vec3(0.0F, 180.0F, 0.0F), Camera::FilmBack{36.0F, 24.0F}, kFocalLengthMm, 0.01F, 1000.0F,
                         2.8F, 1.0F / 125.0F, 100.0F, pathtracer::scene::Lens{pathtracer::scene::LensProjection::Omnidirectional});
@@ -3479,7 +3479,7 @@ PT_CHECK(omnidirectional_film_filter_reaches_across_the_seam, Fast, Exact) {
         pathtracer::debug::PassStats stats;
         pathtracer::scene::renderPathTraced(camera, *accel, {}, {}, {}, lights, pathtracer::scene::VolumeSet{}, kWidth, kHeight,
                                             pathtracer::scene::allTexels(kWidth, kHeight), /*showSky=*/true, settings, 7U,
-                                            /*sampleBase=*/0, settings.samplesPerPixel, generation,
+                                            /*sampleBase=*/0, settings.samplesPerPass, generation,
                                             /*requestedGeneration=*/1U, pool, stats, result);
         // The column across the seam, within the filter's 1.5 px of the band, and the next one in, beyond it.
         const int seamSide = litColumn == 0 ? kWidth - 1 : 0;

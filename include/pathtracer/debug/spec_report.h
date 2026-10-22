@@ -15,10 +15,9 @@ struct EngineSpec {
     int imageHeight;
     float renderScale;
     float interactiveRenderScale;
-    int samplesPerPass;
     int maxBounces;
     int russianRouletteStartBounce;
-    int maxSamples;  // 0 = unbounded
+    int samplesPerPixel;  // 0 = unbounded
     float aoMaxDistance;
     unsigned int pathTraceThreads;
     unsigned int gbufferThreads;

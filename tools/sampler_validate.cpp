@@ -28,7 +28,7 @@ constexpr std::uint32_t kSeed = 0x9E3779B9U;
 constexpr int kSampleCount = 128;
 constexpr int kPixelX = 37;
 constexpr int kPixelY = 41;
-// Must match sampler.cpp's kMaskSize, the one place it is restated. 2^7 = 128 points, matching profile.json's maxSamples cap.
+// Must match sampler.cpp's kMaskSize, the one place it is restated. 2^7 = 128 points, twice profile.json's samplesPerPixel.
 constexpr int kM = 7;
 // A 12-bounce path consumes up to 6 sets per bounce plus 1 at the camera, so set 64+ is reached, where an unpadded sampler degraded.
 constexpr int kSetCount = 72;

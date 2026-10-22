@@ -127,6 +127,10 @@ def load_library() -> ctypes.CDLL:
     library.pt_renderer_default_width.restype = ctypes.c_int
     library.pt_renderer_default_height.argtypes = [ctypes.c_void_p]
     library.pt_renderer_default_height.restype = ctypes.c_int
+    library.pt_renderer_default_samples.argtypes = [ctypes.c_void_p]
+    library.pt_renderer_default_samples.restype = ctypes.c_int
+    library.pt_renderer_default_bloom_strength.argtypes = [ctypes.c_void_p]
+    library.pt_renderer_default_bloom_strength.restype = ctypes.c_float
     library.pt_renderer_light_count.argtypes = [ctypes.c_void_p]
     library.pt_renderer_light_count.restype = ctypes.c_int
     library.pt_renderer_default_root_rotation.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_float)]

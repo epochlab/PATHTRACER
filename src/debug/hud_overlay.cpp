@@ -137,12 +137,12 @@ void drawGpuSection(const HudFrameData& frame) {
     ImGui::Separator();
 }
 
-// Offline needs a pass cap to finish on, so it is greyed while maxSamples is unbounded.
-void drawRenderModeCombo(int& renderMode, int maxSamples) {
+// Offline needs a sample cap to finish on, so it is greyed while samplesPerPixel is unbounded.
+void drawRenderModeCombo(int& renderMode, int samplesPerPixel) {
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
     if (ImGui::BeginCombo("##renderMode", kRenderModeNames[renderMode])) {
         for (int i = 0; i < static_cast<int>(RenderMode::Count); ++i) {
-            const bool available = static_cast<RenderMode>(i) != RenderMode::Offline || maxSamples > 0;
+            const bool available = static_cast<RenderMode>(i) != RenderMode::Offline || samplesPerPixel > 0;
             if (ImGui::Selectable(kRenderModeNames[i], i == renderMode, available ? 0 : ImGuiSelectableFlags_Disabled)) {
                 renderMode = i;
             }
@@ -161,11 +161,11 @@ void drawFrameSection(const HudFrameData& frame, int& renderMode) {
     ImGui::Text("GPU  post %.2f ms", frame.postMs);
     ImGui::Text("Cap  %s", frame.vsync ? "vsync" : "off");
     ImGui::Text("LUT  %s", frame.lutName);
-    drawRenderModeCombo(renderMode, frame.pathTraced.maxSamples);
+    drawRenderModeCombo(renderMode, frame.pathTraced.samplesPerPixel);
     if (frame.pathTraced.hasResult) {
-        if (frame.pathTraced.maxSamples > 0) {
+        if (frame.pathTraced.samplesPerPixel > 0) {
             ImGui::Text("path-traced  %d / %d samples  %.2f s/pass", frame.pathTraced.accumulatedSamples,
-                        frame.pathTraced.maxSamples, frame.pathTraced.lastPassSeconds);
+                        frame.pathTraced.samplesPerPixel, frame.pathTraced.lastPassSeconds);
         } else {
             ImGui::Text("path-traced  %d samples  %.2f s/pass", frame.pathTraced.accumulatedSamples,
                         frame.pathTraced.lastPassSeconds);

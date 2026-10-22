@@ -999,7 +999,7 @@ PT_CHECK(profile_config_reads_the_pixel_probe_readout, Fast, Exact) {
     }
 }
 
-// render.renderMode names one of two presentations; offline needs a pass cap to finish on, at load and under the -max-samples override.
+// render.renderMode names one of two presentations; offline needs a sample cap to finish on, at load and under the -spp override.
 PT_CHECK(profile_config_reads_the_render_mode, Fast, Exact) {
     using pathtracer::debug::RenderMode;
     const std::vector<std::pair<nlohmann::json, std::optional<RenderMode>>> cases = {
@@ -1028,19 +1028,19 @@ PT_CHECK(profile_config_reads_the_render_mode, Fast, Exact) {
     }
     nlohmann::json offline = shipped;
     offline["render"]["renderMode"] = "offline";
-    offline["pathTracer"]["maxSamples"] = 0;
-    PT_EXPECT(ctx, !load(offline), "an offline profile with unbounded maxSamples loaded");
+    offline["pathTracer"]["samplesPerPixel"] = 0;
+    PT_EXPECT(ctx, !load(offline), "an offline profile with unbounded samplesPerPixel loaded");
     offline["render"]["renderMode"] = "progressive";
-    PT_EXPECT(ctx, load(offline).has_value(), "a progressive profile with unbounded maxSamples was refused");
-    // The viewer's -max-samples 0 lands after loading, so the exported check must refuse it for an offline profile too.
+    PT_EXPECT(ctx, load(offline).has_value(), "a progressive profile with unbounded samplesPerPixel was refused");
+    // The viewer's -spp 0 lands after loading, so the exported check must refuse it for an offline profile too.
     offline["render"]["renderMode"] = "offline";
-    offline["pathTracer"]["maxSamples"] = shipped["pathTracer"]["maxSamples"];
+    offline["pathTracer"]["samplesPerPixel"] = shipped["pathTracer"]["samplesPerPixel"];
     std::optional<pathtracer::config::ProfileConfig> loaded = load(offline);
     if (loaded) {
-        loaded->pathTracer.maxSamples = 0;
+        loaded->pathTracer.samplesPerPixel = 0;
     }
     PT_EXPECT(ctx, loaded && !pathtracer::config::validCounts(loaded->render, loaded->pathTracer, "test"),
-              "validCounts accepted offline under a maxSamples override of 0");
+              "validCounts accepted offline under a samplesPerPixel override of 0");
 }
 
 // render.bloomStrength is an energy fraction, so [0,1] closed: both ends and an interior value load, one step past either end does not.
@@ -1134,7 +1134,7 @@ PT_CHECK(profile_config_scene_scale_distances, Fast, Exact) {
     }
 }
 
-// The integer counts nothing downstream re-checks. samplesPerPixel 0 is the sharp one: it divides by a zero filter weight, writing NaN.
+// The integer counts nothing downstream re-checks, each at its floor, under it, and missing.
 PT_CHECK(profile_config_integer_counts, Fast, Exact) {
     struct Case {
         std::string name;
@@ -1145,9 +1145,9 @@ PT_CHECK(profile_config_integer_counts, Fast, Exact) {
     // Off, so the floors below test the counts alone: one replicate is legal only without the stopping rule that needs two.
     const nlohmann::json uniform = {{"threshold", 0.0}};
     std::vector<Case> cases;
-    // Lowest legal value accepted, then each way of going under it. maxBounces/maxSamples 0 are meaningful: direct-only and unbounded.
+    // Lowest legal value accepted, then each way of going under it. samplesPerPixel/maxBounces 0 are meaningful: unbounded and direct-only.
     const std::vector<std::pair<const char*, int>> floors = {
-        {"samplesPerPixel", 1}, {"maxBounces", 0}, {"russianRouletteStartBounce", 0}, {"maxSamples", 0}, {"replicates", 1}};
+        {"samplesPerPixel", 0}, {"maxBounces", 0}, {"russianRouletteStartBounce", 0}, {"replicates", 1}};
     for (const auto& [key, floor] : floors) {
         cases.push_back({std::string(key) + " " + std::to_string(floor), pathTracer({{key, floor}, {"adaptive", uniform}}), true});
         cases.push_back({std::string(key) + " " + std::to_string(floor - 1), pathTracer({{key, floor - 1}, {"adaptive", uniform}}), false});
@@ -1188,11 +1188,15 @@ PT_CHECK(profile_config_integer_counts, Fast, Exact) {
         pathtracer::config::loadProfileConfig(shippedPath.string());
     std::ifstream shippedFile(shippedPath);
     const nlohmann::json shipped = nlohmann::json::parse(shippedFile);
-    // A capped accumulation must end on a complete round: replicates of maxSamples + 1 cannot divide a positive maxSamples.
-    const int shippedMaxSamples = shipped["pathTracer"]["maxSamples"].get<int>();
-    cases.push_back({"replicates not dividing maxSamples",
-                     pathTracer({{"replicates", shippedMaxSamples + 1}, {"adaptive", {{"minSamples", shippedMaxSamples + 1}}}}),
-                     shippedMaxSamples == 0});
+    // A capped frame must end on a complete round: replicates of samplesPerPixel + 1 cannot divide a positive samplesPerPixel.
+    const int shippedSamples = shipped["pathTracer"]["samplesPerPixel"].get<int>();
+    cases.push_back({"replicates not dividing samplesPerPixel",
+                     pathTracer({{"replicates", shippedSamples + 1}, {"adaptive", {{"minSamples", shippedSamples + 1}}}}),
+                     shippedSamples == 0});
+    // Fewer samples than replicates leaves some replicate empty, so 1 spp needs one replicate and no stopping rule.
+    cases.push_back({"samplesPerPixel 1 at replicates 4", pathTracer({{"samplesPerPixel", 1}, {"replicates", 4}}), false});
+    cases.push_back({"samplesPerPixel 1 at replicates 1",
+                     pathTracer({{"samplesPerPixel", 1}, {"replicates", 1}, {"adaptive", {{"threshold", 0.0}, {"minSamples", 1}}}}), true});
     ctx.plan(static_cast<int>(cases.size()) + 3);
     PT_EXPECT(ctx, shippedConfig.has_value(), "the shipped profile does not load, so no row below means anything");
     if (!shippedConfig) {
@@ -1209,12 +1213,12 @@ PT_CHECK(profile_config_integer_counts, Fast, Exact) {
                       testCase.name.c_str());
         PT_EXPECT(ctx, loaded.has_value() == testCase.accepted, detail);
     }
-    // The viewer's -max-samples lands after loading; the exported check is what refuses a cap that splits a round.
+    // The viewer's -spp lands after loading; the exported check is what refuses a cap that splits a round.
     pathtracer::config::PathTracerConfig overridden = shippedConfig->pathTracer;
     PT_EXPECT(ctx, pathtracer::config::validCounts(shippedConfig->render, overridden, "test"), "the shipped counts failed validCounts");
-    overridden.maxSamples = overridden.replicates + 1;
+    overridden.samplesPerPixel = overridden.replicates + 1;
     PT_EXPECT(ctx, overridden.replicates < 2 || !pathtracer::config::validCounts(shippedConfig->render, overridden, "test"),
-              "validCounts accepted a maxSamples override that is not a multiple of replicates");
+              "validCounts accepted a samplesPerPixel override that is not a multiple of replicates");
 }
 
 // The cache keeps each file's own format: a float32 texel past binary16's 65504, an unclipped sun, reads back exactly, not as Inf.
