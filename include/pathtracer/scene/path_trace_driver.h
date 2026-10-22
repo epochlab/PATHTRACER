@@ -39,8 +39,8 @@ public:
         // Whether the environment is in the light set at all (NEE, MIS, miss radiance); showSky gates only the camera ray's own miss.
         bool envLightEnabled = true;
         float envExposure = 1.0F;
-        PathTraceSettings settings;  // samplesPerPixel is "samples per pass", see path_tracer.h
-        int maxSamples = 0;  // accumulated-pass cap; 0 = unbounded
+        PathTraceSettings settings;  // samplesPerPass is 1 (baseSettingsOf): a pass is one sample per texel
+        int samplesPerPixel = 0;  // the accumulation's cap in samples, so in passes; 0 = unbounded
     };
 
     // Every referenced scene object must be at its final address and outlive the driver: LightSet stores a pointer, not a copy.
@@ -142,9 +142,9 @@ private:
     std::jthread thread_;
 };
 
-// Finished at the pass cap (0 = unbounded) or once adaptive sampling has stopped every texel; the driver then idles.
-[[nodiscard]] constexpr bool accumulationComplete(int samples, std::size_t activeTexels, int maxSamples) {
-    return activeTexels == 0 || (maxSamples > 0 && samples >= maxSamples);
+// Finished at the sample cap (0 = unbounded) or once adaptive sampling has stopped every texel; the driver then idles.
+[[nodiscard]] constexpr bool accumulationComplete(int samples, std::size_t activeTexels, int samplesPerPixel) {
+    return activeTexels == 0 || (samplesPerPixel > 0 && samples >= samplesPerPixel);
 }
 
 // Running mean m_n = m_{n-1} + (x_n - m_{n-1}) * invN over count floats; `mean` may alias either input. HeadlessRenderer shares it.

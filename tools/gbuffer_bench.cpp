@@ -181,7 +181,7 @@ int main(int argc, char** argv) {
     instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.2F, 0.2F, 0.8F), 0.8F), glm::mat4(1.0F), ""});
     instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.8F, 0.8F, 0.2F), 1.0F), glm::mat4(1.0F), ""});
 
-    const PathTraceSettings settings{.samplesPerPixel = 1, .maxBounces = 0, .russianRouletteStartBounce = 1};
+    const PathTraceSettings settings{.samplesPerPass = 1, .maxBounces = 0, .russianRouletteStartBounce = 1};
     // Once outside the timed loop, as the app does at load: the measured cost is testing the boxes' edges, not deriving them.
     const std::vector<AabbBounds> instanceBounds =
         computeInstanceBounds(shadingTriangles, static_cast<int>(instances.size()));

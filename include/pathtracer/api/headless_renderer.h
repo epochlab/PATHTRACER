@@ -86,6 +86,8 @@ public:
     [[nodiscard]] const pathtracer::scene::Camera& defaultCamera() const { return defaultCamera_; }
     [[nodiscard]] int defaultWidth() const { return profile_.render.width; }
     [[nodiscard]] int defaultHeight() const { return profile_.render.height; }
+    [[nodiscard]] int defaultSamples() const { return profile_.pathTracer.samplesPerPixel; }  // 0 = unbounded
+    [[nodiscard]] float defaultBloomStrength() const { return profile_.render.bloomStrength; }
 
     // Blocking. outputs parallels request.aovs, caller-allocated at width * height * aovChannels(aovs[i]); each producer runs at most once.
     [[nodiscard]] bool render(const Request& request, std::span<float* const> outputs,

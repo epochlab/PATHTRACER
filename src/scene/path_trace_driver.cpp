@@ -372,7 +372,7 @@ double PathTraceDriver::tracePass(const Request& request, int sampleBase, std::u
                      instanceLightIndex_, lights, volumes_, request.width, request.height, activeTexels_,
                      request.showSky, request.settings,
                      // The generation is the scramble seed: fixed per accumulation, changing exactly when the image restarts.
-                     static_cast<std::uint32_t>(generation), sampleBase, request.maxSamples * request.settings.samplesPerPixel,
+                     static_cast<std::uint32_t>(generation), sampleBase, request.samplesPerPixel,
                      generation_, generation,
                      threadPool_, passStats_, pass);
     return millisecondsSince(traceStart);
@@ -410,7 +410,7 @@ void PathTraceDriver::finishPass(const std::shared_ptr<PathTraceResult>& pass, s
     double publishMs = 0.0;
     // Held back, result_ keeps the last finished image on screen; a reader a frame behind it costs at most one buffer retry.
     if (!publishesFinalOnly_.load(std::memory_order_relaxed) ||
-        accumulationComplete(passIndex, activeTexels_.size(), request.maxSamples)) {
+        accumulationComplete(passIndex, activeTexels_.size(), request.samplesPerPixel)) {
         // After the mean, before the publish: the statistics must describe the image about to go on screen.
         const auto overRangeStart = std::chrono::steady_clock::now();
         reduceOverRange(*pass, overRangeHistograms_, overRangePeaks_, threadPool_);
@@ -464,7 +464,7 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
         // Engaged: requestedGeneration goes non-zero only inside requestTrace(), under one lock.
         const Request& request = *activeRequest;  // NOLINT(bugprone-unchecked-optional-access)
         // A zero-size view, capped or every texel stopped: nothing changes until a new request or a suspend, both bumping the epoch.
-        if (request.width <= 0 || request.height <= 0 || accumulationComplete(accumulated, activeTexels_.size(), request.maxSamples)) {
+        if (request.width <= 0 || request.height <= 0 || accumulationComplete(accumulated, activeTexels_.size(), request.samplesPerPixel)) {
             idleUntilWake(stopToken, wakeSeen);
             continue;
         }
@@ -475,10 +475,10 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
             continue;  // every buffer still referenced by the render thread -- retry rather than allocate
         }
 
-        // accumulated passes have drawn accumulated * spp samples, so this pass continues the sequence there and weighs 1/passIndex.
+        // One sample per pass: this pass draws sample `accumulated` of the sequence and weighs 1/passIndex.
         const int passIndex = accumulated + 1;
         const auto passStart = std::chrono::steady_clock::now();
-        const double traceMs = tracePass(request, accumulated * request.settings.samplesPerPixel, activeGeneration, *pass);
+        const double traceMs = tracePass(request, accumulated, activeGeneration, *pass);
 
         if (generation_.load(std::memory_order_relaxed) != activeGeneration) {
             // Published before the discard, not skipped: a camera drag cancels passes continuously, and their rays were still paid for.

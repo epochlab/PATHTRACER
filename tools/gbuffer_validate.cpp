@@ -148,7 +148,7 @@ glm::dvec2 pixelPoint(const Camera& camera, int x, int y) {
 // The material-independent settings every check renders with: the AOVs under test are geometric, so these need only be valid, not varied.
 PathTraceSettings makeTestSettings() {
     PathTraceSettings settings{};
-    settings.samplesPerPixel = 1;
+    settings.samplesPerPass = 1;
     settings.maxBounces = 0;
     settings.russianRouletteStartBounce = 1;
     // Derived from the scene's depth span, not profile.json: the horizon must fall inside it or one remap branch carries no pixels.

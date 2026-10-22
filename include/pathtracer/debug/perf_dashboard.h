@@ -20,7 +20,7 @@ struct DashboardFrame {
     float frameMs;
     float presentGpuMs;
     int accumulatedSamples;
-    int maxSamples;  // 0 = unbounded
+    int samplesPerPixel;  // 0 = unbounded
     bool driverSuspended;
     std::size_t ramBytes;
     std::size_t gpuBytes;

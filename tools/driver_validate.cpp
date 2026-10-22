@@ -89,7 +89,7 @@ void pushQuad(TestScene& scene, const std::array<glm::vec3, 4>& corners, glm::ve
 
 PathTraceSettings makeSettings() {
     PathTraceSettings settings{};
-    settings.samplesPerPixel = 1;  // one sample per pass: the progressive configuration the driver exists for
+    settings.samplesPerPass = 1;  // the driver's contract: one sample per pass
     settings.replicates = 4;  // interleaved, so every check below crosses replicate boundaries rather than one sequence
     settings.maxBounces = 1;
     settings.russianRouletteStartBounce = 8;
@@ -141,7 +141,7 @@ Camera makeCamera() {
                    2.8F, 1.0F / 125.0F, 100.0F);
 }
 
-PathTraceDriver::Request makeRequest(int maxSamples, const Camera& camera) {
+PathTraceDriver::Request makeRequest(int samplesPerPixel, const Camera& camera) {
     PathTraceDriver::Request request{camera, 0, 0, glm::vec3(0.0F), true, true, 1.0F, makeSettings(), 0};
     request.width = kImageSize;
     request.height = kImageSize;
@@ -150,7 +150,7 @@ PathTraceDriver::Request makeRequest(int maxSamples, const Camera& camera) {
     request.envLightEnabled = true;
     request.envExposure = 1.0F;
     request.settings = makeSettings();
-    request.maxSamples = maxSamples;
+    request.samplesPerPixel = samplesPerPixel;
     return request;
 }
 
@@ -328,7 +328,7 @@ PT_CHECK(running_mean_matches_batch_mean, Slow, Exact) {
         waitForPublished(*fixture->driver, generation, kPasses);
     if (published == nullptr) {
         for (int i = 0; i < 3; ++i) {
-            PT_EXPECT(ctx, false, "driver never published its maxSamples cap");
+            PT_EXPECT(ctx, false, "driver never published its sample cap");
         }
         return;
     }
@@ -390,7 +390,7 @@ PT_CHECK(in_place_fold_is_bit_identical_to_driver, Slow, Exact) {
     const std::shared_ptr<const PathTraceResult> published = waitForPublished(*fixture->driver, generation, kPasses);
     if (published == nullptr) {
         for (int i = 0; i < 2; ++i) {
-            PT_EXPECT(ctx, false, "driver never published its maxSamples cap");
+            PT_EXPECT(ctx, false, "driver never published its sample cap");
         }
         return;
     }
@@ -420,7 +420,7 @@ PT_CHECK(in_place_fold_is_bit_identical_to_driver, Slow, Exact) {
     PT_EXPECT(ctx, differingReplicates == 0 && published->replicateLuminance.size() == expected.foldedReplicates.size(), detail);
 }
 
-// A driver holding sampleBase at 0 publishes the mean of N identical passes (sampler.h); pinned at maxSamples = 1, bit-identical.
+// A driver holding sampleBase at 0 publishes the mean of N identical passes (sampler.h); pinned at samplesPerPixel = 1, bit-identical.
 PT_CHECK(first_pass_is_bit_identical_to_oracle, Slow, Exact) {
     ctx.plan(1);
     std::unique_ptr<DriverFixture> fixture = makeFixture();
@@ -452,7 +452,7 @@ PT_CHECK(first_pass_is_bit_identical_to_oracle, Slow, Exact) {
 }
 
 // The cap is a hard stop, not a target: accumulating past it moves a converged image under a caller that asked it to stop.
-PT_CHECK(max_samples_cap_is_respected, Slow, Exact) {
+PT_CHECK(sample_cap_is_respected, Slow, Exact) {
     constexpr int kCap = 4;
     ctx.plan(1);
     std::unique_ptr<DriverFixture> fixture = makeFixture();
@@ -462,7 +462,7 @@ PT_CHECK(max_samples_cap_is_respected, Slow, Exact) {
     }
     const std::uint64_t generation = fixture->driver->requestTrace(makeRequest(kCap, makeCamera()));
     if (waitForPublished(*fixture->driver, generation, kCap) == nullptr) {
-        PT_EXPECT(ctx, false, "driver never reached its maxSamples cap");
+        PT_EXPECT(ctx, false, "driver never reached its sample cap");
         return;
     }
     // Long enough that an uncapped driver would have run many further passes at this image size.
@@ -913,7 +913,7 @@ PT_CHECK(replicate_means_match_batch_means, Slow, Exact) {
         waitForPublished(*fixture->driver, generation, kPasses);
     if (published == nullptr) {
         for (int i = 0; i < 3; ++i) {
-            PT_EXPECT(ctx, false, "driver never published its maxSamples cap");
+            PT_EXPECT(ctx, false, "driver never published its sample cap");
         }
         return;
     }
@@ -1114,11 +1114,11 @@ PathTraceResult sequentialAdaptiveFold(DriverFixture& fixture, const PathTraceDr
     pathtracer::debug::PassStats stats;
     const auto stride = static_cast<std::size_t>(settings.replicates);
     int p = 0;
-    for (; p < request.maxSamples && !active.empty(); ++p) {
+    for (; p < request.samplesPerPixel && !active.empty(); ++p) {
         pathtracer::scene::renderPathTraced(request.camera, *fixture.accel, fixture.scene.shadingTriangles, fixture.scene.instances,
                                             fixture.scene.instanceLightIndex, lights, pathtracer::scene::VolumeSet{}, kImageSize, kImageSize,
                                             active, request.showSky, settings, scrambleSeed, /*sampleBase=*/p,
-                                            /*sampleCount=*/request.maxSamples, generation, scrambleSeed, fixture.pool, stats, pass);
+                                            /*sampleCount=*/request.samplesPerPixel, generation, scrambleSeed, fixture.pool, stats, pass);
         const float invN = 1.0F / static_cast<float>(p + 1);
         const float invCount = 1.0F / static_cast<float>((p / settings.replicates) + 1);
         const auto fold = [&](std::uint32_t begin, std::uint32_t end) {

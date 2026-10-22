@@ -10,7 +10,7 @@
 namespace pathtracer::debug {
 
 // Schema version of the JSON Lines benchmark log; bump on any field rename or meaning change so a reader can refuse a record.
-inline constexpr int kBenchLogSchema = 2;
+inline constexpr int kBenchLogSchema = 3;
 
 // The benchmark workload every tool defaults to, so logs from different tools and days stay comparable: 512x256 at 16 samples per pixel.
 inline constexpr int kBenchWidth = 512;

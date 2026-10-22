@@ -65,9 +65,9 @@ struct AdaptiveSampling {
     float marSlope = 0.0F;  // foveation: MAR growth per degree of eccentricity (Guenter et al. 2012 measured 0.022-0.0275); 0 is off
 };
 
-// samplesPerPixel is per renderPathTraced() call -- under PathTraceDriver, samples per accumulated pass (typically 1), not the total.
+// samplesPerPass is per renderPathTraced() call: 1 under PathTraceDriver and HeadlessRenderer, whose passes are samples.
 struct PathTraceSettings {
-    int samplesPerPixel;
+    int samplesPerPass;
     int maxBounces;  // secondary/indirect bounces beyond the always-traced primary hit; 0 = direct lighting only
     int russianRouletteStartBounce;
     // AO ray bound and obscurance falloff scale (Zhukov 1998; Iones 2003): a hit at t gives 1-(1-t/aoMaxDistance)^2 visibility.

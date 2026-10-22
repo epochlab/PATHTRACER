@@ -412,11 +412,34 @@ def test_beauty_matches_render_beauty_cli(renderer: Renderer, tmp_path: Path, fl
     assert np.array_equal(actual, expected)
 
 
-def test_display_optics_are_off_by_default(renderer: Renderer) -> None:
-    """Omitting the optics is exactly asking for zero of each."""
-    default = renderer.render(aovs=("beauty",), width=32, height=24, samples=2)["beauty"]
-    zero = renderer.render(aovs=("beauty",), width=32, height=24, samples=2, bloom_strength=0.0, aberration=0.0)["beauty"]
-    assert np.array_equal(default, zero)
+def test_omitted_samples_and_bloom_take_the_profile(renderer: Renderer) -> None:
+    """Omitting samples and bloom_strength is exactly asking for profile.json's values; aberration has no profile key and is off."""
+    size = {"aovs": ("beauty",), "width": 32, "height": 24}
+    default = renderer.render(**size)["beauty"]
+    profile = json.loads((REPO_ROOT / "assets" / "config" / "profile.json").read_text())
+    assert renderer.default_samples == profile["pathTracer"]["samplesPerPixel"]
+    assert renderer.default_bloom_strength == pytest.approx(profile["render"]["bloomStrength"])
+    explicit = renderer.render(**size, samples=renderer.default_samples, bloom_strength=renderer.default_bloom_strength)["beauty"]
+    assert np.array_equal(default, explicit)
+
+
+def test_unbounded_profile_needs_explicit_samples(tmp_path: Path) -> None:
+    """A progressive profile may accumulate forever, which no headless render can, so samples=None is refused by name."""
+    assets = REPO_ROOT / "assets"
+    for entry in assets.iterdir():
+        if entry.name != "config":
+            (tmp_path / entry.name).symlink_to(entry)
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "sensor.json").symlink_to(assets / "config" / "sensor.json")
+    profile = json.loads((assets / "config" / "profile.json").read_text())
+    profile["pathTracer"]["samplesPerPixel"] = 0
+    profile["render"]["renderMode"] = "progressive"
+    (tmp_path / "config" / "profile.json").write_text(json.dumps(profile))
+    with Renderer(SCENE, asset_root=str(tmp_path)) as unbounded:
+        assert unbounded.default_samples == 0
+        with pytest.raises(ValueError, match="samplesPerPixel is 0"):
+            unbounded.render(aovs=("beauty",), width=8, height=8)
+        assert unbounded.render(aovs=("beauty",), width=8, height=8, samples=4)["beauty"].shape == (8, 8, 3)
 
 
 @pytest.mark.parametrize("lattice", PIXEL_LATTICES)

@@ -551,7 +551,7 @@ PT_CHECK(lattice_preview_boundary, Fast, Exact) {
 
 // Every handle-taking query is defined on NULL, so a caller's failed open never turns a cleanup path into a crash.
 PT_CHECK(close_and_queries_accept_null, Fast, Exact) {
-    ctx.plan(2);
+    ctx.plan(3);
     pt_renderer_close(nullptr);
     PtCamera camera{};
     camera.focal_length_mm = 1.0F;
@@ -559,6 +559,8 @@ PT_CHECK(close_and_queries_accept_null, Fast, Exact) {
     PT_EXPECT(ctx, camera.focal_length_mm == 1.0F, "a null renderer must leave the camera untouched");
     PT_EXPECT(ctx, pt_renderer_default_width(nullptr) == 0 && pt_renderer_default_height(nullptr) == 0,
               "a null renderer has no size");
+    PT_EXPECT(ctx, pt_renderer_default_samples(nullptr) == 0 && pt_renderer_default_bloom_strength(nullptr) == 0.0F,
+              "a null renderer has no sampling or bloom default");
 }
 
 }  // namespace

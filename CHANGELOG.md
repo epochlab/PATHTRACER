@@ -3,6 +3,36 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## One sampling budget: `samplesPerPixel` is the finished frame's spp, in the viewer and in Python
+
+`pathTracer.samplesPerPixel` is now the total samples per pixel of a finished frame, and `maxSamples` is removed. Before, the viewer
+ran `maxSamples` (16) passes of `samplesPerPixel` (3) = 48 spp, its HUD counted passes, and Python ran `samples` passes of 1 spp, so
+one profile meant different images. Every pass is now one sample in every path, so the cap, replicate rounds and adaptive checkpoints
+all count samples. The shipped value is 64, the first cap on the checkpoint ladder (4 x 2^k) above the old 48. Evidence is in
+`results/sampling_budget`.
+- **Profile (breaking):** `samplesPerPixel` >= 0, 0 being unbounded (progressive only), and a multiple of `replicates`, so each
+  replicate gets an equal share. 1 spp therefore needs `replicates` 1 and adaptive off. A stale `maxSamples` key is ignored.
+- **Viewer:** `-max-samples N` is now `-spp N`. The HUD reads "64 / 64 samples" in true spp, and the startup spec drops "spp/pass".
+- **Python and C ABI:** `render(samples=None)` takes `samplesPerPixel`, and an unbounded profile raises `ValueError` naming it.
+  `bloom_strength=None` takes `render.bloomStrength`. They are exposed as `Renderer.default_samples` and `default_bloom_strength`, over
+  `pt_renderer_default_samples` and `pt_renderer_default_bloom_strength`. No layout changed, so `PT_ABI_VERSION` stays 11.
+- **Integrator:** `PathTraceSettings::samplesPerPixel` is renamed `samplesPerPass`, its per-call meaning. `baseSettingsOf(profile)` fixes it at 1.
+- **Bench log:** schema 3. `max_samples` is renamed `samples_per_pixel` and `spp_per_pass` is dropped. `-bench` at the default 16
+  is now 16 spp, not 48.
+- **Adaptive:** `minSamples` 8 again means 8 samples, as validated at 1 spp per pass (6281f3f). The 3 spp profile (a20eb64) had made
+  the first checkpoint 24 spp.
+- **Results** (cornell 256x128 Beauty, 48 spp, median of 3):
+  - With adaptive off (identical work), 1-spp passes trace 3% slower (4.58 -> 4.43 Mrays/s), about 2 ms per extra pass barrier.
+  - On the shipped adaptive profile, the finished frame arrives 26% sooner (1159 -> 857 ms ready), at 24.7 spp traced against 32.
+    The earlier stops are the foveated periphery of the 360-degree lens; with foveation off, no texel stops before 48 spp in either.
+  - At the shipped 64x32, Python's default now shows the viewer's finished noise level (64 spp, mean 57 traced) instead of 1 spp.
+- **Tests:**
+  - `io.profile_config_integer_counts` and `io.profile_config_reads_the_render_mode` use the new key, with 1 spp at replicates 4 refused.
+  - `driver.sample_cap_is_respected`.
+  - `adaptive_driver_matches_the_sequential_fold` still holds the driver bit-identical to the headless loop.
+  - Python tests: `test_omitted_samples_and_bloom_take_the_profile` and `test_unbounded_profile_needs_explicit_samples`.
+  - `c_abi_validate` checks the null renderer.
+
 ## Foveated sampling
 
 Adaptive sampling now loosens each texel's noise target with its angle from the frame centre, so the periphery stops sooner. The new
