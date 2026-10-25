@@ -37,7 +37,6 @@ AovSource aovSource(AovId aov) {
         case AovId::Luminance:
         case AovId::Sobel:
         case AovId::Gabor:
-        case AovId::DoG:
         case AovId::ColourOpponent:
         case AovId::ContrastSensitivity:
         case AovId::SNR:
@@ -84,7 +83,6 @@ int aovChannels(AovId aov) {
         case AovId::Luminance:
         case AovId::Sobel:
         case AovId::Gabor:
-        case AovId::DoG:
         case AovId::ContrastSensitivity:
             return 1;
 
@@ -138,7 +136,6 @@ bool aovCarriesRadiance(AovId aov) {
         case AovId::Luminance:
         case AovId::Sobel:
         case AovId::Gabor:
-        case AovId::DoG:
             return true;
 
         // Ratios, reflectances, counts, lengths, directions and frequencies: scaling any of them by an exposure means nothing.
@@ -202,7 +199,6 @@ bool aovIsColour(AovId aov) {
         case AovId::Luminance:
         case AovId::Sobel:
         case AovId::Gabor:
-        case AovId::DoG:
         case AovId::HSV:
         case AovId::ColourOpponent:
         case AovId::ContrastSensitivity:
@@ -234,7 +230,6 @@ bool aovIsColour(AovId aov) {
 bool aovIsBipolar(AovId aov) {
     switch (aov) {
         // Responses of a zero-mean operator: zero is the operator's own centre and the two signs are equally meaningful.
-        case AovId::DoG:
         case AovId::ColourOpponent:
             return true;
 
@@ -538,7 +533,6 @@ bool aovSupportsLattice(AovId aov, pathtracer::gfx::PixelLattice lattice) {
         case AovId::Beauty:
         case AovId::Sobel:
         case AovId::Gabor:
-        case AovId::DoG:
         case AovId::Wireframe:
         case AovId::Alpha:
         case AovId::Depth:

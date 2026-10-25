@@ -192,7 +192,7 @@ void demodulate(std::span<const float> plane, const MorletPlaneWave& wave, int w
 }
 
 HdrImage gaborAov(const HdrImage& beauty, ThreadPool& threadPool, bool wrapsHorizontally, PixelLattice lattice) {
-    // The finest scale the grid resolves, the same fine scale DoG starts from.
+    // The finest scale the grid resolves.
     const float variance = innerScaleVariance(lattice);
     // Off-harmonic carriers make demodulation Bloch-periodic, J(x+W) = J(x)exp(-ikW): wrapped padding to the blur's reach keeps taps real.
     const int pad = wrapsHorizontally ? diffusionReach(variance, lattice).x : 0;
@@ -288,31 +288,6 @@ HdrImage hsvAov(const HdrImage& beauty, ThreadPool& threadPool) {
                 }
             }
             writeTexel(out, x, y, glm::vec3(hue, saturation, value));
-        }
-    });
-    return out;
-}
-
-HdrImage dogAov(const HdrImage& beauty, ThreadPool& threadPool, bool wrapsHorizontally, PixelLattice lattice) {
-    HdrImage out = makeAovImage(AovId::DoG, beauty.width, beauty.height);
-    const float fineVariance = innerScaleVariance(lattice);
-    // One octave up, sigma doubled: variance 4t, reached from the fine level by the semigroup's step 3t.
-    const float coarseStep = (4.0F * fineVariance) - fineVariance;
-    // A frame narrower than the coarse step's kernel support would report the mirror, not the image; a periodic width has no mirror.
-    const glm::ivec2 reach = diffusionReach(coarseStep, lattice);
-    if ((2 * reach.y) + 1 > beauty.height || (!wrapsHorizontally && (2 * reach.x) + 1 > beauty.width)) {
-        return out;
-    }
-    std::vector<float> fine = luminancePlane(beauty, threadPool);
-    diffuse(fine, beauty.width, beauty.height, fineVariance, threadPool, wrapsHorizontally, lattice);
-    std::vector<float> coarse = fine;
-    diffuse(coarse, beauty.width, beauty.height, coarseStep, threadPool, wrapsHorizontally, lattice);
-    threadPool.parallelFor(beauty.height, [&](int y) {
-        const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(beauty.width);
-        for (int x = 0; x < beauty.width; ++x) {
-            const std::size_t pixel = row + static_cast<std::size_t>(x);
-            // Signed, not a magnitude: polarity separates a bright blob from a dark one, and Sobel already reports gradient magnitude.
-            writeTexel(out, x, y, fine[pixel] - coarse[pixel]);
         }
     });
     return out;
@@ -482,7 +457,7 @@ HdrImage contrastSensitivityAov(const HdrImage& beauty, std::span<const float> a
     std::vector<float> coarse(fine.size());
     std::vector<float> energy(fine.size());
     std::vector<float> visibility(fine.size(), 0.0F);
-    // A band whose window outreaches the frame would measure the mirror, not the image (dogAov's rule); a periodic width has no mirror.
+    // A band whose window outreaches the frame would measure the mirror, not the image; a periodic width has no mirror.
     for (glm::ivec2 reach = diffusionReach(static_cast<float>(coarseVariance), lattice);
          (2 * reach.y) + 1 <= height && (wrapsHorizontally || (2 * reach.x) + 1 <= width);
          reach = diffusionReach(static_cast<float>(coarseVariance), lattice)) {
@@ -569,7 +544,6 @@ HdrImage evaluateFilterAov(AovId aov, const FilterInput& input, ThreadPool& thre
         case AovId::Luminance: return luminanceAov(input.beauty, threadPool);
         case AovId::Sobel:     return sobelAov(input.beauty, threadPool, input.wrapsHorizontally, input.lattice);
         case AovId::Gabor:     return gaborAov(input.beauty, threadPool, input.wrapsHorizontally, input.lattice);
-        case AovId::DoG:       return dogAov(input.beauty, threadPool, input.wrapsHorizontally, input.lattice);
         case AovId::ColourOpponent:  return colourOpponentAov(input.beauty, threadPool);
         case AovId::ContrastSensitivity: return tracedContrastSensitivity(input, threadPool);
         case AovId::SNR:

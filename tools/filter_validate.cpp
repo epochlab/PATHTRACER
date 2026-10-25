@@ -1,4 +1,4 @@
-// Correctness gate for the shared scale space and the Beauty filters: kernel identities, DoG, Colour Opponent, SNR, the Morlet bank, OIDN.
+// Correctness gate for the shared scale space and the Beauty filters: kernel identities, Colour Opponent, SNR, the Morlet bank, OIDN.
 
 #include <algorithm>
 #include <array>
@@ -78,13 +78,6 @@ constexpr float kFloatEpsilon = 0x1p-23F;  // distance from 1 to the next float,
         }
     }
     return plane;
-}
-
-// Radius in base pixels inside which a DoG sample sees no mirrored tap: the fine diffusion's radius plus the coarse step's.
-[[nodiscard]] int dogSupportRadius() {
-    const float fine = pathtracer::debug::innerScaleVariance();
-    const auto radius = [](float t) { return static_cast<int>(pathtracer::debug::discreteGaussianKernel(t).size()) - 1; };
-    return radius(fine) + radius((4.0F * fine) - fine);
 }
 
 [[nodiscard]] float texelAt(const HdrImage& image, int x, int y, int channel) {
@@ -194,7 +187,7 @@ PT_CHECK(discrete_gaussian_variance_is_t, Fast, Exact) {
     }
 }
 
-// T(t1) * T(t2) = T(t1+t2) on the grid; DoG reaches its coarse octave by a second step and is only correct because this composition holds.
+// T(t1) * T(t2) = T(t1+t2) on the grid; Contrast Sensitivity steps octave to octave and is only correct because this composition holds.
 PT_CHECK(discrete_gaussian_semigroup_is_exact, Fast, Exact) {
     ctx.plan(1);
     const double first = 8.317766;
@@ -515,114 +508,6 @@ PT_CHECK(hexagonal_diffusion_matches_the_method_of_images, Fast, Exact) {
     }
 }
 
-// A constant field survives the mirror and the lattice fold exactly, so DoG must read zero at every pixel, border included.
-PT_CHECK(dog_is_zero_on_a_constant_field, Fast, Exact) {
-    ctx.plan(2);
-    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    constexpr int kWidth = 128;
-    constexpr int kHeight = 96;
-    const HdrImage flat = greyImage(kWidth, kHeight, std::vector<float>(static_cast<std::size_t>(kWidth) * kHeight, 0.375F));
-    for (const PixelLattice lattice : {PixelLattice::Square, PixelLattice::Hexagonal}) {
-        const HdrImage dog = pathtracer::debug::dogAov(flat, pool, false, lattice);
-        float worstDog = 0.0F;
-        for (int y = 0; y < kHeight; ++y) {
-            for (int x = 0; x < kWidth; ++x) {
-                worstDog = std::max(worstDog, std::fabs(texelAt(dog, x, y, 0)));
-            }
-        }
-        PT_EXPECT(ctx, worstDog == 0.0F,
-                  std::string(pathtracer::gfx::kPixelLatticeNames[static_cast<int>(lattice)]) + ": peak DoG response " + std::to_string(worstDog));
-    }
-}
-
-// Both diffusions reproduce an affine field, so DoG may not fire on a smooth gradient anywhere its support avoids the mirror.
-PT_CHECK(dog_is_flat_on_an_affine_field, Fast, Exact) {
-    ctx.plan(2);
-    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    constexpr int kWidth = 256;
-    constexpr int kHeight = 112;
-    const HdrImage image = greyImage(kWidth, kHeight, affinePlane(kWidth, kHeight));
-    const int radius = dogSupportRadius();
-    PT_EXPECT(ctx, (2 * radius) < kHeight,
-                  "support radius " + std::to_string(radius) + " leaves no interior in " + std::to_string(kHeight) + " rows");
-
-    const HdrImage dog = pathtracer::debug::dogAov(image, pool);
-    float worstDog = 0.0F;
-    for (int y = radius; y < kHeight - radius; ++y) {
-        for (int x = radius; x < kWidth - radius; ++x) {
-            worstDog = std::max(worstDog, std::fabs(texelAt(dog, x, y, 0)));
-        }
-    }
-    // The Rec.709 reduction rounds, so the plane is affine only to an ulp; carried through the widest step that is the bound, not zero.
-    const float peak = greyLuminanceGain() * static_cast<float>(8 + (2 * (kWidth - 1)) + (3 * (kHeight - 1)));
-    const auto taps = static_cast<double>((2 * (static_cast<int>(pathtracer::debug::discreteGaussianKernel(
-                                                    3.0F * pathtracer::debug::innerScaleVariance()).size()) - 1)) + 1);
-    const double quantisation = taps * static_cast<double>(peak) * static_cast<double>(kFloatEpsilon);
-    PT_EXPECT(ctx, static_cast<double>(worstDog) <= quantisation,
-                  "interior DoG " + std::to_string(worstDog) + " exceeds the plane quantisation " + std::to_string(quantisation));
-}
-
-// The band exists exactly when the coarse step's kernel fits the frame: one row short is empty, the fitting frame is not.
-PT_CHECK(dog_is_empty_exactly_below_its_coarse_support, Fast, Exact) {
-    ctx.plan(4);
-    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    constexpr int kWidth = 128;
-    for (const PixelLattice lattice : {PixelLattice::Square, PixelLattice::Hexagonal}) {
-        const float fine = pathtracer::debug::innerScaleVariance(lattice);
-        const int support = (2 * pathtracer::debug::diffusionReach((4.0F * fine) - fine, lattice).y) + 1;
-        const auto peakResponse = [&pool, lattice](int height) {
-            std::vector<float> plane(static_cast<std::size_t>(kWidth) * static_cast<std::size_t>(height), 0.0F);
-            // A unit impulse at the centre, which every non-empty DoG answers with a nonzero centre tap.
-            plane[(static_cast<std::size_t>(height / 2) * kWidth) + (kWidth / 2)] = 1.0F;
-            const HdrImage dog = pathtracer::debug::dogAov(greyImage(kWidth, height, plane), pool, false, lattice);
-            float peak = 0.0F;
-            for (const float response : dog.texels) {
-                peak = std::max(peak, std::fabs(response));
-            }
-            return peak;
-        };
-        const std::string name = pathtracer::gfx::kPixelLatticeNames[static_cast<int>(lattice)];
-        PT_EXPECT(ctx, peakResponse(support - 1) == 0.0F, name + ": a frame one row short of the coarse support must yield an empty band");
-        PT_EXPECT(ctx, peakResponse(support) > 0.0F, name + ": a frame exactly the coarse support must yield a band");
-    }
-}
-
-// On a cosine the two octaves are eigenfunctions, so DoG must equal the analytic difference of transfers -- amplitude and sign both.
-PT_CHECK(dog_matches_the_analytic_transfer, Fast, Exact) {
-    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    constexpr int kWidth = 128;
-    constexpr int kHeight = 96;
-    const std::vector<double> fractions{0.05, 0.1, 0.2, 0.35};
-    ctx.plan(static_cast<int>(fractions.size()));
-    const double fine = static_cast<double>(pathtracer::debug::innerScaleVariance());
-    const double coarse = 4.0 * fine;
-
-    for (const double cyclesPerPixel : fractions) {
-        const double omega = 2.0 * std::numbers::pi * cyclesPerPixel;
-        std::vector<float> plane(static_cast<std::size_t>(kWidth) * kHeight);
-        for (int y = 0; y < kHeight; ++y) {
-            for (int x = 0; x < kWidth; ++x) {
-                plane[(static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x)] =
-                    static_cast<float>(std::cos(omega * static_cast<double>(x)));
-            }
-        }
-        const HdrImage dog = pathtracer::debug::dogAov(greyImage(kWidth, kHeight, plane), pool);
-        // The y transfer at w=0 is unity, so only the x direction attenuates: the expected response is one transfer difference.
-        const double gain = static_cast<double>(greyLuminanceGain()) *
-                            (analyticTransfer(fine, omega) - analyticTransfer(coarse, omega));
-        const int radius = static_cast<int>(pathtracer::debug::discreteGaussianKernel(static_cast<float>(coarse)).size()) - 1;
-        double worst = 0.0;
-        for (int y = radius; y < kHeight - radius; ++y) {
-            for (int x = radius; x < kWidth - radius; ++x) {
-                const double expected = gain * std::cos(omega * static_cast<double>(x));
-                worst = std::max(worst, std::abs(static_cast<double>(texelAt(dog, x, y, 0)) - expected));
-            }
-        }
-        PT_EXPECT(ctx, worst <= 1e-6,
-                      "f=" + std::to_string(cyclesPerPixel) + " cyc/px deviates by " + std::to_string(worst));
-    }
-}
-
 // A grating is two plane waves, eigenfunctions of every pass, so each bank channel and so the envelope have a closed form per texel.
 PT_CHECK(gabor_matches_the_analytic_morlet_response, Fast, Exact) {
     ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
@@ -732,33 +617,6 @@ PT_CHECK(gabor_matches_the_analytic_morlet_response, Fast, Exact) {
                           label + " reads " + std::to_string(weakest / (gain * kAmplitude)) + " of its amplitude, under half");
             }
         }
-    }
-}
-
-// Fine minus coarse is the centre-surround sign: a bright blob reads positive and a dark one negative, the convention the preview shows.
-PT_CHECK(dog_polarity_follows_the_blob, Fast, Exact) {
-    ctx.plan(4);
-    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    constexpr int kWidth = 96;
-    constexpr int kHeight = 96;
-    const auto pixels = static_cast<std::size_t>(kWidth) * kHeight;
-    const int centreX = kWidth / 2;
-    const int centreY = kHeight / 2;
-    const std::size_t centre = (static_cast<std::size_t>(centreY) * kWidth) + static_cast<std::size_t>(centreX);
-    for (const PixelLattice lattice : {PixelLattice::Square, PixelLattice::Hexagonal}) {
-        const std::string name = pathtracer::gfx::kPixelLatticeNames[static_cast<int>(lattice)];
-        const float t = pathtracer::debug::innerScaleVariance(lattice);
-        std::vector<float> bright(pixels, 0.25F);
-        bright[centre] += 1.0F;
-        pathtracer::debug::diffuse(bright, kWidth, kHeight, t, pool, false, lattice);
-        const float brightDog = texelAt(pathtracer::debug::dogAov(greyImage(kWidth, kHeight, bright), pool, false, lattice), centreX, centreY, 0);
-        PT_EXPECT(ctx, brightDog > 0.0F, name + ": bright-on-dark DoG read " + std::to_string(brightDog));
-
-        std::vector<float> dark(pixels, 1.25F);
-        dark[centre] -= 1.0F;
-        pathtracer::debug::diffuse(dark, kWidth, kHeight, t, pool, false, lattice);
-        const float darkDog = texelAt(pathtracer::debug::dogAov(greyImage(kWidth, kHeight, dark), pool, false, lattice), centreX, centreY, 0);
-        PT_EXPECT(ctx, darkDog < 0.0F, name + ": dark-on-bright DoG read " + std::to_string(darkDog));
     }
 }
 
@@ -1656,75 +1514,12 @@ PT_CHECK(hexagonal_sobel_commutes_with_a_half_turn, Fast, Exact) {
     PT_EXPECT(ctx, identical, "a half turn of an even-row hexagonal frame changed its Sobel");
 }
 
-// Both hexagonal diffusions keep an axial-affine field, so DoG may not fire on a smooth gradient anywhere its support avoids the fold.
-PT_CHECK(hexagonal_dog_is_flat_on_an_affine_field, Fast, Exact) {
-    ctx.plan(1);
-    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    constexpr int kWidth = 256;
-    constexpr int kHeight = 192;
-    std::vector<float> plane(static_cast<std::size_t>(kWidth) * kHeight);
-    float peak = 0.0F;
-    for (int y = 0; y < kHeight; ++y) {
-        for (int x = 0; x < kWidth; ++x) {
-            const glm::ivec2 axial = axialOf(x, y);
-            plane[(static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x)] = static_cast<float>(8 + (2 * axial.x) + (3 * axial.y));
-            peak = std::max(peak, std::fabs(plane[(static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x)]));
-        }
-    }
-    const HdrImage dog = pathtracer::debug::dogAov(greyImage(kWidth, kHeight, plane), pool, false, PixelLattice::Hexagonal);
-    const float fine = pathtracer::debug::innerScaleVariance(PixelLattice::Hexagonal);
-    const glm::ivec2 reach = pathtracer::debug::diffusionReach(fine, PixelLattice::Hexagonal) +
-                             pathtracer::debug::diffusionReach(3.0F * fine, PixelLattice::Hexagonal);
-    float worst = 0.0F;
-    for (int y = reach.y; y < kHeight - reach.y; ++y) {
-        for (int x = reach.x; x < kWidth - reach.x; ++x) {
-            worst = std::max(worst, std::fabs(texelAt(dog, x, y, 0)));
-        }
-    }
-    // The Rec.709 reduction rounds, so the plane is affine only to an ulp; carried through the coarse step's three passes.
-    const double bound = hexagonalRoundingBound(3.0F * fine) * static_cast<double>(greyLuminanceGain() * peak);
-    PT_EXPECT(ctx, static_cast<double>(worst) <= bound, "interior hexagonal DoG " + std::to_string(worst) + " bound " + std::to_string(bound));
-}
-
-// Hexagonal plane waves are eigenfunctions of both octaves, so DoG is the difference of the three-axis transfers, oblique waves included.
-PT_CHECK(hexagonal_dog_matches_the_analytic_transfer, Fast, Exact) {
-    ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    constexpr int kWidth = 160;
-    constexpr int kHeight = 128;
-    const std::vector<glm::dvec2> waves{{0.3, 0.0}, {0.6, 0.4}, {0.0, 0.9}, {-1.1, 0.7}};
-    ctx.plan(static_cast<int>(waves.size()));
-    const float fine = pathtracer::debug::innerScaleVariance(PixelLattice::Hexagonal);
-    const std::vector<float> fineAxis = pathtracer::debug::discreteGaussianKernel(static_cast<float>((2.0 * static_cast<double>(fine)) / 3.0));
-    const std::vector<float> stepAxis = pathtracer::debug::discreteGaussianKernel(static_cast<float>(2.0 * static_cast<double>(fine)));
-    const glm::ivec2 reach = pathtracer::debug::diffusionReach(fine, PixelLattice::Hexagonal) +
-                             pathtracer::debug::diffusionReach(3.0F * fine, PixelLattice::Hexagonal);
-    for (const glm::dvec2 k : waves) {
-        std::vector<float> plane(static_cast<std::size_t>(kWidth) * kHeight);
-        for (int y = 0; y < kHeight; ++y) {
-            for (int x = 0; x < kWidth; ++x) {
-                plane[(static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x)] = static_cast<float>(std::cos(glm::dot(k, hexagonalCentre(x, y))));
-            }
-        }
-        const HdrImage dog = pathtracer::debug::dogAov(greyImage(kWidth, kHeight, plane), pool, false, PixelLattice::Hexagonal);
-        const double fineTransfer = hexagonalTransfer(fineAxis, k);
-        const double gain = static_cast<double>(greyLuminanceGain()) * (fineTransfer - (fineTransfer * hexagonalTransfer(stepAxis, k)));
-        double worst = 0.0;
-        for (int y = reach.y; y < kHeight - reach.y; ++y) {
-            for (int x = reach.x; x < kWidth - reach.x; ++x) {
-                worst = std::max(worst, std::abs(static_cast<double>(texelAt(dog, x, y, 0)) - (gain * std::cos(glm::dot(k, hexagonalCentre(x, y))))));
-            }
-        }
-        PT_EXPECT(ctx, worst <= 1e-6, "k=(" + std::to_string(k.x) + ", " + std::to_string(k.y) + ") deviates by " + std::to_string(worst));
-    }
-}
-
-// A wrapping image has no seam to the filters: rolling its columns rolls Sobel and DoG bit for bit, and Gabor to its own rounding.
+// A wrapping image has no seam to the filters: rolling its columns rolls Sobel bit for bit, and Gabor to its own rounding.
 PT_CHECK(wrapped_filters_commute_with_a_cyclic_column_shift, Fast, Exact) {
-    ctx.plan(6);
+    ctx.plan(4);
     ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
     constexpr int kWidth = 64;
-    // Tall enough for both lattices' coarse DoG support, so the band under test is not the empty one.
-    constexpr int kHeight = 96;
+    constexpr int kHeight = 48;
     constexpr int kShift = 23;
     std::mt19937 rng(static_cast<std::uint32_t>(ctx.subSeed("cyclic-shift")));
     std::uniform_real_distribution<float> unit(0.0F, 1.0F);
@@ -1756,10 +1551,6 @@ PT_CHECK(wrapped_filters_commute_with_a_cyclic_column_shift, Fast, Exact) {
         const float sobel = worstShiftError(pathtracer::debug::sobelAov(image, pool, true, lattice),
                                             pathtracer::debug::sobelAov(rolled, pool, true, lattice));
         PT_EXPECT(ctx, sobel == 0.0F, name + ": Sobel moved by " + std::to_string(sobel) + " under a cyclic shift");
-        const HdrImage dogImage = pathtracer::debug::dogAov(image, pool, true, lattice);
-        const float dog = worstShiftError(dogImage, pathtracer::debug::dogAov(rolled, pool, true, lattice));
-        const bool banded = std::any_of(dogImage.texels.begin(), dogImage.texels.end(), [](float value) { return value != 0.0F; });
-        PT_EXPECT(ctx, banded && dog == 0.0F, name + ": DoG moved by " + std::to_string(dog) + " under a cyclic shift, or its band is empty");
     }
     // The roll moves the carrier's phase, so demodulation, both blurs and the baseband round anew: 2R+1 ulps apiece, x2 envelope.
     const auto radius = static_cast<double>(pathtracer::debug::discreteGaussianKernel(pathtracer::debug::innerScaleVariance()).size() - 1);
