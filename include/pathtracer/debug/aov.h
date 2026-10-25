@@ -98,9 +98,6 @@ enum class AovSource { PathTraced, GBuffer, BeautyFilter };
 // True for the rendered picture, Beauty or its denoised estimate: the AOVs the user's LUT, lens effects and alpha apply to.
 [[nodiscard]] bool aovIsPicture(AovId aov);
 
-// True for the receptor's input, the picture and its Luminance (early_vision.ipynb's log input): the AOVs the log transform applies to.
-[[nodiscard]] bool aovTakesLogTransform(AovId aov);
-
 // The AOVs before Denoised: last in AovId, so a disabled denoiser truncates the selectable list rather than holing it.
 inline constexpr int kAovCountWithoutDenoiser = static_cast<int>(AovId::Denoised);
 static_assert(kAovCountWithoutDenoiser == static_cast<int>(AovId::Count) - 1, "Denoised must stay last in AovId");
@@ -128,8 +125,6 @@ struct AovDisplayContext {
     int samples = 0;
     int maxBounces = 0;
     float depthMax = 0.0F;
-    // Set only for an AOV aovTakesLogTransform accepts: the affine becomes the log2 window, centred on the mean log radiance.
-    bool logTransform = false;
 };
 
 // Every display decision that has to read the values: a nonlinear pre-map where one applies, and the affine map for everything else.

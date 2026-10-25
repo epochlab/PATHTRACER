@@ -173,10 +173,6 @@ bool aovIsPicture(AovId aov) {
     return aov == AovId::Beauty || aov == AovId::Denoised;
 }
 
-bool aovTakesLogTransform(AovId aov) {
-    return aovIsPicture(aov) || aov == AovId::Luminance;
-}
-
 bool aovIsColour(AovId aov) {
     switch (aov) {
         // Working-space RGB: radiance lanes and per-channel reflectances, whose values change with the primaries they are written in.
@@ -279,11 +275,6 @@ bool aovIsBipolar(AovId aov) {
 
 namespace {
 
-// The peak, capped at Donoho-Johnstone's sigma*sqrt(2 ln n), where n iid normals' max concentrates (Cramer 1946): outliers can't crush it.
-[[nodiscard]] float cappedRange(float peak, double rms, std::size_t count) {
-    return std::min(peak, static_cast<float>(rms * std::sqrt(2.0 * std::log(static_cast<double>(count)))));
-}
-
 // Symmetric display range over the pooled samples of `lanes`, so lanes sharing one unit share one scale.
 [[nodiscard]] float pooledRange(const pathtracer::gfx::HdrImage& image, std::span<const int> lanes) {
     const auto stride = static_cast<std::size_t>(image.channels);
@@ -302,7 +293,11 @@ namespace {
         return 0.0F;
     }
     // Zero is the operator's own centre, so the scale is the RMS about zero rather than a sample deviation about an estimated mean.
-    return cappedRange(peak, std::sqrt(sumOfSquares / static_cast<double>(count)), count);
+    const double rms = std::sqrt(sumOfSquares / static_cast<double>(count));
+    // Cramer 1946: the max of n iid normals concentrates at sigma*sqrt(2 ln n), Donoho-Johnstone's universal threshold at this RMS.
+    const double expectedMaximum = rms * std::sqrt(2.0 * std::log(static_cast<double>(count)));
+    // The smaller of the two: a Gaussian field keeps its true peak, and a heavy-tailed one stops a lone outlier crushing the preview.
+    return std::min(peak, static_cast<float>(expectedMaximum));
 }
 
 // A lane with no range has no scale to fit, and every finite gain then reads mid-grey, so unity is the choice that assumes least.
@@ -329,33 +324,6 @@ BipolarDisplay bipolarDisplay(const pathtracer::gfx::HdrImage& image) {
 }
 
 namespace {
-
-// log2 radiance about its mean, the receptor's adaptation level, as a bipolar signal: pooled over lanes, so their log ratios survive.
-[[nodiscard]] BipolarDisplay logWindow(const pathtracer::gfx::HdrImage& image) {
-    std::size_t count = 0;
-    double mean = 0.0;
-    double squaredDeviations = 0.0;  // Welford's M2: no cancellation against a mean many stops from zero
-    double lowest = 0.0;
-    double highest = 0.0;
-    for (const float value : image.texels) {
-        // Only a positive texel has a logarithm; the rest clamp below the window at the display's log stage.
-        if (!(value > 0.0F)) {
-            continue;
-        }
-        const double level = std::log2(static_cast<double>(value));
-        lowest = count == 0 ? level : std::min(lowest, level);
-        highest = count == 0 ? level : std::max(highest, level);
-        ++count;
-        const double delta = level - mean;
-        mean += delta / static_cast<double>(count);
-        squaredDeviations += delta * (level - mean);
-    }
-    const float peak = static_cast<float>(std::max(highest - mean, mean - lowest));
-    const float range = count > 0 ? cappedRange(peak, std::sqrt(squaredDeviations / static_cast<double>(count)), count) : 0.0F;
-    // Every lane shares one gain and offset, so a lane's log ratio to another, its chromaticity, reaches the display unscaled.
-    const float gain = bipolarGain(range);
-    return {glm::vec3(gain), glm::vec3(kBipolarDisplayOffset - (static_cast<float>(mean) * gain))};
-}
 
 // SNR's preview is decibels, the domain-standard unit for a ratio of like-dimensioned amplitudes, so the factor is 20 (EMVA 1288).
 void mapSnrForDisplay(const pathtracer::gfx::HdrImage& snr, int samples, pathtracer::gfx::HdrImage& out) {
@@ -402,10 +370,6 @@ void mapVisibilityForDisplay(const pathtracer::gfx::HdrImage& visibility, pathtr
 
 AovDisplay aovDisplay(AovId aov, const pathtracer::gfx::HdrImage& image, const AovDisplayContext& context) {
     AovDisplay display{{}, {glm::vec3(1.0F), glm::vec3(0.0F)}};
-    if (context.logTransform) {
-        display.affine = logWindow(image);
-        return display;
-    }
     if (aovIsBipolar(aov)) {
         display.affine = bipolarDisplay(image);
         return display;

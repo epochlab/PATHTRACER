@@ -17,29 +17,6 @@ scale and Contrast Sensitivity uses its octave cascade.
   - `discrete_gaussian_semigroup_is_exact` now cites Contrast Sensitivity's octave steps, its remaining user.
   - pytest expects 38 AOVs.
 
-## Log transform before the display LUT: the receptor stage of `NN/early_vision.ipynb` in the viewer
-
-The viewer can show `log2` radiance, the first stage of `NN/early_vision.ipynb` (`log_x = torch.log(luminance)`), on Beauty, Denoised
-and Luminance. It runs after the lens optics (aberration, bloom), which scatter linear light, and before the display LUT.
-Python and the C ABI are unchanged and return linear radiance, since the NN takes its own log.
-- **Display window:** pooled over the lanes' positive texels. It is centred on the mean `log2` (the adaptation level), with half-range
-  min(peak deviation, sigma * sqrt(2 ln n)), the cap `pooledRange` already applies. One window is shared by all lanes, so log ratios
-  between channels (hue) are kept. It is computed once per upload, only while the transform is on. Zero and negative texels clamp to
-  `std::numeric_limits<float>::min()` and fall below black.
-- **Exposure-invariant:** a gain becomes a `log2` shift that the mean-centred window cancels, so exposure leaves the log view unchanged.
-  The HUD over-range readout measures against the window's top instead of `1 / exposure`. The pixel probe applies the same window.
-- **Profile:** `render.logTransform` (bool, shipped `false`) sets the starting state of the HUD's `Log Transform` checkbox (Camera
-  section, after Bloom).
-- **Tests:**
-  - `api.log_window_*` cover:
-    - exposure invariance
-    - the outlier cap
-    - non-positive texels clamped below black, and a constant field at mid-grey
-    - Luminance against equal-lane RGB
-  - `api.log_transform_applies_to_the_picture_and_luminance` checks which AOVs take the transform.
-  - `io.profile_config_render_display_settings` refuses a non-bool `logTransform`.
-  - `display_gl.display_matches_the_cpu_encode` adds four log states, checked against GLSL's `log2` error bound.
-
 ## One sampling budget: `samplesPerPixel` is the finished frame's spp, in the viewer and in Python
 
 `pathTracer.samplesPerPixel` is now the total samples per pixel of a finished frame, and `maxSamples` is removed. Before, the viewer

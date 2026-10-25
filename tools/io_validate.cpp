@@ -789,7 +789,7 @@ PT_CHECK(profile_config_rejects_malformed_input, Fast, Exact) {
                   "loadProfileConfig accepted a path that does not exist");
 }
 
-// render.vsync, logTransform and the bit depths, each varied alone: an accepted value maps to its own setting, any other is refused.
+// render.vsync and the two bit depths, each varied alone: every accepted value maps to its own setting, every other is refused.
 PT_CHECK(profile_config_render_display_settings, Fast, Exact) {
     using pathtracer::gfx::ScalarType;
     struct Case {
@@ -808,11 +808,6 @@ PT_CHECK(profile_config_render_display_settings, Fast, Exact) {
         {"vsync 1", "vsync", 1, false},
         {"vsync \"true\"", "vsync", "true", false},
         {"vsync missing", "vsync", nullptr, false},
-        {"logTransform false", "logTransform", false, true},
-        {"logTransform true", "logTransform", true, true},
-        {"logTransform 1", "logTransform", 1, false},
-        {"logTransform \"true\"", "logTransform", "true", false},
-        {"logTransform missing", "logTransform", nullptr, false},
     };
     for (const nlohmann::json& bad : {nlohmann::json(8), nlohmann::json(24), nlohmann::json(16.5), nlohmann::json("16"),
                                       nlohmann::json(nullptr)}) {
@@ -841,17 +836,14 @@ PT_CHECK(profile_config_render_display_settings, Fast, Exact) {
         std::filesystem::remove(path);
         char detail[224];
         if (testCase.accepted) {
-            const std::string key = testCase.key;
+            const bool isDisplay = std::string(testCase.key) == "displayBitDepth";
             const std::optional<ScalarType> varied =
                 testCase.value.is_number_integer() ? pathtracer::gfx::scalarTypeFromBitDepth(testCase.value.get<int>())
                                                    : std::nullopt;
-            const ScalarType display = key == "displayBitDepth" ? *varied : shippedConfig->render.displayFormat;
-            const bool vsync = key == "vsync" ? testCase.value.get<bool>() : shippedConfig->render.vsync;
-            const bool logTransform = key == "logTransform" ? testCase.value.get<bool>() : shippedConfig->render.logTransform;
+            const ScalarType display = isDisplay ? *varied : shippedConfig->render.displayFormat;
+            const bool vsync = isDisplay ? shippedConfig->render.vsync : testCase.value.get<bool>();
             std::snprintf(detail, sizeof(detail), "loadProfileConfig rejected or mis-mapped %s", testCase.name.c_str());
-            PT_EXPECT(ctx, loaded.has_value() && loaded->render.displayFormat == display && loaded->render.vsync == vsync &&
-                               loaded->render.logTransform == logTransform,
-                      detail);
+            PT_EXPECT(ctx, loaded.has_value() && loaded->render.displayFormat == display && loaded->render.vsync == vsync, detail);
         } else {
             std::snprintf(detail, sizeof(detail), "loadProfileConfig accepted %s", testCase.name.c_str());
             PT_EXPECT(ctx, !loaded.has_value(), detail);

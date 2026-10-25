@@ -110,7 +110,7 @@ public:
               float& shutterSeconds, float& iso, int& filmBackPresetIndex,
               const std::vector<const char*>& filmBackPresetNames, int& lensProjection, int& pixelLattice,
               float& acceptanceAngleDegrees, bool& showSky, bool& envLightEnabled, int& envRotationDegrees, float& envExposureStops,
-              float& aberrationStrength, float& bloomStrength, bool& logTransform, const FramingOverlayState& framing,
+              float& aberrationStrength, float& bloomStrength, const FramingOverlayState& framing,
               const PixelProbeSample& pixelProbe) const;
 
     // ImGui::Render + backend draw-data submit. Call after the post-process blit, before window.swapBuffers().
