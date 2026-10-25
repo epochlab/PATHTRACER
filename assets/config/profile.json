@@ -33,6 +33,7 @@
         "vsync": true,
         "displayBitDepth": 16,
         "bloomStrength": 0.0,
+        "logTransform": false,
         "pixelProbe": "colour",
         "renderMode": "progressive"
     },

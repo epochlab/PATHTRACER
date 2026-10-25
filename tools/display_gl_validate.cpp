@@ -142,6 +142,7 @@ struct DisplayState {
     bool invert = false;
     float aberration = 0.0F;
     float bloomStrength = 0.0F;
+    bool logTransform = false;
     PixelLattice lattice = PixelLattice::Square;
     bool wrapsHorizontally = false;
 };
@@ -158,6 +159,7 @@ void present(DisplayPath& path, const pathtracer::gfx::Texture& image, int width
     path.transform.setInvert(state.invert);
     path.transform.setAberration(state.aberration);
     path.transform.setBloomStrength(state.bloomStrength);
+    path.transform.setLogTransform(state.logTransform);
     path.transform.setPixelLattice(state.lattice, state.wrapsHorizontally);
     path.transform.setImageRect(rect);
     path.transform.bind();
@@ -272,13 +274,18 @@ double encode(const DisplayCurve& c, double v) {
     return std::pow(std::max(v, 0.0), 1.0 / c.exponent);
 }
 
-// GLSL 4.10 4.7.1 on pow(v, p), v > 0: exp2(p log2 v), log2 at 3 ulp (2^-21 absolute on [0.5, 2]), exp2 at 3 + 2|z| ulp.
+// GLSL 4.10 4.7.1 on log2(v), v > 0: 3 ulp of the result, but 2^-21 absolute on [0.5, 2] where the result nears zero.
+double log2Error(double v) {
+    return (v >= 0.5 && v <= 2.0) ? 0x1p-21 : 3.0 * kUlp * std::abs(std::log2(v));
+}
+
+// GLSL 4.10 4.7.1 on pow(v, p), v > 0: exp2(p log2 v), log2 as log2Error, exp2 at 3 + 2|z| ulp.
 double powRelativeError(double v, double p) {
     if (!(v > 0.0)) {
         return 0.0;
     }
     const double log2v = std::log2(v);
-    const double logError = (v >= 0.5 && v <= 2.0) ? 0x1p-21 : 3.0 * kUlp * std::abs(log2v);
+    const double logError = log2Error(v);
     const double z = p * log2v;
     return (std::numbers::ln2 * ((p * logError) + (kUnitRoundoff * std::abs(z)))) + (kUlp * (3.0 + (2.0 * std::abs(z))));
 }
@@ -323,9 +330,14 @@ LaneBound referenceTexel(const glm::vec3& texel, const DisplayState& s, const st
     glm::dvec3 a;
     glm::dvec3 da;
     for (int lane = 0; lane < 3; ++lane) {
-        const double scaled = static_cast<double>(texel[lane]) * s.gain[lane];
+        // The log stage's max against the floor is exact, so log2's own bound is the only error it carries into the affine map.
+        const double clamped = std::max(static_cast<double>(texel[lane]), static_cast<double>(pathtracer::gfx::kLogFloor));
+        const double input = s.logTransform ? std::log2(clamped) : static_cast<double>(texel[lane]);
+        const double inputError = s.logTransform ? log2Error(clamped) : 0.0;
+        const double scaled = input * s.gain[lane];
         a[lane] = scaled + s.offset[lane];
-        da[lane] = gamma(2.0) * (std::abs(scaled) + std::abs(static_cast<double>(s.offset[lane])));
+        da[lane] = (std::abs(static_cast<double>(s.gain[lane])) * inputError) +
+                   (gamma(2.0) * (std::abs(scaled) + std::abs(static_cast<double>(s.offset[lane]))));
     }
     if (s.channelView > 0) {
         a = glm::dvec3(a[s.channelView - 1]);
@@ -376,8 +388,15 @@ CodeRange codesOf(double lo, double hi) {
 // The CPU encode's dithered value before quantisation; encodeForDisplay is sRGB-or-identity, so other LUTs compose its own stages.
 std::vector<float> cpuDithered(const HdrImage& image, const DisplayState& s) {
     const std::size_t floats = image.texels.size();
+    std::vector<float> input = image.texels;
+    if (s.logTransform) {
+        for (std::size_t texel = 0; texel < floats; texel += 3) {
+            const glm::vec3 logged = pathtracer::gfx::logTransform(glm::vec3(input[texel], input[texel + 1], input[texel + 2]));
+            std::copy_n(&logged[0], 3, input.begin() + static_cast<std::ptrdiff_t>(texel));
+        }
+    }
     std::vector<float> mapped(floats);
-    pathtracer::gfx::encodeForDisplay(image.texels, image.width, image.height, s.gain, false, s.offset, std::span<float>(mapped));
+    pathtracer::gfx::encodeForDisplay(input, image.width, image.height, s.gain, false, s.offset, std::span<float>(mapped));
     if (s.channelView > 0) {
         for (std::size_t texel = 0; texel < floats; texel += 3) {
             std::fill_n(mapped.begin() + static_cast<std::ptrdiff_t>(texel), 3, mapped[texel + static_cast<std::size_t>(s.channelView - 1)]);
@@ -499,7 +518,7 @@ PT_CHECK(display_matches_the_cpu_encode, Fast, Exact) {
     constexpr ViewportRect kRect{23, 17, kWidth, kHeight};
     constexpr int kTargetWidth = kRect.x + kWidth + 11;
     constexpr int kTargetHeight = kRect.y + kHeight + 9;
-    std::vector<DisplayState> states(9);
+    std::vector<DisplayState> states(13);
     states[1].gain = glm::vec3(1.7F, 0.9F, 1.2F);
     states[1].offset = glm::vec3(0.01F, -0.02F, 0.0F);
     states[2].lut = Lut::Rec709;
@@ -513,9 +532,19 @@ PT_CHECK(display_matches_the_cpu_encode, Fast, Exact) {
     states[7].gain = glm::vec3(1.3F);
     states[7].offset = glm::vec3(0.05F);
     states[7].invert = true;
-    states[8].lut = Lut::SRGB;  // the viewer's default 16-bit display texture, below
+    // Log states: a window taking log2 levels [-12, 8] onto [0, 1], so the test image's toe, curve and floored negatives all run.
+    for (std::size_t i = 8; i < 12; ++i) {
+        states[i].logTransform = true;
+        states[i].gain = glm::vec3(1.0F / 20.0F);
+        states[i].offset = glm::vec3(12.0F / 20.0F);
+    }
+    states[9].lut = Lut::Rec709;
+    states[10].lut = Lut::Raw;
+    states[10].invert = true;
+    states[11].channelView = 2;
+    states[12].lut = Lut::SRGB;  // the viewer's default 16-bit display texture, below
     constexpr std::array<ScalarType, 2> kFormats{ScalarType::Float32, ScalarType::Float16};
-    // Two per state, plus encodeForDisplay's own bytes for the sRGB states without a view or invert: 0, 1 and the 16-bit one.
+    // Two per state, plus encodeForDisplay's own bytes for sRGB states with no view, invert or log: 0, 1 and the 16-bit one.
     ctx.plan(1 + (2 * static_cast<int>(states.size())) + 3);
     const std::optional<DisplayCurve> srgb = displayCurve(Lut::SRGB);
     const std::optional<DisplayCurve> rec709 = displayCurve(Lut::Rec709);
@@ -538,8 +567,8 @@ PT_CHECK(display_matches_the_cpu_encode, Fast, Exact) {
         const std::vector<float> drawn = floatTarget.read<float>(GL_RGBA, 4);
         const std::vector<unsigned char> codes = byteTarget.read<unsigned char>(GL_RGBA, 4);
         const std::vector<float> cpu = cpuDithered(image, state);
-        // Where encodeForDisplay is the whole CPU path (sRGB, no view or invert), its own bytes are the codes compared.
-        if (state.lut == Lut::SRGB && state.channelView == 0 && !state.invert) {
+        // Where encodeForDisplay is the whole CPU path (sRGB, no view, invert or log), its own bytes are the codes compared.
+        if (state.lut == Lut::SRGB && state.channelView == 0 && !state.invert && !state.logTransform) {
             std::vector<unsigned char> api(image.texels.size());
             pathtracer::gfx::encodeForDisplay(image.texels, kWidth, kHeight, state.gain, true, state.offset, std::span<unsigned char>(api));
             bool same = true;

@@ -50,6 +50,9 @@ public:
     // 0 = off; the fraction of energy scattered by the glare PSF, sampled from kBloomTextureUnit while nonzero.
     void setBloomStrength(float bloomStrength) { bloomStrength_ = bloomStrength; }
 
+    // Per-lane log2 after bloom and before the affine map, which then carries the log window rather than the exposure.
+    void setLogTransform(bool logTransform) { logTransform_ = logTransform; }
+
     // The displayed image's lattice and lens wrap: a hexagonal one is drawn cell by cell, its columns wrapping where the lens does.
     void setPixelLattice(PixelLattice pixelLattice, bool wrapsHorizontally) {
         pixelLattice_ = pixelLattice;
@@ -103,6 +106,9 @@ private:
     int rawBloomStrengthLoc_;
     int srgbBloomStrengthLoc_;
     int rec709BloomStrengthLoc_;
+    int rawLogTransformLoc_;
+    int srgbLogTransformLoc_;
+    int rec709LogTransformLoc_;
     int rawHexagonalLoc_;
     int srgbHexagonalLoc_;
     int rec709HexagonalLoc_;
@@ -115,6 +121,7 @@ private:
     bool invert_ = false;
     float aberration_ = 0.0F;
     float bloomStrength_ = 0.0F;
+    bool logTransform_ = false;
     glm::vec3 displayOffset_{0.0F};
     PixelLattice pixelLattice_ = PixelLattice::Square;
     bool wrapsHorizontally_ = false;

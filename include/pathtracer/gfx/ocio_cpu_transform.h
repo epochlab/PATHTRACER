@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <limits>
 #include <span>
 
 #include <glm/glm.hpp>
@@ -13,6 +14,14 @@ namespace pathtracer::gfx {
 // In place, RGB triples (no alpha), row-major, width*height*3 elements; Raw is the identity. Thread-safe, processors are built once.
 void applyOcioDisplayTransform(std::span<float> rgb, int width, int height,
                                OcioDisplayTransform::Lut lut = OcioDisplayTransform::Lut::SRGB);
+
+// The log stage's guard: log2 is undefined at and below zero, so texels clamp to the least positive normal float first.
+inline constexpr float kLogFloor = std::numeric_limits<float>::min();
+
+// The display shaders' log stage per lane, before the affine map: a receptor's response to radiance ratios, not differences.
+[[nodiscard]] inline glm::vec3 logTransform(const glm::vec3& rgb) {
+    return glm::log2(glm::max(rgb, glm::vec3(kLogFloor)));
+}
 
 // Edge of the display dither tile; the encode and the viewer both read texel (x, y), counted from the top-left, at (x, y) mod 128.
 inline constexpr int kDitherMaskSize = 128;
