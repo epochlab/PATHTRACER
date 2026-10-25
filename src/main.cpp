@@ -189,7 +189,6 @@ struct DisplayedAovSource {
     int samples = 0;
     bool wrapsHorizontally = false;  // the image's lens joins its left and right edges, so the display texture repeats in s
     pathtracer::gfx::PixelLattice pixelLattice = pathtracer::gfx::PixelLattice::Square;  // where the image's texels sit on the film
-    bool logTransform = false;  // the image is shown log-transformed, so its display window is the log2 one, re-derived on a toggle
 
     bool operator==(const DisplayedAovSource&) const = default;
 };
@@ -260,8 +259,6 @@ struct AppResources {
     float aberrationStrength = 0.0F;
     // Glare PSF's scattered fraction (0 = off), picture AOVs only; starts at profile.json bloomStrength, then the HUD slider.
     float bloomStrength;
-    // log2 before the display LUT on the AOVs aovTakesLogTransform accepts; starts at profile.json logTransform, then the HUD checkbox.
-    bool logTransform;
     pathtracer::debug::PixelProbeReadout pixelProbeReadout;  // profile.json render.pixelProbe
     // The bloom pyramid no longer matches pathTraceDisplayTexture: set by each upload, cleared by the next build.
     bool bloomStale = true;
@@ -514,7 +511,6 @@ std::optional<AppResources> initializeApp(const pathtracer::config::SceneConfig&
         .statsEnabled = statsEnabled,
         .vsync = profileConfig.render.vsync,
         .bloomStrength = profileConfig.render.bloomStrength,
-        .logTransform = profileConfig.render.logTransform,
         .pixelProbeReadout = profileConfig.render.pixelProbe,
         .samplesPerPixel = profileConfig.pathTracer.samplesPerPixel,
         .displayFormat = profileConfig.render.displayFormat,
@@ -614,11 +610,8 @@ glm::vec3 applyBeautyDisplayTransform(glm::vec3 hdrColor, const AppResources& ap
     } else if (app.channelView == 3) {
         hdrColor = glm::vec3(hdrColor.b);
     }
-    // The shader's own map: the log window shown on screen, else the exposure. Per-lane uniform, so isolating first changes nothing.
-    const pathtracer::debug::BipolarDisplay& window = app.pathTraceDisplay.affine;
-    const glm::vec3 mapped = app.pathTraceDisplayed.logTransform ? (pathtracer::gfx::logTransform(hdrColor) * window.gain) + window.offset
-                                                                 : hdrColor * app.debugCamera.exposureGain();
-    std::array<float, 3> pixel{mapped.r, mapped.g, mapped.b};
+    const glm::vec3 exposed = hdrColor * app.debugCamera.exposureGain();
+    std::array<float, 3> pixel{exposed.r, exposed.g, exposed.b};
     pathtracer::gfx::applyOcioDisplayTransform(pixel, 1, 1, app.userLut);
     glm::vec3 displayColor{pixel[0], pixel[1], pixel[2]};
     if (app.invert) {
@@ -767,7 +760,7 @@ void ensurePathTraceDisplayTexture(AppResources& app, const DisplayedAovSource& 
     const auto aovId = static_cast<pathtracer::debug::AovId>(app.aov);
     app.pathTraceDisplay = pathtracer::debug::aovDisplay(
         aovId, image,
-        {samples, app.scene.baseSettings.maxBounces, app.gbuffer->depthMax, source.logTransform});
+        {samples, app.scene.baseSettings.maxBounces, app.gbuffer->depthMax});
     // A nonlinear pre-map cannot ride the shader's two vec3 uniforms, so where one applies the texture carries its output instead.
     const pathtracer::gfx::HdrImage& shown =
         app.pathTraceDisplay.mapped.texels.empty() ? image : app.pathTraceDisplay.mapped;
@@ -802,26 +795,19 @@ void presentFrame(AppResources& app,
     // Unconditional: the draw covers only imageRect, so the bars need clearing whether or not there is an image to draw into it.
     clearToBlack(viewportWidth, viewportHeight);
 
-    DisplayedAovSource source = resolveAovImage(app, pathTraceSnapshot, aovId);
+    const DisplayedAovSource source = resolveAovImage(app, pathTraceSnapshot, aovId);
     if (source.image == nullptr) {
         return;
     }
-    source.logTransform = app.logTransform && pathtracer::debug::aovTakesLogTransform(aovId);
     pathtracer::gfx::drawImageBounds(imageRect, 0);
     ensurePathTraceDisplayTexture(app, source, pathTraceSnapshot != nullptr ? pathTraceSnapshot->samples : 0);
     const bool isPicture = pathtracer::debug::aovIsPicture(aovId);
     app.ocioTransform.setActiveLut(isPicture ? app.userLut
                                               : pathtracer::gfx::OcioDisplayTransform::Lut::Raw);
+    // The exposure moves without rebuilding the texture: the live gain over the one the texels were uploaded at.
     pathtracer::debug::BipolarDisplay display = app.pathTraceDisplay.affine;
-    if (source.logTransform) {
-        // Texels hold p * radiance, log2 p above the window's levels; the live exposure is a shift the mean-centred window cancels.
-        display.offset -= display.gain * glm::log2(app.displayPreExposure);
-    } else {
-        // The exposure moves without rebuilding the texture: the live gain over the one the texels were uploaded at.
-        display.gain *= pathtracer::debug::aovExposureGain(aovId, app.debugCamera.exposureGain()) / app.displayPreExposure;
-    }
+    display.gain *= pathtracer::debug::aovExposureGain(aovId, app.debugCamera.exposureGain()) / app.displayPreExposure;
     app.ocioTransform.setDisplayAffine(display.gain, display.offset);
-    app.ocioTransform.setLogTransform(source.logTransform);
     app.ocioTransform.setChannelView(app.channelView);
     app.ocioTransform.setInvert(app.invert);
     // The picture only -- an artistic lens effect over the rendered image, not meaningful on a raw data AOV like Normal/Depth/Albedo.
@@ -915,13 +901,10 @@ void updateOverRangeStats(AppResources& app,
         return;
     }
     const pathtracer::scene::OverRangeStats& stats = pathTraceSnapshot->overRange;
-    // Raw radiance at display white: 1/exposure linearly, the log window's top under the log transform, where its clipping starts.
-    const pathtracer::debug::BipolarDisplay& window = app.pathTraceDisplay.affine;
-    const float white = app.pathTraceDisplayed.logTransform ? std::exp2((1.0F - window.offset.r) / window.gain.r)
-                                                            : 1.0F / app.debugCamera.exposureGain();
-    app.overRangePeakMultiple = stats.rawPeak / white;
-    // Texels binned strictly above the one holding white: exact above that edge, the threshold quantised to 1/1024 of a stop.
-    const auto bin = static_cast<std::size_t>(pathtracer::scene::overRangeBin(white));
+    const float exposure = app.debugCamera.exposureGain();
+    app.overRangePeakMultiple = exposure * stats.rawPeak;
+    // Texels binned strictly above the one holding 1/exposure: exact above that edge, the threshold quantised to 1/1024 of a stop.
+    const auto bin = static_cast<std::size_t>(pathtracer::scene::overRangeBin(1.0F / exposure));
     const std::uint32_t texelCount = stats.aboveBin.front();
     app.overRangeFraction =
         texelCount > 0 ? static_cast<float>(stats.aboveBin[bin + 1]) / static_cast<float>(texelCount)
@@ -1034,7 +1017,7 @@ void updateHud(AppResources& app, const pathtracer::platform::Window& window,
                      edits.filmBackPresetIndex, app.filmBackPresetNames, edits.lensProjection, edits.pixelLattice,
                      edits.acceptanceAngleDegrees, app.showSky,
                      app.envLightEnabled, app.envRotationDegrees, app.envExposureStops, app.aberrationStrength,
-                     app.bloomStrength, app.logTransform, app.framingState, pixelProbe);
+                     app.bloomStrength, app.framingState, pixelProbe);
     }
     applyCameraEdits(app, edits);
     app.renderMode = static_cast<pathtracer::debug::RenderMode>(renderMode);

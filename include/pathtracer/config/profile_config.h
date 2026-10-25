@@ -56,8 +56,6 @@ struct RenderConfig {
     pathtracer::gfx::ScalarType displayFormat;
     // The glare PSF's scattered fraction in [0,1], 0 = off: the HUD Bloom slider's starting value, applied to picture AOVs only.
     float bloomStrength;
-    // Starts the HUD Log Transform checkbox: log2 of the picture and Luminance before the display LUT, as early_vision.ipynb's first stage.
-    bool logTransform;
     pathtracer::debug::PixelProbeReadout pixelProbe;  // profile.json "colour", "photometric" or "none"
     pathtracer::debug::RenderMode renderMode;  // profile.json "progressive" or "offline": the HUD dropdown's starting value
 };

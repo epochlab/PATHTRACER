@@ -95,14 +95,6 @@ constexpr const char* kApplyBloomGlsl =
     "        hdrColor = mix(hdrColor, bloom, uBloomStrength);\n"
     "    }\n";
 
-// Per-lane log2 after the scene-linear optics and before the affine map; uLogFloor (kLogFloor) keeps log2's argument positive.
-constexpr const char* kLogTransformGlsl =
-    "uniform bool uLogTransform;\n"
-    "uniform float uLogFloor;\n";
-
-constexpr const char* kApplyLogTransformGlsl =
-    "    if (uLogTransform) { hdrColor = log2(max(hdrColor, vec3(uLogFloor))); }\n";
-
 // TPDF dither before the 8-bit quantization, else gradients band: encodeForDisplay's table and tiling, so a 1:1 frame matches it.
 constexpr const char* kDitherGlsl =
     "uniform sampler2D uDitherMask;\n"
@@ -121,13 +113,12 @@ std::string buildFragmentSource(const std::string& ocioShaderText, const std::st
         << "uniform sampler2D uHdrColor;\n"
         << "uniform vec3 uDisplayGain;\n"
         << "uniform vec3 uDisplayOffset;\n"
-        << kChannelViewGlsl << kInvertGlsl << kLatticeGlsl << kAberrationGlsl << kBloomGlsl << kLogTransformGlsl << "\n"
+        << kChannelViewGlsl << kInvertGlsl << kLatticeGlsl << kAberrationGlsl << kBloomGlsl << "\n"
         << kDitherGlsl
         << ocioShaderText << "\n"
         << "void main() {\n"
         << "    vec3 hdrColor = sampleAberrated(vUv);\n"
         << kApplyBloomGlsl
-        << kApplyLogTransformGlsl
         << "    hdrColor = hdrColor * uDisplayGain + uDisplayOffset;\n"
         << kApplyChannelViewGlsl
         << "    vec4 exposed = vec4(hdrColor, 1.0);\n"
@@ -146,10 +137,10 @@ std::string buildRawFragmentSource() {
                        "uniform sampler2D uHdrColor;\n"
                        "uniform vec3 uDisplayGain;\n"
                        "uniform vec3 uDisplayOffset;\n") +
-           kChannelViewGlsl + kInvertGlsl + kLatticeGlsl + kAberrationGlsl + kBloomGlsl + kLogTransformGlsl + kDitherGlsl +
+           kChannelViewGlsl + kInvertGlsl + kLatticeGlsl + kAberrationGlsl + kBloomGlsl + kDitherGlsl +
            "\nvoid main() {\n"
            "    vec3 hdrColor = sampleAberrated(vUv);\n" +
-           kApplyBloomGlsl + kApplyLogTransformGlsl +
+           kApplyBloomGlsl +
            "    hdrColor = hdrColor * uDisplayGain + uDisplayOffset;\n" +
            kApplyChannelViewGlsl +
            "    vec3 displayColor = hdrColor;\n"
@@ -211,13 +202,12 @@ std::optional<OcioDisplayTransform> OcioDisplayTransform::create() {
         return std::nullopt;
     }
 
-    // One-time texture-unit and log-floor assignment, matching main.cpp's existing explicit-uniform convention for uBaseColor/uHdrColor.
+    // One-time texture-unit assignment, matching main.cpp's existing explicit-uniform convention for uBaseColor/uHdrColor.
     for (const ShaderProgram* shader : {&*rawShader, &*srgbShader, &*rec709Shader}) {
         shader->use();
         GL_CALL(glUniform1i(shader->uniformLocation("uHdrColor"), 0));
         GL_CALL(glUniform1i(shader->uniformLocation("uDitherMask"), static_cast<GLint>(kDitherMaskUnit)));
         GL_CALL(glUniform1i(shader->uniformLocation("uBloom"), static_cast<GLint>(kBloomTextureUnit)));
-        GL_CALL(glUniform1f(shader->uniformLocation("uLogFloor"), kLogFloor));
     }
 
     // Float32, so the shader adds exactly the offsets the CPU encode adds.
@@ -254,9 +244,6 @@ OcioDisplayTransform::OcioDisplayTransform(ShaderProgram rawShader, ShaderProgra
       rawBloomStrengthLoc_(rawShader_.uniformLocation("uBloomStrength")),
       srgbBloomStrengthLoc_(srgbShader_.uniformLocation("uBloomStrength")),
       rec709BloomStrengthLoc_(rec709Shader_.uniformLocation("uBloomStrength")),
-      rawLogTransformLoc_(rawShader_.uniformLocation("uLogTransform")),
-      srgbLogTransformLoc_(srgbShader_.uniformLocation("uLogTransform")),
-      rec709LogTransformLoc_(rec709Shader_.uniformLocation("uLogTransform")),
       rawHexagonalLoc_(rawShader_.uniformLocation("uHexagonal")),
       srgbHexagonalLoc_(srgbShader_.uniformLocation("uHexagonal")),
       rec709HexagonalLoc_(rec709Shader_.uniformLocation("uHexagonal")),
@@ -274,7 +261,6 @@ void OcioDisplayTransform::bind() const {
     int displayOffsetLoc = rawDisplayOffsetLoc_;
     int ditherOriginLoc = rawDitherOriginLoc_;
     int bloomStrengthLoc = rawBloomStrengthLoc_;
-    int logTransformLoc = rawLogTransformLoc_;
     int hexagonalLoc = rawHexagonalLoc_;
     int wrapsHorizontallyLoc = rawWrapsHorizontallyLoc_;
     if (activeLut_ == Lut::SRGB) {
@@ -285,7 +271,6 @@ void OcioDisplayTransform::bind() const {
         displayOffsetLoc = srgbDisplayOffsetLoc_;
         ditherOriginLoc = srgbDitherOriginLoc_;
         bloomStrengthLoc = srgbBloomStrengthLoc_;
-        logTransformLoc = srgbLogTransformLoc_;
         hexagonalLoc = srgbHexagonalLoc_;
         wrapsHorizontallyLoc = srgbWrapsHorizontallyLoc_;
     } else if (activeLut_ == Lut::Rec709) {
@@ -296,7 +281,6 @@ void OcioDisplayTransform::bind() const {
         displayOffsetLoc = rec709DisplayOffsetLoc_;
         ditherOriginLoc = rec709DitherOriginLoc_;
         bloomStrengthLoc = rec709BloomStrengthLoc_;
-        logTransformLoc = rec709LogTransformLoc_;
         hexagonalLoc = rec709HexagonalLoc_;
         wrapsHorizontallyLoc = rec709WrapsHorizontallyLoc_;
     }
@@ -307,7 +291,6 @@ void OcioDisplayTransform::bind() const {
     glUniform1f(aberrationLoc, aberration_);
     glUniform3f(displayOffsetLoc, displayOffset_.r, displayOffset_.g, displayOffset_.b);
     glUniform1f(bloomStrengthLoc, bloomStrength_);
-    glUniform1i(logTransformLoc, logTransform_ ? 1 : 0);
     glUniform1i(hexagonalLoc, pixelLattice_ == PixelLattice::Hexagonal ? 1 : 0);
     glUniform1i(wrapsHorizontallyLoc, wrapsHorizontally_ ? 1 : 0);
     // The image's top-left pixel in window coordinates, whose y axis points up.
