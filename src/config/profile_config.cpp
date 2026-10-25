@@ -118,7 +118,7 @@ std::optional<pathtracer::debug::RenderMode> parseRenderMode(const nlohmann::jso
     return std::nullopt;
 }
 
-// The render block's output fields: LUT, bit depth, sizes, bloom, probe, mode. Scales, AOV and vsync are read after controls.
+// The render block's output fields: LUT, bit depth, sizes, bloom, probe, mode. Scales, AOV, vsync and logTransform follow controls.
 std::optional<RenderConfig> parseRenderOutput(const nlohmann::json& render, const std::string& path) {
     const std::string defaultLutName = render.at("defaultLUT").get<std::string>();
     const std::optional<pathtracer::gfx::OcioDisplayTransform::Lut> defaultLut =
@@ -153,7 +153,7 @@ std::optional<RenderConfig> parseRenderOutput(const nlohmann::json& render, cons
     const int displayWidth = render.at("displayWidth").get<int>();
     const int displayHeight = render.at("displayHeight").get<int>();
     return RenderConfig{width, height, displayWidth, displayHeight, 0.0F, 0.0F, 0, *defaultLut, false, *displayFormat,
-                        toFloat(render.at("bloomStrength")), *pixelProbe, *renderMode};
+                        toFloat(render.at("bloomStrength")), false, *pixelProbe, *renderMode};
 }
 
 // The camera block in field order, then lens, lattice and acceptance. Ranges need the film back, so Camera::validate runs on the whole.
@@ -352,6 +352,7 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
         renderConfig->interactiveRenderScale = toFloat(render.at("interactiveRenderScale"));
         renderConfig->defaultAov = render.at("defaultAOV").get<int>();
         renderConfig->vsync = render.at("vsync").get<bool>();
+        renderConfig->logTransform = render.at("logTransform").get<bool>();
         const PathTracerConfig pathTracerConfig = parsePathTracer(pathTracer);
 
         if (!validRender(*renderConfig, path) ||
