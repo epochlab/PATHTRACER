@@ -14,9 +14,9 @@
 
 namespace pathtracer::debug {
 
-// CPU implementations of the derived AOVs. Sobel clamps at the edge, DoG and Gabor mirror, hexagonal folds by its mirrors; x may wrap.
+// CPU implementations of the derived AOVs. Sobel clamps at the edge, Gabor mirrors, hexagonal folds by its mirrors; x may wrap.
 
-// Radial half-response bandwidth of the Morlet bank, in octaves: DoG's fine-to-coarse spacing, so both operators resolve one band.
+// Radial half-response bandwidth of the Morlet bank, in octaves: one band an octave wide about the carrier.
 inline constexpr float kMorletOctaves = 1.0F;
 
 // Carrier frequency in radians per pitch at envelope variance t: sigma*omega depends on the bandwidth alone (Petkov 1995 eq. 4).
@@ -73,11 +73,6 @@ void demodulate(std::span<const float> plane, const MorletPlaneWave& wave, int w
 // HSV as three channels: hue and saturation normalised to [0,1], value left scene-referred so it is not clamped at white.
 [[nodiscard]] pathtracer::gfx::HdrImage hsvAov(const pathtracer::gfx::HdrImage& beauty,
                                             pathtracer::scene::ThreadPool& threadPool);
-
-// Signed first band of the Laplacian pyramid (Burt & Adelson 1983), finest octave minus the next, one channel. Zero if it cannot fit.
-[[nodiscard]] pathtracer::gfx::HdrImage dogAov(const pathtracer::gfx::HdrImage& beauty,
-                                            pathtracer::scene::ThreadPool& threadPool, bool wrapsHorizontally = false,
-                                            pathtracer::gfx::PixelLattice lattice = pathtracer::gfx::PixelLattice::Square);
 
 // Cone-opponent displacement from scene white (cone_space.h): (l - l_white, s - s_white), two channels, invariant to a positive gain.
 [[nodiscard]] pathtracer::gfx::HdrImage colourOpponentAov(const pathtracer::gfx::HdrImage& beauty,

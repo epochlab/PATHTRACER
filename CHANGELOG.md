@@ -3,6 +3,20 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## DoG removed
+
+The DoG AOV is removed. 38 AOVs remain, and 10 are derived after accumulation. The scale space stays, because Gabor uses its inner
+scale and Contrast Sensitivity uses its octave cascade.
+
+- refactor:
+  - `AovId::DoG` is gone from the enum, the HUD, `pt_aov_id`, Python and `--aov`, along with `dogAov` and its dispatch arm.
+  - Every later id shifts down. Callers resolve ids by name, so `PT_ABI_VERSION` stays 11, as it did when LoG was removed.
+- test:
+  - The seven DoG checks are removed.
+  - `wrapped_filters_commute_with_a_cyclic_column_shift` drops its DoG rows and returns to 48 rows.
+  - `discrete_gaussian_semigroup_is_exact` now cites Contrast Sensitivity's octave steps, its remaining user.
+  - pytest expects 38 AOVs.
+
 ## Log transform before the display LUT: the receptor stage of `NN/early_vision.ipynb` in the viewer
 
 The viewer can show `log2` radiance, the first stage of `NN/early_vision.ipynb` (`log_x = torch.log(luminance)`), on Beauty, Denoised

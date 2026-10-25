@@ -163,7 +163,6 @@ PT_CHECK(filters_are_zero_on_a_constant_field, Fast, Exact) {
 // A bipolar AOV claims both signs are meaningful, so each must actually produce both on a pattern with structure at several scales.
 PT_CHECK(bipolar_aovs_produce_both_signs, Fast, Exact) {
     pathtracer::scene::ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    // Wider than DoG's coarse support: below that DoG has no band to difference and correctly reads zero.
     constexpr int kWidth = 256;
     constexpr int kHeight = 192;
     HdrImage pattern = makeRgbImage(kWidth, kHeight, 0.0F);
@@ -941,7 +940,7 @@ PT_CHECK(show_sky_changes_only_the_background, Slow, Exact) {
 // A new filter AOV reaching the dispatch's default arm is exactly the class of bug this catches: identical output for two distinct AOVs.
 PT_CHECK(aov_filter_dispatch_is_total, Fast, Exact) {
     pathtracer::scene::ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    // Wider than DoG's coarse support, so its band is not legitimately empty, and chromatic so no two of the eight filters agree.
+    // Chromatic and wider than Contrast Sensitivity's first band, so no two filters legitimately agree.
     constexpr int kWidth = 96;
     constexpr int kHeight = 64;
     HdrImage source = makeRgbImage(kWidth, kHeight, 0.0F);
