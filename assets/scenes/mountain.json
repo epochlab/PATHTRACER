@@ -1,6 +1,6 @@
 {
     "model": {
-        "gltfPath": "geometry/gigantic_sandstone_terrain_wldhdhxva/wldhdhxva_tier_1.gltf",
+        "gltfPath": "geometry/gigantic_sandstone_terrain_wldhdhxva/wldhdhxva_tier_0.gltf",
         "position": [0.0, 0.0, 0.0],
         "rotation": [0.0, 0.0, 0.0]
     },
@@ -10,7 +10,7 @@
     },
     "materialPath": "materials/principled.json",
     "textures": {
-        "wldhdhxva_LOD0_TIER1_000": {
+        "wldhdhxva_LOD0_TIER0_000": {
             "base_color": "geometry/gigantic_sandstone_terrain_wldhdhxva/textures/Gigantic_Sandstone_Terrain_wldhdhxva_Raw_8K_BaseColor.exr",
             "specular_roughness": "geometry/gigantic_sandstone_terrain_wldhdhxva/textures/Gigantic_Sandstone_Terrain_wldhdhxva_Raw_8K_Roughness.exr",
             "geometry_normal": {
@@ -20,8 +20,8 @@
         }
     },
     "camera": {
-        "position": [0.0, 60.0, 200.0],
+        "position": [0.0, 60.0, 100.0],
         "rotation": [-25.0, 0.0, 0.0],
-        "farClip": 1000.0
+        "farClip": 10000.0
     }
 }
