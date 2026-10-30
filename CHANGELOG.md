@@ -3,6 +3,11 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## 2AFC scene
+
+- feat: `scenes/2AFC.json` is two 0.1 m sphere lights 1 m apart at 500 lm each, with the environment off, as a two-alternative
+  forced-choice stimulus. Vary one sphere's `lumens` to set the comparison.
+
 ## DoG removed
 
 The DoG AOV is removed. 38 AOVs remain, and 10 are derived after accumulation. The scale space stays, because Gabor uses its inner

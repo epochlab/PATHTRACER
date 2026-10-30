@@ -1,0 +1,29 @@
+{
+    "environment": {
+        "hdriPath": "textures/republiqueHDR_2k.exr",
+        "lightEnabled": false
+    },
+    "lights": [
+        {
+            "type": "sphere",
+            "position": [-0.5, 0.0, 0.0],
+            "rotation": [0.0, 0.0, 0.0],
+            "radius": 0.05,
+            "color": [1.0, 1.0, 1.0],
+            "lumens": 500.0
+        },
+        {
+            "type": "sphere",
+            "position": [0.5, 0.0, 0.0],
+            "rotation": [0.0, 0.0, 0.0],
+            "radius": 0.05,
+            "color": [1.0, 1.0, 1.0],
+            "lumens": 500.0
+        }
+    ],
+    "camera": {
+        "position": [0.0, 0.0, 4.0],
+        "rotation": [0.0, 0.0, 0.0],
+        "farClip": 100.0
+    }
+}
