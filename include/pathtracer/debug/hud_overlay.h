@@ -40,12 +40,12 @@ struct FramingOverlayState {
 // Read-only convergence status for the AOV section's readout, rebuilt each frame from the displayed result's sample count and driver state.
 struct PathTracedStatus {
     bool hasResult = false;
-    double lastPassSeconds = 0.0;
+    double passesPerSecond = 0.0;  // PassRate::fps: the render's frame rate, a pass being one sample over the whole image
+    double avgPassMs = 0.0;
     int accumulatedSamples = 0;
     int samplesPerPixel = 0;  // 0 = unbounded
     bool adaptive = false;  // profile.json's adaptive.threshold is positive, so texels stop on their own error
     double samplingFraction = 1.0;  // texels the next pass traces over all texels; 0 once every one has stopped
-    std::optional<double> readyMs;  // input change to the swap first showing its finished accumulation; nullopt while in flight
 };
 
 // What the bottom-right probe shows: the cursor texel's RGBA, its luminance as a spot meter, or nothing, neither sampled nor drawn.

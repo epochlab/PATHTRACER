@@ -85,6 +85,32 @@ struct PassRecord {
     bool cancelled = false;  // superseded mid-flight and discarded; its rays were still traced and paid for
 };
 
+// Passes per second of the newest accumulation: its finished passes over their summed passMs, restarted on a new generation.
+class PassRate {
+public:
+    // Records in pass order, as takePassRecords returns them. A cancelled pass published no image, so it is not a frame.
+    void add(const PassRecord& pass) {
+        if (pass.cancelled) {
+            return;
+        }
+        if (pass.generation != generation_) {
+            generation_ = pass.generation;
+            count_ = 0;
+            totalMs_ = 0.0;
+        }
+        ++count_;
+        totalMs_ += pass.passMs;
+    }
+
+    [[nodiscard]] double avgMs() const { return count_ > 0 ? totalMs_ / static_cast<double>(count_) : 0.0; }
+    [[nodiscard]] double fps() const { return totalMs_ > 0.0 ? 1000.0 * static_cast<double>(count_) / totalMs_ : 0.0; }
+
+private:
+    std::uint64_t generation_ = 0;
+    int count_ = 0;
+    double totalMs_ = 0.0;
+};
+
 // Per-frame render-thread stage times, ms; one thread writes and reads, so unsynchronized. Zeroed each frame, so a skipped stage reads 0.
 struct FrameStageTimes {
     float fenceMs = 0.0F;       // wait for the previous frame's GPU work: non-zero only when the GPU, not the display, bounds the frame
