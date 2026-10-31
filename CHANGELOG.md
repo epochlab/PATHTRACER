@@ -3,6 +3,16 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## HUD pass rate
+
+- fix: HUD FPS is now the path tracer's pass rate (`debug::PassRate`): finished passes per second over the accumulation shown, restarting
+  on a new generation and skipping cancelled passes. It used to read 60 because it counted the vsync-paced display loop, which runs apart
+  from the driver thread. At 256x128 @ 16 it reads 22.5 on cornell (44.4 ms) and 204.7 on macbeth (4.9 ms). Both lie within the spread of
+  the bench's per-run mean `pass_ms`: 27.1-49.4 ms and 4.4-4.6 ms (`results/hud_pass_rate`).
+- The display loop keeps its own `Display` line, sparkline and min/max. The `s/pass` readout is removed, because it showed only the last
+  pass and the FPS line now gives the mean pass time. The `ready N ms` line is removed from the HUD; the bench still logs `ready_ms`.
+  The bench shows no cost change: `pass_ms` and `frame_ms` B/A are within noise.
+
 ## 2AFC scene
 
 - feat: `scenes/2AFC.json` is two 0.1 m sphere lights 1 m apart at 500 lm each, with the environment off, as a two-alternative

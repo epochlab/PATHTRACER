@@ -21,6 +21,7 @@
 #include "pathtracer/debug/frame_stats.h"
 #include "pathtracer/debug/histogram_curve.h"
 #include "pathtracer/debug/power_spectrum.h"
+#include "pathtracer/debug/render_stats.h"
 #include "pathtracer/gfx/display_optics.h"
 #include "pathtracer/gfx/hdr_image.h"
 #include "pathtracer/gfx/pixel_lattice.h"
@@ -895,6 +896,62 @@ PT_CHECK(frame_stats_percentiles_are_correct, Fast, Exact) {
     char p95[160];
     std::snprintf(p95, sizeof(p95), "p95 of 1..100 ms read as %.6g", static_cast<double>(stats.percentileMs(0.95F)));
     PT_EXPECT(ctx, std::fabs(stats.percentileMs(0.95F) - 96.0F) <= 1.5F, p95);
+}
+
+// --- PassRate: the HUD's FPS. Pass times whose sums divide exactly, so each rate is asserted with ==, not a tolerance.
+
+pathtracer::debug::PassRecord passOf(std::uint64_t generation, double passMs, bool cancelled = false) {
+    pathtracer::debug::PassRecord pass;
+    pass.generation = generation;
+    pass.passMs = passMs;
+    pass.cancelled = cancelled;
+    return pass;
+}
+
+PT_CHECK(pass_rate_is_zero_before_any_pass, Fast, Exact) {
+    ctx.plan(2);
+    const pathtracer::debug::PassRate rate;
+    PT_EXPECT(ctx, rate.fps() == 0.0, "fps must be zero before any pass has finished");
+    PT_EXPECT(ctx, rate.avgMs() == 0.0, "avgMs must be zero before any pass has finished");
+}
+
+// 3 passes in 10 + 20 + 30 = 60 ms is 50 passes/s, mean 20 ms: the accumulation's rate, not its last pass's.
+PT_CHECK(pass_rate_is_passes_over_summed_pass_time, Fast, Exact) {
+    ctx.plan(2);
+    pathtracer::debug::PassRate rate;
+    for (const double passMs : {10.0, 20.0, 30.0}) {
+        rate.add(passOf(1, passMs));
+    }
+    char detail[160];
+    std::snprintf(detail, sizeof(detail), "10/20/30 ms passes read %.6g fps, avg %.6g ms", rate.fps(), rate.avgMs());
+    PT_EXPECT(ctx, rate.fps() == 50.0, detail);
+    PT_EXPECT(ctx, rate.avgMs() == 20.0, detail);
+}
+
+// A cancelled pass published no image, so counting it would report a frame the viewer never saw.
+PT_CHECK(pass_rate_skips_cancelled_passes, Fast, Exact) {
+    ctx.plan(1);
+    pathtracer::debug::PassRate rate;
+    rate.add(passOf(1, 25.0));
+    rate.add(passOf(1, 5.0, true));
+    rate.add(passOf(1, 25.0));
+    char detail[128];
+    std::snprintf(detail, sizeof(detail), "two 25 ms passes around a cancelled one read %.6g fps", rate.fps());
+    PT_EXPECT(ctx, rate.fps() == 40.0, detail);
+}
+
+// A new request is a new accumulation: the previous view's slower passes must not linger in its rate.
+PT_CHECK(pass_rate_restarts_on_a_new_generation, Fast, Exact) {
+    ctx.plan(2);
+    pathtracer::debug::PassRate rate;
+    rate.add(passOf(1, 500.0));
+    rate.add(passOf(1, 500.0));
+    rate.add(passOf(2, 10.0));
+    char detail[160];
+    std::snprintf(detail, sizeof(detail), "one 10 ms pass after a new generation reads %.6g fps, avg %.6g ms", rate.fps(),
+                  rate.avgMs());
+    PT_EXPECT(ctx, rate.fps() == 100.0, detail);
+    PT_EXPECT(ctx, rate.avgMs() == 10.0, detail);
 }
 
 // The letterbox contract: the fitted rect stays inside the viewport, is centred in it, and never distorts the authored aspect.

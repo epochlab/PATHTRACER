@@ -153,7 +153,9 @@ void drawRenderModeCombo(int& renderMode, int samplesPerPixel) {
 
 void drawFrameSection(const HudFrameData& frame, int& renderMode) {
     ImGui::TextColored(kCyan, "Frame");
-    ImGui::Text("%.0f FPS  avg %.2f ms", frame.frameStats.fps(), frame.frameStats.avgMs());
+    // The driver traces off the display loop, so FPS is its pass rate; the vsync-paced loop gets its own Display line.
+    ImGui::Text("%.2f FPS  avg %.1f ms", frame.pathTraced.passesPerSecond, frame.pathTraced.avgPassMs);
+    ImGui::Text("Display  %.0f Hz  avg %.2f ms", frame.frameStats.fps(), frame.frameStats.avgMs());
     ImGui::PlotLines("##frametime", frame.frameStats.history().data(), FrameStats::kHistoryLength,
                       frame.frameStats.cursor(), nullptr, 0.0F, 33.3F,
                       ImVec2(ImGui::GetContentRegionAvail().x, 40.0F));
@@ -164,19 +166,13 @@ void drawFrameSection(const HudFrameData& frame, int& renderMode) {
     drawRenderModeCombo(renderMode, frame.pathTraced.samplesPerPixel);
     if (frame.pathTraced.hasResult) {
         if (frame.pathTraced.samplesPerPixel > 0) {
-            ImGui::Text("path-traced  %d / %d samples  %.2f s/pass", frame.pathTraced.accumulatedSamples,
-                        frame.pathTraced.samplesPerPixel, frame.pathTraced.lastPassSeconds);
+            ImGui::Text("path-traced  %d / %d samples", frame.pathTraced.accumulatedSamples,
+                        frame.pathTraced.samplesPerPixel);
         } else {
-            ImGui::Text("path-traced  %d samples  %.2f s/pass", frame.pathTraced.accumulatedSamples,
-                        frame.pathTraced.lastPassSeconds);
+            ImGui::Text("path-traced  %d samples", frame.pathTraced.accumulatedSamples);
         }
         if (frame.pathTraced.adaptive) {
             ImGui::Text("adaptive  %.1f%% of texels sampling", 100.0 * frame.pathTraced.samplingFraction);
-        }
-        if (frame.pathTraced.readyMs.has_value()) {
-            ImGui::Text("ready  %.0f ms", *frame.pathTraced.readyMs);
-        } else {
-            ImGui::TextDisabled("ready  rendering");
         }
     } else {
         ImGui::TextDisabled("path-traced: no render yet");

@@ -219,6 +219,7 @@ struct AppResources {
     pathtracer::gfx::PostProcessPass postProcess{};
     pathtracer::debug::HudOverlay hud;
     pathtracer::debug::FrameStats frameStats{};
+    pathtracer::debug::PassRate passRate{};  // the HUD's FPS, fed every finished pass by renderFrame
     pathtracer::debug::GpuTimer postTimer{};
     pathtracer::debug::Histogram histogram{};
     // Zeroed at the top of every frame -- see FrameStageTimes.
@@ -964,9 +965,8 @@ pathtracer::debug::PathTracedStatus pathTracedStatusOf(const AppResources& app,
         samplingFraction =
             static_cast<double>(pathTraceSnapshot->activeTexels) / static_cast<double>(pathTraceSnapshot->texelSamples.size());
     }
-    // PassRecord is the single source of truth for pass timing; the HUD wants seconds, the record carries milliseconds.
-    return {hasResult, lastPass.passMs / 1000.0, samples, app.samplesPerPixel, app.scene.baseSettings.adaptive.threshold > 0.0F,
-            samplingFraction, app.readyMs};
+    return {hasResult, app.passRate.fps(), app.passRate.avgMs(), samples, app.samplesPerPixel,
+            app.scene.baseSettings.adaptive.threshold > 0.0F, samplingFraction};
 }
 
 void updateHud(AppResources& app, const pathtracer::platform::Window& window,
@@ -1352,6 +1352,9 @@ void renderFrame(pathtracer::platform::Window& window, pathtracer::platform::Dis
 
     // Taken every frame, so none accumulate, and before the snapshot, so a final record guarantees the snapshot holds the final image.
     const std::vector<pathtracer::debug::PassRecord> finishedPasses = app.pathTraceDriver->takePassRecords();
+    for (const pathtracer::debug::PassRecord& pass : finishedPasses) {
+        app.passRate.add(pass);
+    }
     // Held for the rest of the frame so the images stay valid if the driver publishes mid-frame. Null until the first pass completes.
     const std::shared_ptr<const pathtracer::scene::PathTraceResult> pathTraceSnapshot = app.pathTraceDriver->latestResult();
 
