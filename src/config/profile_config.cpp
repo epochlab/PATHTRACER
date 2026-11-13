@@ -263,6 +263,48 @@ bool validPathTracer(const PathTracerConfig& pathTracer, const std::string& path
     return true;
 }
 
+// The whole file as JSON; nullopt and a stderr log naming it if missing, unreadable or unparseable.
+std::optional<nlohmann::json> readJson(const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        std::cerr << "loadProfileConfig: could not read " << path << '\n';
+        return std::nullopt;
+    }
+    try {
+        return nlohmann::json::parse(file);
+    } catch (const nlohmann::json::exception& e) {
+        std::cerr << "loadProfileConfig: " << path << ": " << e.what() << '\n';
+        return std::nullopt;
+    }
+}
+
+// Only keys the base has, kind for kind (an unknown key merges unread, a null deletes one); the base's nesting bounds the recursion.
+
+// NOLINTNEXTLINE(misc-no-recursion)
+bool validOverride(const nlohmann::json& base, const nlohmann::json& patch, const std::string& keyPath, const std::string& path) {
+    if (!patch.is_object()) {
+        std::cerr << "loadProfileConfig: " << path << " is not a JSON object\n";
+        return false;
+    }
+    for (const auto& [key, value] : patch.items()) {
+        const std::string name = keyPath.empty() ? key : keyPath + "." + key;
+        const auto found = base.find(key);
+        if (found == base.end()) {
+            std::cerr << "loadProfileConfig: " << path << " sets " << name << ", which profile.json does not have\n";
+            return false;
+        }
+        if (value.is_null() || value.is_object() != found->is_object()) {
+            std::cerr << "loadProfileConfig: " << path << " sets " << name << " to " << value.dump() << ", not "
+                      << (found->is_object() ? "an object" : "a value") << " as in profile.json\n";
+            return false;
+        }
+        if (value.is_object() && !validOverride(*found, value, name, path)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
 // Each count has a concrete failure mode, and the viewer overrides some after loading, so this runs at both boundaries.
@@ -316,31 +358,35 @@ bool validCounts(const RenderConfig& render, const PathTracerConfig& pathTracer,
 }
 
 // Reads every block before any range check, so a file with several faults reports the first in read order, then in check order.
-std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file) {
-        std::cerr << "loadProfileConfig: could not read " << path << '\n';
+std::optional<ProfileConfig> loadProfileConfig(const std::string& path, const std::optional<std::string>& overridePath) {
+    std::optional<nlohmann::json> j = readJson(path);
+    if (!j) {
         return std::nullopt;
     }
+    if (overridePath) {
+        const std::optional<nlohmann::json> patch = readJson(*overridePath);
+        if (!patch || !validOverride(*j, *patch, "", *overridePath)) {
+            return std::nullopt;
+        }
+        j->merge_patch(*patch);
+    }
+    const std::string source = overridePath ? path + " under " + *overridePath : path;
 
     try {
-        nlohmann::json j;
-        file >> j;
-
-        const nlohmann::json& camera = j.at("camera");
-        const nlohmann::json& controls = j.at("controls");
-        const nlohmann::json& render = j.at("render");
-        const nlohmann::json& pathTracer = j.at("pathTracer");
-        const std::optional<DenoiserConfig> denoiserConfig = parseDenoiser(j.at("denoiser"), path);
+        const nlohmann::json& camera = j->at("camera");
+        const nlohmann::json& controls = j->at("controls");
+        const nlohmann::json& render = j->at("render");
+        const nlohmann::json& pathTracer = j->at("pathTracer");
+        const std::optional<DenoiserConfig> denoiserConfig = parseDenoiser(j->at("denoiser"), source);
         if (!denoiserConfig.has_value()) {
             return std::nullopt;
         }
 
-        std::optional<RenderConfig> renderConfig = parseRenderOutput(render, path);
+        std::optional<RenderConfig> renderConfig = parseRenderOutput(render, source);
         if (!renderConfig.has_value()) {
             return std::nullopt;
         }
-        const std::optional<CameraConfig> cameraConfig = parseCamera(camera, path);
+        const std::optional<CameraConfig> cameraConfig = parseCamera(camera, source);
         if (!cameraConfig.has_value()) {
             return std::nullopt;
         }
@@ -354,18 +400,22 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
         renderConfig->vsync = render.at("vsync").get<bool>();
         const PathTracerConfig pathTracerConfig = parsePathTracer(pathTracer);
 
-        if (!validRender(*renderConfig, path) ||
-            !validPathTracer(pathTracerConfig, path) || !validCounts(*renderConfig, pathTracerConfig, path)) {
+        if (!validRender(*renderConfig, source) ||
+            !validPathTracer(pathTracerConfig, source) || !validCounts(*renderConfig, pathTracerConfig, source)) {
             return std::nullopt;
         }
-        if (!servedDefaultAov(renderConfig->defaultAov, *denoiserConfig, *cameraConfig, path)) {
+        if (!servedDefaultAov(renderConfig->defaultAov, *denoiserConfig, *cameraConfig, source)) {
             return std::nullopt;
         }
         return ProfileConfig{*cameraConfig, controlsConfig, *renderConfig, pathTracerConfig, *denoiserConfig};
     } catch (const nlohmann::json::exception& e) {
-        std::cerr << "loadProfileConfig: " << path << ": " << e.what() << '\n';
+        std::cerr << "loadProfileConfig: " << source << ": " << e.what() << '\n';
         return std::nullopt;
     }
+}
+
+std::optional<ProfileConfig> loadPreset(const std::string& assetRoot, const std::string& name) {
+    return loadProfileConfig(assetRoot + "/config/profile.json", assetRoot + "/config/presets/" + name + ".json");
 }
 
 std::optional<std::vector<pathtracer::scene::Camera::FilmBackPreset>> loadFilmBackPresets(

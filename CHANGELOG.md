@@ -3,6 +3,36 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Render presets: beauty, proxy and research
+
+`profile.json` holds the beauty settings again: 2048x1152 at 256 spp, interactive scale 0.1, square pixels and a rectilinear lens. Each
+file in `config/presets/` is a named preset and an RFC 7396 merge patch over it:
+- `beauty` is empty, so it is `profile.json` as is.
+- `proxy` is 512x256 at 16 spp, interactive scale 1.0.
+- `research` is the previous `profile.json`: 64x32 at 64 spp, hexagonal pixels, omnidirectional lens, inside the box.
+
+- feat:
+  - The viewer's `-preset NAME`, `render_beauty --preset NAME`, `HeadlessRenderer::open(..., preset, ...)`, the C ABI's
+    `pt_renderer_open(asset_root, scene_path, preset, err, err_cap)` and Python's `Renderer(scene, preset=...)` all select one.
+    Each defaults to beauty, and the C ABI takes NULL as beauty.
+  - `loadProfileConfig(path, overridePath)` merges with `nlohmann::json::merge_patch`. An override is refused if it sets a key
+    `profile.json` lacks, sets one to null, or swaps an object for a value. Otherwise a misspelt key would merge in and never be read.
+- refactor: `kBenchWidth/Height/Samples` are removed, and the proxy preset is the benchmark workload instead. `-bench` with no
+  `-preset` selects proxy, while `render_beauty` and `gbuffer_bench` default to its size and samples. That is 512x256 at 16 spp, as before.
+- breaking:
+  - `PT_ABI_VERSION` 11 -> 12, for `pt_renderer_open`'s new argument.
+  - The default preset is now beauty, so a caller that wants the research camera passes `preset="research"`.
+- test:
+  - `io.profile_config_accepts_the_shipped_presets` loads every file in `config/presets/`.
+  - `io.profile_config_override_replaces_only_named_keys` and `io.profile_config_override_rejects_malformed`.
+  - `api.open_takes_the_named_preset`, `c_abi.open_takes_the_named_preset`.
+  - The pytest fixture opens proxy. New pytest tests: `test_named_preset_overrides_profile_json` and `test_unknown_preset_raises`.
+- note: in `results/render_presets`, at 512x256 @ 16, these runs trace the same rays and produce the same floats as before:
+  - `-preset research`, against the old `profile.json`, in `render_beauty` and the viewer bench;
+  - `render_beauty`'s default, against `kBench*`;
+  - the viewer's `-bench` default, when compared at the same interactive scale. Beauty's 0.1 adds a launch generation, which moves
+    the scramble seed.
+
 ## HUD pass rate
 
 - fix: HUD FPS is now the path tracer's pass rate (`debug::PassRate`): finished passes per second over the accumulation shown, restarting

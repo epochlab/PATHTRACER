@@ -92,8 +92,12 @@ struct ProfileConfig {
 // The sample, bounce and size counts and their cross-constraints, logged against `source`; main re-checks after its overrides.
 [[nodiscard]] bool validCounts(const RenderConfig& render, const PathTracerConfig& pathTracer, const std::string& source);
 
-// Reads and parses path; nullopt and a stderr log if missing, unreadable or unparseable. User input: failure is surfaced, not asserted.
-[[nodiscard]] std::optional<ProfileConfig> loadProfileConfig(const std::string& path);
+// path under the RFC 7396 merge patch overridePath, which may only replace keys path has; nullopt and a stderr log on any failure.
+[[nodiscard]] std::optional<ProfileConfig> loadProfileConfig(const std::string& path,
+                                                             const std::optional<std::string>& overridePath = std::nullopt);
+
+// assetRoot/config/profile.json under assetRoot/config/presets/<name>.json: beauty (empty, profile.json as is), proxy, research.
+[[nodiscard]] std::optional<ProfileConfig> loadPreset(const std::string& assetRoot, const std::string& name);
 
 // Reads the film-back preset catalogue, a JSON array of {name, widthMm, heightMm}; each must pass Camera::validFilmBack.
 [[nodiscard]] std::optional<std::vector<pathtracer::scene::Camera::FilmBackPreset>> loadFilmBackPresets(

@@ -37,7 +37,7 @@ struct OpenRenderer {
 
     OpenRenderer() {
         std::vector<char> err(kErrorCapacity, '\0');
-        handle = pt_renderer_open(nullptr, kScene, err.data(), kErrorCapacity);
+        handle = pt_renderer_open(nullptr, kScene, nullptr, err.data(), kErrorCapacity);
         error = err.data();
     }
     ~OpenRenderer() { pt_renderer_close(handle); }
@@ -140,14 +140,33 @@ PT_CHECK(aov_table_round_trips, Fast, Exact) {
 PT_CHECK(open_reports_null_and_missing_scenes, Fast, Exact) {
     ctx.plan(3);
     std::vector<char> err(kErrorCapacity, '\0');
-    PT_EXPECT(ctx, pt_renderer_open(nullptr, nullptr, err.data(), kErrorCapacity) == nullptr && err[0] != '\0',
+    PT_EXPECT(ctx, pt_renderer_open(nullptr, nullptr, nullptr, err.data(), kErrorCapacity) == nullptr && err[0] != '\0',
               "a null scene path must fail with a reason");
     err.assign(kErrorCapacity, '\0');
-    PT_EXPECT(ctx, pt_renderer_open(nullptr, "scenes/missing.json", err.data(), kErrorCapacity) == nullptr && err[0] != '\0',
+    PT_EXPECT(ctx, pt_renderer_open(nullptr, "scenes/missing.json", nullptr, err.data(), kErrorCapacity) == nullptr && err[0] != '\0',
               "a missing scene must fail with a reason");
-    PT_EXPECT(ctx, pt_renderer_open(nullptr, "scenes/missing.json", nullptr, 0) == nullptr &&
-                       pt_renderer_open(nullptr, "scenes/missing.json", err.data(), 0) == nullptr,
+    PT_EXPECT(ctx, pt_renderer_open(nullptr, "scenes/missing.json", nullptr, nullptr, 0) == nullptr &&
+                       pt_renderer_open(nullptr, "scenes/missing.json", nullptr, err.data(), 0) == nullptr,
               "a null or zero-capacity error buffer must still fail cleanly");
+}
+
+// A named preset overrides profile.json through the ABI: research's hexagonal lat-long camera, not NULL's (beauty's) pinhole.
+PT_CHECK(open_takes_the_named_preset, Fast, Exact) {
+    ctx.plan(2);
+    std::vector<char> err(kErrorCapacity, '\0');
+    PtRenderer* base = pt_renderer_open(nullptr, kScene, nullptr, err.data(), kErrorCapacity);
+    PtRenderer* research = pt_renderer_open(nullptr, kScene, "research", err.data(), kErrorCapacity);
+    PtCamera baseCamera{};
+    PtCamera researchCamera{};
+    pt_renderer_default_camera(base, &baseCamera);
+    pt_renderer_default_camera(research, &researchCamera);
+    PT_EXPECT(ctx, base != nullptr && research != nullptr && baseCamera.pixel_lattice == PT_LATTICE_SQUARE &&
+                       researchCamera.pixel_lattice == PT_LATTICE_HEXAGONAL && researchCamera.lens_projection == PT_LENS_OMNIDIRECTIONAL,
+              std::string("NULL and research did not open their own cameras: ") + err.data());
+    PT_EXPECT(ctx, research != nullptr && pt_renderer_default_width(research) != pt_renderer_default_width(base),
+              "research did not take its own resolution");
+    pt_renderer_close(research);
+    pt_renderer_close(base);
 }
 
 // err_cap bounds every write: the reason is truncated to err_cap - 1 bytes plus its NUL, and nothing past err_cap is touched.
@@ -156,7 +175,7 @@ PT_CHECK(error_buffer_is_truncated_and_terminated, Fast, Exact) {
     ctx.plan(static_cast<int>(kCapacities.size()));
     for (const int capacity : kCapacities) {
         std::vector<char> err(static_cast<std::size_t>(capacity) + kGuardCount, static_cast<char>(kGuardByte));
-        const PtRenderer* renderer = pt_renderer_open(nullptr, nullptr, err.data(), capacity);
+        const PtRenderer* renderer = pt_renderer_open(nullptr, nullptr, nullptr, err.data(), capacity);
         const std::size_t length = std::strlen(err.data());
         const bool guarded = std::all_of(err.begin() + capacity, err.end(),
                                          [](char byte) { return static_cast<unsigned char>(byte) == kGuardByte; });

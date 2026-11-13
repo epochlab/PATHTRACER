@@ -1,0 +1,10 @@
+{
+    "render": {
+        "width": 512,
+        "height": 256,
+        "interactiveRenderScale": 1.0
+    },
+    "pathTracer": {
+        "samplesPerPixel": 16
+    }
+}

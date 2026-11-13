@@ -47,9 +47,11 @@ struct Options {
     std::string compareExrPath;
     // How --compare-exr's error distributes over frequency: a change that rearranges error without reducing it is invisible to RMSE.
     bool errorSpectrum = false;
-    int width = pathtracer::debug::kBenchWidth;
-    int height = pathtracer::debug::kBenchHeight;
-    int passes = pathtracer::debug::kBenchSamples;
+    // --preset NAME over profile.json; proxy is the benchmark workload. --width/--height/--passes override its size and samples.
+    std::string preset = "proxy";
+    std::optional<int> width;
+    std::optional<int> height;
+    std::optional<int> passes;
     // The scramble seed is one realization, not a sampler property: two seeds give independent error images with the same expected RMSE.
     std::uint32_t scrambleSeed = 1;
     float exposureEv = 0.0F;  // stops over the camera's own SOS exposure
@@ -63,11 +65,11 @@ struct Options {
     pathtracer::debug::AovId aov = pathtracer::debug::AovId::Beauty;
     // Appends the timing run to this JSON Lines benchmark log (bench_log.h); empty = no log.
     std::string benchLogPath;
-    // Positive: profile.json's polynomial fisheye at this focal length, so a capture can place the image circle inside the gate.
+    // Positive: the profile's polynomial fisheye at this focal length, so a capture can place the image circle inside the gate.
     float fisheyeFocalLengthMm = 0.0F;
-    // profile.json's camera through the 360-degree lat-long lens, which reads no focal length or gate.
+    // The profile's camera through the 360-degree lat-long lens, which reads no focal length or gate.
     bool omnidirectional = false;
-    // profile.json's camera on the hexagonal pixel lattice; --width and --height still count columns and rows.
+    // The profile's camera on the hexagonal pixel lattice; --width and --height still count columns and rows.
     pathtracer::gfx::PixelLattice lattice = pathtracer::gfx::PixelLattice::Square;
     // Positive: each pixel a compound-eye facet of this half-maximum width in degrees; Camera::validate ranges it.
     float acceptanceAngleDegrees = 0.0F;
@@ -151,7 +153,7 @@ void reportErrorSpectrum(const pathtracer::gfx::HdrImage& image, const pathtrace
 }
 
 // Everything the timed loop's cost depends on goes in config; output paths and exposure do not, so they never split two comparable runs.
-bool appendTimingRecord(const Options& options, int argc, char** argv, int width, int height,
+bool appendTimingRecord(const Options& options, int argc, char** argv, int width, int height, int passes,
                         const std::string& aovName, const pathtracer::scene::PathTraceSettings& settings,
                         bool envLightEnabled, double gbufferMs, double filterMs, double opticsMs,
                         const std::vector<double>& milliseconds, const pathtracer::debug::RayCounts& rays,
@@ -162,7 +164,7 @@ bool appendTimingRecord(const Options& options, int argc, char** argv, int width
         .config = {{"scene", options.scenePath},
                    {"width", width},
                    {"height", height},
-                   {"passes", options.passes},
+                   {"passes", passes},
                    {"seed", options.scrambleSeed},
                    {"aov", aovName},
                    {"env_light", envLightEnabled},
@@ -232,6 +234,9 @@ bool parseArgs(int argc, char** argv, Options& options) {
         } else if (std::strcmp(argv[i], "--seed") == 0) {
             if (!needsValue("--seed")) { return false; }
             options.scrambleSeed = static_cast<std::uint32_t>(std::strtoul(argv[++i], nullptr, 10));
+        } else if (std::strcmp(argv[i], "--preset") == 0) {
+            if (!needsValue("--preset")) { return false; }
+            options.preset = argv[++i];
         } else if (std::strcmp(argv[i], "--passes") == 0) {
             if (!needsValue("--passes")) { return false; }
             options.passes = std::atoi(argv[++i]);
@@ -280,7 +285,7 @@ bool parseArgs(int argc, char** argv, Options& options) {
         } else {
             std::cerr << "render_beauty: unknown argument '" << argv[i]
                       << "'\nusage: render_beauty [--scene scenes/x.json] --out out.png [--out-exr out.exr] [--compare-exr ref.exr] "
-                         "[--compare ref.png] [--error-spectrum] [--seed N] [--passes N] [--width W] [--height H] "
+                         "[--compare ref.png] [--error-spectrum] [--seed N] [--preset NAME] [--passes N] [--width W] [--height H] "
                          "[--exposure EV] [--aov name] [--fisheye FOCAL_MM | --omnidirectional] [--hexagonal] [--acceptance-angle DEG] [--bloom K] [--aberration A] "
                          "[--env-light 0|1] "
                          "[--bench-log log.jsonl] [--assert-deterministic] [--assert-converged]\n";
@@ -300,11 +305,11 @@ bool parseArgs(int argc, char** argv, Options& options) {
         std::cerr << "render_beauty: --fisheye and --omnidirectional each select the lens; pass one\n";
         return false;
     }
-    if (options.passes < 1) {
+    if (options.passes.value_or(1) < 1) {
         std::cerr << "render_beauty: --passes must be at least 1\n";
         return false;
     }
-    if (options.width < 1 || options.height < 1) {
+    if (options.width.value_or(1) < 1 || options.height.value_or(1) < 1) {
         std::cerr << "render_beauty: --width and --height must be at least 1\n";
         return false;
     }
@@ -336,13 +341,13 @@ int main(int argc, char** argv) {
     const std::string assetRoot = ASSET_ROOT_DIR;
     std::string error;
     const std::unique_ptr<pathtracer::api::HeadlessRenderer> renderer =
-        pathtracer::api::HeadlessRenderer::open(assetRoot, options.scenePath, error);
+        pathtracer::api::HeadlessRenderer::open(assetRoot, options.scenePath, options.preset, error);
     if (!renderer) {
         std::cerr << "render_beauty: " << error << "\n";
         return EXIT_FAILURE;
     }
 
-    // Fixed camera from profile.json, no controller: what makes two runs comparable is that neither can have been nudged.
+    // Fixed camera from the profile, no controller: what makes two runs comparable is that neither can have been nudged.
     const bool fisheye = options.fisheyeFocalLengthMm > 0.0F;
     const bool hexagonal = options.lattice != pathtracer::gfx::PixelLattice::Square;
     const bool compoundEye = options.acceptanceAngleDegrees != 0.0F;
@@ -360,8 +365,13 @@ int main(int argc, char** argv) {
                                          authored.iso(), lens, hexagonal ? options.lattice : authored.pixelLattice(),
                                          compoundEye ? options.acceptanceAngleDegrees : authored.acceptanceAngleDegrees()};
     }() : renderer->defaultCamera();
-    const int width = options.width;
-    const int height = options.height;
+    const int width = options.width.value_or(renderer->defaultWidth());
+    const int height = options.height.value_or(renderer->defaultHeight());
+    const int passes = options.passes.value_or(renderer->defaultSamples());
+    if (passes < 1) {
+        std::cerr << "render_beauty: the profile's samplesPerPixel is 0 (unbounded), so --passes is required\n";
+        return EXIT_FAILURE;
+    }
     // --env-light overrides the scene's own authored default (-1 = no override).
     const std::optional<bool> envLightOverride =
         options.envLight >= 0 ? std::optional<bool>(options.envLight != 0) : std::nullopt;
@@ -372,13 +382,13 @@ int main(int argc, char** argv) {
     const std::vector<pathtracer::debug::AovId> requested =
         isPicture ? std::vector{options.aov, pathtracer::debug::AovId::Alpha} : std::vector{options.aov};
 
-    // One accumulation parameterised by its randomization: the mean of `passes` single-sample passes, as PathTraceDriver does.
-    const auto accumulate = [&](std::uint32_t scrambleSeed, int passes) {
+    // One accumulation parameterised by its randomization: the mean of `samples` single-sample passes, as PathTraceDriver does.
+    const auto accumulate = [&](std::uint32_t scrambleSeed, int samples) {
         const pathtracer::api::HeadlessRenderer::Request request{
             .camera = camera,
             .width = width,
             .height = height,
-            .samples = passes,
+            .samples = samples,
             .scrambleSeed = scrambleSeed,
             .aovs = requested,
             .envLightEnabled = envLightOverride,
@@ -394,8 +404,8 @@ int main(int argc, char** argv) {
 
     // --- Determinism gate: same seed, same floats, no statistics.
     if (options.assertDeterministic) {
-        const pathtracer::gfx::HdrImage first = accumulate(options.scrambleSeed, options.passes);
-        const pathtracer::gfx::HdrImage second = accumulate(options.scrambleSeed, options.passes);
+        const pathtracer::gfx::HdrImage first = accumulate(options.scrambleSeed, passes);
+        const pathtracer::gfx::HdrImage second = accumulate(options.scrambleSeed, passes);
         std::size_t differing = 0;
         double worst = 0.0;
         for (std::size_t i = 0; i < first.texels.size(); ++i) {
@@ -418,7 +428,7 @@ int main(int argc, char** argv) {
     // --- Convergence gate: R=8 independent sub-renders, buffer-variance estimator.
     if (options.assertConverged) {
         constexpr int kSubRenders = 8;
-        const int perSubRender = std::max(1, options.passes / kSubRenders);
+        const int perSubRender = std::max(1, passes / kSubRenders);
         const auto family = [&](std::uint32_t base) {
             std::vector<pathtracer::gfx::HdrImage> members;
             members.reserve(kSubRenders);
@@ -491,14 +501,14 @@ int main(int argc, char** argv) {
     }
 
     // Per-pass wall clock on the trace only; compare the mean, which holds to ~1% where a pass minimum varies ~12% run to run.
-    const pathtracer::gfx::HdrImage accumulated = accumulate(options.scrambleSeed, options.passes);
+    const pathtracer::gfx::HdrImage accumulated = accumulate(options.scrambleSeed, passes);
     const std::vector<double>& milliseconds = renderer->lastStats().passMilliseconds;
 
     const pathtracer::api::HeadlessRenderer::RenderStats& stats = renderer->lastStats();
     const pathtracer::debug::RayCounts rays = stats.rays;
     // A G-buffer AOV runs no path-traced passes, so there is no per-pass distribution to report for it.
     if (!milliseconds.empty()) {
-        // Adaptive sampling can end the accumulation before options.passes, so the passes run are the timed ones.
+        // Adaptive sampling can end the accumulation before passes, so the passes run are the timed ones.
         const std::size_t passesRun = milliseconds.size();
         std::cout << "render_beauty: rays over " << passesRun << " passes -- primary " << rays.primary
                   << ", bounce " << rays.bounce << ", ao " << rays.ao << ", shadow " << rays.shadow << ", total "
@@ -520,7 +530,7 @@ int main(int argc, char** argv) {
     }
     // Before any output encode, so the record's rusage covers load, build and the timed passes but not PNG/EXR writing.
     if (!options.benchLogPath.empty() &&
-        !appendTimingRecord(options, argc, argv, width, height, aovName, renderer->baseSettings(),
+        !appendTimingRecord(options, argc, argv, width, height, passes, aovName, renderer->baseSettings(),
                             envLightEnabled, stats.gbufferMilliseconds, stats.filterMilliseconds, stats.opticsMilliseconds,
                             milliseconds,
                             rays, accumulated)) {
@@ -534,7 +544,7 @@ int main(int argc, char** argv) {
             return EXIT_FAILURE;
         }
         std::cout << "render_beauty: wrote " << options.outExrPath << " (linear " << aovName << ", "
-                  << width << "x" << height << ", " << options.passes << " passes)\n";
+                  << width << "x" << height << ", " << passes << " passes)\n";
     }
 
     if (!options.compareExrPath.empty()) {
@@ -573,7 +583,7 @@ int main(int argc, char** argv) {
 
     // The same display decision presentFrame makes, so a PNG and the viewer agree by construction rather than by two copies staying level.
     const pathtracer::debug::AovDisplay prepared = pathtracer::debug::aovDisplay(
-        options.aov, accumulated, {options.passes, renderer->baseSettings().maxBounces, renderer->lastDepthMax()});
+        options.aov, accumulated, {passes, renderer->baseSettings().maxBounces, renderer->lastDepthMax()});
     pathtracer::debug::BipolarDisplay display = prepared.affine;
     // The photographic exposure, which only the caller knows: the camera's SOS gain on cd/m^2, trimmed by --exposure stops.
     display.gain *= pathtracer::debug::aovExposureGain(options.aov, camera.exposureGain() * std::pow(2.0F, options.exposureEv));
@@ -604,7 +614,7 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
     std::cout << "render_beauty: wrote " << options.outPath << " (" << aovName << ", " << width
-              << "x" << height << ", " << options.passes << " passes)\n";
+              << "x" << height << ", " << passes << " passes)\n";
 
     if (!options.comparePath.empty()) {
         const std::optional<Png16> written = readPng16(options.outPath);

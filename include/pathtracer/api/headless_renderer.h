@@ -74,6 +74,7 @@ public:
     // nullptr on any load failure, reason in `error`. assetRoot holds config/, scenes/, geometry/ and materials/; scenePath is relative.
     [[nodiscard]] static std::unique_ptr<HeadlessRenderer> open(const std::string& assetRoot,
                                                                  const std::string& scenePath,
+                                                                 const std::string& preset,  // beauty, proxy or research
                                                                  std::string& error);
     ~HeadlessRenderer();
 
@@ -82,7 +83,7 @@ public:
     HeadlessRenderer(HeadlessRenderer&&) = delete;
     HeadlessRenderer& operator=(HeadlessRenderer&&) = delete;
 
-    // profile.json's authored camera, the one render_beauty and the viewer both start from.
+    // The profile's authored camera, the one render_beauty and the viewer both start from.
     [[nodiscard]] const pathtracer::scene::Camera& defaultCamera() const { return defaultCamera_; }
     [[nodiscard]] int defaultWidth() const { return profile_.render.width; }
     [[nodiscard]] int defaultHeight() const { return profile_.render.height; }

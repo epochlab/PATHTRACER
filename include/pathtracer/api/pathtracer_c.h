@@ -13,7 +13,7 @@ typedef struct PtRenderer PtRenderer;
 #define PT_OK 0
 #define PT_ERROR 1
 /* PtCamera is passed by value, so a caller built against a different layout must be caught rather than reading the fields as garbage. */
-#define PT_ABI_VERSION 11
+#define PT_ABI_VERSION 12
 /* Lens projections, PtCamera.lens_projection: the pinhole, Kannala & Brandt's polynomial fisheye, and the 360-degree lat-long. */
 #define PT_LENS_RECTILINEAR 0
 #define PT_LENS_FISHEYE_POLYNOMIAL 1
@@ -24,8 +24,8 @@ typedef struct PtRenderer PtRenderer;
 /* Tri-state sentinel for the optional request fields: defer to the default rather than forcing on or off. Any other value is rejected. */
 #define PT_DEFAULT (-1)
 
-/* Loads a scene; NULL on failure with a NUL-terminated reason in err (truncated to err_cap). scene_path is relative to asset_root. */
-PtRenderer* pt_renderer_open(const char* asset_root, const char* scene_path, char* err, int err_cap);
+/* Loads scene_path under asset_root and config/presets/<preset>.json (NULL: beauty); NULL on failure, reason in err to err_cap. */
+PtRenderer* pt_renderer_open(const char* asset_root, const char* scene_path, const char* preset, char* err, int err_cap);
 void pt_renderer_close(PtRenderer* renderer);
 
 /* The AOV table, exposed so a caller never hardcodes a parallel copy of it. Ids are dense in [0, pt_aov_count). */
@@ -65,7 +65,7 @@ typedef struct {
     float acceptance_angle_degrees;
 } PtCamera;
 
-/* profile.json's authored camera, image size, samplesPerPixel and bloomStrength -- the defaults a caller overrides one field at a time. */
+/* The profile's authored camera, image size, samplesPerPixel and bloomStrength -- the defaults a caller overrides one field at a time. */
 void pt_renderer_default_camera(const PtRenderer* renderer, PtCamera* out);
 int pt_renderer_default_width(const PtRenderer* renderer);
 int pt_renderer_default_height(const PtRenderer* renderer);

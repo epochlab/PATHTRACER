@@ -20,8 +20,23 @@ cmake --build build
 ## Run
 
 ```
-./build/pathtracer [-scene path/to/scene.json] [-stats] [-bench log.jsonl] [-bench-aovs beauty,normal,...] [-size WxH] [-spp N]
+./build/pathtracer [-scene path/to/scene.json] [-preset beauty|proxy|research] [-stats] [-bench log.jsonl] [-bench-aovs beauty,normal,...] [-size WxH] [-spp N]
 ```
+
+## Presets
+
+`assets/config/profile.json` holds every setting. Each file in `assets/config/presets/` is a named preset and an RFC 7396 merge
+patch over it. Select one with `-preset NAME`, `render_beauty --preset NAME`, `Renderer(scene, preset="NAME")` or
+`pt_renderer_open(..., "NAME", ...)`. `beauty.json` is empty, so beauty is `profile.json` as is. An override may only replace keys
+`profile.json` has, kind for kind, and anything else is refused at load.
+
+| Preset | Size | spp | Interactive scale | Camera |
+| --- | --- | --- | --- | --- |
+| beauty (default) | 2048x1152 | 256 | 0.1 | square pixels, rectilinear lens |
+| `proxy` | 512x256 | 16 | 1.0 | as beauty |
+| `research` | 64x32 | 64 | 1.0 | hexagonal pixels, omnidirectional lens, inside the box |
+
+`proxy` is the benchmark workload: `-bench`, `render_beauty` and `gbuffer_bench` default to its size and samples.
 
 ## Test
 
@@ -41,7 +56,7 @@ The `display_gl` tests open a hidden OpenGL window and report Not Run where none
 | `A` / `D` | Fly left / right |
 | `Q` / `E` | Fly down / up |
 | LMB drag | Orbit about the surface under the view centre |
-| `0` | Reset camera to the `profile.json` pose |
+| `0` | Reset camera to the profile's pose |
 | `L` | Cycle viewer LUT: sRGB -> Rec.709 -> Raw |
 | `R` / `G` / `B` | Isolate a channel; the active one again clears it |
 | `I` | Invert the display |
@@ -61,7 +76,7 @@ The package finds the library in the source tree only; for any other install set
 ```python
 from pathtracer import Renderer
 
-renderer = Renderer("scenes/cornell.json")
+renderer = Renderer("scenes/cornell.json", preset="proxy")  # beauty when omitted
 frame = renderer.render(aovs=("beauty", "depth", "normal"), width=128, height=64, samples=8, seed=1)
 
 frame["beauty"]   # (64, 128, 3) float32, linear ACEScg radiance, luminance in cd/m^2

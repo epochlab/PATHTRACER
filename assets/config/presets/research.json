@@ -1,0 +1,17 @@
+{
+    "camera": {
+        "position": [0.0, 0.0, 0.25],
+        "lens": {
+            "projection": "omnidirectional"
+        },
+        "pixelLattice": "hexagonal"
+    },
+    "render": {
+        "width": 64,
+        "height": 32,
+        "interactiveRenderScale": 1.0
+    },
+    "pathTracer": {
+        "samplesPerPixel": 64
+    }
+}
