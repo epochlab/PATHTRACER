@@ -89,7 +89,6 @@ Ordered by execution, easy wins first. ETA is agent working hours to a complete,
 
 | Area | Item | Detail | Complexity | ETA | Status |
 | --- | --- | --- | --- | --- | --- |
-| Output | AOV contact sheet | Write every AOV of a frame as one labelled mosaic, each tile through its display mapping, composed with OIIO ImageBufAlgo. | medium | 1 h | ready |
 | Camera | Hexagonal cropping | Rows are √3/2 apart, so a W×H hexagonal image covers 0.87 of the film's height. Derive rows from field of view and lattice pitch. | medium | 1 h | ready |
 | Camera | Lens model | Fisheyes lose accuracy near the edge. Generic polynomial model (Kannala and Brandt 2006) with principal point and pixel aspect. | medium | 1 h | ready |
 | Camera | Motion vectors review | Verify camera motion as the analytic reprojection across every projection, lattice and the omnidirectional seam. | medium | 1 h | ready |

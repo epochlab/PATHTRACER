@@ -19,6 +19,8 @@
 #include <string>
 #include <vector>
 
+#include <OpenImageIO/imagebuf.h>
+#include <OpenImageIO/imagebufalgo.h>
 #include <OpenImageIO/imageio.h>
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -45,6 +47,8 @@ struct Options {
     // Linear-light companions to --out/--compare: the PNG path is display-transformed 8-bit, so it clamps the bright high-variance regions.
     std::string outExrPath;
     std::string compareExrPath;
+    // Writes every AOV of one frame as a labelled mosaic PNG instead of a single AOV; --out is then not required.
+    std::string contactSheetPath;
     // How --compare-exr's error distributes over frequency: a change that rearranges error without reducing it is invisible to RMSE.
     bool errorSpectrum = false;
     // --preset NAME over profile.json; proxy is the benchmark workload. --width/--height/--passes override its size and samples.
@@ -220,6 +224,9 @@ bool parseArgs(int argc, char** argv, Options& options) {
         } else if (std::strcmp(argv[i], "--out") == 0) {
             if (!needsValue("--out")) { return false; }
             options.outPath = argv[++i];
+        } else if (std::strcmp(argv[i], "--contact-sheet") == 0) {
+            if (!needsValue("--contact-sheet")) { return false; }
+            options.contactSheetPath = argv[++i];
         } else if (std::strcmp(argv[i], "--compare") == 0) {
             if (!needsValue("--compare")) { return false; }
             options.comparePath = argv[++i];
@@ -284,7 +291,7 @@ bool parseArgs(int argc, char** argv, Options& options) {
             options.envLight = std::atoi(argv[++i]) != 0 ? 1 : 0;
         } else {
             std::cerr << "render_beauty: unknown argument '" << argv[i]
-                      << "'\nusage: render_beauty [--scene scenes/x.json] --out out.png [--out-exr out.exr] [--compare-exr ref.exr] "
+                      << "'\nusage: render_beauty [--scene scenes/x.json] (--out out.png | --contact-sheet sheet.png) [--out-exr out.exr] [--compare-exr ref.exr] "
                          "[--compare ref.png] [--error-spectrum] [--seed N] [--preset NAME] [--passes N] [--width W] [--height H] "
                          "[--exposure EV] [--aov name] [--fisheye FOCAL_MM | --omnidirectional] [--hexagonal] [--acceptance-angle DEG] [--bloom K] [--aberration A] "
                          "[--env-light 0|1] "
@@ -292,13 +299,18 @@ bool parseArgs(int argc, char** argv, Options& options) {
             return false;
         }
     }
-    if (options.outPath.empty() && !options.assertDeterministic && !options.assertConverged) {
-        std::cerr << "render_beauty: --out is required unless running a gate\n";
+    if (options.outPath.empty() && options.contactSheetPath.empty() && !options.assertDeterministic && !options.assertConverged) {
+        std::cerr << "render_beauty: --out or --contact-sheet is required unless running a gate\n";
         return false;
     }
     // The gates return before the timed loop, so a log request alongside one would silently record nothing.
     if (!options.benchLogPath.empty() && (options.assertDeterministic || options.assertConverged)) {
         std::cerr << "render_beauty: --bench-log records the timing path, which the --assert-* gates do not run\n";
+        return false;
+    }
+    // The sheet returns before the timed loop, and its Denoised tile runs a network trained on square images.
+    if (!options.contactSheetPath.empty() && (!options.benchLogPath.empty() || options.lattice != pathtracer::gfx::PixelLattice::Square)) {
+        std::cerr << "render_beauty: --contact-sheet records no --bench-log and renders every AOV, so --hexagonal cannot take it\n";
         return false;
     }
     if (options.omnidirectional && options.fisheyeFocalLengthMm > 0.0F) {
@@ -328,6 +340,94 @@ bool parseArgs(int argc, char** argv, Options& options) {
         return false;
     }
     return true;
+}
+
+// presentFrame's display decision, so a PNG and the viewer agree by construction: display RGB, plus straight alpha for a picture AOV.
+pathtracer::gfx::HdrImage displayImage(const pathtracer::api::HeadlessRenderer& renderer, pathtracer::debug::AovId aov,
+                                       const pathtracer::scene::Camera& camera, float exposureEv, int passes) {
+    const pathtracer::gfx::HdrImage& accumulated = renderer.lastImage(aov);
+    const int width = accumulated.width;
+    const int height = accumulated.height;
+    const bool isPicture = pathtracer::debug::aovIsPicture(aov);
+    const pathtracer::debug::AovDisplay prepared =
+        pathtracer::debug::aovDisplay(aov, accumulated, {passes, renderer.baseSettings().maxBounces, renderer.lastDepthMax()});
+    pathtracer::debug::BipolarDisplay display = prepared.affine;
+    // The photographic exposure, which only the caller knows: the camera's SOS gain on cd/m^2, trimmed by the exposure stops.
+    display.gain *= pathtracer::debug::aovExposureGain(aov, camera.exposureGain() * std::pow(2.0F, exposureEv));
+    // The shared encode takes packed RGB, so expand each texel exactly as the viewer's texture swizzle does.
+    const pathtracer::gfx::HdrImage& source = prepared.mapped.texels.empty() ? accumulated : prepared.mapped;
+    const std::size_t pixels = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    std::vector<float> linearRgb(pixels * 3);
+    // Beauty is radiance premultiplied by coverage; PNG stores straight alpha, so it is unassociated here, in linear, before the curve.
+    const pathtracer::gfx::HdrImage* alpha = isPicture ? &renderer.lastImage(pathtracer::debug::AovId::Alpha) : nullptr;
+    for (std::size_t texel = 0; texel < pixels; ++texel) {
+        const float coverage = alpha != nullptr ? alpha->texels[texel] : 1.0F;
+        const glm::vec3 rgb = coverage > 0.0F ? source.rgb(texel) / coverage : glm::vec3(0.0F);
+        linearRgb[(texel * 3) + 0] = rgb.r;
+        linearRgb[(texel * 3) + 1] = rgb.g;
+        linearRgb[(texel * 3) + 2] = rgb.b;
+    }
+    std::vector<float> encoded(linearRgb.size());
+    pathtracer::gfx::encodeForDisplay(linearRgb, width, height, display.gain, isPicture, display.offset, std::span<float>(encoded));
+    pathtracer::gfx::HdrImage image = pathtracer::gfx::makeImage(width, height, alpha != nullptr ? 4 : 3);
+    for (std::size_t texel = 0; texel < pixels; ++texel) {
+        float* out = image.texels.data() + (texel * static_cast<std::size_t>(image.channels));
+        std::copy_n(encoded.data() + (texel * 3), 3, out);
+        if (alpha != nullptr) {
+            out[3] = alpha->texels[texel];
+        }
+    }
+    return image;
+}
+
+constexpr int kSheetWidth = 4096;
+constexpr int kSheetHeight = 2304;
+constexpr int kSheetColumns = 6;
+constexpr int kSheetRows = 6;
+constexpr int kSheetLabelPoints = 20;
+constexpr int kSheetLabelMargin = 12;
+// A system font, found by OIIO in the platform font directories; the default face is a thin monospace.
+constexpr const char* kSheetLabelFont = "Arial";
+static_assert(kSheetColumns * kSheetRows >= static_cast<int>(pathtracer::debug::AovId::Count), "the grid must hold every AOV");
+
+// Rounded edge of cell `index` of `cells` over `extent`, so neighbouring tiles abut and the cells sum to exactly the extent.
+int cellEdge(int index, int cells, int extent) {
+    return ((index * extent) + (cells / 2)) / cells;
+}
+
+// One frame, every AOV: each through its display mapping, resized into a grid cell with its label top right. Empty cells stay black.
+bool writeContactSheet(const pathtracer::api::HeadlessRenderer& renderer, const pathtracer::scene::Camera& camera,
+                       float exposureEv, int passes, const std::string& path) {
+    OIIO::ImageBuf canvas(OIIO::ImageSpec(kSheetWidth, kSheetHeight, 3, OIIO::TypeFloat));
+    if (!OIIO::ImageBufAlgo::zero(canvas)) {
+        std::cerr << "render_beauty: " << canvas.geterror() << "\n";
+        return false;
+    }
+    constexpr std::array<float, 3> kLabelColour{1.0F, 1.0F, 1.0F};
+    for (int index = 0; index < static_cast<int>(pathtracer::debug::AovId::Count); ++index) {
+        const int left = cellEdge(index % kSheetColumns, kSheetColumns, kSheetWidth);
+        const int right = cellEdge((index % kSheetColumns) + 1, kSheetColumns, kSheetWidth);
+        const int top = cellEdge(index / kSheetColumns, kSheetRows, kSheetHeight);
+        const int bottom = cellEdge((index / kSheetColumns) + 1, kSheetRows, kSheetHeight);
+        const pathtracer::gfx::HdrImage image = displayImage(renderer, static_cast<pathtracer::debug::AovId>(index), camera, exposureEv, passes);
+        const OIIO::ImageBuf full(OIIO::ImageSpec(image.width, image.height, image.channels, OIIO::TypeFloat),
+                                  OIIO::cspan<float>(image.texels));
+        const OIIO::ImageBuf tile = OIIO::ImageBufAlgo::resize(full, OIIO::ImageBufAlgo::KWArgs{},OIIO::ROI(0, right - left, 0, bottom - top, 0, 1, 0, 3));
+        if (tile.has_error() || !OIIO::ImageBufAlgo::paste(canvas, left, top, 0, 0, tile) ||
+            !OIIO::ImageBufAlgo::render_text(canvas, right - kSheetLabelMargin, top + kSheetLabelMargin, pathtracer::debug::kAovLabels[index],
+                                             kSheetLabelPoints, kSheetLabelFont, kLabelColour, OIIO::ImageBufAlgo::TextAlignX::Right,
+                                             OIIO::ImageBufAlgo::TextAlignY::Top, 1)) {
+            std::cerr << "render_beauty: contact sheet tile " << pathtracer::debug::kAovNames[index] << ": "
+                      << (tile.has_error() ? tile.geterror() : canvas.geterror()) << "\n";
+            return false;
+        }
+    }
+    pathtracer::gfx::HdrImage sheet = pathtracer::gfx::makeImage(kSheetWidth, kSheetHeight, 3);
+    if (!canvas.get_pixels(OIIO::ROI::All(), OIIO::TypeFloat, sheet.texels.data())) {
+        std::cerr << "render_beauty: " << canvas.geterror() << "\n";
+        return false;
+    }
+    return pathtracer::gfx::writeDisplayPng(path, sheet);
 }
 
 }  // namespace
@@ -376,6 +476,30 @@ int main(int argc, char** argv) {
     const std::optional<bool> envLightOverride =
         options.envLight >= 0 ? std::optional<bool>(options.envLight != 0) : std::nullopt;
     const bool envLightEnabled = envLightOverride.value_or(renderer->defaultEnvLightEnabled());
+    if (!options.contactSheetPath.empty()) {
+        std::vector<pathtracer::debug::AovId> everyAov;
+        for (int i = 0; i < static_cast<int>(pathtracer::debug::AovId::Count); ++i) {
+            everyAov.push_back(static_cast<pathtracer::debug::AovId>(i));
+        }
+        const pathtracer::api::HeadlessRenderer::Request request{
+            .camera = camera,
+            .width = width,
+            .height = height,
+            .samples = passes,
+            .scrambleSeed = options.scrambleSeed,
+            .aovs = everyAov,
+            .envLightEnabled = envLightOverride,
+            .displayOptics = options.displayOptics,
+        };
+        if (!renderer->render(request, error) ||
+            !writeContactSheet(*renderer, camera, options.exposureEv, passes, options.contactSheetPath)) {
+            std::cerr << "render_beauty: " << error << "\n";
+            return EXIT_FAILURE;
+        }
+        std::cout << "render_beauty: wrote " << options.contactSheetPath << " (" << everyAov.size() << " AOVs, " << width << "x"
+                  << height << ", " << passes << " passes)\n";
+        return EXIT_SUCCESS;
+    }
     const std::string aovName = pathtracer::debug::kAovNames[static_cast<int>(options.aov)];
     const bool isPicture = pathtracer::debug::aovIsPicture(options.aov);
     // Alpha shares Beauty's samples and filter, so asking for it with the picture costs one lane and changes no Beauty float.
@@ -581,35 +705,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    // The same display decision presentFrame makes, so a PNG and the viewer agree by construction rather than by two copies staying level.
-    const pathtracer::debug::AovDisplay prepared = pathtracer::debug::aovDisplay(
-        options.aov, accumulated, {passes, renderer->baseSettings().maxBounces, renderer->lastDepthMax()});
-    pathtracer::debug::BipolarDisplay display = prepared.affine;
-    // The photographic exposure, which only the caller knows: the camera's SOS gain on cd/m^2, trimmed by --exposure stops.
-    display.gain *= pathtracer::debug::aovExposureGain(options.aov, camera.exposureGain() * std::pow(2.0F, options.exposureEv));
-    // The shared encode takes packed RGB, so expand each texel exactly as the viewer's texture swizzle does.
-    const pathtracer::gfx::HdrImage& source = prepared.mapped.texels.empty() ? accumulated : prepared.mapped;
-    const std::size_t pixels = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
-    std::vector<float> linearRgb(pixels * 3);
-    // Beauty is radiance premultiplied by coverage; PNG stores straight alpha, so it is unassociated here, in linear, before the curve.
-    const pathtracer::gfx::HdrImage* alpha = isPicture ? &renderer->lastImage(pathtracer::debug::AovId::Alpha) : nullptr;
-    for (std::size_t texel = 0; texel < pixels; ++texel) {
-        const float coverage = alpha != nullptr ? alpha->texels[texel] : 1.0F;
-        const glm::vec3 rgb = coverage > 0.0F ? source.rgb(texel) / coverage : glm::vec3(0.0F);
-        linearRgb[(texel * 3) + 0] = rgb.r;
-        linearRgb[(texel * 3) + 1] = rgb.g;
-        linearRgb[(texel * 3) + 2] = rgb.b;
-    }
-    std::vector<float> encoded(linearRgb.size());
-    pathtracer::gfx::encodeForDisplay(linearRgb, width, height, display.gain, isPicture, display.offset, std::span<float>(encoded));
-    pathtracer::gfx::HdrImage png = pathtracer::gfx::makeImage(width, height, alpha != nullptr ? 4 : 3);
-    for (std::size_t texel = 0; texel < pixels; ++texel) {
-        float* out = png.texels.data() + (texel * static_cast<std::size_t>(png.channels));
-        std::copy_n(encoded.data() + (texel * 3), 3, out);
-        if (alpha != nullptr) {
-            out[3] = alpha->texels[texel];
-        }
-    }
+    const pathtracer::gfx::HdrImage png = displayImage(*renderer, options.aov, camera, options.exposureEv, passes);
     if (!pathtracer::gfx::writeDisplayPng(options.outPath, png)) {
         return EXIT_FAILURE;
     }
