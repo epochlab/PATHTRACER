@@ -419,6 +419,12 @@ add_test(NAME image.gbuffer_aov_omnidirectional
                  --aov depth --omnidirectional --out gbuffer_aov_omnidirectional.png)
 set_tests_properties(image.gbuffer_aov_omnidirectional PROPERTIES LABELS "image;fast;exact" TIMEOUT 300)
 
+# The mosaic path: every AOV through its display mapping into the 4096x2304 grid, exit code the verdict.
+add_test(NAME image.contact_sheet
+         COMMAND render_beauty --scene scenes/cornell.json --width 48 --height 27 --passes 4
+                 --contact-sheet contact_sheet.png)
+set_tests_properties(image.contact_sheet PROPERTIES LABELS "image;fast;exact" TIMEOUT 300)
+
 add_test(NAME image.convergence
          COMMAND render_beauty --scene scenes/cornell.json --width 48 --height 36 --passes 64
                  --assert-converged)
