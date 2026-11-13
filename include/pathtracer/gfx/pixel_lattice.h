@@ -27,6 +27,11 @@ static_assert(sizeof(kPixelLatticeNames) / sizeof(kPixelLatticeNames[0]) == stat
     return std::sqrt(rowPitch(lattice));
 }
 
+// Rows filling a frame `height` column pitches tall: the count whose extent rows x rowPitch is nearest, so any lattice keeps its FOV.
+[[nodiscard]] inline int latticeRows(PixelLattice lattice, int height) {
+    return static_cast<int>(std::lround(static_cast<double>(height) / static_cast<double>(rowPitch(lattice))));
+}
+
 // Pixel (x, y)'s film centre in column pitches, row 0 at the top; hexagonal rows sit 1/4 either side of x + 1/2, centring the lattice.
 [[nodiscard]] inline glm::vec2 pixelCentre(PixelLattice lattice, int x, int y) {
     const float column = lattice == PixelLattice::Hexagonal ? ((y & 1) != 0 ? 0.75F : 0.25F) : 0.5F;

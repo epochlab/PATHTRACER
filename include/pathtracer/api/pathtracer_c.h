@@ -13,7 +13,7 @@ typedef struct PtRenderer PtRenderer;
 #define PT_OK 0
 #define PT_ERROR 1
 /* PtCamera is passed by value, so a caller built against a different layout must be caught rather than reading the fields as garbage. */
-#define PT_ABI_VERSION 12
+#define PT_ABI_VERSION 13
 /* Lens projections, PtCamera.lens_projection: the pinhole, Kannala & Brandt's polynomial fisheye, and the 360-degree lat-long. */
 #define PT_LENS_RECTILINEAR 0
 #define PT_LENS_FISHEYE_POLYNOMIAL 1
@@ -40,6 +40,9 @@ int pt_aov_needs_samples(int aov);
 
 /* PT_ABI_VERSION this library was built with: a caller compares it to its own header's and refuses to call on a mismatch. */
 int pt_abi_version(void);
+
+/* Rows of a PT_LATTICE_* lattice filling a frame height column pitches tall, pt_render's output rows; -1 if either is invalid. */
+int pt_lattice_rows(int pixel_lattice, int height);
 
 /* Pose, lens, exposure, lattice; aperture/shutter_seconds/iso set pt_display_encode's exposure (no depth of field). Ranges named. */
 typedef struct {
@@ -83,6 +86,7 @@ typedef struct {
     PtCamera camera;
     /* The view motionVector measures motion from, either lens; NULL is camera itself, so motion reads exactly zero. */
     const PtCamera* previous_camera;
+    /* The frame in column pitches; outputs have pt_lattice_rows(camera.pixel_lattice, height) rows, so either lattice spans one FOV. */
     int width;
     int height;
     /* Path-traced passes at one sample each, averaged. Ignored by a request whose AOVs are all G-buffer-backed. */
@@ -109,7 +113,7 @@ typedef struct {
     float aberration;
 } PtRenderRequest;
 
-/* Renders every requested AOV. out parallels request->aovs at width * height * pt_aov_channels(aovs[i]) floats, row-major top-left. */
+/* Renders every requested AOV. out parallels request->aovs at width * rows * pt_aov_channels(aovs[i]) floats, row-major top-left. */
 int pt_render(PtRenderer* renderer, const PtRenderRequest* request, float* const* out, char* err, int err_cap);
 
 /* Linear cd/m^2 to 8-bit sRGB, the viewer's chain: gain is camera's SOS exposure (1 if NULL) times 2^exposure_ev. Buffers hold w*h*3. */

@@ -79,11 +79,13 @@ struct GuardedBuffer {
     return request;
 }
 
-[[nodiscard]] std::vector<GuardedBuffer> makeOutputs(const std::vector<int>& aovs) {
+// rows is pt_lattice_rows of the request's lattice: kHeight on the square one, which makeRequest sets.
+[[nodiscard]] std::vector<GuardedBuffer> makeOutputs(const std::vector<int>& aovs, int rows = kHeight) {
     std::vector<GuardedBuffer> outputs;
     outputs.reserve(aovs.size());
     for (const int aov : aovs) {
-        outputs.emplace_back(static_cast<std::size_t>(kWidth) * kHeight * static_cast<std::size_t>(pt_aov_channels(aov)));
+        outputs.emplace_back(static_cast<std::size_t>(kWidth) * static_cast<std::size_t>(rows) *
+                             static_cast<std::size_t>(pt_aov_channels(aov)));
     }
     return outputs;
 }
@@ -114,6 +116,16 @@ PT_CHECK(abi_version_matches_the_c_header, Fast, Exact) {
     ctx.plan(1);
     PT_EXPECT(ctx, pt_abi_version() == ptHeaderAbiVersion(),
               "library reports " + std::to_string(pt_abi_version()) + ", C header carries " + std::to_string(ptHeaderAbiVersion()));
+}
+
+// pt_lattice_rows is the frame height on square pixels, the nearest hexagonal row count otherwise, and -1 for an invalid input.
+PT_CHECK(lattice_rows_size_the_outputs, Fast, Exact) {
+    ctx.plan(3);
+    PT_EXPECT(ctx, pt_lattice_rows(PT_LATTICE_SQUARE, kHeight) == kHeight, "square rows are not the frame height");
+    PT_EXPECT(ctx, pt_lattice_rows(PT_LATTICE_HEXAGONAL, kHeight) == 10 && pt_lattice_rows(PT_LATTICE_HEXAGONAL, 32) == 37,
+              "hexagonal rows are not round(height / (sqrt(3) / 2))");
+    PT_EXPECT(ctx, pt_lattice_rows(2, kHeight) == -1 && pt_lattice_rows(PT_LATTICE_SQUARE, 0) == -1,
+              "an unknown lattice or a zero height was not refused with -1");
 }
 
 // Ids are dense in [0, pt_aov_count): every name resolves back to its id, and anything outside answers with the documented sentinel.
@@ -264,7 +276,8 @@ PT_CHECK(render_accepts_every_pixel_lattice, Slow, Exact) {
     }
     const std::vector<int> aovs{beautyId(), pt_aov_id("depth")};
     for (const int lattice : kLattices) {
-        std::vector<GuardedBuffer> outputs = makeOutputs(aovs);
+        // Every float of width x pt_lattice_rows written and no guard touched: the hexagonal frame's 10 rows, exactly.
+        std::vector<GuardedBuffer> outputs = makeOutputs(aovs, pt_lattice_rows(lattice, kHeight));
         const std::vector<float*> pointers = pointersTo(outputs);
         PtRenderRequest request = makeRequest(renderer.handle, aovs, 1);
         request.camera.pixel_lattice = lattice;
