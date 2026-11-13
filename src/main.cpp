@@ -339,7 +339,7 @@ std::optional<FilmBackCatalogue> loadFilmBackCatalogue(const pathtracer::config:
         return candidate.name == profileConfig.camera.defaultFilmBackPresetName;
     });
     if (preset == presets->end()) {
-        std::cerr << "main: profile.json filmBackPreset \"" << profileConfig.camera.defaultFilmBackPresetName
+        std::cerr << "main: the profile's filmBackPreset \"" << profileConfig.camera.defaultFilmBackPresetName
                    << "\" not found in sensor.json\n";
         return std::nullopt;
     }
@@ -476,7 +476,7 @@ std::optional<AppResources> initializeApp(const pathtracer::config::SceneConfig&
         makeDebugCamera(profileConfig, filmBacks->presets[static_cast<std::size_t>(filmBacks->defaultIndex)].filmBack);
     const pathtracer::scene::Camera initialCamera = debugCamera.snapshot();
     if (std::string error; !initialCamera.validate(error)) {
-        std::cerr << "main: profile.json camera: " << error << ", aborting startup\n";
+        std::cerr << "main: the profile's camera: " << error << ", aborting startup\n";
         return std::nullopt;
     }
     std::optional<AppScene> scene = loadAppScene(sceneConfig, profileConfig);
@@ -1391,13 +1391,15 @@ void renderFrame(pathtracer::platform::Window& window, pathtracer::platform::Dis
 
 struct Options {
     std::string scenePath = ASSET_ROOT_DIR "/scenes/cornell.json";
+    // -preset NAME: config/presets/NAME.json over profile.json; beauty, or proxy (the benchmark workload) under -bench.
+    std::optional<std::string> preset;
     // Off by default: the live dashboard redraws in place, wrong for anything scripted. Always compiled in, so -stats measures what ships.
     bool stats = false;
-    // -bench PATH: run one accumulation at the kBench* size and samples, append it to this benchmark log (bench_log.h), exit.
+    // -bench PATH: run one accumulation at the profile's size and samples, append it to this benchmark log (bench_log.h), exit.
     std::string benchLogPath;
     // -bench-aovs A,B,C: AovId sequence the run walks, one stage per entry. Empty = today's single-stage capture.
     std::vector<int> benchAovs;
-    // -size WxH and -spp N replace profile.json's render.width/height (not the window), samplesPerPixel and -bench's defaults.
+    // -size WxH and -spp N replace the profile's render.width/height (not the window) and samplesPerPixel.
     std::optional<std::pair<int, int>> size;
     std::optional<int> samplesPerPixel;
 };
@@ -1458,6 +1460,12 @@ std::optional<Options> parseOptions(int argc, char** argv) {
                 return std::nullopt;
             }
             options.scenePath = argv[++i];
+        } else if (std::strcmp(argv[i], "-preset") == 0) {
+            if (i + 1 >= argc) {
+                std::cerr << "pathtracer: -preset expects a value\n";
+                return std::nullopt;
+            }
+            options.preset = argv[++i];
         } else if (std::strcmp(argv[i], "-stats") == 0) {
             options.stats = true;
         } else if (std::strcmp(argv[i], "-bench") == 0) {
@@ -1495,14 +1503,10 @@ std::optional<Options> parseOptions(int argc, char** argv) {
             ++i;
         } else {
             std::cerr << "pathtracer: unknown flag " << argv[i]
-                       << "\n  usage: pathtracer [-scene path/to/scene.json] [-stats] [-bench log.jsonl] [-bench-aovs beauty,normal,...]"
-                       << " [-size WxH] [-spp N]\n";
+                       << "\n  usage: pathtracer [-scene path/to/scene.json] [-preset beauty|proxy|research] [-stats] [-bench log.jsonl]"
+                       << " [-bench-aovs beauty,normal,...] [-size WxH] [-spp N]\n";
             return std::nullopt;
         }
-    }
-    if (!options.benchLogPath.empty()) {
-        options.size = options.size.value_or(std::pair{pathtracer::debug::kBenchWidth, pathtracer::debug::kBenchHeight});
-        options.samplesPerPixel = options.samplesPerPixel.value_or(pathtracer::debug::kBenchSamples);
     }
     return options;
 }
@@ -1515,7 +1519,7 @@ bool validStartup(const Options& options, const std::optional<pathtracer::config
         return false;
     }
     // -size and -spp replaced counts loadProfileConfig validated, so their cross-constraints are checked again.
-    if (!pathtracer::config::validCounts(profileConfig->render, profileConfig->pathTracer, "profile.json under command-line overrides")) {
+    if (!pathtracer::config::validCounts(profileConfig->render, profileConfig->pathTracer, "the profile under command-line overrides")) {
         return false;
     }
     if (options.benchLogPath.empty() && !options.benchAovs.empty()) {
@@ -1532,7 +1536,7 @@ bool validStartup(const Options& options, const std::optional<pathtracer::config
     }
     if (!profileConfig->denoiser.enabled && std::find(options.benchAovs.begin(), options.benchAovs.end(),
                                                       static_cast<int>(pathtracer::debug::AovId::Denoised)) != options.benchAovs.end()) {
-        std::cerr << "main: -bench-aovs names denoised, but profile.json disables the denoiser\n";
+        std::cerr << "main: -bench-aovs names denoised, but the profile disables the denoiser\n";
         return false;
     }
     if (!std::all_of(options.benchAovs.begin(), options.benchAovs.end(), [&](int aov) {
@@ -1609,10 +1613,10 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
-    // profile.json's window size must be known before Window is constructed, so config loads first, before any GL object exists.
+    // The profile's window size must be known before Window is constructed, so config loads first, before any GL object exists.
     const std::optional<pathtracer::config::SceneConfig> sceneConfig = pathtracer::config::loadSceneConfig(options->scenePath);
-    std::optional<pathtracer::config::ProfileConfig> profileConfig =
-        pathtracer::config::loadProfileConfig(ASSET_ROOT_DIR "/config/profile.json");
+    const std::string preset = options->preset.value_or(options->benchLogPath.empty() ? "beauty" : "proxy");
+    std::optional<pathtracer::config::ProfileConfig> profileConfig = pathtracer::config::loadPreset(ASSET_ROOT_DIR, preset);
     if (profileConfig && options->size) {
         profileConfig->render.width = options->size->first;
         profileConfig->render.height = options->size->second;

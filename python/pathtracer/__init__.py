@@ -283,11 +283,13 @@ class Renderer:
     repeatedly rather than reconstructing per frame.
     """
 
-    def __init__(self, scene_path: str, asset_root: str | None = None) -> None:
+    def __init__(self, scene_path: str, asset_root: str | None = None, preset: str = "beauty") -> None:
+        """``preset`` names ``config/presets/<preset>.json`` over ``config/profile.json``: beauty, proxy or research."""
         error = _ffi.make_error_buffer()
         handle = _LIB.pt_renderer_open(
             asset_root.encode() if asset_root is not None else None,
             scene_path.encode(),
+            preset.encode(),
             error,
             len(error),
         )
@@ -312,7 +314,7 @@ class Renderer:
 
     @property
     def default_camera(self) -> Camera:
-        """profile.json's authored camera, the starting point for an override."""
+        """The profile's authored camera, the starting point for an override."""
         struct = _ffi.PtCamera()
         _LIB.pt_renderer_default_camera(self._handle, ctypes.byref(struct))
         return Camera._from_struct(struct)
@@ -323,12 +325,12 @@ class Renderer:
 
     @property
     def default_samples(self) -> int:
-        """profile.json's ``pathTracer.samplesPerPixel``, the viewer's finished frame and ``render(samples=None)``; 0 is unbounded."""
+        """The profile's ``pathTracer.samplesPerPixel``, the viewer's finished frame and ``render(samples=None)``; 0 is unbounded."""
         return _LIB.pt_renderer_default_samples(self._handle)
 
     @property
     def default_bloom_strength(self) -> float:
-        """profile.json's ``render.bloomStrength``: the glare ``render(bloom_strength=None)`` takes."""
+        """The profile's ``render.bloomStrength``: the glare ``render(bloom_strength=None)`` takes."""
         return float(_LIB.pt_renderer_default_bloom_strength(self._handle))
 
     @property
@@ -371,7 +373,7 @@ class Renderer:
         them separately: the 13 path-traced lanes share one sample set, the 14 G-buffer lanes share one set of
         pixel-centre rays, and the Beauty filters share the one accumulated Beauty.
 
-        ``samples`` is samples per pixel, one per pass; ``None`` is profile.json's ``samplesPerPixel``, the viewer's finished frame.
+        ``samples`` is samples per pixel, one per pass; ``None`` is the profile's ``samplesPerPixel``, the viewer's finished frame.
         The sampler's scramble is fixed by ``seed`` and its sequence index advances per pass, so the same arguments always
         reproduce the same floats exactly.
 
@@ -401,7 +403,7 @@ class Renderer:
         ``bloom_strength`` and ``aberration`` are the viewer's lens optics, applied in scene-linear to
         ``beauty`` and ``denoised`` only, after every filter has read the clean beauty; data AOVs are never touched. The result
         is the viewer's frame at one texel per pixel: ``(1 - k) * fringed + k * glare`` with ``k = bloom_strength``.
-        ``bloom_strength`` in ``[0, 1]`` is the fraction of energy a glare PSF scatters, ``None`` being profile.json's
+        ``bloom_strength`` in ``[0, 1]`` is the fraction of energy a glare PSF scatters, ``None`` being the profile's
         ``bloomStrength``: an equal-weight Gaussian pyramid whose octaves reach the frame,
         so it falls off as ``1 / r**2``; the hexagonal lattice builds it by Loop subdivision of its own cells.
         ``aberration`` in ``[0, 1)`` reads red at the film point scaled ``1 - aberration`` about the frame centre and blue at
@@ -415,7 +417,7 @@ class Renderer:
         if samples is None:
             samples = self.default_samples
             if samples == 0:
-                raise ValueError("profile.json samplesPerPixel is 0 (unbounded), so render needs an explicit samples")
+                raise ValueError("the profile's samplesPerPixel is 0 (unbounded), so render needs an explicit samples")
         if samples < 1:
             raise ValueError(f"samples must be at least 1, got {samples}")
 

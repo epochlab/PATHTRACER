@@ -15,6 +15,7 @@
 
 #include <glm/glm.hpp>
 
+#include "pathtracer/config/profile_config.h"
 #include "pathtracer/debug/bench_log.h"
 #include "pathtracer/gfx/hdr_image.h"
 #include "pathtracer/scene/camera.h"
@@ -37,8 +38,8 @@ constexpr float kVertexAngleStep = 2.0943951F;  // 2*pi/3, the three vertices of
 
 struct Options {
     int triangleCount = 20561;  // scene.json's rkswd_tier_2.gltf, the shipped default
-    int width = pathtracer::debug::kBenchWidth;  // --width/--height override
-    int height = pathtracer::debug::kBenchHeight;
+    int width = 0;  // the proxy preset's, the benchmark workload, unless --width/--height override it
+    int height = 0;
     int frames = 5;
     int layers = 1;
     unsigned int seed = 42;
@@ -108,7 +109,13 @@ std::vector<ShadingTriangle> makeLayeredTriangles(const Options& options, const 
 
 // nullopt on an unrecognized flag, missing value, or out-of-range value: argv is a boundary, so a bad value surfaces rather than clamps.
 std::optional<Options> parseOptions(int argc, char** argv) {
+    const std::optional<pathtracer::config::ProfileConfig> proxy = pathtracer::config::loadPreset(ASSET_ROOT_DIR, "proxy");
+    if (!proxy) {
+        return std::nullopt;
+    }
     Options options;
+    options.width = proxy->render.width;
+    options.height = proxy->render.height;
     for (int i = 1; i < argc; ++i) {
         if (i + 1 >= argc) {
             std::cerr << "gbuffer_bench: " << argv[i] << " expects a value\n";

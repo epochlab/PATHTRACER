@@ -168,7 +168,7 @@ void writeError(char* err, int errCap, const std::string& message) {
 
 extern "C" {
 
-PtRenderer* pt_renderer_open(const char* asset_root, const char* scene_path, char* err, int err_cap) {
+PtRenderer* pt_renderer_open(const char* asset_root, const char* scene_path, const char* preset, char* err, int err_cap) {
     try {
         if (scene_path == nullptr) {
             writeError(err, err_cap, "scene_path is null");
@@ -176,7 +176,8 @@ PtRenderer* pt_renderer_open(const char* asset_root, const char* scene_path, cha
         }
         const std::string assetRoot = asset_root != nullptr ? asset_root : ASSET_ROOT_DIR;
         std::string error;
-        std::unique_ptr<HeadlessRenderer> renderer = HeadlessRenderer::open(assetRoot, scene_path, error);
+        std::unique_ptr<HeadlessRenderer> renderer =
+            HeadlessRenderer::open(assetRoot, scene_path, preset != nullptr ? preset : "beauty", error);
         if (!renderer) {
             writeError(err, err_cap, error);
             return nullptr;

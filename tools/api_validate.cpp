@@ -606,7 +606,7 @@ pathtracer::scene::Camera withLens(const pathtracer::scene::Camera& camera, path
 PT_CHECK(every_aov_renders_finite, Slow, Exact) {
     ctx.plan(2 * 3 * kAovCount);
     std::string error;
-    const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", error);
+    const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", "beauty", error);
     if (!renderer) {
         PT_EXPECT(ctx, false, "scene load failed: " + error);
         return;
@@ -654,7 +654,7 @@ PT_CHECK(every_aov_renders_finite, Slow, Exact) {
 PT_CHECK(hexagonal_lattice_refuses_only_denoised, Slow, Exact) {
     ctx.plan(kAovCount + 1);
     std::string error;
-    const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", error);
+    const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", "beauty", error);
     if (!renderer) {
         PT_EXPECT(ctx, false, "scene load failed: " + error);
         return;
@@ -693,7 +693,7 @@ PT_CHECK(multi_aov_request_matches_single_aov_requests, Slow, Exact) {
     ctx.plan(static_cast<int>(combined.size()));
 
     std::string error;
-    const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", error);
+    const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", "beauty", error);
     if (!renderer) {
         for (std::size_t i = 0; i < combined.size(); ++i) {
             PT_EXPECT(ctx, false, "scene load failed: " + error);
@@ -745,7 +745,7 @@ PT_CHECK(multi_aov_request_matches_single_aov_requests, Slow, Exact) {
 PT_CHECK(show_sky_changes_only_the_background, Slow, Exact) {
     ctx.plan(3);
     std::string error;
-    const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", error);
+    const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", "beauty", error);
     if (!renderer) {
         PT_EXPECT(ctx, false, "scene load failed: " + error);
         return;
@@ -889,7 +889,7 @@ PT_CHECK(aov_filter_dispatch_is_total, Fast, Exact) {
 PT_CHECK(gbuffer_depth_agrees_across_lenses_on_the_axis, Fast, Exact) {
     ctx.plan(5);
     std::string error;
-    const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", error);
+    const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", "beauty", error);
     if (!renderer) {
         for (int i = 0; i < 5; ++i) {
             PT_EXPECT(ctx, false, "scene load failed: " + error);
@@ -924,7 +924,7 @@ PT_CHECK(gbuffer_depth_agrees_across_lenses_on_the_axis, Fast, Exact) {
 PT_CHECK(motion_vector_follows_the_previous_camera, Fast, Exact) {
     ctx.plan(4);
     std::string error;
-    const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", error);
+    const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", "beauty", error);
     if (!renderer) {
         for (int i = 0; i < 4; ++i) {
             PT_EXPECT(ctx, false, "scene load failed: " + error);
@@ -966,7 +966,7 @@ PT_CHECK(motion_vector_follows_the_previous_camera, Fast, Exact) {
 PT_CHECK(render_rejects_an_invalid_camera, Fast, Exact) {
     ctx.plan(3);
     std::string error;
-    const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", error);
+    const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", "beauty", error);
     if (!renderer) {
         for (int i = 0; i < 3; ++i) {
             PT_EXPECT(ctx, false, "scene load failed: " + error);
@@ -993,7 +993,7 @@ PT_CHECK(display_optics_touch_only_the_picture_once, Fast, Exact) {
     const std::vector<AovId> aovs = {AovId::Beauty, AovId::Depth, AovId::Normal, AovId::Sobel};
     ctx.plan(static_cast<int>(aovs.size()) + 1);
     std::string error;
-    const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", error);
+    const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", "beauty", error);
     if (!renderer) {
         for (std::size_t i = 0; i <= aovs.size(); ++i) {
             PT_EXPECT(ctx, false, "scene load failed: " + error);
@@ -1055,7 +1055,7 @@ PT_CHECK(render_rejects_invalid_display_optics, Fast, Exact) {
                                      {{.aberration = kNaN}, "aberration"}}};
     ctx.plan(static_cast<int>(cases.size()) + 2);
     std::string error;
-    const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", error);
+    const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", "beauty", error);
     if (!renderer) {
         for (std::size_t i = 0; i <= cases.size() + 1; ++i) {
             PT_EXPECT(ctx, false, "scene load failed: " + error);
@@ -1109,8 +1109,8 @@ PT_CHECK(disabled_denoiser_refuses_denoised_and_leaves_beauty, Fast, Exact) {
     ctx.plan(3);
     const std::filesystem::path offRoot = denoiserDisabledAssetRoot();
     std::string error;
-    const auto enabled = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", error);
-    const auto disabled = pathtracer::api::HeadlessRenderer::open(offRoot.string(), "scenes/cornell.json", error);
+    const auto enabled = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", "beauty", error);
+    const auto disabled = pathtracer::api::HeadlessRenderer::open(offRoot.string(), "scenes/cornell.json", "beauty", error);
     if (!enabled || !disabled) {
         for (int i = 0; i < 3; ++i) {
             PT_EXPECT(ctx, false, "scene load failed: " + error);
@@ -1129,6 +1129,26 @@ PT_CHECK(disabled_denoiser_refuses_denoised_and_leaves_beauty, Fast, Exact) {
     PT_EXPECT(ctx, rendered && enabled->lastImage(AovId::Beauty).texels == disabled->lastImage(AovId::Beauty).texels,
               "disabling the denoiser changed Beauty");
     std::filesystem::remove_all(offRoot);
+}
+
+// open() takes the named preset's defaults, not profile.json's, and an unknown name fails naming the file it looked for.
+PT_CHECK(open_takes_the_named_preset, Fast, Exact) {
+    ctx.plan(3);
+    const std::optional<pathtracer::config::ProfileConfig> proxy = pathtracer::config::loadPreset(ASSET_ROOT_DIR, "proxy");
+    std::string error;
+    const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", "proxy", error);
+    PT_EXPECT(ctx, proxy && renderer && renderer->defaultWidth() == proxy->render.width &&
+                       renderer->defaultHeight() == proxy->render.height && renderer->defaultSamples() == proxy->pathTracer.samplesPerPixel,
+              "open(proxy) did not take the proxy preset's size and samples: " + error);
+    const auto research = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", "research", error);
+    PT_EXPECT(ctx, research && research->defaultCamera().pixelLattice() == pathtracer::gfx::PixelLattice::Hexagonal &&
+                       research->defaultCamera().lens().projection == pathtracer::scene::LensProjection::Omnidirectional,
+              "open(research) did not take the research camera: " + error);
+    error.clear();
+    const auto missing =
+        pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", "engine_api_no_such_preset", error);
+    PT_EXPECT(ctx, !missing && error.find("presets/engine_api_no_such_preset.json") != std::string::npos,
+              "an unknown preset name did not fail naming its file: " + error);
 }
 
 // Cornell's scene.json, parsed, for a check to re-author in another pose.
@@ -1159,8 +1179,8 @@ PT_CHECK(pose_override_matches_the_scene_authored_in_that_pose, Slow, Exact) {
     authored["lights"][0]["rotation"] = {lightRotation.x, lightRotation.y, lightRotation.z};
     const std::filesystem::path posedRoot = posedAssetRoot(authored);
     std::string error;
-    const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", error);
-    const auto posed = pathtracer::api::HeadlessRenderer::open(posedRoot.string(), "scenes/posed.json", error);
+    const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", "beauty", error);
+    const auto posed = pathtracer::api::HeadlessRenderer::open(posedRoot.string(), "scenes/posed.json", "beauty", error);
     if (!renderer || !posed) {
         for (int i = 0; i < 5; ++i) {
             PT_EXPECT(ctx, false, "scene load failed: " + error);
@@ -1211,7 +1231,7 @@ PT_CHECK(pose_override_matches_the_scene_authored_in_that_pose, Slow, Exact) {
 PT_CHECK(render_rejects_an_invalid_pose, Fast, Exact) {
     ctx.plan(5);
     std::string error;
-    const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", error);
+    const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", "beauty", error);
     if (!renderer) {
         for (int i = 0; i < 5; ++i) {
             PT_EXPECT(ctx, false, "scene load failed: " + error);
@@ -1248,7 +1268,7 @@ PT_CHECK(render_rejects_an_invalid_pose, Fast, Exact) {
 PT_CHECK(turning_the_world_with_the_camera_leaves_the_image, Slow, Exact) {
     ctx.plan(4);
     std::string error;
-    const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", error);
+    const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", "beauty", error);
     if (!renderer) {
         for (int i = 0; i < 4; ++i) {
             PT_EXPECT(ctx, false, "scene load failed: " + error);

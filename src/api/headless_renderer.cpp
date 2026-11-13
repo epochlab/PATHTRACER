@@ -34,11 +34,10 @@ struct SceneInputs {
 };
 
 [[nodiscard]] std::optional<SceneInputs> loadSceneInputs(const std::string& assetRoot, const std::string& scenePath,
-                                                         std::string& error) {
-    std::optional<pathtracer::config::ProfileConfig> profile =
-        pathtracer::config::loadProfileConfig(assetRoot + "/config/profile.json");
+                                                         const std::string& preset, std::string& error) {
+    std::optional<pathtracer::config::ProfileConfig> profile = pathtracer::config::loadPreset(assetRoot, preset);
     if (!profile) {
-        error = "failed to load " + assetRoot + "/config/profile.json";
+        error = "failed to load " + assetRoot + "/config/profile.json under " + assetRoot + "/config/presets/" + preset + ".json";
         return std::nullopt;
     }
     std::optional<pathtracer::config::SceneConfig> scene =
@@ -58,7 +57,7 @@ struct SceneInputs {
     return SceneInputs{std::move(*profile), std::move(*scene), std::move(environmentTexture)};
 }
 
-// profile.json names a film-back preset, assets/config/sensor.json supplies its dimensions. Resolved as initializeApp does.
+// The profile names a film-back preset, assets/config/sensor.json supplies its dimensions. Resolved as initializeApp does.
 [[nodiscard]] std::optional<pathtracer::scene::Camera> resolveCamera(const std::string& assetRoot,
                                                                  const pathtracer::config::ProfileConfig& profile,
                                                                  std::string& error) {
@@ -73,7 +72,7 @@ struct SceneInputs {
                                           return candidate.name == profile.camera.defaultFilmBackPresetName;
                                       });
     if (preset == presets->end()) {
-        error = "profile.json filmBackPreset \"" + profile.camera.defaultFilmBackPresetName +
+        error = "the profile's filmBackPreset \"" + profile.camera.defaultFilmBackPresetName +
                 "\" not found in sensor.json";
         return std::nullopt;
     }
@@ -82,7 +81,7 @@ struct SceneInputs {
                                      config.focalLengthMm, config.nearClip, config.farClip, config.aperture,
                                      config.shutterSeconds, config.iso, config.lens, config.pixelLattice, config.acceptanceAngleDegrees);
     if (!camera.validate(error)) {
-        error = "profile.json camera: " + error;
+        error = "the profile's camera: " + error;
         return std::nullopt;
     }
     return camera;
@@ -155,7 +154,7 @@ struct SceneInputs {
         return false;
     }
     if (!denoiserEnabled && std::find(request.aovs.begin(), request.aovs.end(), AovId::Denoised) != request.aovs.end()) {
-        error = "denoised was requested, but profile.json disables the denoiser";
+        error = "denoised was requested, but the profile disables the denoiser";
         return false;
     }
     if (!request.camera.validate(error)) {
@@ -268,8 +267,9 @@ std::optional<HeadlessRenderer::Geometry> HeadlessRenderer::buildGeometry(
 
 std::unique_ptr<HeadlessRenderer> HeadlessRenderer::open(const std::string& assetRoot,
                                                           const std::string& scenePath,
+                                                          const std::string& preset,
                                                           std::string& error) {
-    std::optional<SceneInputs> inputs = loadSceneInputs(assetRoot, scenePath, error);
+    std::optional<SceneInputs> inputs = loadSceneInputs(assetRoot, scenePath, preset, error);
     if (!inputs) {
         return nullptr;
     }

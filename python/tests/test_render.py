@@ -23,6 +23,17 @@ from pathtracer import (AOVS, LENS_PROJECTIONS, PIXEL_LATTICES, Renderer, aov_ch
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCENE = "scenes/cornell.json"
+PRESET = "proxy"  # the benchmark workload, so a test that takes the default size never traces beauty's full resolution
+
+
+def _profile(name: str) -> dict:
+    """profile.json under config/presets/<name>.json, merged as RFC 7396 does: objects key by key, anything else whole."""
+    def merge(base: dict, patch: dict) -> dict:
+        return {**base, **{key: merge(base[key], value) if isinstance(value, dict) else value for key, value in patch.items()}}
+
+    config = REPO_ROOT / "assets" / "config"
+    base = json.loads((config / "profile.json").read_text())
+    return merge(base, json.loads((config / "presets" / f"{name}.json").read_text()))
 
 
 def _rotation_xyz(degrees: tuple[float, float, float]) -> np.ndarray:
@@ -36,7 +47,7 @@ def _rotation_xyz(degrees: tuple[float, float, float]) -> np.ndarray:
 
 @pytest.fixture(scope="module")
 def renderer() -> Renderer:
-    with Renderer(SCENE) as instance:
+    with Renderer(SCENE, preset=PRESET) as instance:
         yield instance
 
 
@@ -91,7 +102,7 @@ def test_depth_is_positive_inside_the_box_and_far_on_the_background(renderer: Re
 
 def test_lookahead_is_depth_on_the_profile_horizon(renderer: Renderer) -> None:
     """The lane's whole contract: clamp(1 - Z/lookaheadDistance, 0, 1) against the Depth lane of the same render."""
-    horizon = json.loads((REPO_ROOT / "assets" / "config" / "profile.json").read_text())["pathTracer"]["lookaheadDistance"]
+    horizon = _profile(PRESET)["pathTracer"]["lookaheadDistance"]
     frame = renderer.render(aovs=("lookahead", "depth"), width=64, height=48)
     lookahead, depth = frame["lookahead"][..., 0], frame["depth"][..., 0]
     hit = depth > 0.0
@@ -146,7 +157,7 @@ def test_every_aov_renders(renderer: Renderer) -> None:
 
 
 def test_sample_count_is_the_cap_or_the_checkpoint_a_texel_stopped_at(renderer: Renderer) -> None:
-    profile = json.loads((REPO_ROOT / "assets" / "config" / "profile.json").read_text())["pathTracer"]
+    profile = _profile(PRESET)["pathTracer"]
     replicates, adaptive, samples = profile["replicates"], profile["adaptive"], 16
     counts = renderer.render(aovs=("sampleCount",), width=32, height=32, samples=samples, seed=3)["sampleCount"]
     if adaptive["threshold"] == 0:
@@ -260,7 +271,7 @@ def test_hexagonal_lattice_refuses_denoised_by_name(renderer: Renderer) -> None:
 
 
 def test_pixel_lattice_round_trips_and_rejects_unknown_names(renderer: Renderer) -> None:
-    authored = json.loads((REPO_ROOT / "assets" / "config" / "profile.json").read_text())["camera"]["pixelLattice"]
+    authored = _profile(PRESET)["camera"]["pixelLattice"]
     assert renderer.default_camera.pixel_lattice == authored
     assert PIXEL_LATTICES == ("square", "hexagonal")
     with pytest.raises(ValueError, match="triangular"):
@@ -357,7 +368,7 @@ def test_unbounded_far_clip_renders(renderer: Renderer) -> None:
 
 def test_default_camera_reports_the_profile_lens(renderer: Renderer) -> None:
     camera = renderer.default_camera
-    assert camera.lens == json.loads((REPO_ROOT / "assets" / "config" / "profile.json").read_text())["camera"]["lens"]["projection"]
+    assert camera.lens == _profile(PRESET)["camera"]["lens"]["projection"]
     assert len(camera.fisheye_coefficients) == 4
     assert 0.0 < camera.fisheye_field_of_view_degrees <= 360.0
 
@@ -381,6 +392,22 @@ def test_unknown_scene_raises() -> None:
         Renderer("scenes/does_not_exist.json")
 
 
+@pytest.mark.parametrize("name", ("beauty", "proxy", "research"))
+def test_named_preset_overrides_profile_json(name: str) -> None:
+    """Each preset takes its override's size, samples, camera and lens; beauty's override is empty, so it is profile.json as is."""
+    profile = _profile(name)
+    with Renderer(SCENE, preset=name) as named:
+        assert named.default_resolution == (profile["render"]["width"], profile["render"]["height"])
+        assert named.default_samples == profile["pathTracer"]["samplesPerPixel"]
+        assert named.default_camera.pixel_lattice == profile["camera"]["pixelLattice"]
+        assert named.default_camera.lens == profile["camera"]["lens"]["projection"]
+
+
+def test_unknown_preset_raises() -> None:
+    with pytest.raises(RuntimeError, match="presets/no_such_preset.json"):
+        Renderer(SCENE, preset="no_such_preset")
+
+
 @pytest.mark.parametrize(
     ("flags", "optics"),
     [((), {}), (("--bloom", "0.2", "--aberration", "0.02"), {"bloom_strength": 0.2, "aberration": 0.02})],
@@ -396,7 +423,7 @@ def test_beauty_matches_render_beauty_cli(renderer: Renderer, tmp_path: Path, fl
 
     reference = tmp_path / "cli.exr"
     subprocess.run(
-        [str(binary), "--scene", SCENE, "--width", "64", "--height", "64",
+        [str(binary), "--scene", SCENE, "--preset", PRESET, "--width", "64", "--height", "64",
          "--passes", "8", "--seed", "1", "--aov", "beauty",
          # --out is mandatory; the PNG is display-encoded and discarded, the EXR is the linear reference.
          "--out", str(tmp_path / "cli.png"), "--out-exr", str(reference), *flags],
@@ -413,10 +440,10 @@ def test_beauty_matches_render_beauty_cli(renderer: Renderer, tmp_path: Path, fl
 
 
 def test_omitted_samples_and_bloom_take_the_profile(renderer: Renderer) -> None:
-    """Omitting samples and bloom_strength is exactly asking for profile.json's values; aberration has no profile key and is off."""
+    """Omitting samples and bloom_strength is exactly asking for the profile's values; aberration has no profile key and is off."""
     size = {"aovs": ("beauty",), "width": 32, "height": 24}
     default = renderer.render(**size)["beauty"]
-    profile = json.loads((REPO_ROOT / "assets" / "config" / "profile.json").read_text())
+    profile = _profile(PRESET)
     assert renderer.default_samples == profile["pathTracer"]["samplesPerPixel"]
     assert renderer.default_bloom_strength == pytest.approx(profile["render"]["bloomStrength"])
     explicit = renderer.render(**size, samples=renderer.default_samples, bloom_strength=renderer.default_bloom_strength)["beauty"]
@@ -431,6 +458,7 @@ def test_unbounded_profile_needs_explicit_samples(tmp_path: Path) -> None:
             (tmp_path / entry.name).symlink_to(entry)
     (tmp_path / "config").mkdir()
     (tmp_path / "config" / "sensor.json").symlink_to(assets / "config" / "sensor.json")
+    (tmp_path / "config" / "presets").symlink_to(assets / "config" / "presets")
     profile = json.loads((assets / "config" / "profile.json").read_text())
     profile["pathTracer"]["samplesPerPixel"] = 0
     profile["render"]["renderMode"] = "progressive"
@@ -633,7 +661,7 @@ def test_light_temperature_scales_each_channel_of_the_light(renderer: Renderer) 
     common = {"aovs": ("beauty",), "width": 32, "height": 18, "samples": 2, "seed": 1, "env_light_enabled": False}
     authored = renderer.render(**common)["beauty"].astype(np.float64)
     lit = authored.min(axis=-1) > 0.0
-    profile = json.loads((REPO_ROOT / "assets" / "config" / "profile.json").read_text())
+    profile = _profile(PRESET)
     # Both renders round the same float sums: samples x (maxBounces + 1) terms per pixel, each half an ulp, bound the gap.
     tolerance = common["samples"] * (profile["pathTracer"]["maxBounces"] + 1) * np.finfo(np.float32).eps
     red_over_blue = []

@@ -752,13 +752,102 @@ PT_CHECK(material_config_rejects_malformed_input, Fast, Exact) {
     }
 }
 
-PT_CHECK(profile_config_accepts_the_shipped_profile, Fast, Exact) {
-    ctx.plan(1);
-    const std::filesystem::path profile = std::filesystem::path(ASSET_ROOT_DIR) / "config" / "profile.json";
-    char detail[256];
-    std::snprintf(detail, sizeof(detail), "loadProfileConfig rejected the shipped profile at %s",
-                  profile.string().c_str());
-    PT_EXPECT(ctx, pathtracer::config::loadProfileConfig(profile.string()).has_value(), detail);
+// profile.json under every file in config/presets/, so a profile added there is covered without editing this check.
+PT_CHECK(profile_config_accepts_the_shipped_presets, Fast, Exact) {
+    const std::filesystem::path config = std::filesystem::path(ASSET_ROOT_DIR) / "config";
+    std::vector<std::filesystem::path> overrides;
+    for (const std::filesystem::directory_entry& entry : std::filesystem::directory_iterator(config / "presets")) {
+        overrides.push_back(entry.path());
+    }
+    ctx.plan(static_cast<int>(overrides.size()) + 1);
+    PT_EXPECT(ctx, overrides.size() >= 3, "config/presets/ ships fewer than the beauty, proxy and research presets");
+    for (const std::filesystem::path& path : overrides) {
+        PT_EXPECT(ctx, pathtracer::config::loadPreset(ASSET_ROOT_DIR, path.stem().string()).has_value(),
+                  "loadPreset rejected profile.json under " + path.string());
+    }
+}
+
+// Each preset changes exactly the keys it names: those take the override's values, every other field keeps profile.json's.
+PT_CHECK(profile_config_override_replaces_only_named_keys, Fast, Exact) {
+    const std::filesystem::path profiles = std::filesystem::path(ASSET_ROOT_DIR) / "config" / "presets";
+    const auto readOverride = [&](const char* name) { return nlohmann::json::parse(std::ifstream(profiles / name)); };
+    const nlohmann::json proxyJson = readOverride("proxy.json");
+    const nlohmann::json researchJson = readOverride("research.json");
+    const std::optional<pathtracer::config::ProfileConfig> base =
+        pathtracer::config::loadProfileConfig((std::filesystem::path(ASSET_ROOT_DIR) / "config" / "profile.json").string());
+    const std::optional<pathtracer::config::ProfileConfig> proxy = pathtracer::config::loadPreset(ASSET_ROOT_DIR, "proxy");
+    const std::optional<pathtracer::config::ProfileConfig> research = pathtracer::config::loadPreset(ASSET_ROOT_DIR, "research");
+    ctx.plan(4);
+    PT_EXPECT(ctx, base && proxy && research, "a shipped profile does not load, so no row below means anything");
+    if (!base || !proxy || !research) {
+        return;
+    }
+    const nlohmann::json& proxyRender = proxyJson["render"];
+    PT_EXPECT(ctx, proxy->render.width == proxyRender["width"].get<int>() && proxy->render.height == proxyRender["height"].get<int>() &&
+                       proxy->render.interactiveRenderScale == proxyRender["interactiveRenderScale"].get<float>() &&
+                       proxy->pathTracer.samplesPerPixel == proxyJson["pathTracer"]["samplesPerPixel"].get<int>(),
+              "proxy's named keys did not take its values");
+    const nlohmann::json& researchRender = researchJson["render"];
+    const nlohmann::json& position = researchJson["camera"]["position"];
+    PT_EXPECT(ctx, research->camera.position == glm::vec3(position[0].get<float>(), position[1].get<float>(), position[2].get<float>()) &&
+                       research->camera.lens.projection == pathtracer::scene::LensProjection::Omnidirectional &&
+                       research->camera.pixelLattice == pathtracer::gfx::PixelLattice::Hexagonal &&
+                       research->render.width == researchRender["width"].get<int>() &&
+                       research->render.height == researchRender["height"].get<int>() &&
+                       research->render.interactiveRenderScale == researchRender["interactiveRenderScale"].get<float>() &&
+                       research->pathTracer.samplesPerPixel == researchJson["pathTracer"]["samplesPerPixel"].get<int>(),
+              "research's named keys did not take its values");
+    // Keys neither override names, from every block: the lens fields beside projection show a nested object merges, not replaces.
+    bool untouched = true;
+    for (const pathtracer::config::ProfileConfig* merged : {&*proxy, &*research}) {
+        untouched = untouched && merged->camera.rotation == base->camera.rotation &&
+                    merged->camera.focalLengthMm == base->camera.focalLengthMm &&
+                    merged->camera.lens.maxFieldOfViewDegrees == base->camera.lens.maxFieldOfViewDegrees &&
+                    merged->camera.lens.radialCoefficients == base->camera.lens.radialCoefficients &&
+                    merged->controls.flySpeedMetersPerSecond == base->controls.flySpeedMetersPerSecond &&
+                    merged->render.displayWidth == base->render.displayWidth && merged->render.renderScale == base->render.renderScale &&
+                    merged->pathTracer.maxBounces == base->pathTracer.maxBounces &&
+                    merged->pathTracer.replicates == base->pathTracer.replicates &&
+                    merged->pathTracer.adaptiveMarSlope == base->pathTracer.adaptiveMarSlope &&
+                    merged->denoiser.enabled == base->denoiser.enabled;
+    }
+    PT_EXPECT(ctx, untouched, "an override changed a key it does not name");
+}
+
+// An override may only replace keys profile.json has, kind for kind; the merged profile still passes every range check.
+PT_CHECK(profile_config_override_rejects_malformed, Fast, Exact) {
+    struct Case {
+        const char* name;
+        std::string text;
+        bool accepted;
+    };
+    const std::vector<Case> cases = {
+        {"an unknown top-level key", R"({"rendr": {"width": 64}})", false},
+        {"an unknown nested key", R"({"render": {"widht": 64}})", false},
+        {"an object replaced by a value", R"({"render": 64})", false},
+        {"a value replaced by an object", R"({"render": {"width": {"x": 64}}})", false},
+        {"a null, which would delete a key", R"({"render": {"width": null}})", false},
+        {"an array, not an object", "[]", false},
+        {"not JSON at all", "{ nope", false},
+        {"a known key out of range", R"({"render": {"width": 0}})", false},
+        {"an empty override", "{}", true},
+        {"an array replaced whole", R"({"camera": {"position": [1.0, 2.0, 3.0]}})", true},
+    };
+    const std::string base = (std::filesystem::path(ASSET_ROOT_DIR) / "config" / "profile.json").string();
+    ctx.plan(static_cast<int>(cases.size()) + 2);
+    for (const Case& testCase : cases) {
+        const std::filesystem::path path = writeJson("engine_io_profile_override.json", testCase.text);
+        const bool loaded = pathtracer::config::loadProfileConfig(base, path.string()).has_value();
+        std::filesystem::remove(path);
+        PT_EXPECT(ctx, loaded == testCase.accepted,
+                  std::string("loadProfileConfig ") + (testCase.accepted ? "rejected " : "accepted ") + testCase.name);
+    }
+    const std::filesystem::path arrayPath = writeJson("engine_io_profile_override.json", R"({"camera": {"position": [1.0, 2.0, 3.0]}})");
+    const std::optional<pathtracer::config::ProfileConfig> moved = pathtracer::config::loadProfileConfig(base, arrayPath.string());
+    std::filesystem::remove(arrayPath);
+    PT_EXPECT(ctx, moved && moved->camera.position == glm::vec3(1.0F, 2.0F, 3.0F), "camera.position did not take the override's array");
+    PT_EXPECT(ctx, !pathtracer::config::loadPreset(ASSET_ROOT_DIR, "engine_io_no_such_preset").has_value(),
+              "loadPreset accepted a preset name with no file");
 }
 
 // The boundary values profile_config.cpp is responsible for: a resolution divides an aspect ratio, a film-back dimension the FOV.
