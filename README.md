@@ -91,7 +91,6 @@ Ordered by execution, easy wins first. ETA is agent working hours to a complete,
 | --- | --- | --- | --- | --- | --- |
 | Camera | Hexagonal cropping | Rows are √3/2 apart, so a W×H hexagonal image covers 0.87 of the film's height. Derive rows from field of view and lattice pitch. | medium | 1 h | ready |
 | Camera | Lens model | Fisheyes lose accuracy near the edge. Generic polynomial model (Kannala and Brandt 2006) with principal point and pixel aspect. | medium | 1 h | ready |
-| Camera | Motion vectors review | Verify camera motion as the analytic reprojection across every projection, lattice and the omnidirectional seam. | medium | 1 h | ready |
 | Light | IES profiles | Lights emit uniformly. Measured distributions (IES LM-63), importance-sampled from the table and scaled by the existing lumens. | medium | 1 h | ready |
 | Geometry | Displacement bounds and black edges | Black edges on geometry; find the root cause. Bound the terminator lift (Chiang et al. 2019) by triangle geometry and rounding error. | medium | 2 h | ready |
 | Camera | Sensor noise model | Images are noise-free. Shot, read and dark noise and quantisation per EMVA 1288, from the calibrated luminance. | medium | 2 h | ready |
