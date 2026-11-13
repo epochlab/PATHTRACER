@@ -1000,11 +1000,9 @@ PT_CHECK(profile_config_camera_pixel_lattice, Fast, Exact) {
         std::optional<PixelLattice> expected;  // nullopt where the load must be refused
     };
     const std::vector<Case> cases = {
-        {"square", "square", pathtracer::debug::AovId::Sobel, PixelLattice::Square},
+        {"square", "square", pathtracer::debug::AovId::Luminance, PixelLattice::Square},
         {"hexagonal", "hexagonal", pathtracer::debug::AovId::Beauty, PixelLattice::Hexagonal},
         {"hexagonal opening on a per-texel filter", "hexagonal", pathtracer::debug::AovId::Luminance, PixelLattice::Hexagonal},
-        {"hexagonal opening on sobel", "hexagonal", pathtracer::debug::AovId::Sobel, PixelLattice::Hexagonal},
-        {"hexagonal opening on gabor", "hexagonal", pathtracer::debug::AovId::Gabor, PixelLattice::Hexagonal},
         {"hexagonal opening on denoised", "hexagonal", pathtracer::debug::AovId::Denoised, std::nullopt},
         {"an unknown lattice name", "triangular", pathtracer::debug::AovId::Beauty, std::nullopt},
         {"no lattice at all", nlohmann::json(nullptr), pathtracer::debug::AovId::Beauty, std::nullopt},
@@ -1162,29 +1160,17 @@ PT_CHECK(profile_config_bloom_strength_is_in_range, Fast, Exact) {
     }
 }
 
-// The two scene-scale distances, each a divisor at its point of use: at or below zero the lane is inf/NaN, not a bounded gradient.
-PT_CHECK(profile_config_scene_scale_distances, Fast, Exact) {
+// aoMaxDistance is the AO ray's tfar and falloff divisor: at or below zero the lane is degenerate, not a bounded occlusion.
+PT_CHECK(profile_config_ao_max_distance, Fast, Exact) {
     struct Case {
         std::string name;
-        const char* key;
         nlohmann::json value;  // null = key removed
         bool accepted;
     };
-    std::vector<Case> cases;
-    for (const char* key : {"aoMaxDistance", "lookaheadDistance"}) {
-        cases.push_back({std::string(key) + " 0.5", key, 0.5, true});
-        for (const nlohmann::json& bad : {nlohmann::json(0.0), nlohmann::json(-1.0), nlohmann::json("1.0"),
-                                          nlohmann::json(nullptr)}) {
-            cases.push_back({std::string(key) + " " + (bad.is_null() ? "missing" : bad.dump()), key, bad, false});
-        }
+    std::vector<Case> cases{{"aoMaxDistance 0.5", 0.5, true}};
+    for (const nlohmann::json& bad : {nlohmann::json(0.0), nlohmann::json(-1.0), nlohmann::json("1.0"), nlohmann::json(nullptr)}) {
+        cases.push_back({"aoMaxDistance " + (bad.is_null() ? std::string("missing") : bad.dump()), bad, false});
     }
-
-    const auto distanceOf = [](const pathtracer::config::PathTracerConfig& config, const char* key) {
-        return std::string(key) == "aoMaxDistance" ? config.aoMaxDistance : config.lookaheadDistance;
-    };
-    const auto otherKey = [](const char* key) {
-        return std::string(key) == "aoMaxDistance" ? "lookaheadDistance" : "aoMaxDistance";
-    };
 
     const std::filesystem::path shippedPath = std::filesystem::path(ASSET_ROOT_DIR) / "config" / "profile.json";
     const std::optional<pathtracer::config::ProfileConfig> shippedConfig =
@@ -1199,23 +1185,18 @@ PT_CHECK(profile_config_scene_scale_distances, Fast, Exact) {
     for (const Case& testCase : cases) {
         nlohmann::json edited = shipped;
         if (testCase.value.is_null()) {
-            edited["pathTracer"].erase(testCase.key);
+            edited["pathTracer"].erase("aoMaxDistance");
         } else {
-            edited["pathTracer"][testCase.key] = testCase.value;
+            edited["pathTracer"]["aoMaxDistance"] = testCase.value;
         }
-        const std::filesystem::path path = writeJson("engine_io_profile_distances.json", edited.dump());
+        const std::filesystem::path path = writeJson("engine_io_profile_ao_max_distance.json", edited.dump());
         const std::optional<pathtracer::config::ProfileConfig> loaded = pathtracer::config::loadProfileConfig(path.string());
         std::filesystem::remove(path);
         char detail[224];
         if (testCase.accepted) {
             std::snprintf(detail, sizeof(detail), "loadProfileConfig rejected or mis-mapped %s",
                           testCase.name.c_str());
-            PT_EXPECT(ctx,
-                          loaded.has_value() &&
-                              distanceOf(loaded->pathTracer, testCase.key) == testCase.value.get<float>() &&
-                              distanceOf(loaded->pathTracer, otherKey(testCase.key)) ==
-                                  distanceOf(shippedConfig->pathTracer, otherKey(testCase.key)),
-                          detail);
+            PT_EXPECT(ctx, loaded.has_value() && loaded->pathTracer.aoMaxDistance == testCase.value.get<float>(), detail);
         } else {
             std::snprintf(detail, sizeof(detail), "loadProfileConfig accepted %s", testCase.name.c_str());
             PT_EXPECT(ctx, !loaded.has_value(), detail);
@@ -1562,8 +1543,7 @@ PT_CHECK(json_float_reads_refuse_float_overflow, Fast, Exact) {
          {"/camera/position/0", "/camera/rotation/0", "/camera/rotation/2", "/camera/focalLengthMm", "/camera/nearClip",
           "/camera/farClip", "/camera/aperture", "/camera/shutterSeconds", "/camera/iso", "/camera/lens/radialCoefficients/3",
           "/camera/lens/maxFieldOfViewDegrees", "/controls/flySpeedMetersPerSecond", "/controls/orbitSensitivityDegPerPixel",
-          "/render/renderScale", "/render/interactiveRenderScale", "/render/bloomStrength", "/pathTracer/aoMaxDistance",
-          "/pathTracer/lookaheadDistance"}},
+          "/render/renderScale", "/render/interactiveRenderScale", "/render/bloomStrength", "/pathTracer/aoMaxDistance"}},
         {"loadFilmBackPresets", nlohmann::json::array({{{"name", "gate"}, {"widthMm", 36.0}, {"heightMm", 24.0}}}),
          [](const std::string& path) { return pathtracer::config::loadFilmBackPresets(path).has_value(); },
          {"/0/widthMm", "/0/heightMm"}},

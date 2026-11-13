@@ -228,13 +228,12 @@ std::optional<glm::vec3> nearBoxEdge(const std::vector<ViewBox>& boxes, const Pi
 
 // Resolves every surface field for one hit pixel: tracePath's bounce-0 sampling calls, never lighting or BSDF. Returns worldPos.
 glm::vec3 shadeHit(GBuffer& result, int x, int y, const Hit& hit, const PixelRay& pixel, const ShadingTriangle& triangle,
-              const Material& material, float lookaheadDistance) {
+                   const Material& material) {
     const ShadingVertex shading = interpolateShading(triangle, hit.u, hit.v);
     const pathtracer::gfx::TextureFootprint footprint = primaryHitFootprint(triangle, pixel.ray, hit.t, pixel.dirPerPixel);
     const ShadingFrame frame = buildShadingFrame(triangle, shading, material.geometryNormal);
     const OpenPbrInputs<Constant> inputs = resolveInputs(material, shading.uv, footprint, shading.colour);
     writeTexel(result.depth, x, y, hit.t);
-    writeTexel(result.lookahead, x, y, std::clamp(1.0F - (hit.t / lookaheadDistance), 0.0F, 1.0F));
     writeTexel(result.worldPos, x, y, shading.position);
     writeTexel(result.uv, x, y, glm::fract(shading.uv));
     writeTexel(result.normal, x, y, frame[2]);
@@ -252,12 +251,10 @@ glm::vec3 shadeHit(GBuffer& result, int x, int y, const Hit& hit, const PixelRay
 }
 
 // shadeHit's fields for a disk or sphere light: its analytic surface with Material{}'s inputs, as a quad light's triangles carry.
-glm::vec3 shadeShapeHit(GBuffer& result, int x, int y, const Hit& hit, const PixelRay& pixel, const AnalyticShape& shape,
-                        float lookaheadDistance) {
+glm::vec3 shadeShapeHit(GBuffer& result, int x, int y, const Hit& hit, const PixelRay& pixel, const AnalyticShape& shape) {
     const ShadingVertex shading = shadingAt(shape, pixel.ray.origin + (hit.t * pixel.ray.dir));
     const OpenPbrInputs<Constant> inputs = resolveInputs(Material{}, shading.uv, {}, shading.colour);
     writeTexel(result.depth, x, y, hit.t);
-    writeTexel(result.lookahead, x, y, std::clamp(1.0F - (hit.t / lookaheadDistance), 0.0F, 1.0F));
     writeTexel(result.worldPos, x, y, shading.position);
     writeTexel(result.uv, x, y, glm::fract(shading.uv));
     writeTexel(result.normal, x, y, shading.normal);
@@ -276,7 +273,6 @@ struct GBufferScene {
     const EmbreeAccel& accel;
     const std::vector<ShadingTriangle>& shadingTriangles;
     const std::vector<MeshInstance>& instances;
-    float lookaheadDistance;
 };
 
 // x_now - x_previous by one projection of one point on both sides, so identical cameras give exactly zero; a miss moves by rotation.
@@ -327,13 +323,11 @@ void renderPixel(GBuffer& result, const GBufferView& view, const GBufferScene& s
     // A miss sees the environment, the plane at infinity, along the ray direction (w = 0); a hit is its worldPos (w = 1).
     glm::vec4 seen(pixel->ray.dir, 0.0F);
     if (hit && hit->shape >= 0) {
-        seen = glm::vec4(
-            shadeShapeHit(result, x, y, *hit, *pixel, scene.accel.shapes()[static_cast<std::size_t>(hit->shape)], scene.lookaheadDistance), 1.0F);
+        seen = glm::vec4(shadeShapeHit(result, x, y, *hit, *pixel, scene.accel.shapes()[static_cast<std::size_t>(hit->shape)]), 1.0F);
     } else if (hit) {
         const ShadingTriangle& triangle = scene.shadingTriangles[static_cast<std::size_t>(hit->triangleIndex)];
         const auto instance = static_cast<std::size_t>(triangle.instanceIndex);
-        seen = glm::vec4(shadeHit(result, x, y, *hit, *pixel, triangle, scene.instances[instance].material, scene.lookaheadDistance),
-                         1.0F);
+        seen = glm::vec4(shadeHit(result, x, y, *hit, *pixel, triangle, scene.instances[instance].material), 1.0F);
     }
     writeMotion(result, view, x, y, seen);
     if (const std::optional<glm::vec3> boxColor = nearBoxEdge(view.boxes, *pixel, hit ? hit->t : pixel->ray.tMax)) {
@@ -373,8 +367,7 @@ void clearRow(GBuffer& result, int y) {
 
 void renderGBuffer(const Camera& camera, const Camera& previousCamera, const EmbreeAccel& accel,
                    const std::vector<ShadingTriangle>& shadingTriangles, const std::vector<MeshInstance>& instances,
-                   float lookaheadDistance, const std::vector<AabbBounds>& instanceBounds, int width, int height, ThreadPool& threadPool,
-                   GBuffer& result) {
+                   const std::vector<AabbBounds>& instanceBounds, int width, int height, ThreadPool& threadPool, GBuffer& result) {
     ensureLanes(result, width, height);
     ++result.generation;
     result.wrapsHorizontally = wrapsHorizontally(camera.lens().projection);
@@ -393,7 +386,7 @@ void renderGBuffer(const Camera& camera, const Camera& previousCamera, const Emb
             view.boxes.push_back(viewBox(instanceBounds[i], camera.position(), falseColorForId(static_cast<int>(i))));
         }
     }
-    const GBufferScene scene{accel, shadingTriangles, instances, lookaheadDistance};
+    const GBufferScene scene{accel, shadingTriangles, instances};
     // One slot per row, so threads write disjoint floats and the reduction is order-independent and deterministic.
     std::vector<float> rowDepthMax(static_cast<std::size_t>(height));
     threadPool.parallelFor(height, [&](int y) {

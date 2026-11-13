@@ -3277,7 +3277,7 @@ PT_CHECK(primary_hits_filter_minified_textures, Fast, Exact) {
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     const pathtracer::scene::PathTraceResult traced = renderPass(scene, env, settings, *accel, pool, /*showSky=*/false);
     pathtracer::scene::GBuffer gbuffer;
-    pathtracer::scene::renderGBuffer(camera, camera, *accel, albedoScene.shadingTriangles, albedoScene.instances, settings.lookaheadDistance,
+    pathtracer::scene::renderGBuffer(camera, camera, *accel, albedoScene.shadingTriangles, albedoScene.instances,
                                      pathtracer::scene::computeInstanceBounds(scene.shadingTriangles, 1), kImageSize, kImageSize, pool,
                                      gbuffer);
     // 16 texels per stratum select levels 3-4, every one exactly 0.5; the blend rounds a few ulp, the 16-sample mean adds one.

@@ -16,17 +16,11 @@ enum class AovId : int {
     Wireframe,  // combined AOV: white mesh-edge lines + one false-coloured bounding box per instance (gbuffer.h)
     Alpha,
     Depth,
-    Lookahead,  // Depth remapped through profile.json's lookaheadDistance: 1 at the camera, 0 at that horizon and beyond
     HSV,
     Luminance,
-    Sobel,
-    Gabor,
     WorldPos,
     UV,
     MotionVector,  // geometric film-plane motion in column pitches from the request's previous camera (gbuffer.h)
-    // Perceptual: observer models over Beauty, as against the Utility block's image-space derivative operators.
-    ColourOpponent,
-    ContrastSensitivity,  // local band contrast over Barten's threshold, max over octaves: 1 is just visible to an observer at the camera
     // Material.
     Normal,
     GeomNormal,
@@ -60,8 +54,7 @@ enum class AovId : int {
 
 // camelCase call name, a standalone acronym lower case, index-parallel to AovId: the one spelling the CLI, bench logs and both APIs share.
 inline constexpr const char* kAovNames[] = {
-    "beauty", "wireframe", "alpha", "depth", "lookahead", "hsv", "luminance", "sobel",
-    "gabor", "worldPos", "uv", "motionVector", "colourOpponent", "contrastSensitivity",
+    "beauty", "wireframe", "alpha", "depth", "hsv", "luminance", "worldPos", "uv", "motionVector",
     "normal", "geomNormal", "albedo", "metallic", "roughness", "tangent", "objectID", "ao",
     "fresnel", "ior", "bounceCount", "snr", "sampleCount",
     "directDiffuse", "indirectDiffuse", "directSpecular", "indirectSpecular", "refraction", "directVolume", "indirectVolume",
@@ -73,8 +66,7 @@ static_assert(sizeof(kAovNames) / sizeof(kAovNames[0]) == static_cast<int>(AovId
 
 // Title-case HUD label, acronyms upper case, index-parallel to AovId: display only, never parsed.
 inline constexpr const char* kAovLabels[] = {
-    "Beauty", "Wireframe", "Alpha", "Depth", "Lookahead", "HSV", "Luminance", "Sobel",
-    "Gabor", "World Pos", "UV", "Motion Vector", "Colour Opponent", "Contrast Sensitivity",
+    "Beauty", "Wireframe", "Alpha", "Depth", "HSV", "Luminance", "World Pos", "UV", "Motion Vector",
     "Normal", "Geom Normal", "Albedo", "Metallic", "Roughness", "Tangent", "Object ID", "AO",
     "Fresnel", "IOR", "Bounce Count", "SNR", "Sample Count",
     "Direct Diffuse", "Indirect Diffuse", "Direct Specular", "Indirect Specular", "Refraction", "Direct Volume", "Indirect Volume",
@@ -84,7 +76,7 @@ inline constexpr const char* kAovLabels[] = {
 static_assert(sizeof(kAovLabels) / sizeof(kAovLabels[0]) == static_cast<int>(AovId::Count),
               "kAovLabels must stay index-parallel with AovId");
 
-// Which of the three producers computes each AOV: 14 accumulated path-traced lanes, 14 G-buffer lanes, 10 derived after accumulation.
+// Which of the three producers computes each AOV: 14 accumulated path-traced lanes, 13 G-buffer lanes, 6 derived after accumulation.
 enum class AovSource { PathTraced, GBuffer, BeautyFilter };
 
 [[nodiscard]] AovSource aovSource(AovId aov);
@@ -105,9 +97,6 @@ static_assert(kAovCountWithoutDenoiser == static_cast<int>(AovId::Count) - 1, "D
 // True where the AOV is RGB in the working space's primaries, so a file carries it as Colour and a change of space converts it.
 [[nodiscard]] bool aovIsColour(AovId aov);
 
-// True where zero is the operator's own centre and both signs are meaningful, so the preview maps zero to mid-grey. Preview only.
-[[nodiscard]] bool aovIsBipolar(AovId aov);
-
 // Added after the preview's gain so a zero response lands exactly on mid-grey; the gain divides by it, so the two halves cannot drift.
 inline constexpr float kBipolarDisplayOffset = 0.5F;
 
@@ -116,9 +105,6 @@ struct BipolarDisplay {
     glm::vec3 gain;
     glm::vec3 offset;
 };
-
-// Auto-ranged per channel of `image`, because channels of one AOV can be different quantities in incomparable units.
-[[nodiscard]] BipolarDisplay bipolarDisplay(const pathtracer::gfx::HdrImage& image);
 
 // What the display needs beyond the texels: SNR's pass count, the path-depth ceiling, and Depth's maximum the G-buffer pass reduced.
 struct AovDisplayContext {
@@ -141,10 +127,10 @@ struct AovDisplay {
     if (aov == AovId::HSV) {
         return {1.0F, 1.0F, exposure};
     }
-    return glm::vec3(aovCarriesRadiance(aov) && !aovIsBipolar(aov) ? exposure : 1.0F);
+    return glm::vec3(aovCarriesRadiance(aov) ? exposure : 1.0F);
 }
 
-// True for AOVs needing light transport, false for the 14 primary-hit ones. Derived from aovSource, so the two cannot drift apart.
+// True for AOVs needing light transport, false for the 13 primary-hit ones. Derived from aovSource, so the two cannot drift apart.
 [[nodiscard]] inline bool aovNeedsLightTransport(AovId aov) {
     return aovSource(aov) != AovSource::GBuffer;
 }

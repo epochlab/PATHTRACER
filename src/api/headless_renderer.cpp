@@ -532,8 +532,7 @@ void HeadlessRenderer::accumulatePass(const Request& request, int pass, const st
 void HeadlessRenderer::renderGBufferLanes(const Request& request) {
     const auto gbufferStart = std::chrono::steady_clock::now();
     pathtracer::scene::renderGBuffer(request.camera, request.previousCamera.value_or(request.camera), geometry_.accel,
-                                     geometry_.model.shadingTriangles, geometry_.model.instances, baseSettings_.lookaheadDistance,
-                                     geometry_.instanceBounds,
+                                     geometry_.model.shadingTriangles, geometry_.model.instances, geometry_.instanceBounds,
                                      request.width, request.height, threadPool_, gbuffer_);
     stats_.gbufferMilliseconds =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - gbufferStart).count();
@@ -553,14 +552,11 @@ void HeadlessRenderer::evaluateFilters(const Request& request) {
                                                      pathTraced_.replicates,
                                                      request.samples,
                                                      pathTraced_.texelSamples.data(),
-                                                     pathtracer::scene::wrapsHorizontally(request.camera.lens().projection),
-                                                     request.camera.pixelLattice(),
                                                      denoises ? &accumulatedImage(pathtracer::debug::kDenoiseFeatureLanes[0]) : nullptr,
                                                      denoises ? &accumulatedImage(pathtracer::debug::kDenoiseFeatureLanes[1]) : nullptr,
                                                      denoiser_.get(),
                                                      shadows ? &accumulatedImage(pathtracer::debug::kShadowLanes[0]) : nullptr,
-                                                     shadows ? &accumulatedImage(pathtracer::debug::kShadowLanes[1]) : nullptr,
-                                                     &request.camera};
+                                                     shadows ? &accumulatedImage(pathtracer::debug::kShadowLanes[1]) : nullptr};
     for (const AovId aov : request.aovs) {
         if (pathtracer::debug::aovSource(aov) != AovSource::BeautyFilter ||
             std::find(filteredAovs_.begin(), filteredAovs_.end(), aov) != filteredAovs_.end()) {

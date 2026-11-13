@@ -52,9 +52,9 @@ def renderer() -> Renderer:
 
 
 def test_aov_table_is_populated() -> None:
-    assert len(AOVS) == 38
-    names = ("beauty", "depth", "lookahead", "normal", "sobel", "luminance", "gabor", "hsv", "colourOpponent", "contrastSensitivity",
-             "motionVector", "snr", "sampleCount", "directVolume", "indirectVolume", "directSubsurface", "indirectSubsurface")
+    assert len(AOVS) == 33
+    names = ("beauty", "depth", "normal", "luminance", "hsv", "motionVector", "snr", "sampleCount", "directVolume", "indirectVolume",
+             "directSubsurface", "indirectSubsurface")
     for name in names:
         assert name in AOVS
 
@@ -100,20 +100,6 @@ def test_depth_is_positive_inside_the_box_and_far_on_the_background(renderer: Re
     assert depth[hit].max() < renderer.default_camera.far_clip
 
 
-def test_lookahead_is_depth_on_the_profile_horizon(renderer: Renderer) -> None:
-    """The lane's whole contract: clamp(1 - Z/lookaheadDistance, 0, 1) against the Depth lane of the same render."""
-    horizon = _profile(PRESET)["pathTracer"]["lookaheadDistance"]
-    frame = renderer.render(aovs=("lookahead", "depth"), width=64, height=48)
-    lookahead, depth = frame["lookahead"][..., 0], frame["depth"][..., 0]
-    hit = depth > 0.0
-    assert hit.any(), "the default camera should see geometry"
-    expected = np.clip(1.0 - depth[hit] / horizon, 0.0, 1.0)
-    assert np.allclose(lookahead[hit], expected, rtol=0.0, atol=1e-6)
-    # A primary miss reads 0, the same value geometry beyond the horizon reads -- depth is what separates the two.
-    assert (lookahead[~hit] == 0.0).all() if (~hit).any() else True
-    assert ((lookahead >= 0.0) & (lookahead <= 1.0)).all()
-
-
 def test_normals_are_unit_length_where_geometry_was_hit(renderer: Renderer) -> None:
     frame = renderer.render(aovs=("normal", "depth"), width=64, height=48)
     hit = frame["depth"][..., 0] > 0.0
@@ -123,7 +109,7 @@ def test_normals_are_unit_length_where_geometry_was_hit(renderer: Renderer) -> N
 
 def test_gbuffer_aovs_need_no_samples() -> None:
     assert aov_needs_samples("beauty")
-    assert aov_needs_samples("sobel"), "filters read Beauty, so they do need light transport"
+    assert aov_needs_samples("luminance"), "filters read Beauty, so they do need light transport"
     assert not aov_needs_samples("depth")
     assert not aov_needs_samples("normal")
 
@@ -169,7 +155,7 @@ def test_sample_count_is_the_cap_or_the_checkpoint_a_texel_stopped_at(renderer: 
 
 
 def test_multi_aov_request_matches_single_requests(renderer: Renderer) -> None:
-    names = ("beauty", "depth", "normal", "sobel")
+    names = ("beauty", "depth", "normal", "luminance")
     size = {"width": 32, "height": 32, "samples": 4, "seed": 5}
     together = renderer.render(aovs=names, **size)
     for name in names:

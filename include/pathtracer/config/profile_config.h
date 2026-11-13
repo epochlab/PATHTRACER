@@ -65,7 +65,6 @@ struct PathTracerConfig {
     int maxBounces;        // path tracer startup default; secondary/indirect bounces beyond the primary hit, 0 = direct lighting only
     int russianRouletteStartBounce;  // 0-based bounce index RR kicks in from
     float aoMaxDistance;  // ray-traced AO occlusion range, scene units; occluders beyond it don't darken
-    float lookaheadDistance;  // horizon of the Lookahead AOV's ramp, scene units; geometry at or beyond it reads 0
     int replicates;  // independent scrambles interleaved by sample, whose spread is the SNR's standard error; divides samplesPerPixel
     // pathTracer.adaptive: texels stop once their relative luminance error is within threshold, at this false-discovery confidence.
     float adaptiveThreshold;
