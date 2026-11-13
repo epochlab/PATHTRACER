@@ -857,7 +857,8 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const pathtracer::scene
     // Offline never shows a reduced-scale accumulation, so tracing one would be pure waste.
     const float renderScale = settled || offline ? app.renderScale : app.interactiveRenderScale;
     const int traceWidth = scaledExtent(app.imageWidth, renderScale);
-    const int traceHeight = scaledExtent(app.imageHeight, renderScale);
+    // The frame scales, then the lattice fills it with rows, so every scale and lattice traces the authored field of view.
+    const int traceHeight = pathtracer::gfx::latticeRows(camera.pixelLattice(), scaledExtent(app.imageHeight, renderScale));
     const bool needsLightTransport = aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(app.aov));
 
     // Park the driver when the selected AOV is not its own: otherwise it accumulates an off-screen image on every core.
@@ -1339,7 +1340,8 @@ void renderFrame(pathtracer::platform::Window& window, pathtracer::platform::Dis
     }();
     const auto [viewportWidth, viewportHeight] = window.framebufferSize();
     // The window only frames the image; what is traced is the authored resolution, so a resize or zoom never restarts an accumulation.
-    const glm::vec2 frame = pathtracer::gfx::frameExtent(camera.pixelLattice(), app.imageWidth, app.imageHeight);
+    const glm::vec2 frame = pathtracer::gfx::frameExtent(camera.pixelLattice(), app.imageWidth,
+                                                         pathtracer::gfx::latticeRows(camera.pixelLattice(), app.imageHeight));
     // Re-clamped every frame, steps or not, so a window resize that outgrows the level returns it to fit.
     app.zoomLevel = pathtracer::gfx::stepZoom(app.zoomLevel, std::exchange(app.zoomSteps, 0), frame.x, frame.y, viewportWidth,
                                               viewportHeight);

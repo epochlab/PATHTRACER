@@ -73,7 +73,7 @@ struct Options {
     float fisheyeFocalLengthMm = 0.0F;
     // The profile's camera through the 360-degree lat-long lens, which reads no focal length or gate.
     bool omnidirectional = false;
-    // The profile's camera on the hexagonal pixel lattice; --width and --height still count columns and rows.
+    // The profile's camera on the hexagonal pixel lattice; --width x --height stays the frame, filled by latticeRows rows.
     pathtracer::gfx::PixelLattice lattice = pathtracer::gfx::PixelLattice::Square;
     // Positive: each pixel a compound-eye facet of this half-maximum width in degrees; Camera::validate ranges it.
     float acceptanceAngleDegrees = 0.0F;
@@ -157,7 +157,7 @@ void reportErrorSpectrum(const pathtracer::gfx::HdrImage& image, const pathtrace
 }
 
 // Everything the timed loop's cost depends on goes in config; output paths and exposure do not, so they never split two comparable runs.
-bool appendTimingRecord(const Options& options, int argc, char** argv, int width, int height, int passes,
+bool appendTimingRecord(const Options& options, int argc, char** argv, int passes,
                         const std::string& aovName, const pathtracer::scene::PathTraceSettings& settings,
                         bool envLightEnabled, double gbufferMs, double filterMs, double opticsMs,
                         const std::vector<double>& milliseconds, const pathtracer::debug::RayCounts& rays,
@@ -166,8 +166,8 @@ bool appendTimingRecord(const Options& options, int argc, char** argv, int width
         .tool = "render_beauty",
         .argv = std::vector<std::string>(argv, argv + argc),
         .config = {{"scene", options.scenePath},
-                   {"width", width},
-                   {"height", height},
+                   {"width", accumulated.width},
+                   {"height", accumulated.height},
                    {"passes", passes},
                    {"seed", options.scrambleSeed},
                    {"aov", aovName},
@@ -579,7 +579,7 @@ int main(int argc, char** argv) {
         const std::vector<pathtracer::gfx::HdrImage> a = family(options.scrambleSeed);
         const std::vector<pathtracer::gfx::HdrImage> b = family(options.scrambleSeed + 1000U);
 
-        const std::size_t pixels = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+        const std::size_t pixels = static_cast<std::size_t>(a.front().width) * static_cast<std::size_t>(a.front().height);
         // Sidak over the pixels examined, so the threshold follows the resolution; luminance, since error visibility is a luminance effect.
         const double perPixelAlpha = tools::stats::sidak(tools::check::kFamilyAlpha, static_cast<int>(pixels));
         double worstZ = 0.0;
@@ -668,7 +668,7 @@ int main(int argc, char** argv) {
     }
     // Before any output encode, so the record's rusage covers load, build and the timed passes but not PNG/EXR writing.
     if (!options.benchLogPath.empty() &&
-        !appendTimingRecord(options, argc, argv, width, height, passes, aovName, renderer->baseSettings(),
+        !appendTimingRecord(options, argc, argv, passes, aovName, renderer->baseSettings(),
                             envLightEnabled, stats.gbufferMilliseconds, stats.filterMilliseconds, stats.opticsMilliseconds,
                             milliseconds,
                             rays, accumulated)) {
@@ -682,7 +682,7 @@ int main(int argc, char** argv) {
             return EXIT_FAILURE;
         }
         std::cout << "render_beauty: wrote " << options.outExrPath << " (linear " << aovName << ", "
-                  << width << "x" << height << ", " << passes << " passes)\n";
+                  << accumulated.width << "x" << accumulated.height << ", " << passes << " passes)\n";
     }
 
     if (!options.compareExrPath.empty()) {
@@ -692,9 +692,11 @@ int main(int argc, char** argv) {
         if (!reference.has_value()) {
             return EXIT_FAILURE;
         }
-        if (reference->width != width || reference->height != height || reference->channels != accumulated.channels) {
+        if (reference->width != accumulated.width || reference->height != accumulated.height ||
+            reference->channels != accumulated.channels) {
             std::cerr << "render_beauty: --compare-exr image is " << reference->width << "x" << reference->height << "x"
-                      << reference->channels << ", this render is " << width << "x" << height << "x" << accumulated.channels
+                      << reference->channels << ", this render is " << accumulated.width << "x" << accumulated.height << "x"
+                      << accumulated.channels
                       << "\n";
             return EXIT_FAILURE;
         }
@@ -723,8 +725,8 @@ int main(int argc, char** argv) {
     if (!pathtracer::gfx::writeDisplayPng(options.outPath, png)) {
         return EXIT_FAILURE;
     }
-    std::cout << "render_beauty: wrote " << options.outPath << " (" << aovName << ", " << width
-              << "x" << height << ", " << passes << " passes)\n";
+    std::cout << "render_beauty: wrote " << options.outPath << " (" << aovName << ", " << png.width
+              << "x" << png.height << ", " << passes << " passes)\n";
 
     if (!options.comparePath.empty()) {
         const std::optional<Png16> written = readPng16(options.outPath);

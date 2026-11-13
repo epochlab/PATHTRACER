@@ -264,6 +264,13 @@ int pt_abi_version(void) {
     return PT_ABI_VERSION;
 }
 
+int pt_lattice_rows(int pixel_lattice, int height) {
+    if ((pixel_lattice != PT_LATTICE_SQUARE && pixel_lattice != PT_LATTICE_HEXAGONAL) || height < 1) {
+        return -1;
+    }
+    return pathtracer::gfx::latticeRows(static_cast<pathtracer::gfx::PixelLattice>(pixel_lattice), height);
+}
+
 int pt_renderer_default_width(const PtRenderer* renderer) {
     return renderer == nullptr ? 0 : reinterpret_cast<const HeadlessRenderer*>(renderer)->defaultWidth();
 }

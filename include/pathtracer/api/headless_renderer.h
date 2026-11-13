@@ -36,6 +36,7 @@ public:
         pathtracer::scene::Camera camera;
         // The view MotionVector measures motion from, either lens; nullopt is camera itself, so motion reads exactly zero.
         std::optional<pathtracer::scene::Camera> previousCamera;
+        // The frame in column pitches; outputs are width x latticeRows(camera's lattice, height), so either lattice spans one FOV.
         int width = 0;
         int height = 0;
         // Path-traced passes at one sample each, averaged. Ignored when every requested AOV comes from the G-buffer.
@@ -90,7 +91,7 @@ public:
     [[nodiscard]] int defaultSamples() const { return profile_.pathTracer.samplesPerPixel; }  // 0 = unbounded
     [[nodiscard]] float defaultBloomStrength() const { return profile_.render.bloomStrength; }
 
-    // Blocking. outputs parallels request.aovs, caller-allocated at width * height * aovChannels(aovs[i]); each producer runs at most once.
+    // Blocking. outputs parallels request.aovs, caller-allocated at width * rows * aovChannels(aovs[i]); each producer runs at most once.
     [[nodiscard]] bool render(const Request& request, std::span<float* const> outputs,
                                std::string& error);
 
@@ -139,7 +140,7 @@ private:
     // Traces request.samples one-sample passes and folds each into accumulators_, the running means PathTraceDriver publishes.
     void accumulatePathTraced(const Request& request);
     // Folds one pass's traced texels into the means, replicate means and counts in place, through the driver's kernels.
-    void accumulatePass(const Request& request, int pass, const std::vector<const std::vector<float>*>& laneSources);
+    void accumulatePass(int pass, const std::vector<const std::vector<float>*>& laneSources);
     // Ray-casts the G-buffer lanes, motion measured from request.previousCamera (camera itself when absent).
     void renderGBufferLanes(const Request& request);
     // Evaluates each distinct BeautyFilter AOV the request names once, over the accumulated Beauty.

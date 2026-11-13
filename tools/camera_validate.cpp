@@ -1048,6 +1048,28 @@ PT_CHECK(square_lattice_centres_are_the_half_integers, Fast, Exact) {
     PT_EXPECT(ctx, pathtracer::gfx::pixelSide(PixelLattice::Square) == 1.0F, "the square pixel side is not exactly 1");
 }
 
+// latticeRows is the identity on square pixels and, on hexagonal ones, the row count whose extent is nearest the frame height.
+PT_CHECK(lattice_rows_fill_the_frame_height, Fast, Exact) {
+    using pathtracer::gfx::PixelLattice;
+    constexpr int kMaxHeight = 4096;
+    const double pitch = pathtracer::gfx::rowPitch(PixelLattice::Hexagonal);
+    int squareMismatches = 0;
+    int notNearest = 0;
+    double worstResidual = 0.0;
+    for (int height = 1; height <= kMaxHeight; ++height) {
+        squareMismatches += pathtracer::gfx::latticeRows(PixelLattice::Square, height) == height ? 0 : 1;
+        const int rows = pathtracer::gfx::latticeRows(PixelLattice::Hexagonal, height);
+        const double residual = std::abs((rows * pitch) - height);
+        worstResidual = std::max(worstResidual, residual);
+        notNearest += residual <= std::abs(((rows - 1) * pitch) - height) && residual <= std::abs(((rows + 1) * pitch) - height) ? 0 : 1;
+    }
+    ctx.plan(4);
+    PT_EXPECT(ctx, squareMismatches == 0, std::to_string(squareMismatches) + " square heights are not their own row count");
+    PT_EXPECT(ctx, notNearest == 0, std::to_string(notNearest) + " hexagonal row counts are not the nearest to the frame height");
+    PT_EXPECT(ctx, worstResidual <= 0.5 * pitch, "a hexagonal frame misses its height by " + std::to_string(worstResidual) + " pitches");
+    PT_EXPECT(ctx, pathtracer::gfx::latticeRows(PixelLattice::Hexagonal, 32) == 37, "a 32-pitch frame is not 37 hexagonal rows");
+}
+
 // Every interior hexagonal pixel has six neighbours at distance 1 and the lattice is symmetric about the frame centre (Mersereau 1979).
 PT_CHECK(hexagonal_lattice_is_regular_and_centred, Fast, Exact) {
     using pathtracer::gfx::PixelLattice;

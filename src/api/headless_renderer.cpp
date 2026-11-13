@@ -417,7 +417,7 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
         std::visit([&](auto& light) { light.radiance = (*colours)[i] * luminance; }, geometry_.lights[i]);
     }
     const bool wantsFilter = requestsSource(request.aovs, AovSource::BeautyFilter);
-    resizeBuffers(request.width, request.height);
+    resizeBuffers(request.width, pathtracer::gfx::latticeRows(request.camera.pixelLattice(), request.height));
     accumulatedLanes_ = accumulatedLanesFor(request.aovs, wantsFilter);
 
     stats_.passMilliseconds.clear();
@@ -443,7 +443,7 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
 void HeadlessRenderer::accumulatePathTraced(const Request& request) {
     accumulators_.clear();
     for (const PathTracedLane lane : accumulatedLanes_) {
-        accumulators_.push_back(pathtracer::gfx::makeImage(request.width, request.height, (pathTraced_.*lane).channels));
+        accumulators_.push_back(pathtracer::gfx::makeImage(bufferWidth_, bufferHeight_, (pathTraced_.*lane).channels));
     }
     // A synchronous caller uses no cooperative cancellation, so generation stays where requestedGeneration asks and never goes stale.
     const std::atomic<std::uint64_t> generation{1};
@@ -464,24 +464,24 @@ void HeadlessRenderer::accumulatePathTraced(const Request& request) {
     // renderPathTraced writes images only, so pathTraced_ holds the replicate means and counts across passes, folded in place from zero.
     std::fill(pathTraced_.replicateLuminance.begin(), pathTraced_.replicateLuminance.end(), 0.0F);
     std::fill(pathTraced_.texelSamples.begin(), pathTraced_.texelSamples.end(), 0);
-    activeTexels_ = pathtracer::scene::allTexels(request.width, request.height);
+    activeTexels_ = pathtracer::scene::allTexels(bufferWidth_, bufferHeight_);
     // Ends at request.samples, or earlier once the stopping rule has retired every texel.
     for (int pass = 0; pass < request.samples && !activeTexels_.empty(); ++pass) {
         // Only the trace is timed: the accumulation below it is O(pixels) and identical across revisions.
         const auto passStart = std::chrono::steady_clock::now();
         // scrambleSeed fixed, sampleBase advancing: the pair that keeps accumulated samples stratified rather than N independent draws.
         pathtracer::scene::renderPathTraced(request.camera, geometry_.accel, geometry_.model.shadingTriangles,
-                                         geometry_.model.instances, geometry_.instanceLightIndex, lights, volumes_, request.width,
-                                         request.height, activeTexels_,
+                                         geometry_.model.instances, geometry_.instanceLightIndex, lights, volumes_, bufferWidth_,
+                                         bufferHeight_, activeTexels_,
                                          showSky, baseSettings_,
                                          request.scrambleSeed, /*sampleBase=*/pass,
                                          /*sampleCount=*/request.samples, generation,
                                          /*requestedGeneration=*/1U, threadPool_, stats, pathTraced_);
         stats_.passMilliseconds.push_back(
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - passStart).count());
-        accumulatePass(request, pass, laneSources);
+        accumulatePass(pass, laneSources);
         if (pathtracer::scene::adaptiveCheckpoint(pass + 1, baseSettings_)) {
-            const pathtracer::scene::FoveatedThreshold fovea(request.camera, request.width, request.height,
+            const pathtracer::scene::FoveatedThreshold fovea(request.camera, bufferWidth_, bufferHeight_,
                                                              baseSettings_.adaptive.marSlope);
             pathtracer::scene::retireConvergedTexels(activeTexels_, pathTraced_.replicateLuminance.data(), baseSettings_, fovea,
                                                      threadPool_);
@@ -491,8 +491,8 @@ void HeadlessRenderer::accumulatePathTraced(const Request& request) {
     stats_.rays = stats.rays();
 }
 
-void HeadlessRenderer::accumulatePass(const Request& request, int pass, const std::vector<const std::vector<float>*>& laneSources) {
-    const auto width = static_cast<std::uint32_t>(request.width);
+void HeadlessRenderer::accumulatePass(int pass, const std::vector<const std::vector<float>*>& laneSources) {
+    const auto width = static_cast<std::uint32_t>(bufferWidth_);
     // The driver's own arithmetic, folded in place: same kernels, same invN, same per-element order, so the two means are bit-identical.
     const float invN = 1.0F / static_cast<float>(pass + 1);
     const int replicates = baseSettings_.replicates;
@@ -523,7 +523,7 @@ void HeadlessRenderer::accumulatePass(const Request& request, int pass, const st
     };
     // In place, an untraced texel's mean is already where it stays.
     const auto carry = [](std::uint32_t, std::uint32_t) {};
-    threadPool_.parallelFor(request.height, [&](int y) {
+    threadPool_.parallelFor(bufferHeight_, [&](int y) {
         const std::uint32_t rowBegin = static_cast<std::uint32_t>(y) * width;
         pathtracer::scene::forEachTracedRun(activeTexels_, rowBegin, rowBegin + width, fold, carry);
     });
@@ -533,7 +533,7 @@ void HeadlessRenderer::renderGBufferLanes(const Request& request) {
     const auto gbufferStart = std::chrono::steady_clock::now();
     pathtracer::scene::renderGBuffer(request.camera, request.previousCamera.value_or(request.camera), geometry_.accel,
                                      geometry_.model.shadingTriangles, geometry_.model.instances, geometry_.instanceBounds,
-                                     request.width, request.height, threadPool_, gbuffer_);
+                                     bufferWidth_, bufferHeight_, threadPool_, gbuffer_);
     stats_.gbufferMilliseconds =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - gbufferStart).count();
 }

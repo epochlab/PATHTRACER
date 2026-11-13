@@ -3,6 +3,36 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Hexagonal cropping
+
+`width x height` is now the frame in column pitches on both lattices, the field of view a square render of that size sees. Hexagonal
+rows are sqrt(3)/2 apart, so the lattice fills the frame with `latticeRows = round(height / (sqrt(3)/2))` rows, the count whose extent
+is nearest the frame height. Research's 64x32 traces 64x37, and its lat-long cells are regular on the sphere. Before, they were 15.5%
+taller than wide. A hexagonal pinhole frame no longer sees 15% more horizontal field than the square one.
+
+- feat:
+  - `gfx::latticeRows` derives the rows. Everything below the request already worked on `width x rows`, so projections,
+    `frameExtent` and `pixelCentre` are unchanged.
+  - `HeadlessRenderer::Request` and `PtRenderRequest` take the frame, and their outputs are `width x rows`. This covers
+    `render_beauty`, the C ABI and Python.
+  - The viewer scales the frame, then derives rows, and fits the display to the lattice's extent. A HUD lattice switch resizes the
+    trace.
+  - `pt_lattice_rows(pixel_lattice, height)` gives the C caller its allocation and returns -1 on invalid input. Python's `render`
+    returns `(rows, width, channels)`.
+- breaking: `PT_ABI_VERSION` 13. A hexagonal `render` returns more rows than `height`, and square output is unchanged.
+- fix: `render_beauty` reports, compares and bench-logs the traced buffer, not the requested height.
+- test:
+  - `camera_validate.lattice_rows_fill_the_frame_height`: identity on square. On hexagonal, the nearest count for every height to
+    4096, within half a row.
+  - `c_abi.lattice_rows_size_the_outputs`.
+  - The hexagonal API and ABI checks allocate and verify `width x rows`.
+  - pytest pins 37 rows on the 64x32 lat-long.
+- note: evidence is in `results/hexagonal_cropping`.
+  - Square output is byte-identical.
+  - At a matched 64x37 buffer, the old and new builds compute bit-identical work at equal cost (`render_beauty` B/A 0.9967
+    [0.9765, 1.0097]).
+  - The research workload grows with its 37/32 rows: 1.122x pass time, 0.970x per pixel.
+
 ## AOV contact sheet
 
 `render_beauty --contact-sheet out.png` writes every AOV of one frame as a 4096x2304 PNG: a grid of 683x384 tiles in `AovId` order, the last three cells empty. The grid is derived from the AOV count and the frame aspect, so a 16:9 frame gives 6x6, and a frame that is not 16:9 is letterboxed in its cell, never stretched. Each tile goes through the same `displayImage` as `--out`, is resized with `ImageBufAlgo::resize`, and carries its label top right via `render_text`. No HUD or crosshair, as the headless path has none.

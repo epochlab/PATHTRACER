@@ -233,6 +233,10 @@ def test_hexagonal_pixels_are_the_documented_centres(renderer: Renderer) -> None
     camera = dataclasses.replace(renderer.default_camera, lens="omnidirectional", rotation=(20.0, 30.0, 40.0), pixel_lattice="hexagonal")
     width, height = 64, 32
     frame = renderer.render(aovs=("worldPos", "depth"), camera=camera, width=width, height=height)
+    row_pitch = math.sqrt(3.0) / 2.0
+    # The 64 x 32 frame is filled by the 37 rows whose extent is nearest 32 pitches, so a cell spans one angle across and down.
+    frame_rows = frame["depth"].shape[0]
+    assert frame_rows == round(height / row_pitch) == 37
     hit = frame["depth"][..., 0] > 0.0
     assert hit.any(), "the lat-long should see the scene"
     rotation = _rotation_xyz(camera.rotation)
@@ -241,13 +245,12 @@ def test_hexagonal_pixels_are_the_documented_centres(renderer: Renderer) -> None
     longitude = np.arctan2(view @ right, view @ forward)
     colatitude = np.arctan2(np.hypot(view @ right, view @ forward), view @ up)
     rows, columns = np.nonzero(hit)
-    row_pitch = math.sqrt(3.0) / 2.0
     centre_x = columns + 0.25 + 0.5 * (rows % 2)
     centre_y = (rows + 0.5) * row_pitch
     magnitude = np.abs(frame["worldPos"][hit]).max(axis=-1) + max(map(abs, camera.position))
     angular = 16.0 * np.finfo(np.float32).eps * (math.pi + magnitude / np.linalg.norm(view, axis=-1))
     assert (np.abs(longitude - math.pi * (2.0 * centre_x / width - 1.0)) <= angular / np.sin(colatitude)).all()
-    assert (np.abs(colatitude - math.pi * centre_y / (height * row_pitch)) <= angular).all()
+    assert (np.abs(colatitude - math.pi * centre_y / (frame_rows * row_pitch)) <= angular).all()
 
 
 def test_hexagonal_lattice_refuses_denoised_by_name(renderer: Renderer) -> None:

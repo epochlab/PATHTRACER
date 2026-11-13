@@ -186,8 +186,9 @@ class Camera:
     ``pixel_lattice`` places the pixels. ``"square"`` centres pixel ``(x, y)`` at ``(x + 0.5, y + 0.5)``. ``"hexagonal"`` is a
     sensor of regular hexagons in offset rows, every neighbour one pitch away: pixel ``(x, y)`` is centred at
     ``(x + 0.25 + 0.5 * (y % 2), (y + 0.5) * sqrt(3) / 2)`` column pitches, so odd rows sit half a pitch right of even ones and
-    the frame spans ``width`` by ``height * sqrt(3) / 2`` pitches. The arrays keep shape ``(height, width, channels)``; this field
-    is the layout's only record. A written EXR carries it as ``pathtracer:pixelLattice`` with ``PixelAspectRatio`` ``2 / sqrt(3)``.
+    ``render``'s ``width`` by ``height`` frame is filled by ``round(height / (sqrt(3) / 2))`` rows: both lattices see one field
+    of view. The arrays keep shape ``(rows, width, channels)``; this field is the layout's only record. A written EXR carries it
+    as ``pathtracer:pixelLattice`` with ``PixelAspectRatio`` ``2 / sqrt(3)``.
     The hexagonal lattice refuses ``denoised``: OIDN is trained on square images.
 
     ``acceptance_angle_degrees`` makes each pixel a compound-eye facet: above 0 it is the full width at half maximum, in
@@ -409,7 +410,9 @@ class Renderer:
         ``aberration`` in ``[0, 1)`` reads red at the film point scaled ``1 - aberration`` about the frame centre and blue at
         ``1 + aberration``, each from its nearest pixel; green stays. On the lat-long both wrap across the seam.
 
-        Returns arrays of shape ``(height, width, channels)``, float32, row 0 at the top.
+        ``width`` by ``height`` is the frame in column pitches, the field of view on either lattice. Returns arrays of shape
+        ``(rows, width, channels)``, float32, row 0 at the top: ``rows`` is ``height`` on the square lattice and
+        ``round(height / (sqrt(3) / 2))`` on the hexagonal one, whose rows are ``sqrt(3) / 2`` pitches apart.
         """
         names = tuple(aovs)
         if not names:
@@ -435,9 +438,11 @@ class Renderer:
         env = _float_array(env_rotation, (3,), "env_rotation")
 
         identifiers = [_aov_id(name) for name in names]
+        camera_struct = (camera if camera is not None else self.default_camera)._to_struct()
+        rows = _LIB.pt_lattice_rows(camera_struct.pixel_lattice, height)
         # numpy owns every byte, so nothing is freed across the ABI and the arrays outlive the call without a copy.
         buffers = [
-            np.empty((height, width, _LIB.pt_aov_channels(identifier)), dtype=np.float32)
+            np.empty((rows, width, _LIB.pt_aov_channels(identifier)), dtype=np.float32)
             for identifier in identifiers
         ]
         pointers = (ctypes.POINTER(ctypes.c_float) * len(buffers))(
@@ -445,7 +450,7 @@ class Renderer:
         )
 
         request = _ffi.PtRenderRequest()
-        request.camera = (camera if camera is not None else self.default_camera)._to_struct()
+        request.camera = camera_struct
         if previous_camera is not None:
             request.previous_camera = ctypes.pointer(previous_camera._to_struct())
         request.width = width

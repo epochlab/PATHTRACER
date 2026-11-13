@@ -454,7 +454,7 @@ PT_CHECK(every_aov_renders_finite, Slow, Exact) {
 
 // The hexagonal lattice refuses exactly the AOVs with no hexagonal version, naming them, and renders every other AOV finite.
 PT_CHECK(hexagonal_lattice_refuses_only_denoised, Slow, Exact) {
-    ctx.plan(kAovCount + 1);
+    ctx.plan(kAovCount + 2);
     std::string error;
     const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", "beauty", error);
     if (!renderer) {
@@ -468,14 +468,18 @@ PT_CHECK(hexagonal_lattice_refuses_only_denoised, Slow, Exact) {
                                            pathtracer::gfx::PixelLattice::Hexagonal};
     constexpr int kWidth = 24;
     constexpr int kHeight = 18;
+    // The frame is 24 x 18 pitches, so the outputs hold the 21 hexagonal rows that fill it, not 18.
+    const int rows = pathtracer::gfx::latticeRows(pathtracer::gfx::PixelLattice::Hexagonal, kHeight);
     bool squareTakesAll = true;
+    bool framesFilled = true;
     for (int i = 0; i < kAovCount; ++i) {
         const auto aov = static_cast<AovId>(i);
         squareTakesAll = squareTakesAll && pathtracer::debug::aovSupportsLattice(aov, pathtracer::gfx::PixelLattice::Square);
         const bool supported = pathtracer::debug::aovSupportsLattice(aov, pathtracer::gfx::PixelLattice::Hexagonal);
         const pathtracer::api::HeadlessRenderer::Request request{
             .camera = camera, .width = kWidth, .height = kHeight, .samples = 2, .scrambleSeed = 1, .aovs = {aov}};
-        std::vector<float> buffer(static_cast<std::size_t>(kWidth) * kHeight * static_cast<std::size_t>(pathtracer::debug::aovChannels(aov)));
+        std::vector<float> buffer(static_cast<std::size_t>(kWidth) * static_cast<std::size_t>(rows) *
+                                  static_cast<std::size_t>(pathtracer::debug::aovChannels(aov)));
         float* pointer = buffer.data();
         error.clear();
         const bool rendered = renderer->render(request, std::span<float* const>(&pointer, 1), error);
@@ -483,10 +487,13 @@ PT_CHECK(hexagonal_lattice_refuses_only_denoised, Slow, Exact) {
             return std::isfinite(value) || (aov == AovId::SNR && value == std::numeric_limits<float>::infinity());
         });
         const std::string name = pathtracer::debug::kAovNames[i];
+        framesFilled = framesFilled && (!rendered || (renderer->lastImage(aov).width == kWidth && renderer->lastImage(aov).height == rows &&
+                                                      renderer->lastImage(aov).texels.size() == buffer.size()));
         PT_EXPECT(ctx, supported ? rendered && finite : !rendered && error.starts_with(name) && error.find("Hexagonal") != std::string::npos,
                   name + (supported ? " did not render finite on the hexagonal lattice: " : " was not refused by name: ") + error);
     }
     PT_EXPECT(ctx, squareTakesAll, "the square lattice refuses an AOV");
+    PT_EXPECT(ctx, framesFilled, "a hexagonal output is not 24 columns by the " + std::to_string(rows) + " rows filling the frame");
 }
 
 // Sharing one accumulation, one G-buffer pass and one Beauty across a multi-AOV request must be bit-identical to requesting them singly.
