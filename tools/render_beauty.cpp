@@ -382,20 +382,23 @@ pathtracer::gfx::HdrImage displayImage(const pathtracer::api::HeadlessRenderer& 
 
 constexpr int kSheetWidth = 4096;
 constexpr int kSheetHeight = 2304;
-constexpr int kSheetColumns = 6;
-constexpr int kSheetRows = 6;
 constexpr int kSheetLabelPoints = 20;
 constexpr int kSheetLabelMargin = 12;
 // A system font, found by OIIO in the platform font directories; the default face is a thin monospace.
-constexpr const char* kSheetLabelFont = "Arial";
-static_assert(kSheetColumns * kSheetRows >= static_cast<int>(pathtracer::debug::AovId::Count), "the grid must hold every AOV");
+constexpr const char* kSheetLabelFont = "Helvetica";
 
-// Rounded edge of cell `index` of `cells` over `extent`, so neighbouring tiles abut and the cells sum to exactly the extent.
+// Rounded edge of cell `index` of `cells` over `extent`, so neighbouring cells abut and sum to exactly the extent.
 int cellEdge(int index, int cells, int extent) {
     return ((index * extent) + (cells / 2)) / cells;
 }
 
-// One frame, every AOV: each through its display mapping, resized into a grid cell with its label top right. Empty cells stay black.
+// Columns so a tile of the frame's aspect fills the canvas: cols / rows = canvas aspect / frame aspect, rounded up to hold every cell.
+int sheetColumns(int cells, double frameAspect) {
+    constexpr double kCanvasAspect = static_cast<double>(kSheetWidth) / kSheetHeight;
+    return static_cast<int>(std::ceil(std::sqrt(static_cast<double>(cells) * kCanvasAspect / frameAspect)));
+}
+
+// One frame, every AOV: each through its display mapping, fitted centred in a grid cell with its label top right. Empty cells stay black.
 bool writeContactSheet(const pathtracer::api::HeadlessRenderer& renderer, const pathtracer::scene::Camera& camera,
                        float exposureEv, int passes, const std::string& path) {
     OIIO::ImageBuf canvas(OIIO::ImageSpec(kSheetWidth, kSheetHeight, 3, OIIO::TypeFloat));
@@ -404,16 +407,27 @@ bool writeContactSheet(const pathtracer::api::HeadlessRenderer& renderer, const 
         return false;
     }
     constexpr std::array<float, 3> kLabelColour{1.0F, 1.0F, 1.0F};
-    for (int index = 0; index < static_cast<int>(pathtracer::debug::AovId::Count); ++index) {
-        const int left = cellEdge(index % kSheetColumns, kSheetColumns, kSheetWidth);
-        const int right = cellEdge((index % kSheetColumns) + 1, kSheetColumns, kSheetWidth);
-        const int top = cellEdge(index / kSheetColumns, kSheetRows, kSheetHeight);
-        const int bottom = cellEdge((index / kSheetColumns) + 1, kSheetRows, kSheetHeight);
+    constexpr int kCells = static_cast<int>(pathtracer::debug::AovId::Count);
+    const pathtracer::gfx::HdrImage& frame = renderer.lastImage(pathtracer::debug::AovId::Beauty);
+    const int columns = sheetColumns(kCells, static_cast<double>(frame.width) / frame.height);
+    const int rows = (kCells + columns - 1) / columns;
+    for (int index = 0; index < kCells; ++index) {
+        const int left = cellEdge(index % columns, columns, kSheetWidth);
+        const int right = cellEdge((index % columns) + 1, columns, kSheetWidth);
+        const int top = cellEdge(index / columns, rows, kSheetHeight);
+        const int bottom = cellEdge((index / columns) + 1, rows, kSheetHeight);
         const pathtracer::gfx::HdrImage image = displayImage(renderer, static_cast<pathtracer::debug::AovId>(index), camera, exposureEv, passes);
         const OIIO::ImageBuf full(OIIO::ImageSpec(image.width, image.height, image.channels, OIIO::TypeFloat),
                                   OIIO::cspan<float>(image.texels));
-        const OIIO::ImageBuf tile = OIIO::ImageBufAlgo::resize(full, OIIO::ImageBufAlgo::KWArgs{},OIIO::ROI(0, right - left, 0, bottom - top, 0, 1, 0, 3));
-        if (tile.has_error() || !OIIO::ImageBufAlgo::paste(canvas, left, top, 0, 0, tile) ||
+        // Aspect-preserving fit, so a frame that is not the canvas's aspect is letterboxed rather than stretched.
+        const double scale = std::min(static_cast<double>(right - left) / image.width, static_cast<double>(bottom - top) / image.height);
+        const int tileWidth = std::max(1, static_cast<int>(std::lround(image.width * scale)));
+        const int tileHeight = std::max(1, static_cast<int>(std::lround(image.height * scale)));
+        const OIIO::ImageBuf tile =
+            OIIO::ImageBufAlgo::resize(full, OIIO::ImageBufAlgo::KWArgs{}, OIIO::ROI(0, tileWidth, 0, tileHeight, 0, 1, 0, 3));
+        const int tileLeft = left + ((right - left - tileWidth) / 2);
+        const int tileTop = top + ((bottom - top - tileHeight) / 2);
+        if (tile.has_error() || !OIIO::ImageBufAlgo::paste(canvas, tileLeft, tileTop, 0, 0, tile) ||
             !OIIO::ImageBufAlgo::render_text(canvas, right - kSheetLabelMargin, top + kSheetLabelMargin, pathtracer::debug::kAovLabels[index],
                                              kSheetLabelPoints, kSheetLabelFont, kLabelColour, OIIO::ImageBufAlgo::TextAlignX::Right,
                                              OIIO::ImageBufAlgo::TextAlignY::Top, 1)) {

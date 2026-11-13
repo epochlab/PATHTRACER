@@ -5,7 +5,7 @@ their own sequence; every entry above them is standalone, most recent first.
 
 ## AOV contact sheet
 
-`render_beauty --contact-sheet out.png` writes every AOV of one frame as a 4096x2304 PNG: a 6x6 grid of 683x384 tiles in `AovId` order, the last three cells empty. Each tile goes through the same `displayImage` as `--out`, is resized with `ImageBufAlgo::resize`, and carries its label top right via `render_text`. No HUD or crosshair, as the headless path has none.
+`render_beauty --contact-sheet out.png` writes every AOV of one frame as a 4096x2304 PNG: a grid of 683x384 tiles in `AovId` order, the last three cells empty. The grid is derived from the AOV count and the frame aspect, so a 16:9 frame gives 6x6, and a frame that is not 16:9 is letterboxed in its cell, never stretched. Each tile goes through the same `displayImage` as `--out`, is resized with `ImageBufAlgo::resize`, and carries its label top right via `render_text`. No HUD or crosshair, as the headless path has none.
 
 - feat: `displayImage` is the display block of `render_beauty`'s `main`, shared by `--out` and the sheet, so a tile and a single-AOV PNG are the same encode.
 - test: `image.contact_sheet` renders the sheet at 48x27 and gates on the exit code.
