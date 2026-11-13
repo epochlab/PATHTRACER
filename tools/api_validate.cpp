@@ -1,13 +1,11 @@
-// Correctness gate for the headless path: the AOV tables, the four CPU Beauty filters, and headless_renderer's dispatch.
+// Correctness gate for the headless path: the AOV tables, the CPU Beauty filters, the display maps, and headless_renderer's dispatch.
 
 #include <algorithm>
 #include <array>
-#include <cfloat>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <limits>
-#include <numbers>
 #include <cstdio>
 #include <optional>
 #include <span>
@@ -21,7 +19,6 @@
 #include "pathtracer/debug/aov.h"
 #include "pathtracer/debug/aov_filters.h"
 #include "pathtracer/debug/colormap.h"
-#include "pathtracer/debug/scale_space.h"
 #include "pathtracer/debug/aov_routing.h"
 #include "pathtracer/gfx/display_optics.h"
 #include "pathtracer/scene/camera.h"
@@ -54,10 +51,15 @@ void setTexel(HdrImage& image, int x, int y, float r, float g, float b) {
                          static_cast<std::size_t>(x)) * static_cast<std::size_t>(image.channels)];
 }
 
-// One row of `channels`-channel texels, the shape every display check below feeds aovDisplay or bipolarDisplay.
+// One row of `channels`-channel texels, the shape every display check below feeds aovDisplay.
 [[nodiscard]] HdrImage frame(int channels, std::vector<float> texels) {
     const auto width = static_cast<int>(texels.size() / static_cast<std::size_t>(channels));
     return HdrImage{width, 1, channels, std::move(texels)};
+}
+
+// Motion Vector's shared display gain over `lanes`, interleaved (dx, dy) pairs pooled into one zero-centred range.
+[[nodiscard]] float motionGain(std::vector<float> lanes) {
+    return pathtracer::debug::aovDisplay(AovId::MotionVector, frame(2, std::move(lanes)), {}).affine.gain.x;
 }
 
 }  // namespace
@@ -101,127 +103,23 @@ PT_CHECK(aov_names_round_trip, Fast, Exact) {
     PT_EXPECT(ctx, pathtracer::debug::aovIdFromName("not an aov") == AovId::Count, "unknown name must not resolve");
 }
 
-// Morlet's admissibility term subtracts the envelope's own response to a constant, so the bank's parameters must leave zero mean.
-PT_CHECK(morlet_bank_is_admissible_and_covers_every_orientation, Fast, Exact) {
-    const std::array<float, 4> variances{1.0F, 4.0F, pathtracer::debug::innerScaleVariance(), 64.0F};
-    ctx.plan(static_cast<int>(variances.size()) + 3);
-    // Petkov 1995 eq. 4 read back: sigma*omega is fixed by the bandwidth alone, at one octave 2 sqrt(ln2/2) * 3.
-    const double expected = 2.0 * std::sqrt(std::numbers::ln2 / 2.0) * 3.0;
-    // Swept over the envelope, because the product is what the bandwidth fixes: a carrier not falling as 1/sigma would still pass at one.
-    for (const float variance : variances) {
-        const double sigmaOmega = pathtracer::debug::morletCarrier(variance) * std::sqrt(static_cast<double>(variance));
-        PT_EXPECT(ctx, std::fabs(sigmaOmega - expected) <= 1e-6 * expected,
-                      "at t=" + std::to_string(variance) + " sigma*omega is " + std::to_string(sigmaOmega) + ", not " +
-                          std::to_string(expected));
-    }
-
-    const float variance = pathtracer::debug::innerScaleVariance();
-    const double carrier = pathtracer::debug::morletCarrier(variance);
-    // Below the Nyquist of the grid it runs on, or the carrier itself aliases and the bank measures a frequency that is not there.
-    PT_EXPECT(ctx, carrier < std::numbers::pi,
-                  "carrier " + std::to_string(carrier) + " is at or past the grid Nyquist");
-    // Half response at a chord of sqrt(2 ln2)/sigma from the carrier, so this is how much of a half turn one orientation covers.
-    const double angularWidth = 4.0 * std::asin(std::sqrt(2.0 * std::numbers::ln2) / (2.0 * expected));
-    const double needed = std::numbers::pi / angularWidth;
-    const int orientations = pathtracer::debug::morletOrientations();
-    PT_EXPECT(ctx, static_cast<double>(orientations) >= needed,
-                  std::to_string(orientations) + " orientations leave a gap, " + std::to_string(needed) + " being needed");
-    // And no more than that: one fewer must fail to cover, or the count is not the one the bandwidth forces but a larger choice.
-    PT_EXPECT(ctx, static_cast<double>(orientations - 1) < needed,
-                  std::to_string(orientations) + " orientations exceed the " + std::to_string(needed) + " the bandwidth needs");
-}
-
-// No gradient and no AC content, so both filters must read exactly zero, including at the border where clamping repeats the constant.
-PT_CHECK(filters_are_zero_on_a_constant_field, Fast, Exact) {
-    ctx.plan(2);
-    pathtracer::scene::ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    const HdrImage flat = makeRgbImage(24, 16, 0.375F);
-
-    const HdrImage sobel = pathtracer::debug::sobelAov(flat, pool);
-    float worstSobel = 0.0F;
-    for (int y = 0; y < sobel.height; ++y) {
-        for (int x = 0; x < sobel.width; ++x) {
-            worstSobel = std::max(worstSobel, texelR(sobel, x, y));
-        }
-    }
-    PT_EXPECT(ctx, worstSobel == 0.0F, "peak Sobel response " + std::to_string(worstSobel));
-
-    const HdrImage gabor = pathtracer::debug::gaborAov(flat, pool);
-    float worstGabor = 0.0F;
-    for (int y = 0; y < gabor.height; ++y) {
-        for (int x = 0; x < gabor.width; ++x) {
-            worstGabor = std::max(worstGabor, texelR(gabor, x, y));
-        }
-    }
-    // Two epsilons for the separability gap, one each for scaling it by the field and differencing, doubled by the envelope's factor 2.
-    const double bound = static_cast<double>(0.375F) * 8.0 * static_cast<double>(FLT_EPSILON);
-    PT_EXPECT(ctx, static_cast<double>(worstGabor) <= bound,
-                  "peak Morlet response " + std::to_string(worstGabor) + " over the cancellation bound " + std::to_string(bound));
-}
-
-// A bipolar AOV claims both signs are meaningful, so each must actually produce both on a pattern with structure at several scales.
-PT_CHECK(bipolar_aovs_produce_both_signs, Fast, Exact) {
-    pathtracer::scene::ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    constexpr int kWidth = 256;
-    constexpr int kHeight = 192;
-    HdrImage pattern = makeRgbImage(kWidth, kHeight, 0.0F);
-    for (int y = 0; y < kHeight; ++y) {
-        for (int x = 0; x < kWidth; ++x) {
-            // Per-channel phases, so the chromatic axes swing either side of white as well as the achromatic ones.
-            const auto fx = static_cast<float>(x);
-            const auto fy = static_cast<float>(y);
-            setTexel(pattern, x, y, 0.5F + (0.4F * std::sin(0.5F * fx)), 0.5F + (0.4F * std::sin(0.11F * fy)),
-                     0.5F + (0.4F * std::cos(0.23F * (fx + fy))));
-        }
-    }
-
-    std::vector<AovId> bipolar;
-    for (int i = 0; i < kAovCount; ++i) {
-        const auto aov = static_cast<AovId>(i);
-        if (pathtracer::debug::aovIsBipolar(aov) && pathtracer::debug::aovSource(aov) == AovSource::BeautyFilter) {
-            bipolar.push_back(aov);
-        }
-    }
-    ctx.plan(static_cast<int>(bipolar.size()) + 1);
-    PT_EXPECT(ctx, !bipolar.empty(), "no bipolar filter AOV exists, so this check would assert nothing");
-
-    for (const AovId aov : bipolar) {
-        const HdrImage out = pathtracer::debug::evaluateFilterAov(
-            aov, pathtracer::debug::FilterInput{pattern}, pool);
-        const int channels = pathtracer::debug::aovChannels(aov);
-        float lowest = 0.0F;
-        float highest = 0.0F;
-        for (int i = 0; i < out.width * out.height; ++i) {
-            for (int c = 0; c < channels; ++c) {
-                const float value = out.texels[(static_cast<std::size_t>(i) * static_cast<std::size_t>(channels)) +
-                                               static_cast<std::size_t>(c)];
-                lowest = std::min(lowest, value);
-                highest = std::max(highest, value);
-            }
-        }
-        PT_EXPECT(ctx, lowest < 0.0F && highest > 0.0F,
-                      std::string(pathtracer::debug::kAovNames[static_cast<int>(aov)]) + " spans [" +
-                          std::to_string(lowest) + ", " + std::to_string(highest) + "], not both signs");
-    }
-}
-
 // The auto-range must equal the peak on a field with no outlier and fall below it on one, or a lone texel crushes the whole preview.
-PT_CHECK(bipolar_range_caps_a_lone_outlier, Fast, Exact) {
+PT_CHECK(motion_vector_range_caps_a_lone_outlier, Fast, Exact) {
     ctx.plan(4);
-    constexpr int kPixels = 4096;
+    constexpr int kPixels = 4096;  // samples pooled over dx and dy, so 2048 texels
     std::vector<float> wave(kPixels, 0.0F);
     // A zero-centred square wave: every sample has the same magnitude, so the peak is exactly the RMS and no tail exists to cap.
     for (int i = 0; i < kPixels; ++i) {
         wave[static_cast<std::size_t>(i)] = (i % 2) == 0 ? 1.0F : -1.0F;
     }
     // The gain is the offset divided by the range, so a unit range must reproduce the offset exactly rather than within a rounding.
-    const float flat = pathtracer::debug::bipolarDisplay(frame(1, wave)).gain[0];
+    const float flat = motionGain(wave);
     // sqrt(2 ln n) > 1 for any n > 1, so the extreme-value cap cannot bite here and the true peak must survive it.
     PT_EXPECT(ctx, flat == pathtracer::debug::kBipolarDisplayOffset,
                   "a constant-magnitude field gained " + std::to_string(flat) + ", not the unit-range offset");
 
     wave[0] = 1024.0F;
-    const float outlier = pathtracer::debug::bipolarDisplay(frame(1, wave)).gain[0];
+    const float outlier = motionGain(wave);
     PT_EXPECT(ctx, outlier > pathtracer::debug::kBipolarDisplayOffset / 1024.0F,
                   "a lone outlier still set the range to its own peak, gaining " + std::to_string(outlier));
     // One sample of 1024 among 4096 unit samples lifts the RMS to sqrt(1 + 1024^2/4096) = 16.03, and sqrt(2 ln 4096) = 4.08 scales it.
@@ -231,12 +129,12 @@ PT_CHECK(bipolar_range_caps_a_lone_outlier, Fast, Exact) {
     PT_EXPECT(ctx, std::fabs(static_cast<double>(outlier) - expected) <= expected * 1e-6,
                   "gain " + std::to_string(outlier) + " against the extreme-value prediction " + std::to_string(expected));
 
-    PT_EXPECT(ctx, pathtracer::debug::bipolarDisplay(frame(1, std::vector<float>(kPixels, 0.0F))).gain[0] == 1.0F,
+    PT_EXPECT(ctx, motionGain(std::vector<float>(kPixels, 0.0F)) == 1.0F,
                   "a field with no range did not fall back to unit gain");
 }
 
-// The preview's affine map must carry -range to 0 and +range to 1 at every amplitude, or a signed AOV clips or collapses to mid-grey.
-PT_CHECK(bipolar_display_maps_the_range_to_the_unit_interval, Fast, Exact) {
+// The preview's affine map must carry -range to 0 and +range to 1 at every amplitude, or a motion clips or collapses to mid-grey.
+PT_CHECK(motion_vector_display_maps_the_range_to_the_unit_interval, Fast, Exact) {
     // Powers of two, so the gain and its product with the amplitude are both exact and the comparison needs no tolerance to hide in.
     const std::vector<float> amplitudes{1.0F, 0.5F, 1.0F / 1024.0F, 4096.0F, 0.0F};
     ctx.plan(static_cast<int>(amplitudes.size()) * 2);
@@ -247,7 +145,7 @@ PT_CHECK(bipolar_display_maps_the_range_to_the_unit_interval, Fast, Exact) {
         for (int i = 0; i < kPixels; ++i) {
             wave[static_cast<std::size_t>(i)] = (i % 2) == 0 ? amplitude : -amplitude;
         }
-        const pathtracer::debug::BipolarDisplay display = pathtracer::debug::bipolarDisplay(frame(1, wave));
+        const pathtracer::debug::BipolarDisplay display = pathtracer::debug::aovDisplay(AovId::MotionVector, frame(2, wave), {}).affine;
         const float low = (-amplitude * display.gain[0]) + display.offset[0];
         const float high = (amplitude * display.gain[0]) + display.offset[0];
         // A zero amplitude is the one degenerate case: there is nothing to map, and both ends must land on mid-grey rather than diverge.
@@ -256,55 +154,6 @@ PT_CHECK(bipolar_display_maps_the_range_to_the_unit_interval, Fast, Exact) {
         PT_EXPECT(ctx, low == expectedLow, "amplitude " + std::to_string(amplitude) + " maps its floor to " + std::to_string(low));
         PT_EXPECT(ctx, high == expectedHigh, "amplitude " + std::to_string(amplitude) + " maps its ceiling to " + std::to_string(high));
     }
-}
-
-// Two lanes of one AOV can be incomparable quantities: Colour Opponent's axes differ by 77x over the gamut, so each ranges alone.
-PT_CHECK(bipolar_lanes_range_independently, Fast, Exact) {
-    ctx.plan(3);
-    constexpr int kPixels = 4096;
-    constexpr float kNarrow = 1.0F / 128.0F;
-    constexpr float kWide = 1024.0F;
-    std::vector<float> pairs(static_cast<std::size_t>(kPixels) * 2, 0.0F);
-    for (int i = 0; i < kPixels; ++i) {
-        const float sign = (i % 2) == 0 ? 1.0F : -1.0F;
-        pairs[static_cast<std::size_t>(i) * 2] = sign * kNarrow;
-        pairs[(static_cast<std::size_t>(i) * 2) + 1] = sign * kWide;
-    }
-    const pathtracer::debug::BipolarDisplay display = pathtracer::debug::bipolarDisplay(frame(2, pairs));
-    const float narrow = (kNarrow * display.gain[0]) + display.offset[0];
-    const float wide = (kWide * display.gain[1]) + display.offset[1];
-    PT_EXPECT(ctx, narrow == 1.0F, "the narrow lane reaches only " + std::to_string(narrow) + " of the display, not 1");
-    PT_EXPECT(ctx, wide == 1.0F, "the wide lane reaches " + std::to_string(wide) + ", not 1");
-    // A pooled range would set both gains from the wider lane, so this ratio is exactly what separates the per-lane map from that one.
-    PT_EXPECT(ctx, display.gain[0] == display.gain[1] * (kWide / kNarrow),
-                  "the lanes' gains differ by " + std::to_string(display.gain[0] / display.gain[1]) + ", not the " +
-                      std::to_string(kWide / kNarrow) + " their amplitudes do");
-}
-
-// A lane the AOV never defined carries no measurement, so the preview must leave it black rather than assert a zero response at mid-grey.
-PT_CHECK(bipolar_absent_lanes_render_black, Fast, Exact) {
-    ctx.plan(4);
-    constexpr int kPixels = 256;
-    std::vector<float> pairs(static_cast<std::size_t>(kPixels) * 2, 0.0F);
-    std::vector<float> scalars(kPixels, 0.0F);
-    for (int i = 0; i < kPixels; ++i) {
-        const float sign = (i % 2) == 0 ? 1.0F : -1.0F;
-        pairs[static_cast<std::size_t>(i) * 2] = sign;
-        pairs[(static_cast<std::size_t>(i) * 2) + 1] = sign * 0.5F;
-        scalars[static_cast<std::size_t>(i)] = sign;
-    }
-    const pathtracer::debug::BipolarDisplay two = pathtracer::debug::bipolarDisplay(frame(2, pairs));
-    PT_EXPECT(ctx, two.gain[2] == 0.0F && two.offset[2] == 0.0F,
-                  "a two-channel AOV's third lane gained " + std::to_string(two.gain[2]) + " at offset " +
-                      std::to_string(two.offset[2]) + ", so an undefined lane would show");
-    PT_EXPECT(ctx, two.offset[0] == pathtracer::debug::kBipolarDisplayOffset &&
-                       two.offset[1] == pathtracer::debug::kBipolarDisplayOffset,
-                  "a defined lane lost the mid-grey offset");
-    // The display swizzle broadcasts a scalar AOV across all three lanes, so its one channel must light all three or its grey tints.
-    const pathtracer::debug::BipolarDisplay one = pathtracer::debug::bipolarDisplay(frame(1, scalars));
-    PT_EXPECT(ctx, one.gain == glm::vec3(one.gain[0]), "a scalar AOV's three lanes gained differently, so its grey would tint");
-    PT_EXPECT(ctx, one.offset == glm::vec3(pathtracer::debug::kBipolarDisplayOffset),
-                  "a scalar AOV lost the mid-grey offset on a lane");
 }
 
 // Reads a pre-mapped display float, or a sentinel neither pre-map can produce, so a vanished pre-map fails an assertion not the process.
@@ -406,23 +255,6 @@ PT_CHECK(sample_count_display_matches_the_turbo_colormap, Fast, Exact) {
               "Sample Count pre-mapped with no pass to scale by");
 }
 
-// Visibility's ramp is log10 V over [1/S, S]: invisible at the floor, threshold at the centre, Barten's ceiling S at the top.
-PT_CHECK(contrast_sensitivity_display_is_a_log_turbo_ramp_about_threshold, Fast, Exact) {
-    const auto ceiling = static_cast<float>(pathtracer::debug::bartenSensitivityBound());
-    const std::vector<float> visibility{0.0F, 1.0F / ceiling, 1.0F, ceiling};
-    const std::vector<float> positions{0.0F, 0.0F, 0.5F, 1.0F};
-    ctx.plan(static_cast<int>(visibility.size()));
-    const pathtracer::debug::AovDisplay display = pathtracer::debug::aovDisplay(AovId::ContrastSensitivity, frame(1, visibility), {});
-    for (std::size_t i = 0; i < visibility.size(); ++i) {
-        const glm::vec3 expected = pathtracer::debug::turbo(positions[i]);
-        const glm::vec3 got{displayLane(display, i * 3), displayLane(display, (i * 3) + 1), displayLane(display, (i * 3) + 2)};
-        // log10 of a float ceiling and its reciprocal lands within a few ulp of the ramp's ends, where turbo is continuous.
-        PT_EXPECT(ctx, glm::all(glm::lessThanEqual(glm::abs(got - expected), glm::vec3(16.0F * 0x1p-23F))),
-                  "visibility " + std::to_string(visibility[i]) + " displayed (" + std::to_string(got.r) + ", " + std::to_string(got.g) +
-                      ", " + std::to_string(got.b) + "), not turbo(" + std::to_string(positions[i]) + ")");
-    }
-}
-
 // Raw metres quantize to white and farClip is a ray bound rather than a depth span, so Depth's gain comes from the depth present.
 PT_CHECK(depth_display_ranges_to_its_own_maximum, Fast, Exact) {
     // Powers of two, so 1/max is exact and the product with the maximum must be exactly 1 rather than within a rounding.
@@ -478,12 +310,11 @@ PT_CHECK(the_exposure_reaches_only_radiance_lanes, Fast, Exact) {
 }
 
 // A nonlinear pre-map costs a full frame copy, so it must apply only where the affine map genuinely cannot express the display.
-PT_CHECK(display_premap_applies_to_exactly_four_aovs, Fast, Exact) {
+PT_CHECK(display_premap_applies_to_exactly_three_aovs, Fast, Exact) {
     ctx.plan(kAovCount);
     for (int i = 0; i < kAovCount; ++i) {
         const auto aov = static_cast<AovId>(i);
-        const bool premapped =
-            aov == AovId::SNR || aov == AovId::BounceCount || aov == AovId::SampleCount || aov == AovId::ContrastSensitivity;
+        const bool premapped = aov == AovId::SNR || aov == AovId::BounceCount || aov == AovId::SampleCount;
         PT_EXPECT(ctx, pathtracer::debug::aovDisplay(aov, aovFrame(aov), {1024, 8, kAovFrameMax}).mapped.texels.empty() != premapped,
                       std::string(pathtracer::debug::kAovNames[i]) +
                           (premapped ? " lost its pre-map" : " gained a pre-map it does not need"));
@@ -499,35 +330,6 @@ PT_CHECK(motion_vector_display_pools_its_two_lanes, Fast, Exact) {
     PT_EXPECT(ctx, display.affine.gain.x == display.affine.gain.y && display.affine.gain.x > 0.0F,
                   "dx and dy do not share one positive gain");
     PT_EXPECT(ctx, display.affine.offset == glm::vec3(0.5F, 0.5F, 0.0F), "zero motion does not land on mid-grey in R and G");
-}
-
-// A unit step edge has a closed-form Sobel magnitude: both adjacent columns read exactly 4 and everything further exactly 0.
-PT_CHECK(sobel_step_edge_matches_closed_form, Fast, Exact) {
-    ctx.plan(4);
-    pathtracer::scene::ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    constexpr int kWidth = 16;
-    constexpr int kHeight = 12;
-    constexpr int kEdge = 8;
-
-    HdrImage step = makeRgbImage(kWidth, kHeight, 0.0F);
-    for (int y = 0; y < kHeight; ++y) {
-        for (int x = 0; x < kWidth; ++x) {
-            // White luminance 1.0 requires all three channels at 1, since the Rec.709 weights sum to 1.
-            const float value = x >= kEdge ? 1.0F : 0.0F;
-            setTexel(step, x, y, value, value, value);
-        }
-    }
-
-    const HdrImage sobel = pathtracer::debug::sobelAov(step, pool);
-    const int midRow = kHeight / 2;
-    PT_EXPECT(ctx, texelR(sobel, kEdge - 1, midRow) == 4.0F,
-                  "left of edge " + std::to_string(texelR(sobel, kEdge - 1, midRow)));
-    PT_EXPECT(ctx, texelR(sobel, kEdge, midRow) == 4.0F,
-                  "right of edge " + std::to_string(texelR(sobel, kEdge, midRow)));
-    PT_EXPECT(ctx, texelR(sobel, kEdge - 3, midRow) == 0.0F,
-                  "far left " + std::to_string(texelR(sobel, kEdge - 3, midRow)));
-    PT_EXPECT(ctx, texelR(sobel, kEdge + 3, midRow) == 0.0F,
-                  "far right " + std::to_string(texelR(sobel, kEdge + 3, midRow)));
 }
 
 // Luminance IS the Rec.709 weighted sum (ITU-R BT.709-6), so each primary returns its own weight exactly: a definition, not a measurement.
@@ -689,7 +491,7 @@ PT_CHECK(hexagonal_lattice_refuses_only_denoised, Slow, Exact) {
 
 // Sharing one accumulation, one G-buffer pass and one Beauty across a multi-AOV request must be bit-identical to requesting them singly.
 PT_CHECK(multi_aov_request_matches_single_aov_requests, Slow, Exact) {
-    const std::vector<AovId> combined = {AovId::Beauty, AovId::Depth, AovId::Normal, AovId::Sobel, AovId::AO};
+    const std::vector<AovId> combined = {AovId::Beauty, AovId::Depth, AovId::Normal, AovId::Luminance, AovId::AO};
     ctx.plan(static_cast<int>(combined.size()));
 
     std::string error;
@@ -813,7 +615,7 @@ PT_CHECK(show_sky_changes_only_the_background, Slow, Exact) {
 // A new filter AOV reaching the dispatch's default arm is exactly the class of bug this catches: identical output for two distinct AOVs.
 PT_CHECK(aov_filter_dispatch_is_total, Fast, Exact) {
     pathtracer::scene::ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
-    // Chromatic and wider than Contrast Sensitivity's first band, so no two filters legitimately agree.
+    // Chromatic and non-uniform, so no two filters legitimately agree.
     constexpr int kWidth = 96;
     constexpr int kHeight = 64;
     HdrImage source = makeRgbImage(kWidth, kHeight, 0.0F);
@@ -862,9 +664,6 @@ PT_CHECK(aov_filter_dispatch_is_total, Fast, Exact) {
         counts[texel] = 1 + static_cast<int>(texel % kWidth);
     }
     input.texelSamples = counts.data();
-    // Contrast Sensitivity's angular pitch: a 35 mm lens on a full-frame back.
-    const pathtracer::scene::Camera camera{glm::vec3(0.0F), glm::vec3(0.0F), {36.0F, 24.0F}, 35.0F, 0.01F, 100.0F, 2.8F, 0.008F, 400.0F};
-    input.camera = &camera;
 
     std::vector<HdrImage> outputs;
     outputs.reserve(filters.size());
@@ -988,9 +787,9 @@ PT_CHECK(render_rejects_an_invalid_camera, Fast, Exact) {
               "an invalid previous camera was not rejected under its own name: " + error);
 }
 
-// Optics act on the picture after every producer: Beauty changes, data AOVs and the Sobel of clean Beauty keep every float, once per AOV.
+// Optics act on the picture after every producer: Beauty changes; data AOVs and clean Beauty's Luminance keep every float, once per AOV.
 PT_CHECK(display_optics_touch_only_the_picture_once, Fast, Exact) {
-    const std::vector<AovId> aovs = {AovId::Beauty, AovId::Depth, AovId::Normal, AovId::Sobel};
+    const std::vector<AovId> aovs = {AovId::Beauty, AovId::Depth, AovId::Normal, AovId::Luminance};
     ctx.plan(static_cast<int>(aovs.size()) + 1);
     std::string error;
     const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", "beauty", error);

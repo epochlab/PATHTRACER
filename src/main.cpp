@@ -295,7 +295,7 @@ struct AppResources {
     std::uint64_t traceGeneration = 0;
     std::optional<double> readyMs{};
 
-    // Synchronous pool for the 14 G-buffer AOVs and the Beauty filters. unique_ptr: ThreadPool owns threads and cannot move.
+    // Synchronous pool for the 13 G-buffer AOVs and the Beauty filters. unique_ptr: ThreadPool owns threads and cannot move.
     std::unique_ptr<pathtracer::scene::ThreadPool> gbufferThreadPool = std::make_unique<pathtracer::scene::ThreadPool>();
     // Allocated once and rendered into in place, never republished: its `generation`, not its address, tells one render from the next.
     std::shared_ptr<pathtracer::scene::GBuffer> gbuffer = std::make_shared<pathtracer::scene::GBuffer>();
@@ -661,9 +661,8 @@ const pathtracer::gfx::HdrImage* ensureFilterImage(
     cache.image = pathtracer::debug::evaluateFilterAov(
         aov,
         pathtracer::debug::FilterInput{snapshot->beauty, snapshot->replicateLuminance.data(), snapshot->replicates, snapshot->samples,
-                                       snapshot->texelSamples.data(), snapshot->wrapsHorizontally, snapshot->pixelLattice, &snapshot->denoiseAlbedo, &snapshot->denoiseNormal,
-                                       app.denoiser.get(), &snapshot->shadowLost, &snapshot->shadowUnoccluded,
-                                       snapshot->camera ? &*snapshot->camera : nullptr},
+                                       snapshot->texelSamples.data(), &snapshot->denoiseAlbedo, &snapshot->denoiseNormal,
+                                       app.denoiser.get(), &snapshot->shadowLost, &snapshot->shadowUnoccluded},
         *app.gbufferThreadPool);
     cache.aov = aov;
     cache.generation = snapshot->generation;
@@ -885,9 +884,8 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const pathtracer::scene
     {
         const pathtracer::debug::ScopedCpuTimer gbufferTimer(app.stages.gbufferMs);
         pathtracer::scene::renderGBuffer(camera, previousCamera, app.scene.accel, app.scene.model.shadingTriangles,
-                                         app.scene.model.instances, app.scene.baseSettings.lookaheadDistance,
-                                         app.scene.instanceBounds, traceWidth, traceHeight, *app.gbufferThreadPool,
-                                         *app.gbuffer);
+                                         app.scene.model.instances, app.scene.instanceBounds, traceWidth, traceHeight,
+                                         *app.gbufferThreadPool, *app.gbuffer);
     }
     app.lastGBufferTrigger = gbufferTrigger;
 }

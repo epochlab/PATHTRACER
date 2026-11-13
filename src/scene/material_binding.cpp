@@ -362,7 +362,6 @@ PathTraceSettings baseSettingsOf(const pathtracer::config::ProfileConfig& profil
         .maxBounces = profile.pathTracer.maxBounces,
         .russianRouletteStartBounce = profile.pathTracer.russianRouletteStartBounce,
         .aoMaxDistance = profile.pathTracer.aoMaxDistance,
-        .lookaheadDistance = profile.pathTracer.lookaheadDistance,
         .replicates = profile.pathTracer.replicates,
         .denoiseFeatures = profile.denoiser.enabled,
         .adaptive = {profile.pathTracer.adaptiveThreshold, profile.pathTracer.adaptiveConfidence, profile.pathTracer.adaptiveMinSamples,

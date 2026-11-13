@@ -188,7 +188,6 @@ int main(int argc, char** argv) {
     instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.2F, 0.2F, 0.8F), 0.8F), glm::mat4(1.0F), ""});
     instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.8F, 0.8F, 0.2F), 1.0F), glm::mat4(1.0F), ""});
 
-    const PathTraceSettings settings{.samplesPerPass = 1, .maxBounces = 0, .russianRouletteStartBounce = 1};
     // Once outside the timed loop, as the app does at load: the measured cost is testing the boxes' edges, not deriving them.
     const std::vector<AabbBounds> instanceBounds =
         computeInstanceBounds(shadingTriangles, static_cast<int>(instances.size()));
@@ -208,8 +207,8 @@ int main(int argc, char** argv) {
     // One buffer for the whole run as the app owns it: renderGBuffer reuses it in place, so timed frames measure steady state.
     GBuffer gbuffer;
     // Discarded warm-up pass absorbing the once-only costs: spinning up and parking the pool's workers, and the buffer's only allocation.
-    renderGBuffer(camera, camera, *accel, shadingTriangles, instances, settings.lookaheadDistance, instanceBounds, options->width,
-                  options->height, threadPool, gbuffer);
+    renderGBuffer(camera, camera, *accel, shadingTriangles, instances, instanceBounds, options->width, options->height, threadPool,
+                  gbuffer);
     if (gbuffer.depth.width != options->width) {
         std::cerr << "gbuffer_bench: warm-up produced a " << gbuffer.depth.width << "px-wide buffer\n";
         return EXIT_FAILURE;
@@ -219,8 +218,8 @@ int main(int argc, char** argv) {
     milliseconds.reserve(static_cast<std::size_t>(options->frames));
     for (int frame = 0; frame < options->frames; ++frame) {
         const auto start = std::chrono::steady_clock::now();
-        renderGBuffer(camera, camera, *accel, shadingTriangles, instances, settings.lookaheadDistance, instanceBounds,
-                      options->width, options->height, threadPool, gbuffer);
+        renderGBuffer(camera, camera, *accel, shadingTriangles, instances, instanceBounds, options->width, options->height, threadPool,
+                      gbuffer);
         const auto end = std::chrono::steady_clock::now();
         milliseconds.push_back(std::chrono::duration<double, std::milli>(end - start).count());
         // Reading one texel keeps the optimizer from treating the whole call as dead; the result is otherwise unused.

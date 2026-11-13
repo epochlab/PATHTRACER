@@ -6,7 +6,6 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
-#include <optional>
 #include <span>
 #include <vector>
 
@@ -72,8 +71,6 @@ struct PathTraceSettings {
     int russianRouletteStartBounce;
     // AO ray bound and obscurance falloff scale (Zhukov 1998; Iones 2003): a hit at t gives 1-(1-t/aoMaxDistance)^2 visibility.
     float aoMaxDistance = 1.0F;
-    // Horizon of the Lookahead AOV ramp (gbuffer.h), scene units: ray distance maps linearly to 1 at the camera and 0 here.
-    float lookaheadDistance = 10.0F;
     float rrMinProb = 0.05F;  // floor: stops a near-zero-throughput path being killed with near-certainty
     // Exactly 1.0: a path at full throughput must never be terminated; a lower cap costs more in variance than the deep paths it saves.
     float rrMaxProb = 1.0F;
@@ -159,7 +156,6 @@ struct PathTraceResult {
     std::uint64_t generation = 0;  // the request whose accumulation this is, stamped by PathTraceDriver at publish; 0 from renderPathTraced
     bool wrapsHorizontally = false;  // the lens it was traced through joins its left and right edges, so neighbour reads wrap in x
     pathtracer::gfx::PixelLattice pixelLattice = pathtracer::gfx::PixelLattice::Square;  // where its texels sit on the film
-    std::optional<Camera> camera;  // the camera it was traced through, so a filter needing its angular pitch reads this pass's intrinsics
     int samples = 0;  // passes averaged in, stamped with generation so image and count publish as one snapshot
 };
 

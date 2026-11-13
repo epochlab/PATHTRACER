@@ -135,7 +135,7 @@ target_link_libraries(vendored_imgui PRIVATE glfw)
 target_compile_options(vendored_imgui PRIVATE -w)
 
 # Colorimetry, shared by pathtracer_core and metal_fit. No -march=native or IPO: albedo_table's committed output must reproduce exactly.
-add_library(pathtracer_cie OBJECT src/scene/cie.cpp src/scene/cone_space.cpp)
+add_library(pathtracer_cie OBJECT src/scene/cie.cpp)
 target_include_directories(pathtracer_cie PUBLIC include)
 pathtracer_target_defaults(pathtracer_cie)
 target_link_libraries(pathtracer_cie PRIVATE glm::glm)
@@ -154,7 +154,6 @@ add_library(pathtracer_core STATIC
     src/debug/memory_tracker.cpp
     src/debug/perf_dashboard.cpp
     src/debug/power_spectrum.cpp
-    src/debug/scale_space.cpp
     src/gfx/display_optics.cpp
     src/gfx/hdr_image.cpp
     src/gfx/ocio_cpu_transform.cpp

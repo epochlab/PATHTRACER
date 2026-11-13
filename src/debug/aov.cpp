@@ -35,20 +35,15 @@ AovSource aovSource(AovId aov) {
         // Derived from finished accumulated lanes, Beauty or its companions, so they need light transport but are not lanes of it.
         case AovId::HSV:
         case AovId::Luminance:
-        case AovId::Sobel:
-        case AovId::Gabor:
-        case AovId::ColourOpponent:
-        case AovId::ContrastSensitivity:
         case AovId::SNR:
         case AovId::SampleCount:
         case AovId::Shadow:
         case AovId::Denoised:
             return AovSource::BeautyFilter;
 
-        // The 14 primary-hit lanes renderGBuffer ray-casts. No default: -Werror makes an unclassified AovId a compile error.
+        // The 13 primary-hit lanes renderGBuffer ray-casts. No default: -Werror makes an unclassified AovId a compile error.
         case AovId::Wireframe:
         case AovId::Depth:
-        case AovId::Lookahead:
         case AovId::WorldPos:
         case AovId::UV:
         case AovId::MotionVector:
@@ -70,7 +65,6 @@ int aovChannels(AovId aov) {
     switch (aov) {
         // Scalars, broadcast to RGB for display but carrying one value: a depth, an occlusion fraction, a filter response.
         case AovId::Depth:
-        case AovId::Lookahead:
         case AovId::Alpha:
         case AovId::Metallic:
         case AovId::Roughness:
@@ -81,15 +75,11 @@ int aovChannels(AovId aov) {
         case AovId::SNR:
         case AovId::SampleCount:
         case AovId::Luminance:
-        case AovId::Sobel:
-        case AovId::Gabor:
-        case AovId::ContrastSensitivity:
             return 1;
 
-        // Two-component lanes: UV and image-plane motion have no third axis; Colour Opponent spans the two cardinal chromatic axes only.
+        // Two-component lanes: UV and image-plane motion have no third axis.
         case AovId::UV:
         case AovId::MotionVector:
-        case AovId::ColourOpponent:
             return 2;
 
         // Radiance triples, world-space vectors and the two false-coloured lanes, all three-channel.
@@ -134,19 +124,14 @@ bool aovCarriesRadiance(AovId aov) {
         case AovId::DirectSubsurface:
         case AovId::IndirectSubsurface:
         case AovId::Luminance:
-        case AovId::Sobel:
-        case AovId::Gabor:
             return true;
 
         // Ratios, reflectances, counts, lengths, directions and frequencies: scaling any of them by an exposure means nothing.
         case AovId::HSV:
-        case AovId::ColourOpponent:
-        case AovId::ContrastSensitivity:
         case AovId::MotionVector:
         case AovId::Wireframe:
         case AovId::Alpha:
         case AovId::Depth:
-        case AovId::Lookahead:
         case AovId::WorldPos:
         case AovId::UV:
         case AovId::Normal:
@@ -193,16 +178,11 @@ bool aovIsColour(AovId aov) {
 
         // Scalars, geometry, derived colour coordinates and false colours: no change of primaries applies to them.
         case AovId::Luminance:
-        case AovId::Sobel:
-        case AovId::Gabor:
         case AovId::HSV:
-        case AovId::ColourOpponent:
-        case AovId::ContrastSensitivity:
         case AovId::MotionVector:
         case AovId::Wireframe:
         case AovId::Alpha:
         case AovId::Depth:
-        case AovId::Lookahead:
         case AovId::WorldPos:
         case AovId::UV:
         case AovId::Normal:
@@ -217,56 +197,6 @@ bool aovIsColour(AovId aov) {
         case AovId::SNR:
         case AovId::SampleCount:
         case AovId::Shadow:
-        case AovId::Count:
-            return false;
-    }
-    return false;
-}
-
-bool aovIsBipolar(AovId aov) {
-    switch (aov) {
-        // Responses of a zero-mean operator: zero is the operator's own centre and the two signs are equally meaningful.
-        case AovId::ColourOpponent:
-            return true;
-
-        // Signed but not bipolar: a normal spans a sphere; motion's two signed lanes share one unit, so it takes its own display.
-        case AovId::ContrastSensitivity:
-        case AovId::MotionVector:
-        case AovId::Beauty:
-        case AovId::Wireframe:
-        case AovId::Alpha:
-        case AovId::Depth:
-        case AovId::Lookahead:
-        case AovId::HSV:
-        case AovId::Luminance:
-        case AovId::Sobel:
-        case AovId::Gabor:
-        case AovId::WorldPos:
-        case AovId::UV:
-        case AovId::Normal:
-        case AovId::GeomNormal:
-        case AovId::Albedo:
-        case AovId::Metallic:
-        case AovId::Roughness:
-        case AovId::Tangent:
-        case AovId::ObjectID:
-        case AovId::AO:
-        case AovId::Fresnel:
-        case AovId::IOR:
-        case AovId::BounceCount:
-        case AovId::SNR:
-        case AovId::SampleCount:
-        case AovId::DirectDiffuse:
-        case AovId::IndirectDiffuse:
-        case AovId::DirectSpecular:
-        case AovId::IndirectSpecular:
-        case AovId::Refraction:
-        case AovId::DirectVolume:
-        case AovId::IndirectVolume:
-        case AovId::DirectSubsurface:
-        case AovId::IndirectSubsurface:
-        case AovId::Shadow:
-        case AovId::Denoised:
         case AovId::Count:
             return false;
     }
@@ -305,26 +235,6 @@ namespace {
     return range > 0.0F ? kBipolarDisplayOffset / range : 1.0F;
 }
 
-}  // namespace
-
-BipolarDisplay bipolarDisplay(const pathtracer::gfx::HdrImage& image) {
-    // Ranged per lane, because each lane is its own operator in its own unit: sharing one range would crush the narrower axis to nothing.
-    BipolarDisplay display{glm::vec3(0.0F), glm::vec3(0.0F)};
-    // Texture's swizzle broadcasts a scalar to all three display lanes, so channel 0's range is theirs, not absences left at zero gain.
-    const bool scalar = image.channels == pathtracer::gfx::kScalarChannels;
-    const int lanes = scalar ? glm::vec3::length() : image.channels;
-    const std::array<int, 1> firstLane{0};
-    const float scalarRange = scalar ? pooledRange(image, firstLane) : 0.0F;
-    for (int lane = 0; lane < lanes; ++lane) {
-        const std::array<int, 1> ownLane{lane};
-        display.gain[lane] = bipolarGain(scalar ? scalarRange : pooledRange(image, ownLane));
-        display.offset[lane] = kBipolarDisplayOffset;
-    }
-    return display;
-}
-
-namespace {
-
 // SNR's preview is decibels, the domain-standard unit for a ratio of like-dimensioned amplitudes, so the factor is 20 (EMVA 1288).
 void mapSnrForDisplay(const pathtracer::gfx::HdrImage& snr, int samples, pathtracer::gfx::HdrImage& out) {
     // From 0 dB, the ratio 1 where a texel equals its own uncertainty, to 10*log10(n), the ratio sqrt(n); the shared factor cancels.
@@ -351,29 +261,10 @@ void mapCountForDisplay(const pathtracer::gfx::HdrImage& counts, float ceiling, 
     }
 }
 
-// Visibility on a log10 turbo ramp over [1/S, S], S Barten's ceiling: threshold at the centre, a full-contrast grating at the top.
-void mapVisibilityForDisplay(const pathtracer::gfx::HdrImage& visibility, pathtracer::gfx::HdrImage& out) {
-    const double inverseSpan = 1.0 / (2.0 * std::log10(bartenSensitivityBound()));
-    out = pathtracer::gfx::makeImage(visibility.width, visibility.height, pathtracer::gfx::kRgbChannels);
-    for (std::size_t pixel = 0; pixel < visibility.texels.size(); ++pixel) {
-        // Nothing visible, V = 0, has no logarithm and takes the ramp's floor, as any V below 1/S does.
-        const float value = visibility.texels[pixel];
-        const glm::vec3 mapped = turbo(value > 0.0F ? static_cast<float>(0.5 + (std::log10(static_cast<double>(value)) * inverseSpan)) : 0.0F);
-        float* texel = out.texels.data() + (pixel * pathtracer::gfx::kRgbChannels);
-        texel[0] = mapped.r;
-        texel[1] = mapped.g;
-        texel[2] = mapped.b;
-    }
-}
-
 }  // namespace
 
 AovDisplay aovDisplay(AovId aov, const pathtracer::gfx::HdrImage& image, const AovDisplayContext& context) {
     AovDisplay display{{}, {glm::vec3(1.0F), glm::vec3(0.0F)}};
-    if (aovIsBipolar(aov)) {
-        display.affine = bipolarDisplay(image);
-        return display;
-    }
     switch (aov) {
         // Raw metres quantize to white and farClip is not a depth span, so the depth present is white; an all-miss frame keeps unity.
         case AovId::Depth:
@@ -393,9 +284,6 @@ AovDisplay aovDisplay(AovId aov, const pathtracer::gfx::HdrImage& image, const A
             if (context.samples >= 1) {
                 mapCountForDisplay(image, static_cast<float>(context.samples), display.mapped);
             }
-            return display;
-        case AovId::ContrastSensitivity:
-            mapVisibilityForDisplay(image, display.mapped);
             return display;
         // dx and dy share the pixel, so one pooled range keeps the direction; the swizzle's zero third lane stays black.
         case AovId::MotionVector: {
@@ -437,7 +325,6 @@ GBufferLane gbufferLane(AovId aov) {
     switch (aov) {
         case AovId::IOR:        return &GBuffer::iorAov;
         case AovId::Depth:      return &GBuffer::depth;
-        case AovId::Lookahead:  return &GBuffer::lookahead;
         case AovId::WorldPos:   return &GBuffer::worldPos;
         case AovId::UV:         return &GBuffer::uv;
         case AovId::MotionVector: return &GBuffer::motionVector;
@@ -493,21 +380,16 @@ bool aovSupportsLattice(AovId aov, pathtracer::gfx::PixelLattice lattice) {
         case AovId::Denoised:
             return false;
 
-        // One texel each, a primary ray at the pixel's own centre, or a stencil with a hexagonal version.
+        // One texel each: a primary ray at the pixel's own centre, or a per-texel function of accumulated lanes.
         case AovId::Beauty:
-        case AovId::Sobel:
-        case AovId::Gabor:
         case AovId::Wireframe:
         case AovId::Alpha:
         case AovId::Depth:
-        case AovId::Lookahead:
         case AovId::HSV:
         case AovId::Luminance:
         case AovId::WorldPos:
         case AovId::UV:
         case AovId::MotionVector:
-        case AovId::ColourOpponent:
-        case AovId::ContrastSensitivity:
         case AovId::Normal:
         case AovId::GeomNormal:
         case AovId::Albedo:

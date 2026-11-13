@@ -41,7 +41,6 @@
         "maxBounces": 8,
         "russianRouletteStartBounce": 3,
         "aoMaxDistance": 1.0,
-        "lookaheadDistance": 2.0,
         "replicates": 4,
         "adaptive": {
             "threshold": 0.02,

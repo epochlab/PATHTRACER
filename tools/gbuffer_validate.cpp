@@ -42,7 +42,7 @@ constexpr int kWidth = 96;
 constexpr int kHeight = 96;
 constexpr int kTriangleCount = 150;
 constexpr int kMaterialCount = 4;
-// Depth span the triangle centres are drawn over; the lookahead check derives its horizon from it, so one outside would blind the check.
+// Depth span the triangle centres are drawn over.
 constexpr float kSceneNearZ = 1.0F;
 constexpr float kSceneFarZ = 16.0F;
 constexpr float kEps = std::numeric_limits<float>::epsilon();
@@ -145,30 +145,17 @@ glm::dvec2 pixelPoint(const Camera& camera, int x, int y) {
            static_cast<double>(pathtracer::gfx::pixelSide(camera.pixelLattice()));
 }
 
-// The material-independent settings every check renders with: the AOVs under test are geometric, so these need only be valid, not varied.
-PathTraceSettings makeTestSettings() {
-    PathTraceSettings settings{};
-    settings.samplesPerPass = 1;
-    settings.maxBounces = 0;
-    settings.russianRouletteStartBounce = 1;
-    // Derived from the scene's depth span, not profile.json: the horizon must fall inside it or one remap branch carries no pixels.
-    settings.lookaheadDistance = 0.5F * (kSceneNearZ + kSceneFarZ);
-    return settings;
-}
-
 // One scene and its accel, rebuilt per check: construction is milliseconds, and a check building its own world orders no other.
 struct Fixture {
     std::vector<ShadingTriangle> shadingTriangles;
     std::optional<EmbreeAccel> accel;
     std::vector<MeshInstance> instances;
-    PathTraceSettings settings = makeTestSettings();
     std::vector<AabbBounds> instanceBounds;
     ThreadPool threadPool;
 
     [[nodiscard]] GBuffer render(const Camera& camera, const Camera& previous) {
         GBuffer gbuffer;
-        renderGBuffer(camera, previous, *accel, shadingTriangles, instances, settings.lookaheadDistance, instanceBounds, kWidth, kHeight,
-                      threadPool, gbuffer);
+        renderGBuffer(camera, previous, *accel, shadingTriangles, instances, instanceBounds, kWidth, kHeight, threadPool, gbuffer);
         return gbuffer;
     }
 };
@@ -253,8 +240,8 @@ struct PoseCounts {
 
 // Every lane bar wireframe at a pixel without a surface: zero, IOR's -1 background, and zero motion between identical views.
 bool isBackground(const GBuffer& g, int x, int y) {
-    const std::array<const pathtracer::gfx::HdrImage*, 12> zeroLanes{
-        &g.depth, &g.lookahead, &g.worldPos, &g.uv, &g.motionVector, &g.normal, &g.geomNormal, &g.albedo,
+    const std::array<const pathtracer::gfx::HdrImage*, 11> zeroLanes{
+        &g.depth, &g.worldPos, &g.uv, &g.motionVector, &g.normal, &g.geomNormal, &g.albedo,
         &g.metallic, &g.roughness, &g.tangent, &g.objectId};
     return std::all_of(zeroLanes.begin(), zeroLanes.end(), [&](const auto* lane) { return texelAt(*lane, x, y) == glm::vec3(0.0F); }) &&
            texelAt(g.iorAov, x, y).x == -1.0F;
@@ -271,7 +258,6 @@ bool matchesOracle(const GBuffer& g, int x, int y, const Ray& ray, const glm::ma
     const ShadingFrame frame = buildShadingFrame(triangle, shading, material.geometryNormal);
     const OpenPbrInputs<Constant> inputs = resolveInputs(material, shading.uv, footprint, shading.colour);
     return texelAt(g.depth, x, y).x == hit.t &&
-           texelAt(g.lookahead, x, y).x == std::clamp(1.0F - (hit.t / fixture.settings.lookaheadDistance), 0.0F, 1.0F) &&
            texelAt(g.worldPos, x, y) == shading.position && glm::vec2(texelAt(g.uv, x, y)) == glm::fract(shading.uv) &&
            texelAt(g.normal, x, y) == frame[2] && texelAt(g.geomNormal, x, y) == glm::normalize(shading.normal) &&
            texelAt(g.albedo, x, y) == inputs.baseWeight * inputs.baseColor && texelAt(g.metallic, x, y).x == inputs.baseMetalness &&

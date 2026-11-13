@@ -225,7 +225,6 @@ PathTracerConfig parsePathTracer(const nlohmann::json& pathTracer) {
         pathTracer.at("maxBounces").get<int>(),
         pathTracer.at("russianRouletteStartBounce").get<int>(),
         toFloat(pathTracer.at("aoMaxDistance")),
-        toFloat(pathTracer.at("lookaheadDistance")),
         pathTracer.at("replicates").get<int>(),
         toFloat(adaptive.at("threshold")),
         toFloat(adaptive.at("confidence")),
@@ -238,11 +237,6 @@ bool validPathTracer(const PathTracerConfig& pathTracer, const std::string& path
     // AO ray tfar. At or below zero every occlusion ray is degenerate and the AO lane reads a uniform 1.0: inert white, not an error.
     if (pathTracer.aoMaxDistance <= 0.0F) {
         std::cerr << "loadProfileConfig: " << path << " has a non-positive aoMaxDistance\n";
-        return false;
-    }
-    // The Lookahead ramp divisor: at or below zero every covered pixel divides by it, giving inf or NaN, not the [0,1] gradient.
-    if (pathTracer.lookaheadDistance <= 0.0F) {
-        std::cerr << "loadProfileConfig: " << path << " has a non-positive lookaheadDistance\n";
         return false;
     }
     // Negative or NaN would stop nothing or everything; infinity would stop every texel at its first checkpoint.

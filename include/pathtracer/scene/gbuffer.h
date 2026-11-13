@@ -18,8 +18,6 @@ struct GBuffer {
     pathtracer::gfx::HdrImage iorAov;
     // Distance along the primary ray to the first hit, the one depth every projection defines, a fisheye's past 90 degrees included.
     pathtracer::gfx::HdrImage depth;
-    // `depth` on a fixed scale: 1 at the camera falling linearly to 0 at lookaheadDistance, clamped, so no near/far pair is needed.
-    pathtracer::gfx::HdrImage lookahead;
     pathtracer::gfx::HdrImage worldPos;
     pathtracer::gfx::HdrImage uv;
     // x_now - x_previous in column pitches of the point at the pixel centre, the short way round a lat-long; 0 where a view has no image.
@@ -44,7 +42,6 @@ struct GBuffer {
 // Row-parallel over disjoint rows, through the path tracer's own accel and bounce-0 sampling; previousCamera sets motionVector's origin.
 void renderGBuffer(const Camera& camera, const Camera& previousCamera, const EmbreeAccel& accel,
                    const std::vector<ShadingTriangle>& shadingTriangles, const std::vector<MeshInstance>& instances,
-                   float lookaheadDistance, const std::vector<AabbBounds>& instanceBounds, int width, int height, ThreadPool& threadPool,
-                   GBuffer& out);
+                   const std::vector<AabbBounds>& instanceBounds, int width, int height, ThreadPool& threadPool, GBuffer& out);
 
 }  // namespace pathtracer::scene

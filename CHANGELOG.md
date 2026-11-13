@@ -3,6 +3,38 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Analysis AOVs removed
+
+The Sobel, Gabor, Colour Opponent, Contrast Sensitivity and Lookahead AOVs are removed. 33 AOVs remain: 14 are path-traced, 13 come
+from the G-buffer and 6 are derived after accumulation. Image analysis now lives downstream. Nothing else used the scale space or the
+cone-opponent space, so both are removed with them.
+
+- refactor:
+  - The five ids are gone from `AovId`, the HUD, `pt_aov_id`, Python and `--aov`.
+    - Every later id shifts down. Callers resolve ids by name, so `PT_ABI_VERSION` stays 12.
+  - These are deleted:
+    - `sobelAov`, `gaborAov` with the Morlet bank, and `colourOpponentAov`
+    - `contrastSensitivityAov`, together with the Barten observer and `texelAngularPitch`
+    - `debug/scale_space` and `scene/cone_space`
+  - `PathTraceResult::camera` is removed, and `FilterInput` drops `wrapsHorizontally`, `lattice` and `camera`. The six remaining
+    filters are per-texel.
+  - `aovIsBipolar` and `bipolarDisplay` are removed, because Colour Opponent was their only user. Motion Vector keeps the pooled
+    zero-centred range.
+  - The G-buffer drops its `lookahead` lane, which takes it from 30 to 29 floats per texel. `renderGBuffer` drops its
+    `lookaheadDistance` argument.
+- breaking: `pathTracer.lookaheadDistance` is removed from `profile.json`, `PathTracerConfig` and `PathTraceSettings`.
+- test:
+  - 36 checks for the removed code are deleted, taking ctest from 480 to 444 tests.
+  - The `bipolar_*` range checks now run through Motion Vector's display as `motion_vector_range_caps_a_lone_outlier` and
+    `motion_vector_display_maps_the_range_to_the_unit_interval`.
+  - `display_premap_applies_to_exactly_three_aovs` replaces the four-AOV check.
+  - `io.profile_config_ao_max_distance` replaces `profile_config_scene_scale_distances`.
+  - pytest expects 33 AOVs.
+- note: evidence is in `results/remove_analysis_aovs`.
+  - All 33 surviving AOVs are byte-identical to `main` on cornell and macbeth (proxy) and on cornell (research, hexagonal).
+  - Timing B/A for the G-buffer, `render_beauty` and the viewer is 1.002, 0.991 and 0.995, and every confidence interval contains 1.
+  - The binaries are 73-194 KB smaller.
+
 ## Render presets: beauty, proxy and research
 
 `profile.json` holds the beauty settings again: 2048x1152 at 256 spp, interactive scale 0.1, square pixels and a rectilinear lens. Each
