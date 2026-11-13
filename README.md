@@ -85,17 +85,38 @@ frame["depth"]    # (64, 128, 1) float32, camera-space Z
 
 ## Roadmap
 
-| Area | Item | Detail | Complexity | Status |
-| --- | --- | --- | --- | --- |
-| Texture | Minification filtering | The random checker is never filtered, and normal, bump and roughness maps are read at full resolution at every bounce. They need filtering that keeps surfaces from shading flat; it would also cut the stump's texture reads, still about 60% of its render time. | high | ready |
-| BSDF | Normal-map noise | On normal-mapped glossy metal, glass and coated surfaces, light that bounces between facets more than once is estimated with infinite variance, so its fireflies fade slower than usual. Rough glass also fails its sampling-against-evaluation calibration (`results/untested_paths/bias`). | high | ready |
-| BSDF | Smith-exact transmission | Light that passes through rough glass after bouncing between tiny surface facets uses an approximate, physically lopsided shape. | high | ready |
-| Validation | Hand-set test tolerances | 33 random tests still use fixed seeds or hand-set tolerances instead of bands from the suite's error rate; `ctest -C Calibration -L calibration` lists them as UNDERIVED. | medium | ready |
-| Sampling | Blue noise beyond one dimension | Blue noise makes noise look finer, but the mask spreads error well in one dimension only; a multi-dimensional mask would fix it. | medium | ready |
-| Sampling | Many-light sampling | Lights are picked uniformly, so a small dim light gets as many shadow rays as a large bright one. A light tree would pick by power and orientation, and ReSTIR would reuse picks across pixels. | high | ready |
-| Colour | Measured-observer cones | Model colour vision from measured human eye response. Needs light tracked by wavelength, so it waits for spectral rendering. | high | blocked |
-| Camera | Multi-viewpoint compound eyes | Facets share one viewpoint and one acceptance angle. CompoundRay (Millward et al. 2022) places each on its own eye surface with its own axis and angle, from measured eye data. | high | ready |
-| Camera | Lens model | Most fisheye lenses are only approximated and lose accuracy near the edge. Real cameras also need an off-centre lens and non-square pixels. | medium | ready |
-| Camera | Anamorphic and distortion | Stretched widescreen lenses and real lens distortion. Each needs an inverse to keep motion vectors and texture filtering right. | high | ready |
-| Camera | Subdivision surfaces | Smooth curved surfaces from coarse meshes, subdivided at load. OpenSubDiv. Needs a scene-file flag and waits for the scene graph. | high | blocked |
-| Camera | Scene graph and instancing | Every copy of an object is stored separately. Keeping objects in a hierarchy would let copies share memory and enable motion blur. | high | ready |
+Ordered by execution, easy wins first. ETA is agent working hours to a complete, tested item.
+
+| Area | Item | Detail | Complexity | ETA | Status |
+| --- | --- | --- | --- | --- | --- |
+| Cleanup | Remove analysis AOVs | Remove Sobel, Gabor, Colour Opponent, Contrast Sensitivity and Lookahead AOVs with their variants, bindings and tests. | medium | 1 h | ready |
+| Output | AOV contact sheet | Write every AOV of a frame as one labelled mosaic, each tile through its display mapping, composed with OIIO ImageBufAlgo. | medium | 1 h | ready |
+| Camera | Hexagonal cropping | Rows are √3/2 apart, so a W×H hexagonal image covers 0.87 of the film's height. Derive rows from field of view and lattice pitch. | medium | 1 h | ready |
+| Camera | Lens model | Fisheyes lose accuracy near the edge. Generic polynomial model (Kannala and Brandt 2006) with principal point and pixel aspect. | medium | 1 h | ready |
+| Camera | Motion vectors review | Verify camera motion as the analytic reprojection across every projection, lattice and the omnidirectional seam. | medium | 1 h | ready |
+| Light | IES profiles | Lights emit uniformly. Measured distributions (IES LM-63), importance-sampled from the table and scaled by the existing lumens. | medium | 1 h | ready |
+| Geometry | Displacement bounds and black edges | Black edges on geometry; find the root cause. Bound the terminator lift (Chiang et al. 2019) by triangle geometry and rounding error. | medium | 2 h | ready |
+| Camera | Sensor noise model | Images are noise-free. Shot, read and dark noise and quantisation per EMVA 1288, from the calibrated luminance. | medium | 2 h | ready |
+| Cleanup | Codebase review | Remove dead code, duplicated logic, needless abstraction, redundant copies and loop-invariant work, output unchanged. | medium | 3 h | ready |
+| Validation | Derived test tolerances | 33 tests use literal tolerances or fixed seeds (UNDERIVED under -C Calibration). Derive each band from standard error and alpha. | medium | 3 h | ready |
+| BSDF | Smith-exact transmission | Rough glass multiple scattering uses a lopsided approximation. Random walk on the Smith microsurface (Heitz et al. 2016). | high | 3 h | ready |
+| BSDF | Normal-map noise | Multi-facet bounces on normal-mapped glossy surfaces have infinite variance; rough glass fails its sampling calibration. | high | 4 h | ready |
+| Texture | Minification filtering | Unfiltered maps and checker. OIIO mips by ray-cone width, LEAN normals (Olano and Baker 2010), analytic box-filtered checker. | high | 3 h | ready |
+| Sampling | Blue noise beyond one dimension | The mask spreads error in one dimension only. Blue-noise-distributed Sobol scrambling and ranking (Heitz et al. 2019). | medium | 2 h | ready |
+| Sampling | Many-light sampling | Lights are picked uniformly. Light tree by power and orientation (Conty Estevez and Kulla 2018), then ReSTIR (Bitterli et al. 2020). | high | 6 h | ready |
+| Performance | A/B tuning | Small local speed-ups, kept only on a significant paired-run gain on the proxy profile with output inside calibrated bands. | medium | 3 h | ready |
+| Sampling | Bidirectional paths | Light and eye subpaths joined by MIS (Veach and Guibas 1995) so caustics converge. Waits for Smith-exact transmission. | high | 8 h | blocked |
+| Camera | Anamorphic and distortion | Anamorphic squeeze and Brown-Conrady distortion (Brown 1966), Newton-inverted for motion vectors and texture filtering. | high | 2 h | ready |
+| Camera | Event camera output | Log-contrast events for neuromorphic sensors, timed by interpolating between rendered frames (Rebecq et al. 2018). | medium | 3 h | ready |
+| Camera | Multi-viewpoint compound eyes | Facets share one viewpoint and angle. Per-facet position, axis and acceptance from measured eye data (Millward et al. 2022). | high | 3 h | ready |
+| Colour | Spectral transport | Per-path wavelength sampling (Wilkie et al. 2014) by channel sensitivity; spectral upsampling of textures (Jakob and Hanika 2019). | high | 6 h | ready |
+| Colour | Measured-observer cones | Colour vision from CIE 2006 cone fundamentals (Stockman and Sharpe 2000). Waits for spectral transport. | high | 1 h | blocked |
+| Light | Polarisation | No polarisation state. Stokes-Mueller transport (Wilkie and Weidlich 2012) with a polarised sky (Wilkie et al. 2004). | high | 6 h | ready |
+| Geometry | Scene graph and instancing | Every copy is stored separately. Embree two-level instancing under a transform hierarchy. | high | 5 h | ready |
+| Geometry | OpenUSD scenes | Read USD meshes, transforms, instancing, UsdLux lights and UsdShade OpenPBR materials onto the scene graph. Waits for scene graph. | high | 6 h | blocked |
+| Geometry | Subdivision surfaces | Smooth surfaces from coarse meshes via OpenSubdiv at load, honouring USD subdivision schemes. Waits for OpenUSD. | high | 2 h | blocked |
+| Geometry | Geometry motion vectors | Moving geometry reads as static. Reproject hits by previous instance transforms and USD time-sampled points. Waits for OpenUSD. | medium | 2 h | blocked |
+| Output | Upscaling | Spatial or temporal (Xiao et al. 2020); temporal reads motionVector. Never replaces the converged Beauty. | medium | 3 h | ready |
+| Output | Generative channel | Diffusion refinement AOV and latents (Ho et al. 2020; Rombach et al. 2022) from the Denoised AOV. Never replaces Beauty. | high | 6 h | ready |
+| Performance | Wavefront rearchitecture | Single-ray inline shading caps throughput. Embree streams with material-sorted shading (Laine, Karras and Aila 2013), before GPU. | high | 16 h | ready |
+| Performance | GPU denoising | Move Open Image Denoise to its GPU device, output unchanged. Waits for a GPU backend after wavefront. | medium | 2 h | blocked |
