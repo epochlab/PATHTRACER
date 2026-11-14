@@ -103,7 +103,7 @@ typedef struct {
     const float* root_rotation_degrees;
     /* NULL keeps every authored lights[i].rotation, else 3 * pt_renderer_light_count floats, each light under the root. */
     const float* light_rotation_degrees;
-    /* NULL keeps every authored light colour, else pt_renderer_light_count kelvin: each a Planckian colour at unit luminance. */
+    /* NULL keeps every authored light colour, else pt_renderer_light_count kelvin, each on that light's illuminant locus. */
     const float* light_temperature_kelvin;
     /* The environment map to world, background and lighting alike; all zero is the map unrotated. */
     float env_rotation_degrees[3];

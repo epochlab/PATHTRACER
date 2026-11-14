@@ -104,21 +104,22 @@ struct SceneInputs {
     return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
 }
 
-// Each light's colour for this request: its kelvin override resolved on the Planckian locus, else the authored colour.
+// Each light's colour for this request: its kelvin override resolved on the light's own illuminant locus, else the authored colour.
 [[nodiscard]] std::optional<std::vector<glm::vec3>> lightColours(const HeadlessRenderer::Request& request,
                                                                  const std::vector<pathtracer::config::LightConfig>& lights,
                                                                  std::string& error) {
     std::vector<glm::vec3> colours;
     colours.reserve(lights.size());
     for (std::size_t i = 0; i < lights.size(); ++i) {
-        if (!request.lightTemperaturesKelvin.has_value()) {
+        if (!request.lightKelvins.has_value()) {
             colours.push_back(lights[i].color);
             continue;
         }
-        const float kelvin = (*request.lightTemperaturesKelvin)[i];
-        const std::optional<glm::dvec3> rgb = pathtracer::scene::cie::blackbodyToScene(kelvin);
+        const float kelvin = (*request.lightKelvins)[i];
+        const std::optional<glm::dvec3> rgb = pathtracer::scene::cie::kelvinToScene(lights[i].illuminant, kelvin);
         if (!rgb) {
-            error = "light temperature " + std::to_string(kelvin) + " K is not positive or lies outside the scene gamut";
+            error = "light kelvin " + std::to_string(kelvin) + " for light " + std::to_string(i) +
+                    " lies outside its illuminant's domain or the scene gamut";
             return std::nullopt;
         }
         colours.emplace_back(*rgb);
@@ -188,8 +189,8 @@ struct SceneInputs {
             return false;
         }
     }
-    if (request.lightTemperaturesKelvin.has_value() && request.lightTemperaturesKelvin->size() != lightCount) {
-        error = "light temperatures number " + std::to_string(request.lightTemperaturesKelvin->size()) + ", the scene has " +
+    if (request.lightKelvins.has_value() && request.lightKelvins->size() != lightCount) {
+        error = "light kelvins number " + std::to_string(request.lightKelvins->size()) + ", the scene has " +
                 std::to_string(lightCount) + " lights";
         return false;
     }

@@ -427,7 +427,7 @@ PT_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
     };
     const std::string validLights =
         ",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
-        "\"color\":[1,1,1],\"luminance\":5.0,\"twoSided\":false}]";
+        "\"color\":[1,1,1],\"nits\":5.0,\"twoSided\":false}]";
 
     const std::vector<Case> cases = {
         {"not JSON at all", "engine_io_scene_notjson.json", "{ this is not json"},
@@ -445,24 +445,24 @@ PT_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
                "\"materialPath\":\"materials/volume.json\"}]")},
         {"a camera without its far clip", "engine_io_scene_camera.json", scene(",\"camera\":{\"position\":[0,0,9],\"rotation\":[0,0,0]}")},
         // Negative radiance is not a scene, and would propagate as negative energy through every estimator.
-        {"negative light luminance", "engine_io_scene_negluminance.json",
+        {"negative light nits", "engine_io_scene_negluminance.json",
          scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
-               "\"color\":[1,1,1],\"luminance\":-5.0,\"twoSided\":false}]")},
+               "\"color\":[1,1,1],\"nits\":-5.0,\"twoSided\":false}]")},
         // A zero extent is a quad with no area; a negative one would mirror it and silently flip the emitting face.
         {"quad light with a zero size", "engine_io_scene_zerosizelight.json",
          scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,0],"
-               "\"color\":[1,1,1],\"luminance\":5.0,\"twoSided\":false}]")},
+               "\"color\":[1,1,1],\"nits\":5.0,\"twoSided\":false}]")},
         {"quad light with a negative size", "engine_io_scene_negsizelight.json",
          scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[-1,1],"
-               "\"color\":[1,1,1],\"luminance\":5.0,\"twoSided\":false}]")},
+               "\"color\":[1,1,1],\"nits\":5.0,\"twoSided\":false}]")},
         // The retired corner + edges form has no position, so it fails rather than placing a light nobody authored.
         {"the retired quad light origin/edge0/edge1 keys", "engine_io_scene_cornerlight.json",
          scene(",\"lights\":[{\"type\":\"quad\",\"origin\":[0,0,0],\"edge0\":[1,0,0],\"edge1\":[0,0,1],"
-               "\"color\":[1,1,1],\"luminance\":5.0,\"twoSided\":false}]")},
+               "\"color\":[1,1,1],\"nits\":5.0,\"twoSided\":false}]")},
         // Closed key set: a leftover edge0 beside a complete placement would otherwise be ignored silently.
         {"a stale quad light edge0 key", "engine_io_scene_staleedge.json",
          scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
-               "\"edge0\":[1,0,0],\"color\":[1,1,1],\"luminance\":5.0,\"twoSided\":false}]")},
+               "\"edge0\":[1,0,0],\"color\":[1,1,1],\"nits\":5.0,\"twoSided\":false}]")},
         // Each node maps slot names to paths; a bare path string would leave the slot unstated.
         {"textures entry that is not a slot object", "engine_io_scene_textureflat.json",
          scene(",\"textures\":{\"sphere01\":\"textures/macbeth.exr\"}")},
@@ -492,56 +492,56 @@ PT_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
          "\"materialPath\":\"materials/clay.json\"}"},
         {"negative light colour", "engine_io_scene_negcolor.json",
          scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
-               "\"color\":[1,-1,1],\"luminance\":5.0,\"twoSided\":false}]")},
+               "\"color\":[1,-1,1],\"nits\":5.0,\"twoSided\":false}]")},
         // A light's colour is authored once: both keys leave it ambiguous, neither leaves it unset.
-        {"a light with both color and temperature", "engine_io_scene_colortemp.json",
+        {"a light with both color and kelvin", "engine_io_scene_colortemp.json",
          scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
-               "\"color\":[1,1,1],\"temperature\":2856,\"luminance\":5.0}]")},
-        {"a light with neither color nor temperature", "engine_io_scene_nocolor.json",
-         scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],\"luminance\":5.0}]")},
-        {"a zero light temperature", "engine_io_scene_zerotemp.json",
+               "\"color\":[1,1,1],\"kelvin\":2856,\"nits\":5.0}]")},
+        {"a light with neither color nor kelvin", "engine_io_scene_nocolor.json",
+         scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],\"nits\":5.0}]")},
+        {"a zero light kelvin", "engine_io_scene_zerotemp.json",
          scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
-               "\"temperature\":0,\"luminance\":5.0}]")},
+               "\"kelvin\":0,\"nits\":5.0}]")},
         // Each shape's own extent is a measure, so zero or negative is no light; each key set is closed per type.
         {"a disk light with a zero radius", "engine_io_scene_diskradius.json",
-         scene(",\"lights\":[{\"type\":\"disk\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"radius\":0,\"color\":[1,1,1],\"luminance\":5.0}]")},
+         scene(",\"lights\":[{\"type\":\"disk\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"radius\":0,\"color\":[1,1,1],\"nits\":5.0}]")},
         {"a sphere light with a negative radius", "engine_io_scene_sphereradius.json",
-         scene(",\"lights\":[{\"type\":\"sphere\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"radius\":-1,\"color\":[1,1,1],\"luminance\":5.0}]")},
+         scene(",\"lights\":[{\"type\":\"sphere\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"radius\":-1,\"color\":[1,1,1],\"nits\":5.0}]")},
         // A sphere is closed: its inside is never lit, so a twoSided switch would be a key with no meaning.
         {"a sphere light with twoSided", "engine_io_scene_spheresided.json",
-         scene(",\"lights\":[{\"type\":\"sphere\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"radius\":1,\"color\":[1,1,1],\"luminance\":5.0,"
+         scene(",\"lights\":[{\"type\":\"sphere\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"radius\":1,\"color\":[1,1,1],\"nits\":5.0,"
                "\"twoSided\":true}]")},
         {"a mesh light with a zero scale", "engine_io_scene_meshscale.json",
          scene(",\"lights\":[{\"type\":\"mesh\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"gltfPath\":\"m.gltf\",\"scale\":0,"
-               "\"color\":[1,1,1],\"luminance\":5.0}]")},
+               "\"color\":[1,1,1],\"nits\":5.0}]")},
         {"a mesh light without its gltfPath", "engine_io_scene_meshpath.json",
-         scene(",\"lights\":[{\"type\":\"mesh\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"color\":[1,1,1],\"luminance\":5.0}]")},
+         scene(",\"lights\":[{\"type\":\"mesh\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"color\":[1,1,1],\"nits\":5.0}]")},
         {"a disk light with a quad's size key", "engine_io_scene_disksize.json",
          scene(",\"lights\":[{\"type\":\"disk\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"radius\":1,\"size\":[1,1],"
-               "\"color\":[1,1,1],\"luminance\":5.0}]")},
+               "\"color\":[1,1,1],\"nits\":5.0}]")},
         // Point, spot and distant lights have no surface to hit: an unknown type fails rather than loading as another.
         {"a point light", "engine_io_scene_pointlight.json",
-         scene(",\"lights\":[{\"type\":\"point\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"color\":[1,1,1],\"luminance\":5.0}]")},
+         scene(",\"lights\":[{\"type\":\"point\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"color\":[1,1,1],\"nits\":5.0}]")},
         // A black colour has no luminance to normalise by: it is no light, not a dark one.
         {"a black light colour", "engine_io_scene_blackcolor.json",
          scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
-               "\"color\":[0,0,0],\"luminance\":5.0}]")},
-        // A light's output is authored once, as a luminance or a flux: both leave it ambiguous, neither leaves it unset.
-        {"a light with both luminance and lumens", "engine_io_scene_lumlm.json",
+               "\"color\":[0,0,0],\"nits\":5.0}]")},
+        // A light's output is authored once, as nits or lumens: both leave it ambiguous, neither leaves it unset.
+        {"a light with both nits and lumens", "engine_io_scene_lumlm.json",
          scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
-               "\"color\":[1,1,1],\"luminance\":5.0,\"lumens\":800}]")},
-        {"a light with neither luminance nor lumens", "engine_io_scene_nolum.json",
+               "\"color\":[1,1,1],\"nits\":5.0,\"lumens\":800}]")},
+        {"a light with neither nits nor lumens", "engine_io_scene_nolum.json",
          scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],\"color\":[1,1,1]}]")},
-        {"a zero light luminance", "engine_io_scene_zerolum.json",
+        {"a zero light nits", "engine_io_scene_zerolum.json",
          scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
-               "\"color\":[1,1,1],\"luminance\":0}]")},
+               "\"color\":[1,1,1],\"nits\":0}]")},
         {"negative light lumens", "engine_io_scene_neglumens.json",
          scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
                "\"color\":[1,1,1],\"lumens\":-800}]")},
         // The unitless multiplier photometric units replaced: refused by name rather than read as cd/m^2.
         {"the legacy intensity key", "engine_io_scene_intensity.json",
          scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
-               "\"color\":[1,1,1],\"luminance\":5.0,\"intensity\":5.0}]")},
+               "\"color\":[1,1,1],\"nits\":5.0,\"intensity\":5.0}]")},
         // A calibration target in lux: zero would black the sky, which lightEnabled false already says.
         {"a zero environment lux", "engine_io_scene_zerolux.json",
          "{\"environment\":{\"hdriPath\":\"textures/republiqueHDR_2k.exr\",\"lux\":0}}"},
@@ -550,9 +550,30 @@ PT_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
         {"a string environment lux", "engine_io_scene_strlux.json",
          "{\"environment\":{\"hdriPath\":\"textures/republiqueHDR_2k.exr\",\"lux\":\"x\"}}"},
         // The locus leaves AP1 below about 600 K: 500 K has negative green, which a clamp would hide as a hue shift.
-        {"a light temperature outside the scene gamut", "engine_io_scene_gamuttemp.json",
+        {"a light kelvin outside the scene gamut", "engine_io_scene_gamuttemp.json",
          scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
-               "\"temperature\":500,\"luminance\":5.0}]")},
+               "\"kelvin\":500,\"nits\":5.0}]")},
+        // Renamed by unit to sit beside lux and lumens: the old names fail rather than load as a default.
+        {"the retired temperature key", "engine_io_scene_oldtemp.json",
+         scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
+               "\"temperature\":2856,\"nits\":5.0}]")},
+        {"the retired luminance key", "engine_io_scene_oldlum.json",
+         scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
+               "\"color\":[1,1,1],\"luminance\":5.0}]")},
+        // An illuminant names the locus a kelvin lies on: beside an authored colour it has nothing to name.
+        {"an illuminant beside color", "engine_io_scene_illumcolor.json",
+         scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
+               "\"color\":[1,1,1],\"illuminant\":\"daylight\",\"nits\":5.0}]")},
+        {"an unknown illuminant", "engine_io_scene_illumname.json",
+         scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
+               "\"kelvin\":6504,\"illuminant\":\"D65\",\"nits\":5.0}]")},
+        // CIE defines daylight's locus over 4000-25000 K only; past either end the polynomial is an extrapolation.
+        {"a daylight kelvin below 4000 K", "engine_io_scene_daylow.json",
+         scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
+               "\"kelvin\":3999,\"illuminant\":\"daylight\",\"nits\":5.0}]")},
+        {"a daylight kelvin above 25000 K", "engine_io_scene_dayhigh.json",
+         scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
+               "\"kelvin\":25001,\"illuminant\":\"daylight\",\"nits\":5.0}]")},
     };
 
     // Anti-vacuity: the base the scene() rows are built from must itself LOAD, or they would prove nothing.
@@ -560,18 +581,24 @@ PT_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
     const bool baseLoads = pathtracer::config::loadSceneConfig(basePath.string()).has_value();
     std::filesystem::remove(basePath);
 
-    // Anti-vacuity for the temperature rows: an in-gamut temperature loads, resolved to the blackbody colour.
+    // Anti-vacuity for the kelvin rows: a blackbody and a daylight kelvin load, each resolved on its own locus.
     const std::filesystem::path tempPath = writeJson("engine_io_scene_temp.json",
         scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
-              "\"temperature\":2856,\"luminance\":5.0}]"));
+              "\"kelvin\":2856,\"nits\":5.0},{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
+              "\"kelvin\":6504,\"illuminant\":\"daylight\",\"nits\":5.0}]"));
     const std::optional<pathtracer::config::SceneConfig> tempScene = pathtracer::config::loadSceneConfig(tempPath.string());
     std::filesystem::remove(tempPath);
 
-    ctx.plan(static_cast<int>(cases.size()) + 2);
+    using pathtracer::scene::cie::Illuminant;
+    ctx.plan(static_cast<int>(cases.size()) + 3);
     PT_EXPECT(ctx, baseLoads,
                   "the unmutated base scene must load, or every mutated row below passes vacuously");
-    PT_EXPECT(ctx, tempScene && tempScene->lights.at(0).color == glm::vec3(*pathtracer::scene::cie::blackbodyToScene(2856.0)),
+    PT_EXPECT(ctx, tempScene && tempScene->lights.at(0).illuminant == Illuminant::Blackbody &&
+                       tempScene->lights.at(0).color == glm::vec3(*pathtracer::scene::cie::kelvinToScene(Illuminant::Blackbody, 2856.0)),
               "a 2856 K light did not load as the blackbody colour");
+    PT_EXPECT(ctx, tempScene && tempScene->lights.at(1).illuminant == Illuminant::Daylight &&
+                       tempScene->lights.at(1).color == glm::vec3(*pathtracer::scene::cie::kelvinToScene(Illuminant::Daylight, 6504.0)),
+              "a 6504 K daylight light did not load as the daylight colour");
     for (const Case& testCase : cases) {
         const std::filesystem::path path = writeJson(testCase.file, testCase.text);
         const bool accepted = pathtracer::config::loadSceneConfig(path.string()).has_value();
@@ -587,11 +614,11 @@ PT_CHECK(scene_config_reads_every_light_shape, Fast, Exact) {
     const std::filesystem::path path = writeJson(
         "engine_io_scene_shapes.json",
         "{\"environment\":{\"hdriPath\":\"textures/republiqueHDR_2k.exr\",\"lux\":405.5},\"lights\":["
-        "{\"type\":\"disk\",\"position\":[1,2,3],\"rotation\":[10,20,30],\"radius\":0.25,\"color\":[1,0.5,0.25],\"luminance\":4.0,\"twoSided\":true},"
-        "{\"type\":\"sphere\",\"position\":[0,1,0],\"rotation\":[0,0,0],\"radius\":0.5,\"temperature\":2856,\"luminance\":2.0},"
+        "{\"type\":\"disk\",\"position\":[1,2,3],\"rotation\":[10,20,30],\"radius\":0.25,\"color\":[1,0.5,0.25],\"nits\":4.0,\"twoSided\":true},"
+        "{\"type\":\"sphere\",\"position\":[0,1,0],\"rotation\":[0,0,0],\"radius\":0.5,\"kelvin\":6504,\"illuminant\":\"daylight\",\"nits\":2.0},"
         "{\"type\":\"mesh\",\"position\":[0,0,1],\"rotation\":[0,90,0],\"gltfPath\":\"mesh.gltf\","
         "\"scale\":0.3,\"color\":[1,1,1],\"lumens\":800.0},"
-        "{\"type\":\"mesh\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"gltfPath\":\"m.gltf\",\"color\":[1,1,1],\"luminance\":1.0}]}");
+        "{\"type\":\"mesh\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"gltfPath\":\"m.gltf\",\"color\":[1,1,1],\"nits\":1.0}]}");
     const std::optional<pathtracer::config::SceneConfig> scene = pathtracer::config::loadSceneConfig(path.string());
     std::filesystem::remove(path);
     ctx.plan(5);
@@ -609,9 +636,10 @@ PT_CHECK(scene_config_reads_every_light_shape, Fast, Exact) {
                        scene->lights[0].color == unitColor && luminance && luminance->candelasPerSquareMetre == 4.0F,
               "the disk's radius, placement, side, unit-luminance colour or luminance did not read as authored");
     const auto* sphere = std::get_if<pathtracer::config::SphereShape>(&scene->lights[1].shape);
-    PT_EXPECT(ctx, sphere && sphere->radius == 0.5F && !scene->lights[1].twoSided &&
-                       scene->lights[1].color == glm::vec3(*pathtracer::scene::cie::blackbodyToScene(2856.0)),
-              "the sphere's radius or temperature did not read as authored");
+    using pathtracer::scene::cie::Illuminant;
+    PT_EXPECT(ctx, sphere && sphere->radius == 0.5F && !scene->lights[1].twoSided && scene->lights[1].illuminant == Illuminant::Daylight &&
+                       scene->lights[1].color == glm::vec3(*pathtracer::scene::cie::kelvinToScene(Illuminant::Daylight, 6504.0)),
+              "the sphere's radius, kelvin or daylight illuminant did not read as authored");
     const auto* scaled = std::get_if<pathtracer::config::MeshShape>(&scene->lights[2].shape);
     const auto* unscaled = std::get_if<pathtracer::config::MeshShape>(&scene->lights[3].shape);
     PT_EXPECT(ctx, scaled && scaled->gltfPath == "mesh.gltf" && scaled->scale == 0.3F && unscaled &&
@@ -1502,7 +1530,7 @@ PT_CHECK(json_float_reads_refuse_float_overflow, Fast, Exact) {
         std::vector<const char*> floatFields;  // JSON pointers into base
     };
     const nlohmann::json light = {{"type", "quad"},      {"position", {0, 0, 0}}, {"rotation", {0, 0, 0}}, {"size", {1, 1}},
-                                  {"color", {1, 1, 1}}, {"luminance", 5.0}};
+                                  {"color", {1, 1, 1}}, {"nits", 5.0}};
     const nlohmann::json scene = {
         {"model", {{"gltfPath", "geometry/cornell/cornell_v001.gltf"}, {"position", {0, 0, 0}}, {"rotation", {0, 0, 0}}}},
         {"environment", {{"hdriPath", "textures/republiqueHDR_2k.exr"}, {"lux", 405.6}}},
@@ -1535,7 +1563,7 @@ PT_CHECK(json_float_reads_refuse_float_overflow, Fast, Exact) {
         {"loadSceneConfig", scene,
          [](const std::string& path) { return pathtracer::config::loadSceneConfig(path).has_value(); },
          {"/model/position/0", "/model/rotation/1", "/lights/0/position/2", "/lights/0/rotation/0", "/lights/0/size/1",
-          "/lights/0/color/0", "/lights/0/luminance", "/environment/lux"}},
+          "/lights/0/color/0", "/lights/0/nits", "/environment/lux"}},
         {"loadSceneConfig bump", texturedScene,
          [](const std::string& path) { return pathtracer::config::loadSceneConfig(path).has_value(); },
          {"/textures/node/geometry_normal/bump/height"}},
@@ -1582,12 +1610,12 @@ PT_CHECK(json_float_reads_refuse_float_overflow, Fast, Exact) {
         }
     }
 
-    // The exact boundary, on luminance, which has no upper bound of its own: below FLT_MAX + ulp/2 rounds to FLT_MAX, the tie to inf.
+    // The exact boundary, on nits, which has no upper bound of its own: below FLT_MAX + ulp/2 rounds to FLT_MAX, the tie to inf.
     const double floatMax = std::numeric_limits<float>::max();
     const double halfUlp = 0.5 * (floatMax - std::nextafter(std::numeric_limits<float>::max(), 0.0F));
     const auto luminanceLoaded = [&](double luminance) {
         nlohmann::json edited = scene;
-        edited["lights"][0]["luminance"] = luminance;
+        edited["lights"][0]["nits"] = luminance;
         const std::filesystem::path path = writeJson("engine_io_float_boundary.json", edited.dump());
         const std::optional<pathtracer::config::SceneConfig> loaded = pathtracer::config::loadSceneConfig(path.string());
         std::filesystem::remove(path);

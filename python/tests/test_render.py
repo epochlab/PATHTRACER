@@ -641,8 +641,8 @@ def test_env_rotation_turns_the_sky(renderer: Renderer) -> None:
     assert not np.array_equal(renderer.render(**common)["beauty"], renderer.render(**common, env_rotation=(0, 180, 0))["beauty"])
 
 
-def test_light_temperature_scales_each_channel_of_the_light(renderer: Renderer) -> None:
-    """With the environment off, paths do not depend on the light's colour, so a temperature rescales each channel uniformly.
+def test_light_kelvin_scales_each_channel_of_the_light(renderer: Renderer) -> None:
+    """With the environment off, paths do not depend on the light's colour, so a kelvin rescales each channel uniformly.
 
     The per-channel ratio to the authored render recovers the light's new colour: warmer is redder, and returning to
     None restores the authored floats exactly.
@@ -655,7 +655,7 @@ def test_light_temperature_scales_each_channel_of_the_light(renderer: Renderer) 
     tolerance = common["samples"] * (profile["pathTracer"]["maxBounces"] + 1) * np.finfo(np.float32).eps
     red_over_blue = []
     for kelvin in (2856.0, 6504.0):
-        ratio = renderer.render(**common, light_temperatures=(kelvin,))["beauty"][lit] / authored[lit]
+        ratio = renderer.render(**common, light_kelvins=(kelvin,))["beauty"][lit] / authored[lit]
         spread = (ratio.max(axis=0) - ratio.min(axis=0)) / ratio.mean(axis=0)
         assert np.all(spread <= tolerance), f"{kelvin} K: per-channel spread {spread} exceeds {tolerance:.2e}"
         red_over_blue.append(ratio.mean(axis=0)[0] / ratio.mean(axis=0)[2])
@@ -666,16 +666,30 @@ def test_light_temperature_scales_each_channel_of_the_light(renderer: Renderer) 
 @pytest.mark.parametrize(
     ("kelvin", "message"),
     [
-        ((2856.0, 2856.0), "light_temperatures must have shape"),
-        ((0.0,), "not positive or lies outside the scene gamut"),
-        ((math.inf,), "not positive or lies outside the scene gamut"),
-        ((500.0,), "not positive or lies outside the scene gamut"),
+        ((2856.0, 2856.0), "light_kelvins must have shape"),
+        ((0.0,), "outside its illuminant's domain or the scene gamut"),
+        ((math.inf,), "outside its illuminant's domain or the scene gamut"),
+        ((500.0,), "outside its illuminant's domain or the scene gamut"),
     ],
 )
-def test_invalid_light_temperature_is_rejected_by_name(renderer: Renderer, kelvin: tuple, message: str) -> None:
-    """A wrong count is caught before the ABI, which reads raw floats; an unrepresentable temperature by the renderer."""
+def test_invalid_light_kelvin_is_rejected_by_name(renderer: Renderer, kelvin: tuple, message: str) -> None:
+    """A wrong count is caught before the ABI, which reads raw floats; an unrepresentable kelvin by the renderer."""
     with pytest.raises((ValueError, RuntimeError), match=message):
-        renderer.render(aovs=("beauty",), width=8, height=8, light_temperatures=kelvin)
+        renderer.render(aovs=("beauty",), width=8, height=8, light_kelvins=kelvin)
+
+
+def test_light_kelvins_keep_each_lights_illuminant() -> None:
+    """2AFC's spheres are daylight at 6504 K, so overriding them with 6504 K must reproduce the authored render bit for bit.
+
+    A blackbody override would resolve 6504 K off the daylight locus and recolour them; below 4000 K daylight is undefined.
+    """
+    common = {"aovs": ("beauty",), "width": 32, "height": 18, "samples": 1, "seed": 1}
+    with Renderer("scenes/2AFC.json", preset=PRESET) as daylight:
+        authored = daylight.render(**common)["beauty"]
+        assert np.any(authored > 0.0), "the spheres must be in frame, or equality holds vacuously"
+        assert np.array_equal(daylight.render(**common, light_kelvins=(6504.0, 6504.0))["beauty"], authored)
+        with pytest.raises(RuntimeError, match="outside its illuminant's domain"):
+            daylight.render(**common, light_kelvins=(3999.0, 6504.0))
 
 
 @pytest.mark.parametrize(

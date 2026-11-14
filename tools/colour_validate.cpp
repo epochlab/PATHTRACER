@@ -1,5 +1,6 @@
 // Gate for CIE 1931 (scene/cie.cpp), the metal fit, and the Fresnel shading chrome.
 
+#include <algorithm>
 #include <cfloat>
 #include <array>
 #include <cmath>
@@ -112,7 +113,7 @@ PT_CHECK(blackbody_reproduces_illuminant_a, Fast, Exact) {
     ctx.plan(1);
     constexpr double kKelvin = 2848.0 * 1.4388e-2 / 1.435e-2;
     constexpr glm::dvec2 kPublished(0.44757, 0.40745);
-    const std::optional<glm::dvec3> rgb = cie::blackbodyToScene(kKelvin);
+    const std::optional<glm::dvec3> rgb = cie::kelvinToScene(cie::Illuminant::Blackbody, kKelvin);
     const glm::dvec2 xy = rgb ? chromaticity(glm::inverse(cie::xyzToScene()) * *rgb) : glm::dvec2(0.0);
     const double error = std::max(std::abs(xy.x - kPublished.x), std::abs(xy.y - kPublished.y));
     char detail[160];
@@ -130,14 +131,71 @@ PT_CHECK(blackbody_has_unit_luminance_and_refuses_outside_the_scene_gamut, Fast,
     const glm::dmat3 rgbToXyz = glm::inverse(cie::xyzToScene());
     char detail[160];
     for (const double kelvin : kInGamut) {
-        const std::optional<glm::dvec3> rgb = cie::blackbodyToScene(kelvin);
+        const std::optional<glm::dvec3> rgb = cie::kelvinToScene(cie::Illuminant::Blackbody, kelvin);
         const double luminanceError = rgb ? std::abs((rgbToXyz * *rgb).y - 1.0) : 1.0;
         std::snprintf(detail, sizeof(detail), "%g K: %s, luminance off 1 by %.3e", kelvin, rgb ? "resolved" : "refused", luminanceError);
         PT_EXPECT(ctx, rgb && luminanceError <= kDoubleRoundoff, detail);
     }
     for (const double kelvin : kRefused) {
         std::snprintf(detail, sizeof(detail), "%g K resolved to a colour; it is outside the domain or the scene gamut", kelvin);
-        PT_EXPECT(ctx, !cie::blackbodyToScene(kelvin), detail);
+        PT_EXPECT(ctx, !cie::kelvinToScene(cie::Illuminant::Blackbody, kelvin), detail);
+    }
+}
+
+// D65 is daylight at 6500 K on the 1.4380e-2 c2 scale; CIE tabulated it with M1, M2 rounded to 3 decimals, which bounds the gap.
+PT_CHECK(daylight_reproduces_d65, Fast, Exact) {
+    ctx.plan(1);
+    constexpr double kKelvin = 6500.0 * 1.4388e-2 / 1.4380e-2;
+    constexpr double kRoundingHalfStep = 5e-4;
+    glm::dvec3 d65(0.0);
+    glm::dvec3 s1(0.0);
+    glm::dvec3 s2(0.0);
+    for (int i = 0; i < cie::kSampleCount; ++i) {
+        const cie::TableRow row = cie::tableRow(i);
+        const int knot = std::min(i / cie::kDaylightIntervalNm, cie::kDaylightKnotCount - 2);
+        const double f = static_cast<double>(i - (knot * cie::kDaylightIntervalNm)) / cie::kDaylightIntervalNm;
+        const glm::dvec3 components = ((1.0 - f) * cie::daylightComponents(knot)) + (f * cie::daylightComponents(knot + 1));
+        d65 += row.d65 * row.colourMatching;
+        s1 += components.y * row.colourMatching;
+        s2 += components.z * row.colourMatching;
+    }
+    // The tabulated spectrum moved by each rounding corner: chromaticity is near-linear at this scale, so a corner is the extreme.
+    const glm::dvec2 tabulated = chromaticity(d65);
+    double bound = 0.0;
+    for (const double a : {-kRoundingHalfStep, kRoundingHalfStep}) {
+        for (const double b : {-kRoundingHalfStep, kRoundingHalfStep}) {
+            const glm::dvec2 corner = chromaticity(d65 + (a * s1) + (b * s2));
+            bound = std::max(bound, std::max(std::abs(corner.x - tabulated.x), std::abs(corner.y - tabulated.y)));
+        }
+    }
+    const std::optional<glm::dvec3> rgb = cie::kelvinToScene(cie::Illuminant::Daylight, kKelvin);
+    const glm::dvec2 xy = rgb ? chromaticity(glm::inverse(cie::xyzToScene()) * *rgb) : glm::dvec2(0.0);
+    const double error = std::max(std::abs(xy.x - tabulated.x), std::abs(xy.y - tabulated.y));
+    char detail[192];
+    std::snprintf(detail, sizeof(detail), "daylight at %.2f K gives xy (%.6f, %.6f), %.3e from D65's (%.6f, %.6f); rounding bounds %.3e",
+                  kKelvin, xy.x, xy.y, error, tabulated.x, tabulated.y, bound);
+    PT_EXPECT(ctx, error <= bound, detail);
+}
+
+// Daylight resolves at unit luminance across CIE's defined 4000-25000 K, both locus branches; outside it is refused.
+PT_CHECK(daylight_has_unit_luminance_and_refuses_outside_its_range, Fast, Exact) {
+    constexpr std::array<double, 6> kInRange{cie::kDaylightMinKelvin, 5003.0, 6504.0, 7000.0, 7001.0, cie::kDaylightMaxKelvin};
+    const std::array<double, 6> kRefused{std::nextafter(cie::kDaylightMinKelvin, 0.0), std::nextafter(cie::kDaylightMaxKelvin, 1e9),
+                                             0.0, -6504.0, std::numeric_limits<double>::infinity(),
+                                             std::numeric_limits<double>::quiet_NaN()};
+    ctx.plan(static_cast<int>(kInRange.size() + kRefused.size()));
+    const glm::dmat3 rgbToXyz = glm::inverse(cie::xyzToScene());
+    char detail[160];
+    for (const double kelvin : kInRange) {
+        const std::optional<glm::dvec3> rgb = cie::kelvinToScene(cie::Illuminant::Daylight, kelvin);
+        const double luminanceError = rgb ? std::abs((rgbToXyz * *rgb).y - 1.0) : 1.0;
+        std::snprintf(detail, sizeof(detail), "%g K daylight: %s, luminance off 1 by %.3e", kelvin, rgb ? "resolved" : "refused",
+                      luminanceError);
+        PT_EXPECT(ctx, rgb && luminanceError <= kDoubleRoundoff, detail);
+    }
+    for (const double kelvin : kRefused) {
+        std::snprintf(detail, sizeof(detail), "%.17g K resolved as daylight; CIE defines it over 4000-25000 K only", kelvin);
+        PT_EXPECT(ctx, !cie::kelvinToScene(cie::Illuminant::Daylight, kelvin), detail);
     }
 }
 
