@@ -92,6 +92,7 @@ Ordered by execution, easy wins first. ETA is agent working hours to a complete,
 | Light | IES profiles | Lights emit uniformly. Measured distributions (IES LM-63), importance-sampled from the table and scaled by the existing lumens. | medium | 1 h | ready |
 | Geometry | Displacement bounds and black edges | Black edges on geometry; find the root cause. Bound the terminator lift (Chiang et al. 2019) by triangle geometry and rounding error. | medium | 2 h | ready |
 | Camera | Sensor noise model | Images are noise-free. Shot, read and dark noise and quantisation per EMVA 1288, from the calibrated luminance. | medium | 2 h | ready |
+| Colour | Film grading | No looks. Bleach bypass (retained silver as added neutral density) and three-strip Technicolor dye transfer (Kalmus 1938) in print density, before the view transform. | medium | 2 h | ready |
 | Cleanup | Codebase review | Remove dead code, duplicated logic, needless abstraction, redundant copies and loop-invariant work, output unchanged. | medium | 3 h | ready |
 | Validation | Derived test tolerances | 33 tests use literal tolerances or fixed seeds (UNDERIVED under -C Calibration). Derive each band from standard error and alpha. | medium | 3 h | ready |
 | BSDF | Smith-exact transmission | Rough glass multiple scattering uses a lopsided approximation. Random walk on the Smith microsurface (Heitz et al. 2016). | high | 3 h | ready |
