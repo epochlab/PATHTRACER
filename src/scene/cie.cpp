@@ -1,5 +1,6 @@
 #include "pathtracer/scene/cie.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace pathtracer::scene::cie {
@@ -15,6 +16,16 @@ struct Sample {
 
 constexpr std::array<Sample, kSampleCount> kTable = {{
 #include "cie_1931.inc"
+}};
+
+struct DaylightComponents {
+    double s0;
+    double s1;
+    double s2;
+};
+
+constexpr std::array<DaylightComponents, kDaylightKnotCount> kDaylight = {{
+#include "cie_daylight.inc"
 }};
 
 // ACEScg's AP1 primary and white chromaticities (x, y), SMPTE ST 2065-1 and ACES S-2014-004.
@@ -74,6 +85,11 @@ TableRow tableRow(int index) {
     return {{s.xBar, s.yBar, s.zBar}, s.d65};
 }
 
+glm::dvec3 daylightComponents(int knot) {
+    const DaylightComponents& c = kDaylight[knot];
+    return {c.s0, c.s1, c.s2};
+}
+
 const glm::dmat3& xyzToScene() {
     static const glm::dmat3 kMatrix = deriveXyzToScene();
     return kMatrix;
@@ -95,24 +111,68 @@ std::array<float, 8> sceneChromaticities() {
 
 glm::dvec3 reflectanceToScene(const Spectrum& reflectance) { return xyzToScene() * reflectanceToXyz(reflectance); }
 
-std::optional<glm::dvec3> blackbodyToScene(double kelvin) {
-    if (!(kelvin > 0.0) || !std::isfinite(kelvin)) {
-        return std::nullopt;
-    }
-    // Planck's second radiation constant, CIE 015:2018's ITS-90 value; c1 and the 1 nm interval cancel in the Y = 1 normalisation.
+namespace {
+
+// Planck's law at each tabulated wavelength; c1 and the 1 nm interval cancel in emissionToScene's Y = 1 normalisation.
+Spectrum blackbodySpectrum(double kelvin) {
+    // Planck's second radiation constant, CIE 015:2018's ITS-90 value.
     constexpr double kC2 = 1.4388e-2;
-    glm::dvec3 xyz(0.0);
+    Spectrum power;
     for (int i = 0; i < kSampleCount; ++i) {
         const double lambda = wavelengthNm(i) * 1e-9;
+        power[i] = 1.0 / (std::pow(lambda, 5) * std::expm1(kC2 / (lambda * kelvin)));
+    }
+    return power;
+}
+
+// CIE 015:2018 daylight: S0 + M1 S1 + M2 S2 at the locus xy; M1, M2 unrounded so the colour is continuous in kelvin.
+Spectrum daylightSpectrum(double kelvin) {
+    const double t = 1e3 / kelvin;
+    const double x = kelvin <= 7000.0 ? 0.244063 + (t * (0.09911 + (t * (2.9678 - (t * 4.6070)))))
+                                      : 0.237040 + (t * (0.24748 + (t * (1.9018 - (t * 2.0064)))));
+    const double y = (-3.000 * x * x) + (2.870 * x) - 0.275;
+    const double m = 0.0241 + (0.2562 * x) - (0.7341 * y);
+    const double m1 = (-1.3515 - (1.7703 * x) + (5.9114 * y)) / m;
+    const double m2 = (0.0300 - (31.4424 * x) + (30.0717 * y)) / m;
+    Spectrum power;
+    for (int i = 0; i < kSampleCount; ++i) {
+        const int knot = std::min(i / kDaylightIntervalNm, kDaylightKnotCount - 2);
+        const double f = static_cast<double>(i - (knot * kDaylightIntervalNm)) / kDaylightIntervalNm;
+        const DaylightComponents& a = kDaylight[knot];
+        const DaylightComponents& b = kDaylight[knot + 1];
+        power[i] = ((1.0 - f) * (a.s0 + (m1 * a.s1) + (m2 * a.s2))) + (f * (b.s0 + (m1 * b.s1) + (m2 * b.s2)));
+    }
+    return power;
+}
+
+// Scene RGB of an emission spectrum at Y = 1; nullopt where a channel is negative (outside the gamut) or the spectrum underflowed.
+std::optional<glm::dvec3> emissionToScene(const Spectrum& power) {
+    glm::dvec3 xyz(0.0);
+    for (int i = 0; i < kSampleCount; ++i) {
         const Sample& s = kTable[i];
-        xyz += glm::dvec3(s.xBar, s.yBar, s.zBar) / (std::pow(lambda, 5) * std::expm1(kC2 / (lambda * kelvin)));
+        xyz += power[i] * glm::dvec3(s.xBar, s.yBar, s.zBar);
     }
     const glm::dvec3 rgb = xyzToScene() * (xyz / xyz.y);
-    // Cool of the gamut the locus leaves the primaries (a channel < 0) and an underflowed spectrum is NaN: a clamp shifts hue, so refuse.
+    // A clamp would shift hue, so refuse; an underflowed spectrum is NaN, which fails the comparison too.
     if (!glm::all(glm::greaterThanEqual(rgb, glm::dvec3(0.0)))) {
         return std::nullopt;
     }
     return rgb;
+}
+
+}  // namespace
+
+std::optional<glm::dvec3> kelvinToScene(Illuminant illuminant, double kelvin) {
+    if (!(kelvin > 0.0) || !std::isfinite(kelvin)) {
+        return std::nullopt;
+    }
+    if (illuminant == Illuminant::Blackbody) {
+        return emissionToScene(blackbodySpectrum(kelvin));
+    }
+    if (kelvin < kDaylightMinKelvin || kelvin > kDaylightMaxKelvin) {
+        return std::nullopt;
+    }
+    return emissionToScene(daylightSpectrum(kelvin));
 }
 
 }  // namespace pathtracer::scene::cie

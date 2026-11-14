@@ -3,6 +3,25 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Kelvin light keys and CIE daylight
+
+Scene lights are now authored in units, as the environment's `lux` and the lights' `lumens` already were: `temperature` is
+`kelvin` and `luminance` is `nits` (cd/m^2). A kelvin names a Planckian radiator by default. `"illuminant": "daylight"` puts it on
+the CIE daylight locus instead, which lies just green of the Planckian one, so daylight whites keep their colour as a kelvin.
+
+- feat: `cie::kelvinToScene(illuminant, kelvin)` replaces `blackbodyToScene`. Daylight is CIE 015:2018's S0 + M1 S1 + M2 S2 over
+  4000-25000 K, from CIE's published components (`src/scene/cie_daylight.inc`, md5 as CIE publishes). M1 and M2 stay unrounded,
+  so the colour is continuous in kelvin; CIE's 3-decimal rounding only reproduces the tabulated D65.
+- refactor: scene keys `temperature` -> `kelvin`, `luminance` -> `nits`; the old names are rejected as unknown keys. Python's
+  `light_temperatures` is `light_kelvins` and resolves each light on its own illuminant; the C field keeps its name and layout.
+- chore: every scene light is a kelvin and lumens. cloud is 6025 K daylight and 2AFC 6504 K daylight (D65), their former RGB at
+  dE2000 0.64 and 0.005; as blackbodies they would have shifted pink by 5.6 and 4.6. Redundant `twoSided: false` keys are gone.
+- test: `colour.daylight_reproduces_d65` meets the tabulated D65 inside the bound CIE's M1/M2 rounding sets;
+  `colour.daylight_has_unit_luminance_and_refuses_outside_its_range`; io rows for the retired keys, an illuminant beside `color`,
+  an unknown illuminant and daylight at 3999 and 25001 K; `test_light_kelvins_keep_each_lights_illuminant`.
+- note: cornell, cornell_sss, cornell_research, macbeth and stump render pixel-identical to `main`; render cost is unchanged.
+  Evidence in `results/kelvin_light_keys`.
+
 ## Research camera pose moves to cornell_research.json
 
 A preset now sets only how to render: size, samples and sensor. `research` also placed the camera inside the Cornell box, a pose

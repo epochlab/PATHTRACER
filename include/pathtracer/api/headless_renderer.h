@@ -52,8 +52,8 @@ public:
         std::optional<glm::vec3> rootRotationDegrees;
         // One rotationXyz per scene light, under the root, replacing each lights[i].rotation; nullopt keeps them. Rebuilds the BVH.
         std::optional<std::vector<glm::vec3>> lightRotationsDegrees;
-        // One Planckian temperature in kelvin per scene light, replacing each authored colour at unit luminance; nullopt keeps them.
-        std::optional<std::vector<float>> lightTemperaturesKelvin;
+        // One kelvin per scene light on that light's illuminant locus, replacing its colour at unit luminance; nullopt keeps them.
+        std::optional<std::vector<float>> lightKelvins;
         // rotationXyz of the environment map to world, background and lighting alike; zero is the map unrotated.
         glm::vec3 envRotationDegrees{0.0F};
         // The viewer's lens optics on picture AOVs, 0 = off: fringe in [0, 1), bloom's scattered fraction in [0, 1].

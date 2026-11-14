@@ -9,9 +9,9 @@
             "position": [0.0, 300.0, 0.0],
             "rotation": [-90.0, 0.0, 0.0],
             "size": [420.0, 540.0],
-            "color": [0.9815, 0.9631, 0.8954],
-            "lumens": 3.707e8,
-            "twoSided": false
+            "kelvin": 6025,
+            "illuminant": "daylight",
+            "lumens": 3.707e8
         }
     ],
     "volumes": [

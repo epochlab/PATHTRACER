@@ -9,6 +9,7 @@
 #include <glm/glm.hpp>
 
 #include "pathtracer/config/profile_config.h"
+#include "pathtracer/scene/cie.h"
 #include "pathtracer/scene/material.h"
 
 namespace pathtracer::config {
@@ -65,7 +66,7 @@ struct MeshShape {
     float scale = 1.0F;    // optional, default 1; loadSceneConfig rejects a non-positive one
 };
 
-// Luminance in cd/m^2 at every emitting point, the scene-linear unit.
+// scene.json's nits: luminance in cd/m^2 at every emitting point, the scene-linear unit.
 struct Luminance {
     float candelasPerSquareMetre;
 };
@@ -80,9 +81,11 @@ struct LightConfig {
     glm::vec3 position;  // the shape's centre, before the model root transform
     glm::vec3 rotation;  // degrees; Rz*Ry*Rx as ModelConfig::rotation, so X applies first
     std::variant<QuadShape, DiskShape, SphereShape, MeshShape> shape;
-    glm::vec3 color;  // unit luminance: an authored colour over its own luminance, or a kelvin temperature's blackbody
-    std::variant<Luminance, LuminousFlux> emission;  // exactly one of scene.json's luminance or lumens, positive
+    glm::vec3 color;  // unit luminance: an authored colour over its own luminance, or the illuminant's colour at a kelvin
+    std::variant<Luminance, LuminousFlux> emission;  // exactly one of scene.json's nits or lumens, positive
     bool twoSided = false;  // a sphere's stays false
+    // The locus a kelvin override resolves on; an authored colour keeps the blackbody default.
+    pathtracer::scene::cie::Illuminant illuminant = pathtracer::scene::cie::Illuminant::Blackbody;
 };
 
 // A volume material file, MaterialX anisotropic_vdf's inputs: coefficients per unit of the grid's own space at density 1.

@@ -330,9 +330,9 @@ PT_CHECK(render_rejects_invalid_requests_without_writing, Slow, Exact) {
          [](PtRenderRequest& r, std::vector<float*>&) { r.root_rotation_degrees = kNanRotation.data(); }},
         {"infinite light rotation", "light rotation",
          [](PtRenderRequest& r, std::vector<float*>&) { r.light_rotation_degrees = kInfRotation.data(); }},
-        {"zero light temperature", "light temperature",
+        {"zero light kelvin", "light kelvin",
          [](PtRenderRequest& r, std::vector<float*>&) { r.light_temperature_kelvin = kZeroKelvin.data(); }},
-        {"out-of-gamut light temperature", "outside the scene gamut",
+        {"out-of-gamut light kelvin", "the scene gamut",
          [](PtRenderRequest& r, std::vector<float*>&) { r.light_temperature_kelvin = kOutOfGamutKelvin.data(); }},
         {"NaN environment rotation", "environment rotation",
          [](PtRenderRequest& r, std::vector<float*>&) { r.env_rotation_degrees[1] = std::numeric_limits<float>::quiet_NaN(); }},
@@ -437,7 +437,7 @@ PT_CHECK(light_temperature_is_per_request, Slow, Exact) {
                    ? std::vector<float>(written.storage.begin(), written.storage.begin() + static_cast<std::ptrdiff_t>(written.extent))
                    : std::vector<float>{};
     };
-    // cornell's one light is authored by colour, so any temperature differs from it.
+    // cornell's one light is authored at 4000 K, so a 2856 K override differs from it.
     constexpr std::array<float, 1> kTungsten{2856.0F};
     const std::vector<float> authored = render(nullptr);
     const std::vector<float> tungsten = render(kTungsten.data());

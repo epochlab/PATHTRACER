@@ -363,7 +363,7 @@ class Renderer:
         env_light_enabled: bool | None = None,
         root_rotation: Sequence[float] | None = None,
         light_rotations: Sequence[Sequence[float]] | None = None,
-        light_temperatures: Sequence[float] | None = None,
+        light_kelvins: Sequence[float] | None = None,
         env_rotation: Sequence[float] = (0.0, 0.0, 0.0),
         bloom_strength: float | None = None,
         aberration: float = 0.0,
@@ -396,9 +396,10 @@ class Renderer:
         previous render's reloads the glTF and rebuilds the BVH, so batch renders by pose rather than alternating poses.
         ``env_rotation`` turns the environment map, background and lighting alike; zero is the map unrotated.
 
-        ``light_temperatures`` replaces each light's colour, one kelvin per light in scene order, with the Planckian
-        radiator's linear ACEScg colour at unit luminance, so each light keeps its authored luminance. A colour outside the scene
-        gamut (blue turns negative) is refused rather than clamped. ``None`` keeps the authored colours.
+        ``light_kelvins`` replaces each light's colour, one kelvin per light in scene order, with its illuminant's linear ACEScg
+        colour at unit luminance: a blackbody, or CIE daylight for a light authored ``"illuminant": "daylight"``. Each light keeps
+        its authored luminance. A kelvin outside the illuminant's domain or the scene gamut is refused rather than clamped.
+        ``None`` keeps the authored colours.
         Only the lights' radiance changes, so it never rebuilds the BVH. The environment keeps its measured colour.
 
         ``bloom_strength`` and ``aberration`` are the viewer's lens optics, applied in scene-linear to
@@ -434,7 +435,7 @@ class Renderer:
         root = None if root_rotation is None else _float_array(root_rotation, (3,), "root_rotation")
         count = _LIB.pt_renderer_light_count(self._handle)
         lights = None if light_rotations is None else _float_array(light_rotations, (count, 3), "light_rotations")
-        kelvin = None if light_temperatures is None else _float_array(light_temperatures, (count,), "light_temperatures")
+        kelvin = None if light_kelvins is None else _float_array(light_kelvins, (count,), "light_kelvins")
         env = _float_array(env_rotation, (3,), "env_rotation")
 
         identifiers = [_aov_id(name) for name in names]
