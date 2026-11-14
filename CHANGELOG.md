@@ -3,6 +3,21 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Research camera pose moves to cornell_research.json
+
+A preset now sets only how to render: size, samples and sensor. `research` also placed the camera inside the Cornell box, a pose
+that belongs to one scene, so pairing it with any other scene put the camera at an arbitrary point in it.
+
+- refactor: `config/presets/research.json` drops `camera.position`. The new `scenes/cornell_research.json` is `cornell.json` with a
+  `camera` block at `[0, 0, 0.25]`, rotation and far clip as `profile.json`'s, so its camera is the one research had.
+- test:
+  - `api.open_takes_the_named_preset` opens research on `cornell_research.json` and asserts the preset's lens and lattice and the
+    scene's position, rotation and far clip all reach the default camera.
+  - `io.profile_config_override_replaces_only_named_keys` asserts the camera position is now untouched by every preset.
+  - `io.scene_config_accepts_the_shipped_scenes` loads every file in `scenes/`, not a fixed list that had missed three.
+- note: `render_beauty --preset research --seed 1` on `cornell_research.json` matches `main` on `cornell.json` at linear RMSE 0.
+  Callers that paired research with `cornell.json` for the inside view now open `cornell_research.json`.
+
 ## Derived test tolerances
 
 Every statistical test now derives its pass band from its own standard error and the suite's alpha, and draws its seed from the

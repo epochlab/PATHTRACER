@@ -1,6 +1,5 @@
 {
     "camera": {
-        "position": [0.0, 0.0, 0.25],
         "lens": {
             "projection": "omnidirectional"
         },
