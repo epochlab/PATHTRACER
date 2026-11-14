@@ -333,19 +333,24 @@ std::filesystem::path writeJson(const char* name, const std::string& text) {
     return path;
 }
 
-// Every shipped scene must load under the closed key sets: without this, each rejection row below could pass by rejecting everything.
+// Every file in scenes/ must load under the closed key sets, else each rejection row below could pass by rejecting everything.
 PT_CHECK(scene_config_accepts_the_shipped_scenes, Fast, Exact) {
-    const std::vector<const char*> shipped = {"cornell.json", "macbeth.json", "stump.json"};
+    const std::filesystem::path scenes = std::filesystem::path(ASSET_ROOT_DIR) / "scenes";
+    std::vector<std::filesystem::path> shipped;
+    for (const std::filesystem::directory_entry& entry : std::filesystem::directory_iterator(scenes)) {
+        if (entry.path().extension() == ".json") {
+            shipped.push_back(entry.path());
+        }
+    }
     ctx.plan(static_cast<int>(shipped.size()) + 1);
-    for (const char* name : shipped) {
-        const std::filesystem::path scene = std::filesystem::path(ASSET_ROOT_DIR) / "scenes" / name;
+    for (const std::filesystem::path& scene : shipped) {
         char detail[256];
         std::snprintf(detail, sizeof(detail), "loadSceneConfig rejected the shipped scene at %s", scene.string().c_str());
         PT_EXPECT(ctx, pathtracer::config::loadSceneConfig(scene.string()).has_value(), detail);
     }
     // Anti-vacuity for the textures key itself: macbeth binds its chart only through it, so an unparsed key would leave it empty.
     const std::optional<pathtracer::config::SceneConfig> macbeth =
-        pathtracer::config::loadSceneConfig((std::filesystem::path(ASSET_ROOT_DIR) / "scenes" / "macbeth.json").string());
+        pathtracer::config::loadSceneConfig((scenes / "macbeth.json").string());
     PT_EXPECT(ctx, macbeth && macbeth->textures.size() == 2, "macbeth.json's textures did not parse to its two grids");
 }
 
@@ -788,9 +793,7 @@ PT_CHECK(profile_config_override_replaces_only_named_keys, Fast, Exact) {
                        proxy->pathTracer.samplesPerPixel == proxyJson["pathTracer"]["samplesPerPixel"].get<int>(),
               "proxy's named keys did not take its values");
     const nlohmann::json& researchRender = researchJson["render"];
-    const nlohmann::json& position = researchJson["camera"]["position"];
-    PT_EXPECT(ctx, research->camera.position == glm::vec3(position[0].get<float>(), position[1].get<float>(), position[2].get<float>()) &&
-                       research->camera.lens.projection == pathtracer::scene::LensProjection::Omnidirectional &&
+    PT_EXPECT(ctx, research->camera.lens.projection == pathtracer::scene::LensProjection::Omnidirectional &&
                        research->camera.pixelLattice == pathtracer::gfx::PixelLattice::Hexagonal &&
                        research->render.width == researchRender["width"].get<int>() &&
                        research->render.height == researchRender["height"].get<int>() &&
@@ -800,7 +803,7 @@ PT_CHECK(profile_config_override_replaces_only_named_keys, Fast, Exact) {
     // Keys neither override names, from every block: the lens fields beside projection show a nested object merges, not replaces.
     bool untouched = true;
     for (const pathtracer::config::ProfileConfig* merged : {&*proxy, &*research}) {
-        untouched = untouched && merged->camera.rotation == base->camera.rotation &&
+        untouched = untouched && merged->camera.position == base->camera.position && merged->camera.rotation == base->camera.rotation &&
                     merged->camera.focalLengthMm == base->camera.focalLengthMm &&
                     merged->camera.lens.maxFieldOfViewDegrees == base->camera.lens.maxFieldOfViewDegrees &&
                     merged->camera.lens.radialCoefficients == base->camera.lens.radialCoefficients &&

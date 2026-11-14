@@ -34,9 +34,12 @@ patch over it. Select one with `-preset NAME`, `render_beauty --preset NAME`, `R
 | --- | --- | --- | --- | --- |
 | beauty (default) | 2048x1152 | 256 | 0.1 | square pixels, rectilinear lens |
 | `proxy` | 512x256 | 16 | 1.0 | as beauty |
-| `research` | 64x32 | 64 | 1.0 | hexagonal pixels, omnidirectional lens, inside the box |
+| `research` | 64x32 | 64 | 1.0 | hexagonal pixels, omnidirectional lens |
 
 `proxy` is the benchmark workload: `-bench`, `render_beauty` and `gbuffer_bench` default to its size and samples.
+
+A preset sets the sensor, never the pose: a scene's `camera` block places it. `scenes/cornell_research.json` is Cornell seen
+from inside the box, the scene `research` is made for.
 
 ## Test
 

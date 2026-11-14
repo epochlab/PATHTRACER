@@ -16,6 +16,7 @@
 
 #include "check.h"
 #include "pathtracer/api/headless_renderer.h"
+#include "pathtracer/config/scene_config.h"
 #include "pathtracer/debug/aov.h"
 #include "pathtracer/debug/aov_filters.h"
 #include "pathtracer/debug/colormap.h"
@@ -946,10 +947,17 @@ PT_CHECK(open_takes_the_named_preset, Fast, Exact) {
     PT_EXPECT(ctx, proxy && renderer && renderer->defaultWidth() == proxy->render.width &&
                        renderer->defaultHeight() == proxy->render.height && renderer->defaultSamples() == proxy->pathTracer.samplesPerPixel,
               "open(proxy) did not take the proxy preset's size and samples: " + error);
-    const auto research = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", "research", error);
-    PT_EXPECT(ctx, research && research->defaultCamera().pixelLattice() == pathtracer::gfx::PixelLattice::Hexagonal &&
-                       research->defaultCamera().lens().projection == pathtracer::scene::LensProjection::Omnidirectional,
-              "open(research) did not take the research camera: " + error);
+    // The preset supplies lens and lattice, the scene its pose: both must reach the default camera.
+    const std::optional<pathtracer::config::SceneConfig> scene =
+        pathtracer::config::loadSceneConfig((std::filesystem::path(ASSET_ROOT_DIR) / "scenes" / "cornell_research.json").string());
+    const auto research = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell_research.json", "research", error);
+    PT_EXPECT(ctx, scene && scene->camera && research &&
+                       research->defaultCamera().pixelLattice() == pathtracer::gfx::PixelLattice::Hexagonal &&
+                       research->defaultCamera().lens().projection == pathtracer::scene::LensProjection::Omnidirectional &&
+                       research->defaultCamera().position() == scene->camera->position &&
+                       research->defaultCamera().rotationDegrees() == scene->camera->rotation &&
+                       research->defaultCamera().farClip() == scene->camera->farClip,
+              "open(research) on cornell_research.json did not take the preset's sensor and the scene's pose: " + error);
     error.clear();
     const auto missing =
         pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", "engine_api_no_such_preset", error);

@@ -1,0 +1,32 @@
+{
+    "model": {
+        "gltfPath": "geometry/cornell/cornell_v001.gltf",
+        "position": [0.0, 0.0, 0.0],
+        "rotation": [0.0, 0.0, 0.0]
+    },
+    "environment": {
+        "hdriPath": "textures/republiqueHDR_2k.exr",
+        "lux": 405.6
+    },
+    "materialPath": "materials/clay.json",
+    "materialOverrides": {
+        "sphere01": "materials/chrome.json",
+        "sphere02": "materials/glass.json"
+    },
+    "lights": [
+        {
+            "type": "quad",
+            "position": [0.0, 0.49, 0.0],
+            "rotation": [-90.0, 0.0, 0.0],
+            "size": [0.3, 0.3],
+            "temperature": 4000,
+            "lumens": 880.3,
+            "twoSided": false
+        }
+    ],
+    "camera": {
+        "position": [0.0, 0.0, 0.25],
+        "rotation": [0.0, 0.0, 0.0],
+        "farClip": 100.0
+    }
+}
