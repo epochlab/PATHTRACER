@@ -57,7 +57,16 @@ std::optional<SphericalRectangle> sphericalRectangleFrame(const QuadLight& quad,
     return SphericalRectangle{referencePoint, x, y, zFrame, z0, x0, x0 + exl, y0, y0 + eyl, 0.0F, 0.0F, 0.0F, 0.0F};
 }
 
-// The spherical quadrilateral's edge-plane normals and interior angles, giving sample()'s b0, b1, k and the solid angle.
+// Van Oosterom & Strackee 1983: a triangle's tan(Omega/2) = |a.(b x c)| / (abc + (a.b)c + (a.c)b + (b.c)a), corners a, b, c unnormalised.
+float triangleSolidAngle(const glm::vec3& a, const glm::vec3& b, const glm::vec3& c, float tripleProduct) {
+    const float la = glm::length(a);
+    const float lb = glm::length(b);
+    const float lc = glm::length(c);
+    const float denominator = (la * lb * lc) + (glm::dot(a, b) * lc) + (glm::dot(a, c) * lb) + (glm::dot(b, c) * la);
+    return 2.0F * std::atan2(tripleProduct, denominator);
+}
+
+// The spherical quadrilateral's edge-plane normals and interior angles, giving sample()'s b0, b1 and k, and its solid angle.
 void sphericalRectangleAngles(SphericalRectangle& rect) {
     // Vectors from referencePoint to the four corners, in the local (x, y, zFrame) frame.
     const glm::vec3 v00(rect.x0, rect.y0, rect.z0);
@@ -65,21 +74,19 @@ void sphericalRectangleAngles(SphericalRectangle& rect) {
     const glm::vec3 v10(rect.x1, rect.y0, rect.z0);
     const glm::vec3 v11(rect.x1, rect.y1, rect.z0);
     const glm::vec3 n0 = glm::normalize(glm::cross(v00, v10));
-    const glm::vec3 n1 = glm::normalize(glm::cross(v10, v11));
     const glm::vec3 n2 = glm::normalize(glm::cross(v11, v01));
     const glm::vec3 n3 = glm::normalize(glm::cross(v01, v00));
 
-    // Internal angles of the spherical quadrilateral at each of its four vertices (gamma_i, paper notation).
-    const float g0 = angleBetween(-n0, n1);
-    const float g1 = angleBetween(-n1, n2);
+    // Internal angles at the two vertices sample()'s k needs (gamma_i, paper notation).
     const float g2 = angleBetween(-n2, n3);
     const float g3 = angleBetween(-n3, n0);
 
     rect.b0 = n0.z;
     rect.b1 = n2.z;
     rect.k = (2.0F * glm::pi<float>()) - g2 - g3;
-    // Girard's theorem: a spherical polygon's solid angle is its interior-angle sum minus (N-2)*pi.
-    rect.solidAngle = g0 + g1 - rect.k;
+    // Two triangles, each triple product z0 dx dy from the edges: Girard's angle sum minus 2 pi cancels to 1e-4 for a light 0.2 wide at 4.
+    const float tripleProduct = std::abs(rect.z0) * (rect.x1 - rect.x0) * (rect.y1 - rect.y0);
+    rect.solidAngle = triangleSolidAngle(v00, v10, v11, tripleProduct) + triangleSolidAngle(v00, v11, v01, tripleProduct);
 }
 
 // The cone a sphere subtends at a point, PBR 4e 6.2.4: sin^2(theta_max) = r^2/d^2, and 1 - cos(theta_max) as sin^2/(1 + cos).
