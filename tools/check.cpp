@@ -108,6 +108,7 @@ struct Calibration {
     int failures = 0;
     bool miscalibrated = false;
     bool derived = false;  // every run asked ctx.alpha() for its band
+    bool seeded = false;   // every run drew ctx.seed() or ctx.subSeed()
 };
 
 // Runs one Statistical check under fresh seeds at the design's target until the SPRT decides, or its truncation does.
@@ -119,6 +120,7 @@ Calibration calibrate(const Registration& check, std::uint64_t suiteSeed, std::s
     const double passStep = std::log((1.0 - design.alternative) / (1.0 - design.target));
     Calibration result;
     result.derived = true;
+    result.seeded = true;
     double logLikelihood = 0.0;
     while (result.runs < design.truncationRuns) {
         Context ctx(check, splitmix64(suiteSeed + static_cast<std::uint64_t>(result.runs) + 1), suiteName, threads, design.target, true);
@@ -127,6 +129,7 @@ Calibration calibrate(const Registration& check, std::uint64_t suiteSeed, std::s
         const bool failed = ctx.failures() > 0 || (ctx.planned() >= 0 && ctx.asserted() != ctx.planned());
         result.failures += failed ? 1 : 0;
         result.derived = result.derived && ctx.alphaQueried();
+        result.seeded = result.seeded && ctx.seedQueried();
         logLikelihood += failed ? failStep : passStep;
         if (logLikelihood >= reject || logLikelihood <= accept) {
             result.miscalibrated = logLikelihood >= reject;
@@ -150,7 +153,10 @@ Context::Context(const Registration& registration, std::uint64_t suiteSeed, std:
       perCheckAlpha_(perCheckAlpha),
       quiet_(quiet) {}
 
-std::uint64_t Context::subSeed(std::string_view label) const { return splitmix64(seed_ ^ fnv1a64(label)); }
+std::uint64_t Context::subSeed(std::string_view label) {
+    seedQueried_ = true;
+    return splitmix64(seed_ ^ fnv1a64(label));
+}
 
 void Context::plan(int assertions) { planned_ = assertions; }
 
@@ -266,10 +272,11 @@ int run(int argc, char** argv, const char* suiteName) {
             const Calibration result = calibrate(check, suiteSeed, suiteName, threads, design);
             const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
             const stats::Band rate = stats::clopperPearsonBand(result.failures, result.runs, design.rejectAlpha);
-            const char* verdict = !result.derived ? "UNDERIVED" : (result.miscalibrated ? "MISCALIBRATED" : "CALIBRATED");
+            const char* verdict =
+                !result.seeded ? "UNSEEDED" : (!result.derived ? "UNDERIVED" : (result.miscalibrated ? "MISCALIBRATED" : "CALIBRATED"));
             std::printf("  [%7.3fs] %-46s %s  (%d of %d runs failed, target %.3f against %.3f, rate in [%.3f, %.3f])\n", seconds,
                         check.name, verdict, result.failures, result.runs, design.target, design.alternative, rate.lo, rate.hi);
-            failures += (result.miscalibrated || !result.derived) ? 1 : 0;
+            failures += (result.miscalibrated || !result.derived || !result.seeded) ? 1 : 0;
             continue;
         }
         ++ran;

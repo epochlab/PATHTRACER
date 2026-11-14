@@ -101,17 +101,17 @@ struct TestScene {
     std::vector<MeshInstance> instances;
 };
 
-// One quad in the z=0 plane facing +Z, wound counter-clockwise as seen from +Z so geometricNormalOf gives (0,0,1).
-TestScene makeQuadScene(float roughness) {
+// One quad of half-extent `extent` in the z=0 plane facing +Z, wound counter-clockwise as seen from +Z so geometricNormalOf gives (0,0,1).
+TestScene makeQuadScene(float roughness, float extent = kQuadExtent) {
     const glm::vec3 normal(0.0F, 0.0F, 1.0F);
     const glm::vec4 tangent(1.0F, 0.0F, 0.0F, 1.0F);
     const auto vertex = [&](float x, float y) {
         return ShadingVertex{glm::vec3(x, y, 0.0F), normal, glm::vec2(0.5F, 0.5F), tangent};
     };
-    const ShadingVertex v0 = vertex(-kQuadExtent, -kQuadExtent);
-    const ShadingVertex v1 = vertex(kQuadExtent, -kQuadExtent);
-    const ShadingVertex v2 = vertex(kQuadExtent, kQuadExtent);
-    const ShadingVertex v3 = vertex(-kQuadExtent, kQuadExtent);
+    const ShadingVertex v0 = vertex(-extent, -extent);
+    const ShadingVertex v1 = vertex(extent, -extent);
+    const ShadingVertex v2 = vertex(extent, extent);
+    const ShadingVertex v3 = vertex(-extent, extent);
 
     TestScene scene;
     scene.worldTriangles = {Triangle{v0.position, v1.position, v2.position},
@@ -319,11 +319,42 @@ pathtracer::scene::PathTraceResult renderPass(const TestScene& scene, const Envi
     return result;
 }
 
-// Centre-region mean radiance of one pass.
-float renderCentre(const TestScene& scene, const EnvironmentMap& env, const PathTraceSettings& settings,
-                    EmbreeAccel& accel, pathtracer::scene::ThreadPool& pool) {
-    const glm::vec3 mean = centreMean(renderPass(scene, env, settings, accel, pool, true).beauty);
-    return std::max({mean.x, mean.y, mean.z});
+// Welford over kReplicates estimates, the r-th scrambled from seed + r: independent scrambles make their means iid (Owen 1997b).
+template <typename Estimate>
+tools::stats::Welford replicatedScalar(std::uint64_t seed, Estimate estimate) {
+    tools::stats::Welford welford;
+    for (int r = 0; r < tools::stats::kReplicates; ++r) {
+        welford.add(estimate(static_cast<std::uint32_t>(seed + static_cast<std::uint64_t>(r))));
+    }
+    return welford;
+}
+
+// The same per channel, for an estimate returning RGB.
+template <typename Estimate>
+std::array<tools::stats::Welford, 3> replicatedChannels(std::uint64_t seed, Estimate estimate) {
+    std::array<tools::stats::Welford, 3> channels;
+    for (int r = 0; r < tools::stats::kReplicates; ++r) {
+        const glm::vec3 value = estimate(static_cast<std::uint32_t>(seed + static_cast<std::uint64_t>(r)));
+        for (int c = 0; c < 3; ++c) {
+            channels[static_cast<std::size_t>(c)].add(value[c]);
+        }
+    }
+    return channels;
+}
+
+// Settings at one replicate's share of kSamplesPerPixel, so kReplicates passes keep the row's sample budget.
+PathTraceSettings perReplicate(PathTraceSettings settings) {
+    settings.samplesPerPass = kSamplesPerPixel / tools::stats::kReplicates;
+    return settings;
+}
+
+// Centre-region brightest channel over replicate renders at this scramble's seed.
+tools::stats::Welford renderCentre(const TestScene& scene, const EnvironmentMap& env, const PathTraceSettings& settings, EmbreeAccel& accel,
+                                   pathtracer::scene::ThreadPool& pool, std::uint64_t seed) {
+    return replicatedScalar(seed, [&](std::uint32_t scramble) {
+        const glm::vec3 mean = centreMean(renderPass(scene, env, perReplicate(settings), accel, pool, true, scramble).beauty);
+        return static_cast<double>(std::max({mean.x, mean.y, mean.z}));
+    });
 }
 
 struct Case {
@@ -340,71 +371,54 @@ PT_CHECK(depth_and_russian_roulette_invariance, Slow, Statistical) {
         {"rough metal (rough 0.5)", 0.5F, 1.0F},
         {"rough metal (rough 0.25)", 0.25F, 1.0F},
     }};
-
-    // Depth invariance is exact up to Monte Carlo noise, so it gets the tighter bound; absolute agreement is looser, its reference noisier.
-    constexpr float kDepthInvarianceTolerance = 0.02F;
-    constexpr float kReferenceTolerance = 0.06F;
     constexpr int kReferenceSamples = 400000;
 
     const EnvironmentMap env = makeUniformEnvironment();
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
-    std::mt19937 referenceRng(99);
-    bool ok = true;
-
+    // Three differences per case, each of two independently seeded estimators: depth 0 vs 1, RR on vs off, render vs reference.
+    ctx.plan(static_cast<int>(cases.size()) * 3);
+    const double alpha = ctx.alpha();
     std::cout << "integrator_validate: quad under uniform L0=1 environment, wo = surface normal\n";
-    std::cout << "  case                              maxB=0    maxB=1    RR on    reference\n";
-
     for (const Case& testCase : cases) {
         const TestScene scene = withSurface(makeQuadScene(testCase.roughness), metallic(testCase.metallic));
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         if (!accel.has_value()) {
-            std::cerr << "integrator_validate: FAILED to build Embree scene for " << testCase.name << '\n';
-            finish(ctx, false, "depth_and_russian_roulette_invariance failed; see the rows above");
+            ctx.recordFailure("EmbreeAccel::build", testCase.name, __FILE__, __LINE__);
             return;
         }
-
+        const std::string name = testCase.name;
         // rrStartBounce far above maxBounces disables Russian roulette for the first two renders, so depth invariance sheds that variance.
-        const float loDepth0 = renderCentre(scene, env, makeSettings(0, 999), *accel, pool);
-        const float loDepth1 = renderCentre(scene, env, makeSettings(1, 999), *accel, pool);
+        const tools::stats::Welford depth0 = renderCentre(scene, env, makeSettings(0, 999), *accel, pool, ctx.subSeed(name + " depth 0"));
+        const tools::stats::Welford depth1 = renderCentre(scene, env, makeSettings(1, 999), *accel, pool, ctx.subSeed(name + " depth 1"));
         // RR from bounce 0, same scene: reweighting by 1/p must leave the expectation unchanged.
-        const float loRoulette = renderCentre(scene, env, makeSettings(1, 0), *accel, pool);
+        const tools::stats::Welford roulette = renderCentre(scene, env, makeSettings(1, 0), *accel, pool, ctx.subSeed(name + " roulette"));
 
         OpenPbrInputs<Constant> inputs;
         inputs.baseColor = glm::vec3(1.0F);
         inputs.baseMetalness = testCase.metallic;
         inputs.specularRoughness = testCase.roughness;
-        const float reference = referenceLo(inputs, glm::vec3(0.0F, 0.0F, 1.0F), kReferenceSamples,
-                                             referenceRng);
+        std::mt19937 referenceRng(static_cast<std::mt19937::result_type>(ctx.subSeed(name + " reference")));
+        tools::stats::Welford reference;
+        for (int r = 0; r < tools::stats::kReplicates; ++r) {
+            reference.add(referenceLo(inputs, glm::vec3(0.0F, 0.0F, 1.0F), kReferenceSamples / tools::stats::kReplicates, referenceRng));
+        }
 
-        std::cout << "  " << testCase.name;
-        for (std::size_t pad = std::string(testCase.name).size(); pad < 34; ++pad) {
-            std::cout << ' ';
-        }
-        std::cout << loDepth0 << "  " << loDepth1 << "  " << loRoulette << "  " << reference << '\n';
-
-        const float scale = std::max(reference, 0.05F);
-        if (std::fabs(loDepth0 - loDepth1) > kDepthInvarianceTolerance * scale) {
-            std::cerr << "integrator_validate: FAILED depth invariance at " << testCase.name
-                      << " -- maxBounces=0 gave " << loDepth0 << ", maxBounces=1 gave " << loDepth1
-                      << ". With no indirect light these must match; a gap means the terminal "
-                         "BSDF-sampled ray is not being traced, so NEE's MIS weight is never "
-                         "complemented.\n";
-            ok = false;
-        }
-        if (std::fabs(loRoulette - loDepth1) > kDepthInvarianceTolerance * scale) {
-            std::cerr << "integrator_validate: FAILED Russian roulette invariance at " << testCase.name
-                      << " -- RR on gave " << loRoulette << ", RR off gave " << loDepth1
-                      << ". RR reweights by 1/p and must not change the expectation.\n";
-            ok = false;
-        }
-        if (std::fabs(loDepth1 - reference) > kReferenceTolerance * scale) {
-            std::cerr << "integrator_validate: FAILED reference agreement at " << testCase.name
-                      << " -- rendered " << loDepth1 << ", analytic " << reference << '\n';
-            ok = false;
+        // Depth 0 and 1 agree with no indirect light; a gap means the terminal BSDF ray is untraced, so NEE's MIS is never complemented.
+        const std::array<std::tuple<const char*, const tools::stats::Welford*, const tools::stats::Welford*>, 3> pairs = {{
+            {"maxBounces 1 - 0", &depth1, &depth0},
+            {"RR on - off", &roulette, &depth1},
+            {"render - uniform-MC reference", &depth1, &reference},
+        }};
+        for (const auto& [what, a, b] : pairs) {
+            const double difference = a->mean() - b->mean();
+            const tools::stats::Band band = tools::stats::differenceBand(*a, *b, alpha);
+            char detail[256];
+            std::snprintf(detail, sizeof(detail), "%s %s: %.5f - %.5f = %+.2e vs +/- %.2e", testCase.name, what, a->mean(), b->mean(), difference,
+                          band.halfWidth());
+            std::cout << "  " << detail << '\n';
+            PT_EXPECT(ctx, band.contains(difference), detail);
         }
     }
-    finish(ctx, ok, "depth_and_russian_roulette_invariance failed; see the rows above");
-    return;
 }
 
 // A white non-absorbing dielectric slab is invisible under a uniform environment, the only case reaching a transmissive exiting vertex.
@@ -460,39 +474,13 @@ PT_CHECK(transmissive_slab_energy, Slow, Statistical) {
     }
 }
 
+// Rim light scattered past the 41.8 degree critical angle escapes by a slow facet walk: 16 bounces read 0.910 at b 0.95-0.98, r 0.2.
+constexpr int kSphereBounces = 65536;  // measured past b 0.98: 4096 leaves r 0.02 at 0.9994, 16384 at 0.9999; TIR trapping, not loss
+
 // The curved counterpart on the same invariant: a sphere traps far more light, internal hits past the critical angle reflecting totally.
 PT_CHECK(transmissive_sphere_energy, Slow, Statistical) {
-    // Converged at the centre, where the chord meets the far side head-on: the rim traps light, so its depth is the radial check's.
-    constexpr int kSphereBounces = 16;
-    constexpr float kTolerance = 0.03F;
     // 0 is the smooth interface and takes the delta path; the rest take the Walter lobe with far-side NEE.
     const std::array<float, 4> roughnesses = {0.0F, 0.2F, 0.4F, 0.7F};
-
-    const EnvironmentMap env = makeUniformEnvironment();
-    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
-    bool ok = true;
-
-    std::cout << "integrator_validate: white non-absorbing glass sphere, uniform L0=1 (1.0 = invisible)\n";
-    for (float roughness : roughnesses) {
-        const TestScene scene = withSurface(makeSphereScene(roughness), transmissive);
-        std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
-        if (!accel.has_value()) {
-            std::cerr << "integrator_validate: FAILED to build Embree sphere scene\n";
-            finish(ctx, false, "transmissive_sphere_energy failed; see the rows above");
-            return;
-        }
-        const float lo = renderCentre(scene, env, makeSettings(kSphereBounces, 999), *accel, pool);
-        std::cout << "  roughness " << roughness << "   Lo " << lo << '\n';
-        if (std::fabs(lo - 1.0F) > kTolerance) {
-            std::cerr << "integrator_validate: FAILED glass sphere transparency at roughness=" << roughness
-                      << " -- rendered " << lo
-                      << ", expected 1.0. Same invariant as the flat slab above, so a flat slab that "
-                         "passes while this fails localises the fault to a curvature-driven term: the "
-                         "spawn origin's side or bound, or the shadow-terminator lift.\n";
-            ok = false;
-        }
-    }
-
     // The same invariant with a dispersive index, gating the one-sample channel estimator.
     struct DispersiveGlass {
         const char* name;
@@ -503,7 +491,36 @@ PT_CHECK(transmissive_sphere_energy, Slow, Statistical) {
         {"Schott N-BK7", 1.5168F, 64.17F},
         {"Schott SF10", 1.72825F, 28.53F},
     }};
-    std::cout << "  dispersive (per channel, the one-sample hero-channel estimator)\n";
+
+    const EnvironmentMap env = makeUniformEnvironment();
+    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    const PathTraceSettings settings = perReplicate(makeSettings(kSphereBounces, 999));
+    ctx.plan(static_cast<int>(roughnesses.size() + (3 * dispersive.size())));
+    const double t = tools::stats::studentTTwoSided(ctx.alpha(), tools::stats::kReplicates - 1);
+    // Against 1 at t SE; the film's float32 mean resolves to one ulp, all the variance a smooth sphere's delta paths leave.
+    const auto expectInvisible = [&](const std::string& label, const tools::stats::Welford& lo) {
+        const double half = (t * lo.standardError()) + (std::numeric_limits<float>::epsilon() * lo.mean());
+        char detail[256];
+        std::snprintf(detail, sizeof(detail), "%s: Lo %.5f vs 1 +/- %.2e", label.c_str(), lo.mean(), half);
+        std::cout << "  " << detail << '\n';
+        PT_EXPECT(ctx, std::abs(lo.mean() - 1.0) <= half, detail);
+    };
+
+    std::cout << "integrator_validate: white non-absorbing glass sphere, uniform L0=1 (1.0 = invisible)\n";
+    for (const float roughness : roughnesses) {
+        const std::string label = "roughness " + std::to_string(roughness);
+        const TestScene scene = withSurface(makeSphereScene(roughness), transmissive);
+        std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+        if (!accel.has_value()) {
+            ctx.recordFailure("EmbreeAccel::build", label, __FILE__, __LINE__);
+            return;
+        }
+        expectInvisible(label, replicatedScalar(ctx.subSeed(label), [&](std::uint32_t scramble) {
+                            const glm::vec3 mean = centreMean(renderPass(scene, env, settings, *accel, pool, true, scramble).beauty);
+                            return static_cast<double>(std::max({mean.x, mean.y, mean.z}));
+                        }));
+    }
+    // Energy conservation does not depend on wavelength, so a failing channel is the estimator losing or gaining energy, not the optics.
     for (const DispersiveGlass& glass : dispersive) {
         const TestScene scene = withSurface(makeSphereScene(0.0F), [&](Material& material) {
             transmissive(material);
@@ -513,25 +530,16 @@ PT_CHECK(transmissive_sphere_energy, Slow, Statistical) {
         });
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         if (!accel.has_value()) {
-            std::cerr << "integrator_validate: FAILED to build Embree sphere scene\n";
-            finish(ctx, false, "transmissive_sphere_energy failed; see the rows above");
+            ctx.recordFailure("EmbreeAccel::build", glass.name, __FILE__, __LINE__);
             return;
         }
-        const glm::vec3 lo = centreMean(renderPass(scene, env, makeSettings(kSphereBounces, 999), *accel, pool, true).beauty);
-        std::cout << "    " << glass.name << " (ior " << glass.ior << ", abbe " << glass.abbe << ")   Lo ["
-                  << lo.x << ", " << lo.y << ", " << lo.z << "]\n";
+        const std::array<tools::stats::Welford, 3> lo = replicatedChannels(ctx.subSeed(glass.name), [&](std::uint32_t scramble) {
+            return centreMean(renderPass(scene, env, settings, *accel, pool, true, scramble).beauty);
+        });
         for (int c = 0; c < 3; ++c) {
-            if (std::fabs(lo[c] - 1.0F) > kTolerance) {
-                std::cerr << "integrator_validate: FAILED dispersive glass sphere transparency for "
-                          << glass.name << " channel " << c << " -- rendered " << lo[c]
-                          << ", expected 1.0. Energy conservation does not depend on wavelength, so this "
-                             "is the channel estimator losing or gaining energy, not the optics.\n";
-                ok = false;
-            }
+            expectInvisible(std::string(glass.name) + " channel " + std::to_string(c), lo[static_cast<std::size_t>(c)]);
         }
     }
-    finish(ctx, ok, "transmissive_sphere_energy failed; see the rows above");
-    return;
 }
 
 // Whole disc in frame: 50 mm on the 24 mm gate puts the silhouette, 11.5 degrees off axis from z = 5, at 0.85 of the half-height.
@@ -604,18 +612,16 @@ void printRim(const char* label, const RimEnergy& energy) {
 
 // The whole disc, not the centre: entry at impact parameter b has cosine sqrt(1 - b^2), and the rim is where it reaches grazing.
 PT_CHECK(transmissive_sphere_energy_radial, Slow, Statistical) {
-    // Rim light scattered past the 41.8 degree critical angle escapes by a slow facet walk: 16 bounces read 0.910 at b 0.95-0.98, r 0.2.
-    constexpr int kRimBounces = 4096;  // measured: 1024 leaves r 0.1 at 0.9968 past b 0.98; 4096 is within every bin's band
-    // The interpolated-normal residual (Schussler 2017 Fig. 18) scales with facet angle: 0.987 past b 0.98 at 64x32, 0.9989 here.
-    constexpr int kRimSlices = 256;
-    constexpr int kRimStacks = 128;
+    // The interpolated-normal residual (Schussler 2017 Fig. 18) scales with facet angle: past b 0.98, 0.9993 at 256x128, 1.0000 here.
+    constexpr int kRimSlices = 1024;
+    constexpr int kRimStacks = 512;
     const std::array<float, 8> roughnesses = {0.0F, 0.02F, 0.1F, 0.2F, 0.3F, 0.4F, 0.7F, 1.0F};
 
     ctx.plan(static_cast<int>(roughnesses.size() * (kRimBins + 1)));
     const EnvironmentMap env = makeUniformEnvironment();
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
-    PathTraceSettings settings = makeSettings(kRimBounces, 999);
-    settings.samplesPerPass = 1;  // kReplicates scrambles of one sample: 256x128 at 16 samples per pixel in all
+    PathTraceSettings settings = makeSettings(kSphereBounces, 999);
+    settings.samplesPerPass = 1;  // kReplicates scrambles of one sample: 256x128 at 64 samples per pixel in all
     const double t = tools::stats::studentTTwoSided(ctx.alpha(), tools::stats::kReplicates - 1);
     std::printf("integrator_validate: white non-absorbing glass sphere, uniform L0=1, mean(SE) per b/R bin (1.0 = invisible)\n  b/R      ");
     for (std::size_t b = 0; b < kRimBins; ++b) {
@@ -997,8 +1003,6 @@ PT_CHECK(embedded_object_of_its_ambient_index_is_invisible, Slow, Statistical) {
 PT_CHECK(on_surface_transmission_tint, Slow, Statistical) {
     constexpr int kBounces = 8;
     constexpr float kSlabThickness = 0.5F;
-    // Relative and tight: with no absorption and no refraction there is no distance bias, so both rows carry only estimator noise.
-    constexpr float kRelativeTolerance = 0.002F;
     const glm::vec3 colour(0.5F, 0.25F, 0.75F);
     const glm::vec3 expected = colour * colour;   // two interfaces crossed, one factor each
 
@@ -1010,8 +1014,9 @@ PT_CHECK(on_surface_transmission_tint, Slow, Statistical) {
 
     const EnvironmentMap env = makeUniformEnvironment();
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
-    bool ok = true;
-
+    const PathTraceSettings settings = perReplicate(makeSettings(kBounces, 999));
+    ctx.plan(static_cast<int>(cases.size()) * 3);
+    const double t = tools::stats::studentTTwoSided(ctx.alpha(), tools::stats::kReplicates - 1);
     std::cout << "integrator_validate: on-surface transmission tint at transmissionDepth 0\n";
     for (const TintCase& testCase : cases) {
         const TestScene scene = withSurface(testCase.sphere ? makeSphereScene(0.0F) : makeSlabScene(0.0F, kSlabThickness),
@@ -1022,91 +1027,84 @@ PT_CHECK(on_surface_transmission_tint, Slow, Statistical) {
                                             });
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         if (!accel.has_value()) {
-            std::cerr << "integrator_validate: FAILED to build Embree scene for " << testCase.name
-                      << '\n';
-            finish(ctx, false, "on_surface_transmission_tint failed; see the rows above");
+            ctx.recordFailure("EmbreeAccel::build", testCase.name, __FILE__, __LINE__);
             return;
         }
-        const glm::vec3 lo = centreMean(renderPass(scene, env, makeSettings(kBounces, 999), *accel, pool, true).beauty);
-
-        std::cout << "  " << testCase.name;
-        for (std::size_t pad = std::string(testCase.name).size(); pad < 36; ++pad) {
-            std::cout << ' ';
-        }
-        std::cout << "measured [" << lo.x << ", " << lo.y << ", " << lo.z << "]   expected ["
-                  << expected.x << ", " << expected.y << ", " << expected.z << "]\n";
+        const std::array<tools::stats::Welford, 3> lo = replicatedChannels(ctx.subSeed(testCase.name), [&](std::uint32_t scramble) {
+            return centreMean(renderPass(scene, env, settings, *accel, pool, true, scramble).beauty);
+        });
+        // No medium and no refraction leave delta paths only: the film's float32 ulp is all the spread the mean can carry.
         for (int c = 0; c < 3; ++c) {
-            if (std::fabs(lo[c] - expected[c]) > kRelativeTolerance * expected[c]) {
-                std::cerr << "integrator_validate: FAILED on-surface transmission tint at "
-                          << testCase.name << " channel " << c << " -- measured " << lo[c]
-                          << ", expected " << expected[c]
-                          << ". At transmissionDepth 0 there is no medium to absorb in, so "
-                             "transmissionColor tints each interface crossing once and nothing "
-                             "else can move this reading.\n";
-                ok = false;
-            }
+            const tools::stats::Welford& channel = lo[static_cast<std::size_t>(c)];
+            const double half = (t * channel.standardError()) + (std::numeric_limits<float>::epsilon() * channel.mean());
+            char detail[256];
+            std::snprintf(detail, sizeof(detail), "%s channel %d: %.6f vs colour^2 %.6f +/- %.2e", testCase.name, c, channel.mean(),
+                          static_cast<double>(expected[c]), half);
+            std::cout << "  " << detail << '\n';
+            PT_EXPECT(ctx, std::abs(channel.mean() - expected[c]) <= half, detail);
         }
     }
-    finish(ctx, ok, "on_surface_transmission_tint failed; see the rows above");
-    return;
 }
 
 // Per-instance material binding, integrator side: two coplanar quads distinguished only by each instance's base_color.
 PT_CHECK(per_instance_materials, Slow, Statistical) {
     constexpr float kRoughness = 1.0F;
-    constexpr float kDominance = 4.0F;   // the off-channel is the white glossy layer, not zero, so this is a ratio test, not an equality
-    constexpr float kSwapTolerance = 0.02F;
     const glm::vec3 red(1.0F, 0.0F, 0.0F);
     const glm::vec3 blue(0.0F, 0.0F, 1.0F);
 
     const TestScene scene = makeTwoInstanceScene(kRoughness);
     std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
     if (!accel.has_value()) {
-        std::cerr << "integrator_validate: FAILED to build Embree two-instance scene\n";
-        finish(ctx, false, "per_instance_materials failed; see the rows above");
+        ctx.recordFailure("EmbreeAccel::build", "two-instance scene", __FILE__, __LINE__);
         return;
     }
-
     const EnvironmentMap env = makeUniformEnvironment();
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
-    const auto render = [&](const glm::vec3& left, const glm::vec3& right) {
+    const PathTraceSettings settings = perReplicate(makeSettings(1, 999));
+    // One block of one assignment, replicated: the left block is instance 0's, the right instance 1's.
+    const auto block = [&](const glm::vec3& left, const glm::vec3& right, bool leftBlock) {
         TestScene coloured = scene;
         coloured.instances[0].material.baseColor = left;
         coloured.instances[1].material.baseColor = right;
-        const pathtracer::gfx::HdrImage beauty = renderPass(coloured, env, makeSettings(1, 999), *accel, pool, /*showSky=*/true).beauty;
-        return std::pair{regionMean(beauty, 2, 6, 6, 10), regionMean(beauty, 10, 6, 14, 10)};
+        char label[64];
+        std::snprintf(label, sizeof(label), "left %g%g%g right %g%g%g %s", static_cast<double>(left.x), static_cast<double>(left.y),
+                      static_cast<double>(left.z), static_cast<double>(right.x), static_cast<double>(right.y), static_cast<double>(right.z),
+                      leftBlock ? "left" : "right");
+        return replicatedChannels(ctx.subSeed(label), [&](std::uint32_t scramble) {
+            const pathtracer::gfx::HdrImage beauty = renderPass(coloured, env, settings, *accel, pool, /*showSky=*/true, scramble).beauty;
+            return leftBlock ? regionMean(beauty, 2, 6, 6, 10) : regionMean(beauty, 10, 6, 14, 10);
+        });
     };
-
-    bool ok = true;
-    const auto [leftRed, rightBlue] = render(red, blue);
-    const auto [leftBlue, rightRed] = render(blue, red);
-
+    // Each block of each assignment against the same block with that colour on both instances: a swap or a constant index moves one.
+    struct Comparison {
+        const char* name;
+        glm::vec3 left;
+        glm::vec3 right;
+        bool leftBlock;
+        glm::vec3 uniform;
+    };
+    const std::array<Comparison, 4> comparisons{{
+        {"instance 0 red", red, blue, true, red},
+        {"instance 1 blue", red, blue, false, blue},
+        {"instance 0 blue", blue, red, true, blue},
+        {"instance 1 red", blue, red, false, red},
+    }};
+    ctx.plan(static_cast<int>(comparisons.size()) * 3);
+    const double alpha = ctx.alpha();
     std::cout << "integrator_validate: per-instance material binding (two instances, one material each)\n";
-    std::cout << "  entry0=red   entry1=blue   left [" << leftRed.x << ", " << leftRed.z
-              << "]  right [" << rightBlue.x << ", " << rightBlue.z << "]  (r, b)\n";
-    std::cout << "  entry0=blue  entry1=red    left [" << leftBlue.x << ", " << leftBlue.z
-              << "]  right [" << rightRed.x << ", " << rightRed.z << "]  (r, b)\n";
-
-    if (!(leftRed.x > kDominance * leftRed.z) || !(rightBlue.z > kDominance * rightBlue.x)) {
-        std::cerr << "integrator_validate: FAILED per-instance material binding -- with entry 0 red "
-                     "and entry 1 blue, the left quad (instanceIndex 0) read ["
-                  << leftRed.x << ", " << leftRed.z << "] and the right (instanceIndex 1) read ["
-                  << rightBlue.x << ", " << rightBlue.z
-                  << "] in (r, b). Each instance's triangles must resolve to its own "
-                     "material; a swap or a constant index lands here.\n";
-        ok = false;
+    for (const Comparison& comparison : comparisons) {
+        const std::array<tools::stats::Welford, 3> mixed = block(comparison.left, comparison.right, comparison.leftBlock);
+        const std::array<tools::stats::Welford, 3> uniform = block(comparison.uniform, comparison.uniform, comparison.leftBlock);
+        for (std::size_t c = 0; c < 3; ++c) {
+            const double difference = mixed[c].mean() - uniform[c].mean();
+            const tools::stats::Band band = tools::stats::differenceBand(mixed[c], uniform[c], alpha);
+            char detail[192];
+            std::snprintf(detail, sizeof(detail), "%s channel %zu: %.5f vs uniform %.5f, difference %+.2e vs +/- %.2e", comparison.name, c,
+                          mixed[c].mean(), uniform[c].mean(), difference, band.halfWidth());
+            std::cout << "  " << detail << '\n';
+            PT_EXPECT(ctx, band.contains(difference), detail);
+        }
     }
-    // Swapping the materials must swap the picture: each block is compared against the other assignment's opposite block.
-    if (std::fabs(leftRed.x - rightRed.x) > kSwapTolerance ||
-        std::fabs(rightBlue.z - leftBlue.z) > kSwapTolerance) {
-        std::cerr << "integrator_validate: FAILED per-instance material binding under swap -- "
-                     "exchanging the two instances' base_color must exchange the two blocks' "
-                     "readings, but red measured " << leftRed.x << " on the left and " << rightRed.x
-                  << " on the right, blue " << rightBlue.z << " then " << leftBlue.z << ".\n";
-        ok = false;
-    }
-    finish(ctx, ok, "per_instance_materials failed; see the rows above");
-    return;
 }
 
 // An emission-only surface returns emission_luminance x emission_color to a camera ray whatever lights the scene: the authored value.
@@ -2000,25 +1998,38 @@ PT_CHECK(rough_transmission_tint, Slow, Exact) {
 }
 
 // Lambert (1760) / Baum, Rushmeier & Winget 1989 polygon form factor, summing over EDGES rather than Girard's internal angles.
-float lambertPolygonIrradiance(const std::array<glm::vec3, 4>& vertices, const glm::vec3& p,
-                                const glm::vec3& n, float radiance) {
-    float sum = 0.0F;
+double lambertPolygonIrradiance(const std::array<glm::vec3, 4>& vertices, const glm::vec3& p, const glm::vec3& n, float radiance) {
+    double sum = 0.0;
     for (std::size_t i = 0; i < vertices.size(); ++i) {
-        const glm::vec3 r0 = glm::normalize(vertices[i] - p);
-        const glm::vec3 r1 = glm::normalize(vertices[(i + 1) % vertices.size()] - p);
-        const float gamma = std::acos(glm::clamp(glm::dot(r0, r1), -1.0F, 1.0F));
+        const glm::dvec3 r0 = glm::normalize(glm::dvec3(vertices[i] - p));
+        const glm::dvec3 r1 = glm::normalize(glm::dvec3(vertices[(i + 1) % vertices.size()] - p));
         // cross(r1, r0), not (r0, r1): the sign convention matching Baum/Rushmeier/Winget's vertex ordering, fixed against the renderer.
-        const glm::vec3 axis = glm::cross(r1, r0);
-        const float axisLen = glm::length(axis);
-        if (axisLen > 1e-8F) {
-            sum += gamma * glm::dot(axis / axisLen, n);
+        const glm::dvec3 axis = glm::cross(r1, r0);
+        const double axisLen = glm::length(axis);
+        // atan2 of sine and cosine, in double: acos near 1 loses half its digits, 3e-4 of a small far light's edge angle in float.
+        if (axisLen > 0.0) {
+            sum += std::atan2(axisLen, glm::dot(r0, r1)) * glm::dot(axis / axisLen, glm::dvec3(n));
         }
     }
-    return radiance * 0.5F * sum;
+    return radiance * 0.5 * sum;
 }
 
-// The receiver: makeQuadScene's own z=0 quad facing +Z, reused so every analytic reference below describes the same surface.
-TestScene makeLambertianFloor() { return withSurface(makeQuadScene(/*roughness=*/1.0F), indexMatched); }
+// Furthest a filtered primary ray of the kImageSize frame lands from the origin on z = 0: the frame's corners widened by the filter.
+float floorReach(const Camera& camera) {
+    const glm::vec2 frame = pathtracer::gfx::frameExtent(camera.pixelLattice(), kImageSize, kImageSize);
+    float reach = 0.0F;
+    for (const glm::vec2 corner : {glm::vec2(-1.0F, -1.0F), glm::vec2(-1.0F, 1.0F), glm::vec2(1.0F, -1.0F), glm::vec2(1.0F, 1.0F)}) {
+        const glm::vec2 film = (frame * 0.5F) + (corner * ((frame * 0.5F) + pathtracer::scene::kFilterRadius));
+        const std::optional<pathtracer::scene::Ray> ray =
+            camera.primaryRay(((film.x / frame.x) * 2.0F) - 1.0F, 1.0F - ((film.y / frame.y) * 2.0F), frame.x / frame.y);
+        const glm::vec3 hit = ray->origin - ((ray->origin.z / ray->dir.z) * ray->dir);
+        reach = std::max({reach, std::abs(hit.x), std::abs(hit.y)});
+    }
+    return reach;
+}
+
+// Sized to the default camera's frame: barycentric hits err ~2^-24 of the triangle, 6e-6 m at kQuadExtent, a 6e-6 bias at 1/m gradient.
+TestScene makeLambertianFloor() { return withSurface(makeQuadScene(/*roughness=*/1.0F, floorReach(makeCamera())), indexMatched); }
 
 // A one-sided quad light facing -Z at the receiver, offset in x so its non-emitting back face stays out of the camera's view cone.
 pathtracer::scene::QuadLight makeOverheadLight(bool twoSided = false) {
@@ -2046,12 +2057,34 @@ void appendWall(TestScene& scene, const Material& material, std::vector<int>& in
     instanceLightIndex.push_back(-1);
 }
 
+// The references are point values at the origin; a pixel block averages a footprint whose curvature biases at second order, so 1/64th.
+Camera makePointCamera() {
+    return Camera(glm::vec3(0.0F, 0.0F, 5.0F), glm::vec3(0.0F), Camera::FilmBack{36.0F, 24.0F}, 64.0F * kFocalLengthMm, 0.01F, 1000.0F, 2.8F,
+                  1.0F / 125.0F, 100.0F);
+}
+
+// The centre block's red channel over replicate passes of a lit scene through the point camera, sky off: the irradiance reading.
+tools::stats::Welford renderLitCentre(const TestScene& scene, const std::vector<int>& instanceLightIndex,
+                                      const std::vector<pathtracer::scene::AreaLight>& lights, const PathTraceSettings& settings,
+                                      EmbreeAccel& accel, pathtracer::scene::ThreadPool& pool, std::uint64_t seed) {
+    const Camera camera = makePointCamera();
+    return replicatedScalar(seed, [&](std::uint32_t scramble) {
+        return static_cast<double>(centreMean(renderPassWithLights(scene, instanceLightIndex, lights, nullptr, perReplicate(settings), accel, pool,
+                                                                   /*showSky=*/false, scramble, camera)
+                                                  .beauty)
+                                       .x);
+    });
+}
+
+// Pass form against a closed form: |mean - reference| within t SE plus a deterministic floor, NaN failing.
+bool matchesReference(const tools::stats::Welford& reading, double reference, double alpha, double floor) {
+    const double half = (tools::stats::studentTTwoSided(alpha, tools::stats::kReplicates - 1) * reading.standardError()) + floor;
+    return std::abs(reading.mean() - reference) <= half;
+}
+
 // Irradiance against the closed form, a one-sided face reading 0 and an occluded light 0.
 PT_CHECK(quad_light_irradiance_and_occlusion, Slow, Statistical) {
-    constexpr float kTolerance = 0.02F;  // Monte Carlo NEE noise at kSamplesPerPixel, not a formula slop
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
-    bool ok = true;
-
     struct LightCase {
         const char* name;
         pathtracer::scene::QuadLight light;
@@ -2066,7 +2099,9 @@ PT_CHECK(quad_light_irradiance_and_occlusion, Slow, Statistical) {
                                                       glm::vec3(0.0F, 6.0F, 0.0F),
                                                       glm::vec3(6.0F, 0.0F, 0.0F), glm::vec3(2.0F), false}},
     }};
-
+    // Each lit row against Lambert's polygon form factor; the back face and the occluded light are exactly 0, no sample reaching light.
+    ctx.plan(static_cast<int>(cases.size()) + 2);
+    const double alpha = ctx.alpha();
     std::cout << "integrator_validate: quad light irradiance vs Lambert's closed-form polygon form factor\n";
     for (const LightCase& testCase : cases) {
         TestScene scene = makeLambertianFloor();
@@ -2074,105 +2109,58 @@ PT_CHECK(quad_light_irradiance_and_occlusion, Slow, Statistical) {
         appendQuadEmitter(scene, testCase.light, /*quadIndex=*/0, instanceLightIndex);
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         if (!accel.has_value()) {
-            std::cerr << "integrator_validate: FAILED to build Embree scene for " << testCase.name << '\n';
-            finish(ctx, false, "quad_light_irradiance_and_occlusion failed; see the rows above");
+            ctx.recordFailure("EmbreeAccel::build", testCase.name, __FILE__, __LINE__);
             return;
         }
-        const std::vector<pathtracer::scene::AreaLight> quads{testCase.light};
-        const glm::vec3 lo = centreMean(renderPassWithLights(scene, instanceLightIndex, quads,
-                                                              /*env=*/nullptr,
-                                                              makeSettings(0, 999), *accel, pool,
-                                                              /*showSky=*/false)
-                                             .beauty);
-
-        const std::array<glm::vec3, 4> corners{
-            testCase.light.origin, testCase.light.origin + testCase.light.edge0,
-            testCase.light.origin + testCase.light.edge0 + testCase.light.edge1,
-            testCase.light.origin + testCase.light.edge1};
-        const float irradiance =
-            lambertPolygonIrradiance(corners, glm::vec3(0.0F), glm::vec3(0.0F, 0.0F, 1.0F),
-                                      testCase.light.radiance.x);
-        const float reference = irradiance / kPi;
-
-        std::cout << "  " << testCase.name << "   rendered " << lo.x << "   reference " << reference
-                  << '\n';
-        if (std::fabs(lo.x - reference) > kTolerance * std::max(reference, 0.05F)) {
-            std::cerr << "integrator_validate: FAILED quad light irradiance at " << testCase.name
-                      << " -- rendered " << lo.x << ", Lambert polygon reference " << reference << '\n';
-            ok = false;
-        }
+        const std::array<glm::vec3, 4> corners{testCase.light.origin, testCase.light.origin + testCase.light.edge0,
+                                               testCase.light.origin + testCase.light.edge0 + testCase.light.edge1,
+                                               testCase.light.origin + testCase.light.edge1};
+        const double reference =
+            lambertPolygonIrradiance(corners, glm::vec3(0.0F), glm::vec3(0.0F, 0.0F, 1.0F), testCase.light.radiance.x) / std::numbers::pi;
+        const tools::stats::Welford lo =
+            renderLitCentre(scene, instanceLightIndex, {testCase.light}, makeSettings(0, 999), *accel, pool, ctx.subSeed(testCase.name));
+        char detail[192];
+        std::snprintf(detail, sizeof(detail), "%s: rendered %.6f (SE %.1e), Lambert polygon reference %.6f", testCase.name, lo.mean(),
+                      lo.standardError(), reference);
+        std::cout << "  " << detail << '\n';
+        PT_EXPECT(ctx, matchesReference(lo, reference, alpha, 0.0), detail);
     }
 
     // The same position with edge0/edge1 swapped, so only radianceToward's front/back-face test stands between this and nonzero.
-    {
+    const pathtracer::scene::QuadLight backFacing{glm::vec3(0.5F, -0.5F, 1.5F), glm::vec3(1.0F, 0.0F, 0.0F), glm::vec3(0.0F, 1.0F, 0.0F),
+                                                  glm::vec3(3.0F), false};
+    // The first case's light plus a wall over its footprint: an opaque blocker must stop NEE, kShadowDistanceEpsilon's back-off included.
+    const std::array<std::tuple<const char*, pathtracer::scene::QuadLight, bool>, 2> dark{{
+        {"one-sided light facing away", backFacing, false},
+        {"opaque wall between light and receiver", makeOverheadLight(), true},
+    }};
+    for (const auto& [name, light, walled] : dark) {
         TestScene scene = makeLambertianFloor();
         std::vector<int> instanceLightIndex(scene.instances.size(), -1);
-        const pathtracer::scene::QuadLight light{glm::vec3(0.5F, -0.5F, 1.5F), glm::vec3(1.0F, 0.0F, 0.0F),
-                                              glm::vec3(0.0F, 1.0F, 0.0F), glm::vec3(3.0F), false};
         appendQuadEmitter(scene, light, /*quadIndex=*/0, instanceLightIndex);
+        if (walled) {
+            appendWall(scene, makeLambertianFloor().instances[0].material, instanceLightIndex);
+        }
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         if (!accel.has_value()) {
-            std::cerr << "integrator_validate: FAILED to build Embree scene for one-sided check\n";
-            finish(ctx, false, "quad_light_irradiance_and_occlusion failed; see the rows above");
+            ctx.recordFailure("EmbreeAccel::build", name, __FILE__, __LINE__);
             return;
         }
-        const std::vector<pathtracer::scene::AreaLight> quads{light};
-        const glm::vec3 lo = centreMean(renderPassWithLights(scene, instanceLightIndex, quads,
-                                                              /*env=*/nullptr, makeSettings(0, 999),
-                                                              *accel, pool, /*showSky=*/false)
-                                             .beauty);
-        std::cout << "  one-sided (light behind, facing away)   rendered [" << lo.x << ", " << lo.y
-                  << ", " << lo.z << "]\n";
-        if (lo.x > kTolerance || lo.y > kTolerance || lo.z > kTolerance) {
-            std::cerr << "integrator_validate: FAILED quad light one-sidedness -- rendered [" << lo.x
-                      << ", " << lo.y << ", " << lo.z
-                      << "], expected exactly 0. A one-sided emitter's back face must emit nothing.\n";
-            ok = false;
-        }
+        const tools::stats::Welford lo = renderLitCentre(scene, instanceLightIndex, {light}, makeSettings(0, 999), *accel, pool, ctx.subSeed(name));
+        const std::string detail = std::string(name) + ": rendered " + std::to_string(lo.mean()) + " with spread " +
+                                   std::to_string(lo.standardError()) + ", expected exactly 0";
+        std::cout << "  " << detail << '\n';
+        PT_EXPECT(ctx, lo.mean() == 0.0 && lo.standardError() == 0.0, detail);
     }
-
-    // The first case's light plus a wall over its footprint.
-    {
-        TestScene scene = makeLambertianFloor();
-        std::vector<int> instanceLightIndex(scene.instances.size(), -1);
-        const pathtracer::scene::QuadLight light = makeOverheadLight();
-        appendQuadEmitter(scene, light, /*quadIndex=*/0, instanceLightIndex);
-        appendWall(scene, makeLambertianFloor().instances[0].material, instanceLightIndex);
-
-        std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
-        if (!accel.has_value()) {
-            std::cerr << "integrator_validate: FAILED to build Embree scene for occlusion check\n";
-            finish(ctx, false, "quad_light_irradiance_and_occlusion failed; see the rows above");
-            return;
-        }
-        const std::vector<pathtracer::scene::AreaLight> quads{light};
-        const glm::vec3 lo = centreMean(renderPassWithLights(scene, instanceLightIndex, quads,
-                                                              /*env=*/nullptr, makeSettings(0, 999),
-                                                              *accel, pool, /*showSky=*/false)
-                                             .beauty);
-        std::cout << "  occluded (opaque wall between light and receiver)   rendered [" << lo.x << ", "
-                  << lo.y << ", " << lo.z << "]\n";
-        if (lo.x > kTolerance || lo.y > kTolerance || lo.z > kTolerance) {
-            std::cerr << "integrator_validate: FAILED quad light occlusion -- rendered [" << lo.x << ", "
-                      << lo.y << ", " << lo.z
-                      << "], expected exactly 0. An opaque wall between light and receiver must fully "
-                         "block NEE; a non-zero reading means kShadowDistanceEpsilon's back-off (or the "
-                         "shadow ray itself) is not reaching the blocker.\n";
-            ok = false;
-        }
-    }
-    finish(ctx, ok, "quad_light_irradiance_and_occlusion failed; see the rows above");
-    return;
 }
 
 // OpenPBR's presence and a smooth thin wall between the overhead light and the floor: NEE's shadow walk and the BSDF ray agree.
 PT_CHECK(presence_and_window_transmission, Slow, Statistical) {
-    constexpr float kTolerance = 0.02F;  // Monte Carlo noise at kSamplesPerPixel, as quad_light_irradiance_and_occlusion
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     const pathtracer::scene::QuadLight light = makeOverheadLight();
     const std::array<glm::vec3, 4> corners{light.origin, light.origin + light.edge0, light.origin + light.edge0 + light.edge1,
                                            light.origin + light.edge1};
-    const float open = lambertPolygonIrradiance(corners, glm::vec3(0.0F), glm::vec3(0.0F, 0.0F, 1.0F), light.radiance.x) / kPi;
+    const double open = lambertPolygonIrradiance(corners, glm::vec3(0.0F), glm::vec3(0.0F, 0.0F, 1.0F), light.radiance.x) / std::numbers::pi;
     Material window = makeLambertianFloor().instances[0].material;
     window.geometryThinWalled = true;
     window.transmissionWeight = 1.0F;
@@ -2183,37 +2171,44 @@ PT_CHECK(presence_and_window_transmission, Slow, Statistical) {
     sheet.geometryThinWalled = true;
     sheet.transmissionWeight = 1.0F;
     sheet.specularRoughness = 0.0F;
-    double windowIrradiance = 0.0;
-    constexpr int kNodes = 256;
-    for (int i = 0; i < kNodes; ++i) {
-        for (int j = 0; j < kNodes; ++j) {
-            const glm::vec3 point = light.origin + (((static_cast<float>(i) + 0.5F) / kNodes) * light.edge0) +
-                                    (((static_cast<float>(j) + 0.5F) / kNodes) * light.edge1);
-            const float r = glm::length(point);
-            const float mu = point.z / r;
-            const glm::vec3 wo(std::sqrt(1.0F - (mu * mu)), 0.0F, mu);
-            const float through = pathtracer::scene::makeBsdfClosure(sheet, wo).sheet.transmit.x;
-            windowIrradiance += static_cast<double>(light.radiance.x * through * mu * mu / (r * r));
+    const double area = glm::length(glm::cross(light.edge0, light.edge1));
+    // Midpoint rule over the light in double; its error is measured as the distance to the rule at twice the nodes per axis.
+    const auto throughWindowAt = [&](int nodes) {
+        double irradiance = 0.0;
+        for (int i = 0; i < nodes; ++i) {
+            for (int j = 0; j < nodes; ++j) {
+                const glm::dvec3 point = glm::dvec3(light.origin) + (((i + 0.5) / nodes) * glm::dvec3(light.edge0)) +
+                                         (((j + 0.5) / nodes) * glm::dvec3(light.edge1));
+                const double r = glm::length(point);
+                const double mu = point.z / r;
+                const glm::vec3 wo(static_cast<float>(std::sqrt(1.0 - (mu * mu))), 0.0F, static_cast<float>(mu));
+                const double through = pathtracer::scene::makeBsdfClosure(sheet, wo).sheet.transmit.x;
+                irradiance += light.radiance.x * through * mu * mu / (r * r);
+            }
         }
-    }
-    const float area = glm::length(glm::cross(light.edge0, light.edge1));
-    const auto throughWindow = static_cast<float>(windowIrradiance * area / (kNodes * kNodes) / kPi);
+        return irradiance * area / (static_cast<double>(nodes) * nodes) / std::numbers::pi;
+    };
+    constexpr int kNodes = 256;
+    const double throughWindow = throughWindowAt(kNodes);
+    const double quadratureError = std::abs(throughWindowAt(2 * kNodes) - throughWindow);
 
     struct Case {
         const char* name;
         float opacity;
         bool window;
         int maxBounces;
-        float expected;
+        double expected;
+        double floor;
     };
     const std::array<Case, 5> cases{{
-        {"absent wall, opacity 0", 0.0F, false, 0, open},
-        {"half-present wall, opacity 0.5", 0.5F, false, 0, 0.5F * open},
-        {"smooth window, final ray past the depth cap", 1.0F, true, 0, throughWindow},
-        {"smooth window, sampled pass-through", 1.0F, true, 1, throughWindow},
-        {"half-present window", 0.5F, true, 1, 0.5F * (open + throughWindow)},
+        {"absent wall, opacity 0", 0.0F, false, 0, open, 0.0},
+        {"half-present wall, opacity 0.5", 0.5F, false, 0, 0.5 * open, 0.0},
+        {"smooth window, final ray past the depth cap", 1.0F, true, 0, throughWindow, quadratureError},
+        {"smooth window, sampled pass-through", 1.0F, true, 1, throughWindow, quadratureError},
+        {"half-present window", 0.5F, true, 1, 0.5 * (open + throughWindow), 0.5 * quadratureError},
     }};
-    bool ok = true;
+    ctx.plan(static_cast<int>(cases.size()));
+    const double alpha = ctx.alpha();
     for (const Case& c : cases) {
         TestScene scene = makeLambertianFloor();
         std::vector<int> instanceLightIndex(scene.instances.size(), -1);
@@ -2223,25 +2218,21 @@ PT_CHECK(presence_and_window_transmission, Slow, Statistical) {
         appendWall(scene, wall, instanceLightIndex);
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         if (!accel.has_value()) {
-            finish(ctx, false, "failed to build the Embree wall scene");
+            ctx.recordFailure("EmbreeAccel::build", c.name, __FILE__, __LINE__);
             return;
         }
-        const std::vector<pathtracer::scene::AreaLight> quads{light};
-        const PathTraceSettings settings = makeSettings(c.maxBounces, 999);
-        const glm::vec3 lo =
-            centreMean(renderPassWithLights(scene, instanceLightIndex, quads, /*env=*/nullptr, settings, *accel, pool, false).beauty);
-        std::cout << "  " << c.name << "   rendered " << lo.x << "   reference " << c.expected << '\n';
-        if (std::fabs(lo.x - c.expected) > kTolerance * c.expected) {
-            std::cerr << "integrator_validate: FAILED " << c.name << " -- rendered " << lo.x << ", reference " << c.expected << '\n';
-            ok = false;
-        }
+        const tools::stats::Welford lo = renderLitCentre(scene, instanceLightIndex, {light}, makeSettings(c.maxBounces, 999), *accel, pool,
+                                                         ctx.subSeed(c.name));
+        char detail[192];
+        std::snprintf(detail, sizeof(detail), "%s: rendered %.6f (SE %.1e), reference %.6f (quadrature %.1e)", c.name, lo.mean(), lo.standardError(),
+                      c.expected, c.floor);
+        std::cout << "  " << detail << '\n';
+        PT_EXPECT(ctx, matchesReference(lo, c.expected, alpha, c.floor), detail);
     }
-    finish(ctx, ok, "presence_and_window_transmission failed; see the rows above");
 }
 
 // A normal-mapped white Lambertian plane under a uniform sky returns the sky: the microsurface loses nothing at all orders, nor blackens.
 PT_CHECK(normal_mapped_furnace, Slow, Statistical) {
-    constexpr float kTolerance = 0.02F;
     constexpr float kTilt = 0.6F;
     constexpr float kCameraPitch = 70.0F;
     const std::filesystem::path map = std::filesystem::temp_directory_path() / "engine_integrator_normal_map.exr";
@@ -2251,14 +2242,16 @@ PT_CHECK(normal_mapped_furnace, Slow, Statistical) {
     const float pitch = glm::radians(kCameraPitch);
     const Camera camera(glm::vec3(0.0F, -5.0F * std::sin(pitch), 5.0F * std::cos(pitch)), glm::vec3(kCameraPitch, 0.0F, 0.0F),
                         Camera::FilmBack{36.0F, 24.0F}, kFocalLengthMm, 0.01F, 1000.0F, 2.8F, 1.0F / 125.0F, 100.0F);
-    bool ok = true;
+    // Per facet direction: the centre against the sky, and no texel black in any replicate, an exact assertion.
+    ctx.plan(4);
+    const double alpha = ctx.alpha();
     for (const float toward : {1.0F, -1.0F}) {
         // The facet tilted toward +y faces away from the camera, the classic black-fringe case; toward -y it faces the camera.
         const glm::vec3 normal(0.0F, toward * std::sin(kTilt), std::cos(kTilt));
         const glm::vec3 texel = 0.5F * (normal + 1.0F);
         if (!pathtracer::gfx::writeExr(map.string(), {1, 1, pathtracer::gfx::kRgbChannels, {texel.x, texel.y, texel.z}},
                                        pathtracer::gfx::ImageRole::Data)) {
-            finish(ctx, false, "could not write the normal map");
+            ctx.recordFailure("writeExr", map.string(), __FILE__, __LINE__);
             return;
         }
         TestScene scene = withSurface(makeQuadScene(1.0F), indexMatched);
@@ -2266,20 +2259,24 @@ PT_CHECK(normal_mapped_furnace, Slow, Statistical) {
             map.string(), pathtracer::gfx::kRgbChannels, pathtracer::gfx::ImageRole::Data, pathtracer::gfx::TextureWrap::Repeat, std::nullopt, 0);
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         if (!accel.has_value() || !scene.instances[0].material.geometryNormal.map) {
-            finish(ctx, false, "failed to build the normal-mapped plane");
+            ctx.recordFailure("EmbreeAccel::build", "normal-mapped plane", __FILE__, __LINE__);
             return;
         }
-        const pathtracer::scene::PathTraceResult result = renderPass(scene, sky, makeSettings(4, 999), *accel, pool, true, 7U, camera);
-        const glm::vec3 lo = centreMean(result.beauty);
+        const std::string label = toward > 0.0F ? "facet toward +y" : "facet toward -y";
         float darkest = std::numeric_limits<float>::infinity();
-        for (std::size_t i = 0; i < result.beauty.texels.size(); ++i) {
-            darkest = std::min(darkest, result.beauty.texels[i]);
-        }
-        std::cout << "  facet toward " << (toward > 0.0F ? "+y" : "-y") << ": rendered " << lo.x << ", darkest texel " << darkest << '\n';
-        ok = ok && std::abs(lo.x - 1.0F) <= kTolerance && darkest > 0.0F;
+        const tools::stats::Welford lo = replicatedScalar(ctx.subSeed(label), [&](std::uint32_t scramble) {
+            const pathtracer::scene::PathTraceResult result =
+                renderPass(scene, sky, perReplicate(makeSettings(4, 999)), *accel, pool, true, scramble, camera);
+            darkest = std::min(darkest, *std::min_element(result.beauty.texels.begin(), result.beauty.texels.end()));
+            return static_cast<double>(centreMean(result.beauty).x);
+        });
+        char detail[160];
+        std::snprintf(detail, sizeof(detail), "%s: rendered %.5f (SE %.1e) against the sky's 1", label.c_str(), lo.mean(), lo.standardError());
+        std::cout << "  " << detail << ", darkest texel " << darkest << '\n';
+        PT_EXPECT(ctx, matchesReference(lo, 1.0, alpha, 0.0), detail);
+        PT_EXPECT(ctx, darkest > 0.0F, label + ": a texel went black, the microsurface's fringe");
     }
     std::filesystem::remove(map);
-    finish(ctx, ok, "a normal-mapped white plane under a uniform sky differs from the sky, or a texel went black");
 }
 
 // A bulk surface emits from its front alone; a thin wall, with no interior, emits from both faces alike.
@@ -2435,9 +2432,7 @@ PT_CHECK(area_light_irradiance, Slow, Statistical) {
         {"sphere at 100 lm", fromLumens(pathtracer::config::SphereShape{kRadius}, false), kLumens / (4.0F * kPi * kPi * r2) * sphereFactor},
     };
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
-    // The references are point values at the origin; a pixel block averages a footprint whose curvature biases at second order, so 1/64th.
-    const Camera camera(glm::vec3(0.0F, 0.0F, 5.0F), glm::vec3(0.0F), Camera::FilmBack{36.0F, 24.0F}, 64.0F * kFocalLengthMm, 0.01F, 1000.0F, 2.8F,
-                        1.0F / 125.0F, 100.0F);
+    const Camera camera = makePointCamera();
     ctx.plan(static_cast<int>(rows.size()));
     for (const Row& row : rows) {
         const std::vector<pathtracer::scene::AreaLight> lights{row.light};
@@ -2659,7 +2654,6 @@ PT_CHECK(shadow_matte, Slow, Exact) {
 
 // A blocker hiding a light's near part: the penumbra reads 1 - E(visible part) / E(whole light) by the Lambert polygon form factor.
 PT_CHECK(shadow_matte_penumbra, Slow, Statistical) {
-    constexpr float kTolerance = 0.02F;  // Monte Carlo NEE noise at kSamplesPerPixel, as quad_light_irradiance_and_occlusion
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     // A blocker below the light, its near edge outside the view cone and past the light's in y, so only its far edge casts the penumbra.
     struct Row {
@@ -2678,6 +2672,8 @@ PT_CHECK(shadow_matte_penumbra, Slow, Statistical) {
     const glm::vec3 normal(0.0F, 0.0F, 1.0F);
     const glm::vec4 tangent(1.0F, 0.0F, 0.0F, 1.0F);
     ctx.plan(static_cast<int>(rows.size()));
+    const double t = tools::stats::studentTTwoSided(ctx.alpha(), tools::stats::kReplicates - 1);
+    const Camera camera = makePointCamera();
     for (const Row& row : rows) {
         const pathtracer::scene::QuadLight& light = row.light;
         TestScene scene = makeLambertianFloor();
@@ -2703,15 +2699,43 @@ PT_CHECK(shadow_matte_penumbra, Slow, Statistical) {
             PT_EXPECT(ctx, false, "failed to build the Embree penumbra scene");
             return;
         }
+        // Replicate passes summed into one 512-sample pair of shadow lanes, which the AOV divides as a render does.
         const std::vector<pathtracer::scene::AreaLight> quads{light};
-        const pathtracer::scene::PathTraceResult result =
-            renderPassWithLights(scene, instanceLightIndex, std::vector<pathtracer::scene::AreaLight>(quads.begin(), quads.end()),
-                                 /*env=*/nullptr,
-                                 makeSettings(0, 999), *accel, pool, false);
-        pathtracer::debug::FilterInput input{result.beauty};
-        input.shadowLost = &result.shadowLost;
-        input.shadowUnoccluded = &result.shadowUnoccluded;
-        const float shadow = centreMean(pathtracer::debug::evaluateFilterAov(pathtracer::debug::AovId::Shadow, input, pool)).x;
+        pathtracer::scene::PathTraceResult summed;
+        tools::stats::Welford lost;
+        tools::stats::Welford unoccluded;
+        std::array<double, tools::stats::kReplicates> lostReadings{};
+        std::array<double, tools::stats::kReplicates> unoccludedReadings{};
+        const std::uint64_t seed = ctx.subSeed(row.name);
+        for (int r = 0; r < tools::stats::kReplicates; ++r) {
+            const pathtracer::scene::PathTraceResult result =
+                renderPassWithLights(scene, instanceLightIndex, quads, /*env=*/nullptr, perReplicate(makeSettings(0, 999)), *accel, pool,
+                                     /*showSky=*/false, static_cast<std::uint32_t>(seed + static_cast<std::uint64_t>(r)), camera);
+            lostReadings[static_cast<std::size_t>(r)] = centreMean(result.shadowLost).x;
+            unoccludedReadings[static_cast<std::size_t>(r)] = centreMean(result.shadowUnoccluded).x;
+            lost.add(lostReadings[static_cast<std::size_t>(r)]);
+            unoccluded.add(unoccludedReadings[static_cast<std::size_t>(r)]);
+            if (r == 0) {
+                summed = result;
+                continue;
+            }
+            for (std::size_t i = 0; i < result.shadowLost.texels.size(); ++i) {
+                summed.shadowLost.texels[i] += result.shadowLost.texels[i];
+                summed.shadowUnoccluded.texels[i] += result.shadowUnoccluded.texels[i];
+            }
+        }
+        pathtracer::debug::FilterInput input{summed.beauty};
+        input.shadowLost = &summed.shadowLost;
+        input.shadowUnoccluded = &summed.shadowUnoccluded;
+        const double shadow = centreMean(pathtracer::debug::evaluateFilterAov(pathtracer::debug::AovId::Shadow, input, pool)).x;
+        // Ratio estimator lost / unoccluded (Cochran 1977 6.3): SE from the residuals l - R u, its bias at most CV(u) of that SE.
+        const double ratio = lost.mean() / unoccluded.mean();
+        tools::stats::Welford residuals;
+        for (int r = 0; r < tools::stats::kReplicates; ++r) {
+            residuals.add(lostReadings[static_cast<std::size_t>(r)] - (ratio * unoccludedReadings[static_cast<std::size_t>(r)]));
+        }
+        const double standardError = residuals.standardError() / unoccluded.mean();
+        const double half = (t + (unoccluded.standardError() / unoccluded.mean())) * standardError;
 
         // From the origin the blocker's far edge projects onto the light plane at x = edge * z_light / z_blocker; the light past it shows.
         const float lightZ = light.origin.z;
@@ -2723,23 +2747,18 @@ PT_CHECK(shadow_matte_penumbra, Slow, Statistical) {
                                              light.origin + light.edge1};
         const std::array<glm::vec3, 4> visible{glm::vec3(visibleFrom, nearY, lightZ), glm::vec3(visibleFrom, farY, lightZ),
                                                glm::vec3(far, farY, lightZ), glm::vec3(far, nearY, lightZ)};
-        const float expected = 1.0F - (lambertPolygonIrradiance(visible, glm::vec3(0.0F), normal, light.radiance.x) /
+        const double expected = 1.0 - (lambertPolygonIrradiance(visible, glm::vec3(0.0F), normal, light.radiance.x) /
                                        lambertPolygonIrradiance(whole, glm::vec3(0.0F), normal, light.radiance.x));
-        std::cout << "  " << row.name << "   shadow " << shadow << "   form-factor reference " << expected << '\n';
-        PT_EXPECT(ctx, std::fabs(shadow - expected) <= kTolerance * expected,
-                  std::string(row.name) + ": Shadow is not 1 - E(visible) / E(whole) of the Lambert polygon form factor");
+        char detail[192];
+        std::snprintf(detail, sizeof(detail), "%s: Shadow %.5f +/- %.1e vs 1 - E(visible) / E(whole) %.5f", row.name, shadow, half, expected);
+        std::cout << "  " << detail << '\n';
+        PT_EXPECT(ctx, std::abs(shadow - expected) <= half, detail);
     }
 }
 
 // Quadratic falloff is implicit: NEE divides by selectionPdf/solidAngle, and nothing asserted the point-source limit until this.
 PT_CHECK(quad_light_inverse_square, Slow, Statistical) {
-    constexpr float kTolerance = 0.02F;  // same Monte Carlo NEE noise band as checkQuadLightIrradiance above, at the same kSamplesPerPixel
-    // The far row must reach the point-source limit; 1e-2 sits above the MC noise and far below the near-field deviation demanded below.
-    constexpr float kPointLimitTolerance = 1e-2F;
-    constexpr float kMinNearFieldDeviation = 0.25F;
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
-    bool ok = true;
-
     // Small square light offset in x to clear the view cone, held FIXED across the sweep, so the true distance is sqrt(kOffsetX^2 + z^2).
     constexpr float kOffsetX = 0.5F;
     constexpr float kSide = 0.2F;
@@ -2749,104 +2768,73 @@ PT_CHECK(quad_light_inverse_square, Slow, Statistical) {
                                          glm::vec3(0.0F, side, 0.0F), glm::vec3(side, 0.0F, 0.0F),
                                          glm::vec3(radiance), false};
     };
-
     struct Row {
         const char* name;
         pathtracer::scene::QuadLight light;
-        bool farField;  // true: must reach the point-source limit. false: the near-field conditioning guard.
+        bool nearField;  // the conditioning guard: the point model must fall outside the rendered band
     };
     const std::array<Row, 5> rows{{
         {"z=0.5  small", makeLight(kOffsetX, 0.5F, kSide, kRadiance), false},
         {"z=1.0  small", makeLight(kOffsetX, 1.0F, kSide, kRadiance), false},
-        {"z=2.0  small", makeLight(kOffsetX, 2.0F, kSide, kRadiance), true},
-        {"z=4.0  small", makeLight(kOffsetX, 4.0F, kSide, kRadiance), true},
+        {"z=2.0  small", makeLight(kOffsetX, 2.0F, kSide, kRadiance), false},
+        {"z=4.0  small", makeLight(kOffsetX, 4.0F, kSide, kRadiance), false},
         // Near field: a light 30x wider at half the nearest distance, subtending nearly the whole hemisphere, where irradiance flattens.
-        {"z=0.5  large (near field)", makeLight(3.5F, 0.5F, 6.0F, 1.0F), false},
+        {"z=0.5  large (near field)", makeLight(3.5F, 0.5F, 6.0F, 1.0F), true},
     }};
-
+    // Every row against the exact polygon irradiance; the near-field row must resolve the point model's error; the small rows approach it.
+    ctx.plan(static_cast<int>(rows.size()) + 2);
+    const double alpha = ctx.alpha();
+    const double t = tools::stats::studentTTwoSided(alpha, tools::stats::kReplicates - 1);
     std::cout << "integrator_validate: quad light inverse-square limit (E*d^2 / (L*A*cos_r*cos_l))\n";
-    float previousRatioError = std::numeric_limits<float>::max();
-    bool sawNearFieldDeviation = false;
+    double previousPointError = std::numeric_limits<double>::infinity();
+    bool converging = true;
     for (const Row& row : rows) {
         TestScene scene = makeLambertianFloor();
         std::vector<int> instanceLightIndex(scene.instances.size(), -1);
         appendQuadEmitter(scene, row.light, /*quadIndex=*/0, instanceLightIndex);
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         if (!accel.has_value()) {
-            std::cerr << "integrator_validate: FAILED to build Embree scene for " << row.name << '\n';
-            finish(ctx, false, "quad_light_inverse_square failed; see the rows above");
+            ctx.recordFailure("EmbreeAccel::build", row.name, __FILE__, __LINE__);
             return;
         }
-        const std::vector<pathtracer::scene::AreaLight> quads{row.light};
-        const glm::vec3 lo = centreMean(renderPassWithLights(scene, instanceLightIndex, quads,
-                                                              /*env=*/nullptr,
-                                                              makeSettings(0, 999), *accel, pool,
-                                                              /*showSky=*/false)
-                                             .beauty);
-        const float renderedIrradiance = lo.x * kPi;
-
-        const std::array<glm::vec3, 4> corners{
-            row.light.origin, row.light.origin + row.light.edge0,
-            row.light.origin + row.light.edge0 + row.light.edge1, row.light.origin + row.light.edge1};
+        const tools::stats::Welford lo = renderLitCentre(scene, instanceLightIndex, {row.light}, makeSettings(0, 999), *accel, pool, ctx.subSeed(row.name));
+        const std::array<glm::vec3, 4> corners{row.light.origin, row.light.origin + row.light.edge0,
+                                               row.light.origin + row.light.edge0 + row.light.edge1, row.light.origin + row.light.edge1};
         const glm::vec3 receiverNormal(0.0F, 0.0F, 1.0F);
-        const float exactIrradiance = lambertPolygonIrradiance(corners, glm::vec3(0.0F), receiverNormal,
-                                                                row.light.radiance.x);
-
+        const double exact = lambertPolygonIrradiance(corners, glm::vec3(0.0F), receiverNormal, row.light.radiance.x) / std::numbers::pi;
         // Point-source limit: E = L * A * cos(theta_r) * cos(theta_l) / d^2, evaluated at the light's centre.
         const glm::vec3 centre = row.light.origin + (row.light.edge0 * 0.5F) + (row.light.edge1 * 0.5F);
         const float distance = glm::length(centre);
         const glm::vec3 toLight = centre / distance;
         const float area = glm::length(row.light.edge0) * glm::length(row.light.edge1);
-        const float pointIrradiance = row.light.radiance.x * area * glm::dot(toLight, receiverNormal) *
-                                       glm::dot(-toLight, row.light.normal) / (distance * distance);
-        const float ratio = renderedIrradiance / pointIrradiance;
-
-        std::cout << "  " << row.name << "   d " << distance << "   rendered E " << renderedIrradiance
-                   << "   exact E " << exactIrradiance << "   E/E_point " << ratio << '\n';
-
-        // The renderer must track the EXACT polygon irradiance at every distance, near field included.
-        if (std::fabs(renderedIrradiance - exactIrradiance) > kTolerance * std::max(exactIrradiance, 0.05F)) {
-            std::cerr << "integrator_validate: FAILED inverse-square row " << row.name
-                       << " -- rendered E " << renderedIrradiance << ", Lambert polygon reference "
-                       << exactIrradiance << '\n';
-            ok = false;
+        const double point = row.light.radiance.x * area * glm::dot(toLight, receiverNormal) * glm::dot(-toLight, row.light.normal) /
+                             (distance * distance) / std::numbers::pi;
+        char detail[192];
+        std::snprintf(detail, sizeof(detail), "%s: d %.3f, rendered %.9f (SE %.1e), exact %.9f, point model %.6f", row.name,
+                      static_cast<double>(distance), lo.mean(), lo.standardError(), exact, point);
+        std::cout << "  " << detail << '\n';
+        PT_EXPECT(ctx, matchesReference(lo, exact, alpha, 0.0), detail);
+        if (row.nearField) {
+            // Keeps the far rows honest: a render whose band also held the point model would prove nothing about the near field.
+            PT_EXPECT(ctx, std::abs(lo.mean() - point) > t * lo.standardError(), std::string(detail) + ": the point model is not resolved");
+            continue;
         }
-        const float ratioError = std::fabs(ratio - 1.0F);
-        if (row.farField) {
-            // Assert the PASS condition so a NaN ratio fails rather than slipping through an ordered compare.
-            if (!(ratioError <= kPointLimitTolerance)) {
-                std::cerr << "integrator_validate: FAILED inverse-square limit at " << row.name
-                           << " -- E/E_point " << ratio << ", expected 1 within " << kPointLimitTolerance << '\n';
-                ok = false;
-            }
-            // Monotone approach, so a renderer that merely happened to land on 1 at one distance cannot pass.
-            if (!(ratioError <= previousRatioError)) {
-                std::cerr << "integrator_validate: FAILED inverse-square convergence at " << row.name
-                           << " -- |E/E_point - 1| rose to " << ratioError << " from " << previousRatioError << '\n';
-                ok = false;
-            }
-            previousRatioError = ratioError;
-        } else if (ratioError >= kMinNearFieldDeviation) {
-            sawNearFieldDeviation = true;
-        }
+        // The exact form must approach the point model monotonically, so a renderer that tracks it reaches the inverse-square limit.
+        const double pointError = std::abs((exact / point) - 1.0);
+        converging = converging && pointError < previousPointError;
+        previousPointError = pointError;
     }
-    // Keeps the guard honest: if no row ever deviated from the point model, the far-field rows proved nothing.
-    if (!sawNearFieldDeviation) {
-        std::cerr << "integrator_validate: FAILED inverse-square conditioning -- no near-field row deviated from the point-source model by " << kMinNearFieldDeviation << ", so the far-field rows are vacuous\n";
-        ok = false;
-    }
-    finish(ctx, ok, "quad_light_inverse_square failed; see the rows above");
-    return;
+    PT_EXPECT(ctx, converging, "|E_exact / E_point - 1| did not fall monotonically with distance over the small rows");
 }
 
 // --- Ray-traced ambient occlusion (path_tracer.cpp's AO lane) ---------------------------------------
 
 // Wall distance for the AO checks, 10x makeCornerScene's default: holds AO(c) curvature bias to 3.3e-5 and keeps c > 1 at every pixel.
 constexpr float kAoWallDistance = 10.0F;
-// One rho draw per sample, so error falls as 1/sqrt(N); this count puts the 6-sigma tolerance 8x below every curve the sweep excludes.
+// The frame's spread of c about its nominal value at kAoWallDistance biases the frame mean by at most this against AO(c).
+constexpr double kAoCurvatureBias = 3.3e-5;
+// One rho draw per sample, so error falls as 1/sqrt(N): the row's budget, split over kReplicates passes.
 constexpr int kAoSamplesPerPixel = 1024;
-// Every pixel, not centreMean's 4x4: AO ignores view direction, so the whole frame gives the same N for a sixteenth of the paths.
-constexpr float kAoMeasuredPixels = static_cast<float>(kImageSize) * static_cast<float>(kImageSize);
 
 // Closed-form cosine-weighted obscurance for the corner scene, in double: three O(1) terms whose sum vanishes as (1-c)^(7/2).
 float analyticAmbientOcclusion(float c) {
@@ -2860,34 +2848,21 @@ float analyticAmbientOcclusion(float c) {
     return static_cast<float>(1.0 - (deficit / std::numbers::pi));
 }
 
-// Standard error on the mean at ~6 sigma, from the estimator's own statistics, conservative by the Bhatia-Davis bound
-float aoTolerance(float expected) {
-    const float n = static_cast<float>(kAoSamplesPerPixel) * kAoMeasuredPixels;
-    return 6.0F * std::sqrt(expected * (1.0F - expected) / n);
-}
-
-// One AO render over the whole frame at maxBounces=0, since AO is written at bounce 0 and reads no material at all.
-bool checkAoRow(const char* label, const TestScene& scene, const EnvironmentMap& env,
-                 float aoMaxDistance, float expected, EmbreeAccel& accel,
-                 pathtracer::scene::ThreadPool& pool) {
+// One AO row over the whole frame at maxBounces=0, AO ignoring view direction; c >= 1 leaves nothing in range, so every ray reads 1.
+void expectAoRow(tools::check::Context& ctx, double t, const char* label, const TestScene& scene, const EnvironmentMap& env, float c,
+                 EmbreeAccel& accel, pathtracer::scene::ThreadPool& pool) {
     PathTraceSettings settings = makeSettings(/*maxBounces=*/0, 999);
-    settings.samplesPerPass = kAoSamplesPerPixel;
-    settings.aoMaxDistance = aoMaxDistance;
-    const pathtracer::gfx::HdrImage& ao = renderPass(scene, env, settings, accel, pool, true).ao;
-    const float measured = regionMean(ao, 0, 0, kImageSize, kImageSize).x;
-    const float tolerance = aoTolerance(expected);
-    std::cout << "  " << label;
-    for (std::size_t pad = std::string(label).size(); pad < 38; ++pad) {
-        std::cout << ' ';
-    }
-    std::cout << "measured " << measured << "   analytic " << expected << "   tolerance " << tolerance
-              << '\n';
-    if (std::fabs(measured - expected) > tolerance) {
-        std::cerr << "integrator_validate: FAILED ambient occlusion at " << label << " -- measured "
-                  << measured << " vs analytic " << expected << " (tolerance " << tolerance << ")\n";
-        return false;
-    }
-    return true;
+    settings.samplesPerPass = kAoSamplesPerPixel / tools::stats::kReplicates;
+    settings.aoMaxDistance = kAoWallDistance / c;
+    const tools::stats::Welford ao = replicatedScalar(ctx.subSeed(label), [&](std::uint32_t scramble) {
+        return static_cast<double>(regionMean(renderPass(scene, env, settings, accel, pool, true, scramble).ao, 0, 0, kImageSize, kImageSize).x);
+    });
+    const double expected = analyticAmbientOcclusion(c);
+    const double half = c >= 1.0F ? 0.0 : (t * ao.standardError()) + kAoCurvatureBias;
+    char detail[192];
+    std::snprintf(detail, sizeof(detail), "%s: measured %.6f vs analytic %.6f +/- %.2e", label, ao.mean(), expected, half);
+    std::cout << "  " << detail << '\n';
+    PT_EXPECT(ctx, std::abs(ao.mean() - expected) <= half, detail);
 }
 
 struct AoCase {
@@ -2901,58 +2876,44 @@ PT_CHECK(ambient_occlusion_analytic, Slow, Statistical) {
     const EnvironmentMap env = makeUniformEnvironment();
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     const TestScene openScene = makeQuadScene(1.0F);
-    std::optional<EmbreeAccel> openAccel = EmbreeAccel::build(openScene.worldTriangles);
-    if (!openAccel.has_value()) {
-        std::cerr << "integrator_validate: FAILED to build Embree scene for the unoccluded AO plane\n";
-        finish(ctx, false, "ambient_occlusion_analytic failed; see the rows above");
-        return;
-    }
-    // The first row initialises the accumulator; later rows keep `check(...) && ok`, so no row is ever short-circuited away.
-    bool ok = checkAoRow("unoccluded plane", openScene, env, kAoWallDistance, 1.0F, *openAccel, pool);
-
     const TestScene corner = makeCornerScene(1.0F, kAoWallDistance);
+    std::optional<EmbreeAccel> openAccel = EmbreeAccel::build(openScene.worldTriangles);
     std::optional<EmbreeAccel> cornerAccel = EmbreeAccel::build(corner.worldTriangles);
-    if (!cornerAccel.has_value()) {
-        std::cerr << "integrator_validate: FAILED to build Embree scene for the AO corner\n";
-        finish(ctx, false, "ambient_occlusion_analytic failed; see the rows above");
+    if (!openAccel.has_value() || !cornerAccel.has_value()) {
+        ctx.recordFailure("EmbreeAccel::build", "AO plane or corner", __FILE__, __LINE__);
         return;
     }
     const std::array<AoCase, 4> sweep{{{"corner c=0.05 (half-space limit)", 0.05F},
                                         {"corner c=0.15", 0.15F},
                                         {"corner c=0.25", 0.25F},
                                         {"corner c=0.50", 0.5F}}};
+    ctx.plan(static_cast<int>(sweep.size()) + 1);
+    const double t = tools::stats::studentTTwoSided(ctx.alpha(), tools::stats::kReplicates - 1);
+    // Nothing to occlude: the plane's c is effectively infinite, so its lane reads exactly 1.
+    expectAoRow(ctx, t, "unoccluded plane", openScene, env, 1.0F, *openAccel, pool);
     for (const AoCase& testCase : sweep) {
-        ok = checkAoRow(testCase.name, corner, env, kAoWallDistance / testCase.c,
-                         analyticAmbientOcclusion(testCase.c), *cornerAccel, pool) &&
-             ok;
+        expectAoRow(ctx, t, testCase.name, corner, env, testCase.c, *cornerAccel, pool);
     }
-    finish(ctx, ok, "ambient_occlusion_analytic failed; see the rows above");
-    return;
 }
 
-// aoMaxDistance bracketed on one geometry: inside, the wall darkens by 11 tolerances; outside, every ray escapes and the lane reads 1.0.
+// aoMaxDistance bracketed on one geometry: inside, the wall darkens the lane; outside, every ray escapes and the lane reads exactly 1.0.
 PT_CHECK(ambient_occlusion_distance_bound, Slow, Statistical) {
     std::cout << "integrator_validate: ambient occlusion respects aoMaxDistance\n";
     const EnvironmentMap env = makeUniformEnvironment();
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
-
     const TestScene corner = makeCornerScene(1.0F, kAoWallDistance);
     std::optional<EmbreeAccel> accel = EmbreeAccel::build(corner.worldTriangles);
     if (!accel.has_value()) {
-        std::cerr << "integrator_validate: FAILED to build Embree scene for the AO distance bound\n";
-        finish(ctx, false, "ambient_occlusion_distance_bound failed; see the rows above");
+        ctx.recordFailure("EmbreeAccel::build", "AO corner", __FILE__, __LINE__);
         return;
     }
     const std::array<AoCase, 2> cases{{{"occluder inside range (c=0.50)", 0.5F},
                                         {"occluder just outside range (c=1.10)", 1.1F}}};
-    bool ok = true;
+    ctx.plan(static_cast<int>(cases.size()));
+    const double t = tools::stats::studentTTwoSided(ctx.alpha(), tools::stats::kReplicates - 1);
     for (const AoCase& testCase : cases) {
-        ok = checkAoRow(testCase.name, corner, env, kAoWallDistance / testCase.c,
-                         analyticAmbientOcclusion(testCase.c), *accel, pool) &&
-             ok;
+        expectAoRow(ctx, t, testCase.name, corner, env, testCase.c, *accel, pool);
     }
-    finish(ctx, ok, "ambient_occlusion_distance_bound failed; see the rows above");
-    return;
 }
 
 }  // namespace
@@ -3067,13 +3028,12 @@ double radialTailMass(double d) {
 // Mean over the pixels a half-plane edge cuts of each one's tail estimate minus the oracle's, per independent scramble.
 tools::stats::Welford hexagonalTailResiduals(const TestScene& scene, EmbreeAccel& accel, const EnvironmentMap& env,
                                              const PathTraceSettings& settings, pathtracer::scene::ThreadPool& pool, const Camera& camera,
-                                             bool horizontalEdge, int seeds) {
+                                             bool horizontalEdge, std::uint64_t seed) {
     const pathtracer::gfx::PixelLattice lattice = camera.pixelLattice();
     const glm::vec2 edge = 0.5F * pathtracer::gfx::frameExtent(lattice, kImageSize, kImageSize);
-    tools::stats::Welford residuals;
-    for (int seed = 0; seed < seeds; ++seed) {
+    return replicatedScalar(seed, [&](std::uint32_t scramble) {
         const pathtracer::scene::PathTraceResult traced =
-            renderPass(scene, env, settings, accel, pool, /*showSky=*/false, 100U + static_cast<std::uint32_t>(seed), camera);
+            renderPass(scene, env, settings, accel, pool, /*showSky=*/false, scramble, camera);
         double sum = 0.0;
         int cut = 0;
         for (int y = 0; y < kImageSize; ++y) {
@@ -3090,16 +3050,14 @@ tools::stats::Welford hexagonalTailResiduals(const TestScene& scene, EmbreeAccel
                 ++cut;
             }
         }
-        residuals.add(sum / cut);
-    }
-    return residuals;
+        return sum / cut;
+    });
 }
 
 }  // namespace
 
 // Hexagonal film offsets follow the radial window: an edge's coverage is its tail mass at both row parities and on both axes.
 PT_CHECK(hexagonal_film_offsets_follow_the_radial_filter, Fast, Statistical) {
-    constexpr int kSeeds = 16;
     TestScene scene = makeTwoInstanceScene(1.0F);
     scene.worldTriangles.resize(2);
     scene.shadingTriangles.resize(2);
@@ -3117,15 +3075,17 @@ PT_CHECK(hexagonal_film_offsets_follow_the_radial_filter, Fast, Statistical) {
     };
     // Rolled 90 degrees, the camera's up is world -x, so the same plane's edge crosses the rows at d = sqrt(3)/4 instead of the columns.
     const std::array<std::pair<const char*, tools::stats::Welford>, 2> axes{{
-        {"vertical edge", hexagonalTailResiduals(scene, *accel, env, settings, pool, hexagonal(glm::vec3(0.0F)), false, kSeeds)},
-        {"horizontal edge", hexagonalTailResiduals(scene, *accel, env, settings, pool, hexagonal(glm::vec3(0.0F, 0.0F, 90.0F)), true, kSeeds)},
+        {"vertical edge",
+         hexagonalTailResiduals(scene, *accel, env, settings, pool, hexagonal(glm::vec3(0.0F)), false, ctx.subSeed("vertical edge"))},
+        {"horizontal edge", hexagonalTailResiduals(scene, *accel, env, settings, pool, hexagonal(glm::vec3(0.0F, 0.0F, 90.0F)), true,
+                                                   ctx.subSeed("horizontal edge"))},
     }};
-    const double threshold = tools::stats::studentTTwoSided(tools::stats::sidak(tools::check::kFamilyAlpha, 2), kSeeds - 1);
     ctx.plan(2);
+    const double threshold = tools::stats::studentTTwoSided(ctx.alpha(), tools::stats::kReplicates - 1);
     for (const auto& [name, residuals] : axes) {
         char detail[192];
         std::snprintf(detail, sizeof(detail), "%s: mean tail residual %.3g over %d scrambles, %.3g standard errors against %.3g", name,
-                      residuals.mean(), kSeeds, residuals.mean() / residuals.standardError(), threshold);
+                      residuals.mean(), tools::stats::kReplicates, residuals.mean() / residuals.standardError(), threshold);
         PT_EXPECT(ctx, std::abs(residuals.mean()) <= threshold * residuals.standardError(), detail);
     }
 }
@@ -3157,7 +3117,6 @@ double lobeCoverage(double kappa, double c) {
 
 // A facet's lobe replaces the film filter: each pixel's coverage of a half-plane edge is the lobe's mass past it, on both lattices.
 PT_CHECK(acceptance_coverage_follows_the_lobe, Fast, Statistical) {
-    constexpr int kSeeds = 16;
     TestScene scene = makeTwoInstanceScene(1.0F);
     scene.worldTriangles.resize(2);
     scene.shadingTriangles.resize(2);
@@ -3177,8 +3136,10 @@ PT_CHECK(acceptance_coverage_follows_the_lobe, Fast, Statistical) {
                                           {pathtracer::gfx::PixelLattice::Square, 3.0F},
                                           {pathtracer::gfx::PixelLattice::Hexagonal, 1.0F},
                                           {pathtracer::gfx::PixelLattice::Hexagonal, 3.0F}}};
-    const double threshold = tools::stats::studentTTwoSided(tools::stats::sidak(tools::check::kFamilyAlpha, kCases.size()), kSeeds - 1);
     ctx.plan(static_cast<int>(kCases.size()));
+    const double threshold = tools::stats::studentTTwoSided(ctx.alpha(), tools::stats::kReplicates - 1);
+    // Only pixels the edge actually splits: elsewhere both the estimate and the oracle are 0 or 1 to within float.
+    constexpr double kSplit = std::numeric_limits<float>::epsilon();
     for (const Case& testCase : kCases) {
         const Camera camera(base.position(), base.rotationDegrees(), base.filmBack(), base.focalLengthMm(), base.nearClip(), base.farClip(),
                             base.aperture(), base.shutterSeconds(), base.iso(), pathtracer::scene::Lens{}, testCase.lattice,
@@ -3196,27 +3157,27 @@ PT_CHECK(acceptance_coverage_follows_the_lobe, Fast, Statistical) {
                 oracle[(static_cast<std::size_t>(y) * kImageSize) + static_cast<std::size_t>(x)] = lobeCoverage(kappa, -axis->ray.dir.x);
             }
         }
-        tools::stats::Welford residuals;
-        for (int seed = 0; seed < kSeeds; ++seed) {
+        char label[64];
+        std::snprintf(label, sizeof(label), "%s %.1f degrees", pathtracer::gfx::kPixelLatticeNames[static_cast<int>(testCase.lattice)],
+                      static_cast<double>(testCase.acceptanceDegrees));
+        const tools::stats::Welford residuals = replicatedScalar(ctx.subSeed(label), [&](std::uint32_t scramble) {
             const pathtracer::scene::PathTraceResult traced =
-                renderPass(scene, env, settings, *accel, pool, /*showSky=*/false, 200U + static_cast<std::uint32_t>(seed), camera);
+                renderPass(scene, env, settings, *accel, pool, /*showSky=*/false, scramble, camera);
             double sum = 0.0;
             int cut = 0;
             for (std::size_t pixel = 0; pixel < oracle.size(); ++pixel) {
-                // Only pixels the edge actually splits: elsewhere both the estimate and the oracle are 0 or 1 to within float.
-                if (oracle[pixel] > 1e-3 && oracle[pixel] < 1.0 - 1e-3) {
+                if (oracle[pixel] > kSplit && oracle[pixel] < 1.0 - kSplit) {
                     // Folded to the minority side's mass, so a lobe too wide or narrow errs the same way on both sides of the edge.
                     const double alpha = traced.alpha.texels[pixel];
                     sum += oracle[pixel] < 0.5 ? alpha - oracle[pixel] : oracle[pixel] - alpha;
                     ++cut;
                 }
             }
-            residuals.add(sum / cut);
-        }
+            return sum / cut;
+        });
         char detail[192];
-        std::snprintf(detail, sizeof(detail), "%s %.1f degrees: mean coverage residual %.3g over %d scrambles, %.3g standard errors against %.3g",
-                      pathtracer::gfx::kPixelLatticeNames[static_cast<int>(testCase.lattice)], static_cast<double>(testCase.acceptanceDegrees),
-                      residuals.mean(), kSeeds, residuals.mean() / residuals.standardError(), threshold);
+        std::snprintf(detail, sizeof(detail), "%s: mean coverage residual %.3g over %d scrambles, %.3g standard errors against %.3g", label,
+                      residuals.mean(), tools::stats::kReplicates, residuals.mean() / residuals.standardError(), threshold);
         PT_EXPECT(ctx, std::abs(residuals.mean()) <= threshold * residuals.standardError(), detail);
     }
 }
@@ -3516,17 +3477,6 @@ void appendQuad(TestScene& scene, const glm::vec3& origin, const glm::vec3& edge
     scene.instances.push_back(MeshInstance{material, glm::mat4(1.0F), ""});
 }
 
-// One channel of an RGB image over the half-open block [x0,x1) x [y0,y1), one Welford sample per pixel: pixels are independent scrambles.
-tools::stats::Welford pixelChannel(const pathtracer::gfx::HdrImage& image, int channel, int x0, int y0, int x1, int y1) {
-    tools::stats::Welford welford;
-    for (int y = y0; y < y1; ++y) {
-        for (int x = x0; x < x1; ++x) {
-            welford.add(image.rgb((static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width)) + static_cast<std::size_t>(x))[channel]);
-        }
-    }
-    return welford;
-}
-
 // Whether every texel of an RGB image in the block is exactly `value`: a per-sample constant survives the plain mean bit for bit.
 bool blockEquals(const pathtracer::gfx::HdrImage& image, const glm::vec3& value, int x0, int y0, int x1, int y1) {
     for (int y = y0; y < y1; ++y) {
@@ -3631,34 +3581,37 @@ PT_CHECK(denoise_features_follow_lobes_narrower_than_a_pixel, Slow, Statistical)
     const double predicted = 2.0 * alpha * std::sqrt(std::numbers::pi / omega);
     const EnvironmentMap env = makeUniformEnvironment();
     ctx.plan(3);
-    const auto render = [&](float roughness) -> std::optional<pathtracer::scene::PathTraceResult> {
-        const TestScene scene = withSurface(makeQuadScene(roughness), metallic(1.0F));
-        std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
-        if (!accel.has_value()) {
-            return std::nullopt;
-        }
-        return renderPass(scene, env, makeSettings(1, 999), *accel, sharedPool(ctx.threads()), true);
-    };
-    const std::optional<pathtracer::scene::PathTraceResult> nearDelta = render(kNearDeltaRoughness);
-    const std::optional<pathtracer::scene::PathTraceResult> rough = render(kRoughRoughness);
-    if (!nearDelta.has_value() || !rough.has_value()) {
-        for (int i = 0; i < 3; ++i) {
-            PT_EXPECT(ctx, false, "failed to build the metal plane");
-        }
+    const TestScene nearDelta = withSurface(makeQuadScene(kNearDeltaRoughness), metallic(1.0F));
+    const TestScene rough = withSurface(makeQuadScene(kRoughRoughness), metallic(1.0F));
+    std::optional<EmbreeAccel> nearDeltaAccel = EmbreeAccel::build(nearDelta.worldTriangles);
+    std::optional<EmbreeAccel> roughAccel = EmbreeAccel::build(rough.worldTriangles);
+    if (!nearDeltaAccel.has_value() || !roughAccel.has_value()) {
+        ctx.recordFailure("EmbreeAccel::build", "metal plane", __FILE__, __LINE__);
         return;
     }
-    // A followed draw reflects into the sky and leaves the normal 0; a closed one leaves (0, 0, 1): the z lane counts the closed draws.
-    double closed = 0.0;
-    for (std::size_t texel = 0; texel < static_cast<std::size_t>(kImageSize) * kImageSize; ++texel) {
-        closed += static_cast<double>(nearDelta->denoiseNormal.rgb(texel).z) * kSamplesPerPixel;
+    const PathTraceSettings settings = perReplicate(makeSettings(1, 999));
+    // A followed draw reflects into the sky and leaves the normal 0; a closed one leaves (0, 0, 1): the z lane's mean is the closed share.
+    const tools::stats::Welford closed = replicatedScalar(ctx.subSeed("near delta"), [&](std::uint32_t scramble) {
+        const pathtracer::scene::PathTraceResult result = renderPass(nearDelta, env, settings, *nearDeltaAccel, sharedPool(ctx.threads()), true, scramble);
+        return static_cast<double>(regionMean(result.denoiseNormal, 0, 0, kImageSize, kImageSize).z);
+    });
+    const double half = tools::stats::studentTTwoSided(ctx.alpha(), tools::stats::kReplicates - 1) * closed.standardError();
+    char detail[192];
+    std::snprintf(detail, sizeof(detail), "alpha 1e-4: %.5f +/- %.1e of draws close at the floor, predicted %.5f", closed.mean(), half, predicted);
+    std::cout << "  " << detail << '\n';
+    PT_EXPECT(ctx, std::abs(closed.mean() - predicted) <= half, detail);
+    // Exact in every replicate: each sample of a lobe wider than a pixel closes, and its albedo lane carries the metal's reflectance.
+    bool roughCloses = true;
+    bool roughAlbedo = true;
+    const std::uint64_t roughSeed = ctx.subSeed("rough");
+    for (int r = 0; r < tools::stats::kReplicates; ++r) {
+        const auto scramble = static_cast<std::uint32_t>(roughSeed + static_cast<std::uint64_t>(r));
+        const pathtracer::scene::PathTraceResult result = renderPass(rough, env, settings, *roughAccel, sharedPool(ctx.threads()), true, scramble);
+        roughCloses = roughCloses && blockEquals(result.denoiseNormal, glm::vec3(0.0F, 0.0F, 1.0F), 0, 0, kImageSize, kImageSize);
+        roughAlbedo = roughAlbedo && glm::all(glm::greaterThan(centreMean(result.denoiseAlbedo), glm::vec3(0.0F)));
     }
-    const long long trials = static_cast<long long>(kImageSize) * kImageSize * kSamplesPerPixel;
-    const tools::stats::Band band = tools::stats::clopperPearsonBand(std::llround(closed), trials, ctx.alpha());
-    std::cout << "  alpha 1e-4: " << closed / static_cast<double>(trials) << " of draws close at the floor, predicted " << predicted << '\n';
-    PT_EXPECT(ctx, band.contains(predicted), "a lobe narrower than a pixel is not followed in proportion to its sub-pixel mass");
-    PT_EXPECT(ctx, blockEquals(rough->denoiseNormal, glm::vec3(0.0F, 0.0F, 1.0F), 0, 0, kImageSize, kImageSize),
-              "a lobe wider than a pixel was followed past its own surface");
-    PT_EXPECT(ctx, glm::all(glm::greaterThan(centreMean(rough->denoiseAlbedo), glm::vec3(0.0F))), "a rough metal's albedo lane is zero");
+    PT_EXPECT(ctx, roughCloses, "a lobe wider than a pixel was followed past its own surface");
+    PT_EXPECT(ctx, roughAlbedo, "a rough metal's albedo lane is zero");
 }
 
 // The hero draw's one-sample spectral estimator keeps each channel's albedo: channel c matches a non-dispersive render at c's own IOR.
@@ -3681,7 +3634,7 @@ PT_CHECK(denoise_albedo_through_dispersive_glass, Slow, Statistical) {
         return scene;
     };
     const EnvironmentMap env = makeUniformEnvironment();
-    const PathTraceSettings settings = makeSettings(16, 999);
+    const PathTraceSettings settings = perReplicate(makeSettings(16, 999));
     ctx.plan(3);
     const TestScene dispersive = sceneWith(kIor, 1.0F);
     std::optional<EmbreeAccel> accel = EmbreeAccel::build(dispersive.worldTriangles);
@@ -3691,20 +3644,28 @@ PT_CHECK(denoise_albedo_through_dispersive_glass, Slow, Statistical) {
         }
         return;
     }
-    const pathtracer::scene::PathTraceResult hero = renderPass(dispersive, env, settings, *accel, sharedPool(ctx.threads()), true, 7U);
+    const std::array<tools::stats::Welford, 3> hero = replicatedChannels(ctx.subSeed("dispersive"), [&](std::uint32_t scramble) {
+        return regionMean(renderPass(dispersive, env, settings, *accel, sharedPool(ctx.threads()), true, scramble).denoiseAlbedo, 0, 0, kImageSize,
+                          kImageSize);
+    });
     const OpenPbrInputs<Constant> inputs = resolveInputs(dispersive.instances[0].material, glm::vec2(0.5F), {}, glm::vec3(1.0F));
     for (int c = 0; c < 3; ++c) {
         // Its own seed, so the two estimates are independent as differenceBand assumes; the geometry, and so the accel, is shared.
         const float ior = pathtracer::scene::modulatedIor(inputs, c);
-        const pathtracer::scene::PathTraceResult reference =
-            renderPass(sceneWith(ior, 0.0F), env, settings, *accel, sharedPool(ctx.threads()), true, 11U);
-        const tools::stats::Welford heroChannel = pixelChannel(hero.denoiseAlbedo, c, 0, 0, kImageSize, kImageSize);
-        const tools::stats::Welford referenceChannel = pixelChannel(reference.denoiseAlbedo, c, 0, 0, kImageSize, kImageSize);
+        const TestScene matched = sceneWith(ior, 0.0F);
+        const std::array<tools::stats::Welford, 3> reference =
+            replicatedChannels(ctx.subSeed("reference " + std::to_string(c)), [&](std::uint32_t scramble) {
+                return regionMean(renderPass(matched, env, settings, *accel, sharedPool(ctx.threads()), true, scramble).denoiseAlbedo, 0, 0,
+                                  kImageSize, kImageSize);
+            });
+        const tools::stats::Welford& heroChannel = hero[static_cast<std::size_t>(c)];
+        const tools::stats::Welford& referenceChannel = reference[static_cast<std::size_t>(c)];
         const double difference = heroChannel.mean() - referenceChannel.mean();
-        std::cout << "  channel " << c << " at IOR " << ior << ": dispersive " << heroChannel.mean() << ", reference "
-                  << referenceChannel.mean() << '\n';
-        PT_EXPECT(ctx, tools::stats::differenceBand(heroChannel, referenceChannel, ctx.alpha()).contains(difference),
-                  "a dispersive channel's albedo differs from a non-dispersive render at that channel's IOR");
+        char detail[192];
+        std::snprintf(detail, sizeof(detail), "channel %d at IOR %.5f: dispersive %.5f, reference %.5f", c, static_cast<double>(ior),
+                      heroChannel.mean(), referenceChannel.mean());
+        std::cout << "  " << detail << '\n';
+        PT_EXPECT(ctx, tools::stats::differenceBand(heroChannel, referenceChannel, ctx.alpha()).contains(difference), detail);
     }
 }
 

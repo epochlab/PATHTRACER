@@ -191,8 +191,9 @@ PT_CHECK(index_zero_is_scrambled, Fast, Statistical) {
     constexpr int kPixels = 4096;
     constexpr int kBins = 16;
     std::vector<int> bins(kBins, 0);
+    const auto seed = static_cast<std::uint32_t>(ctx.seed());
     for (int i = 0; i < kPixels; ++i) {
-        Sampler sampler(i % 64, i / 64, 0, kSampleCount, kSeed);
+        Sampler sampler(i % 64, i / 64, 0, kSampleCount, seed);
         ++bins[binOf(sampler.next1D(), kBins)];
     }
     // Chi-square against uniform over 16 bins: a correct scramble sits near its 15 dof, the all-zeros case at kPixels * 15.
@@ -258,10 +259,13 @@ PT_CHECK(shift_is_rigid, Fast, Exact) {
     PT_EXPECT(ctx, mismatches == 0, detail);
 }
 
-// Distinct dither channels must be uncorrelated on either lattice: one shared shift put the error at 199x white noise. |r| < 0.1, ~13 SD.
-PT_CHECK(channels_are_decorrelated, Fast, Statistical) {
+// Distinct dither channels must be uncorrelated on either lattice: one shared shift put the error at 199x white noise.
+PT_CHECK(channels_are_decorrelated, Fast, Exact) {
     const int channelCount = (2 * kSetCount) + 2;
+    const int pairs = channelCount * (channelCount - 1) / 2;
     ctx.plan(2);
+    // Every pair is one mask at two shifts, so no pair may correlate past what a uniformly random shift reaches, Sidak over the pairs.
+    const double z = tools::stats::normalQuantile(1.0 - (0.5 * tools::stats::sidak(ctx.alpha(), pairs)));
     for (const pathtracer::gfx::PixelLattice lattice : {pathtracer::gfx::PixelLattice::Square, pathtracer::gfx::PixelLattice::Hexagonal}) {
         std::vector<std::vector<double>> fields(static_cast<std::size_t>(channelCount));
         for (int c = 0; c < channelCount; ++c) {
@@ -274,6 +278,13 @@ PT_CHECK(channels_are_decorrelated, Fast, Statistical) {
                 }
             }
         }
+        // The mask's autocorrelation over every nonzero shift: its mean square is the random-phase variance of a pair's r (Parseval).
+        const std::vector<double> autocorrelation = tools::stats::toroidalCorrelations(fields[0], fields[0], kMaskSize);
+        double squares = 0.0;
+        for (std::size_t lag = 1; lag < autocorrelation.size(); ++lag) {
+            squares += autocorrelation[lag] * autocorrelation[lag];
+        }
+        const double bound = z * std::sqrt(squares / (kMaskPixels - 1));
         double worst = 0.0;
         int worstA = -1;
         int worstB = -1;
@@ -298,9 +309,10 @@ PT_CHECK(channels_are_decorrelated, Fast, Statistical) {
             }
         }
         char detail[192];
-        std::snprintf(detail, sizeof(detail), "%s: worst |r| = %.4f between channels %d and %d, over %d channels",
-                      pathtracer::gfx::kPixelLatticeNames[static_cast<int>(lattice)], worst, worstA, worstB, channelCount);
-        PT_EXPECT(ctx, worst < 0.1, detail);
+        std::snprintf(detail, sizeof(detail), "%s: worst |r| = %.4f between channels %d and %d, over %d channels, bound %.4f",
+                      pathtracer::gfx::kPixelLatticeNames[static_cast<int>(lattice)], worst, worstA, worstB, channelCount, bound);
+        std::printf("  %s\n", detail);
+        PT_EXPECT(ctx, worst <= bound, detail);
     }
 }
 
@@ -325,8 +337,8 @@ PT_CHECK(mask_is_permutation, Fast, Exact) {
     PT_EXPECT(ctx, bad == 0, detail);
 }
 
-// The mask must be blue noise, measured against the analytic null: a sampled control reproduced the mask's own generator sequence.
-PT_CHECK(mask_is_blue_noise, Fast, Statistical) {
+// The mask must be blue noise: its low-band share improbably small for white noise, against the analytic null, never a sampled control.
+PT_CHECK(mask_is_blue_noise, Fast, Exact) {
     std::vector<double> mask(kMaskPixels);
     for (int y = 0; y < kMaskSize; ++y) {
         for (int x = 0; x < kMaskSize; ++x) {
@@ -345,11 +357,15 @@ PT_CHECK(mask_is_blue_noise, Fast, Statistical) {
                              std::accumulate(bands.begin(), bands.end(), 0.0);
     const double expected = std::accumulate(null.begin() + kLowBand, null.end(), 0.0);
 
-    char detail[160];
-    std::snprintf(detail, sizeof(detail), "low band %.5f%% of power vs %.3f%% white-noise null (%.0fx suppressed)",
-                  100.0 * measured, 100.0 * expected, expected / measured);
+    // The white null's share is its frequency count over the mask's kMaskPixels - 1 nonzero ones.
+    const int lowFrequencies = static_cast<int>(std::lround(expected * (kMaskPixels - 1)));
     ctx.plan(1);
-    PT_EXPECT(ctx, measured < 0.5 * expected, detail);
+    const double p = tools::stats::whiteNoiseShareLowerTail(measured, lowFrequencies, kMaskPixels);
+    char detail[192];
+    std::snprintf(detail, sizeof(detail), "low band %.5f%% of power vs %.3f%% white-noise null (%.0fx suppressed), P(white this low) %.3g",
+                  100.0 * measured, 100.0 * expected, expected / measured, p);
+    std::printf("  %s\n", detail);
+    PT_EXPECT(ctx, p <= ctx.alpha(), detail);
 }
 
 // The hexagonal mask is a permutation too, so it shifts by exactly representable, never-repeated ranks.
@@ -373,8 +389,14 @@ PT_CHECK(hexagonal_mask_is_permutation, Fast, Exact) {
     PT_EXPECT(ctx, bad == 0, detail);
 }
 
-// Mean power over the torus's frequencies below 1/16 cycle per pitch, over white noise's N var: a DFT at the cells' film positions.
-double lowFrequencyPowerRatio(pathtracer::gfx::PixelLattice lattice) {
+// A field's power below 1/16 cycle per pitch as a share of its total, and how many torus frequencies hold it.
+struct LowBand {
+    double share;
+    int frequencies;
+};
+
+// A DFT at the cells' film positions: offset rows keep the exponentials orthogonal (even row period), so Parseval holds on the torus.
+LowBand lowFrequencyShare(pathtracer::gfx::PixelLattice lattice) {
     std::vector<glm::dvec2> positions;
     std::vector<double> values;
     double mean = 0.0;
@@ -412,17 +434,20 @@ double lowFrequencyPowerRatio(pathtracer::gfx::PixelLattice lattice) {
             ++frequencies;
         }
     }
-    // White noise has E|F(k)|^2 = N var at every nonzero frequency of the torus, the analytic null.
-    return power / (frequencies * kMaskPixels * variance);
+    // Parseval: the nonzero frequencies hold N^2 var in all.
+    return {power / (static_cast<double>(kMaskPixels) * kMaskPixels * variance), frequencies};
 }
 
-// The hexagonal mask is blue on its own film: low-frequency power under half white noise's, as the square mask's band gate demands.
-PT_CHECK(hexagonal_mask_is_blue_noise, Fast, Statistical) {
-    const double hexagonal = lowFrequencyPowerRatio(pathtracer::gfx::PixelLattice::Hexagonal);
-    char detail[96];
-    std::snprintf(detail, sizeof(detail), "low-frequency power %.4f of white noise on the hexagonal film", hexagonal);
+// The hexagonal mask is blue on its own film: its low-frequency share improbably small for white noise, as the square mask's gate.
+PT_CHECK(hexagonal_mask_is_blue_noise, Fast, Exact) {
+    const LowBand hexagonal = lowFrequencyShare(pathtracer::gfx::PixelLattice::Hexagonal);
     ctx.plan(1);
-    PT_EXPECT(ctx, hexagonal < 0.5, detail);
+    const double p = tools::stats::whiteNoiseShareLowerTail(hexagonal.share, hexagonal.frequencies, kMaskPixels);
+    char detail[160];
+    std::snprintf(detail, sizeof(detail), "low-frequency share %.5f%% over %d frequencies on the hexagonal film, P(white this low) %.3g",
+                  100.0 * hexagonal.share, hexagonal.frequencies, p);
+    std::printf("  %s\n", detail);
+    PT_EXPECT(ctx, p <= ctx.alpha(), detail);
 }
 
 // Every hexagonal dither channel is the base mask translated by a lattice vector: an even row shift, so offset rows keep their parity.

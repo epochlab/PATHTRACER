@@ -147,7 +147,41 @@ inline double regularizedBetaI(double a, double b, double x) {
                                           : 1.0 - (front * betaContinuedFraction(b, a, 1.0 - x) / b);
 }
 
-// Two-sided Student-t quantile, not normal, because the variance is ESTIMATED: at R = 16 (15 dof) the difference is a factor of ~1.6.
+// Pearson r of a against b shifted toroidally by every (dx, dy) of a size x size torus, r[dy * size + dx]; both fields mean-centred.
+inline std::vector<double> toroidalCorrelations(const std::vector<double>& a, const std::vector<double>& b, int size) {
+    const auto dotOf = [](const std::vector<double>& v) {
+        double sum = 0.0;
+        for (const double x : v) {
+            sum += x * x;
+        }
+        return sum;
+    };
+    const double norm = std::sqrt(dotOf(a) * dotOf(b));
+    std::vector<double> r(a.size());
+    for (int dy = 0; dy < size; ++dy) {
+        for (int dx = 0; dx < size; ++dx) {
+            double dot = 0.0;
+            for (int y = 0; y < size; ++y) {
+                const double* rowA = &a[static_cast<std::size_t>(y) * static_cast<std::size_t>(size)];
+                const double* rowB = &b[static_cast<std::size_t>((y + dy) % size) * static_cast<std::size_t>(size)];
+                // The row's shift split at the wrap, so the inner loops carry no modulo.
+                for (int x = 0; x < size - dx; ++x) {
+                    dot += rowA[x] * rowB[x + dx];
+                }
+                for (int x = size - dx; x < size; ++x) {
+                    dot += rowA[x] * rowB[x + dx - size];
+                }
+            }
+            r[(static_cast<std::size_t>(dy) * static_cast<std::size_t>(size)) + static_cast<std::size_t>(dx)] = dot / norm;
+        }
+    }
+    return r;
+}
+
+// P(S <= share) for the power share a field holds at m of its n - 1 nonzero frequencies, under Gaussian white noise: Beta(m/2, (n-1-m)/2).
+inline double whiteNoiseShareLowerTail(double share, int m, int n) { return regularizedBetaI(0.5 * m, 0.5 * (n - 1 - m), share); }
+
+// Two-sided Student-t quantile, not normal, because the variance is ESTIMATED: at R = 64 (63 dof) and alpha 1e-9, 7.2 against 6.1.
 inline double studentTTwoSided(double alpha, double dof) {
     // Monotone in t, so bisection is both correct and immune to the convergence caveats an inverse-series would carry.
     const auto tailProbability = [dof](double t) {
@@ -163,8 +197,8 @@ inline double studentTTwoSided(double alpha, double dof) {
     return 0.5 * (low + high);
 }
 
-// Replicate count for randomized-QMC: independent scrambles make replicate means iid (Owen 1997b; L'Ecuyer & Lemieux 2002).
-inline constexpr int kReplicates = 16;
+// Randomized-QMC replicates, iid by independent scrambles (Owen 1997b): 64 holds t at alpha 1e-9 to 7.2, where 16 gave 13.3 (normal 6.1).
+inline constexpr int kReplicates = 64;
 
 // --- Estimators and bands ---------------------------------------------------------------------------------------
 
@@ -200,6 +234,12 @@ private:
     double mean_ = 0.0;
     double m2_ = 0.0;
 };
+
+// The two-sided t band about a replicated estimator's mean: its replicate means are iid, so their standard error carries it.
+inline Band meanBand(const Welford& estimate, double alpha) {
+    const double half = studentTTwoSided(alpha, static_cast<double>(estimate.count() - 1)) * estimate.standardError();
+    return {estimate.mean() - half, estimate.mean() + half};
+}
 
 // Band for the DIFFERENCE of two independent estimators at the null they estimate the same thing, on Welch's standard error.
 inline Band differenceBand(const Welford& a, const Welford& b, double alpha) {

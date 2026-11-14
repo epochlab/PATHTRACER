@@ -175,7 +175,7 @@ std::unique_ptr<Fixture> makeFixture(std::vector<ShadingTriangle> triangles, int
     return fixture;
 }
 
-std::unique_ptr<Fixture> makeClusterFixture(const tools::check::Context& ctx) {
+std::unique_ptr<Fixture> makeClusterFixture(tools::check::Context& ctx) {
     std::mt19937 rng(static_cast<std::mt19937::result_type>(ctx.seed()));
     return makeFixture(makeSyntheticTriangles(rng), kMaterialCount);
 }
@@ -1047,12 +1047,11 @@ PT_CHECK(random_checker_is_cellwise, Fast, Exact) {
     PT_EXPECT(ctx, shadingMismatches == 0, "resolveInputs did not read the checker's bit, or a footprint changed it");
 }
 
-// Fair, independent bits: fill, horizontal and vertical neighbour agreement, and next-seed agreement each sit at 1/2 within 5 sigma.
+// Fair, independent bits: fill, horizontal and vertical neighbour agreement, and next-seed agreement are each Binomial(n, 1/2).
 PT_CHECK(random_checker_bits_are_fair_and_independent, Fast, Statistical) {
-    // The paper's 10 mm cells over a 1 m UV square: n = 10^4 indicators per statistic, each with standard error 1 / (2 sqrt(n)).
+    // The paper's 10 mm cells over a 1 m UV square: n = 10^4 indicators per statistic.
     constexpr std::uint32_t kCells = 100U;
     constexpr float kCellSize = 0.01F;
-    constexpr double kSigmaBand = 5.0;
     const RandomChecker checker{kCellSize, static_cast<std::uint32_t>(ctx.subSeed("random-checker"))};
     const RandomChecker next{kCellSize, checker.seed + 1U};
     const auto bit = [](const RandomChecker& c, std::uint32_t i, std::uint32_t j) {
@@ -1071,15 +1070,18 @@ PT_CHECK(random_checker_bits_are_fair_and_independent, Fast, Statistical) {
             acrossSeeds += b == bit(next, i, j) ? 1.0 : 0.0;
         }
     }
-    const double n = static_cast<double>(kCells) * kCells;
-    const double band = kSigmaBand * 0.5 / std::sqrt(n);
+    const long long n = static_cast<long long>(kCells) * kCells;
     const std::array<std::pair<const char*, double>, 4> statistics = {
-        {{"fill", ones / n}, {"horizontal agreement", horizontal / n}, {"vertical agreement", vertical / n}, {"seed agreement", acrossSeeds / n}}};
+        {{"fill", ones}, {"horizontal agreement", horizontal}, {"vertical agreement", vertical}, {"seed agreement", acrossSeeds}}};
     ctx.plan(static_cast<int>(statistics.size()));
-    for (const auto& [name, fraction] : statistics) {
+    // Clopper-Pearson: exact coverage of the binomial count, so 1/2 outside it rejects fairness at the per-assertion alpha.
+    for (const auto& [name, count] : statistics) {
+        const tools::stats::Band band = tools::stats::clopperPearsonBand(std::llround(count), n, ctx.alpha());
         char detail[160];
-        std::snprintf(detail, sizeof(detail), "random checker %s %.4f is outside 1/2 +- %.4f (5 sigma, n = %.0f)", name, fraction, band, n);
-        PT_EXPECT(ctx, std::abs(fraction - 0.5) <= band, detail);
+        std::snprintf(detail, sizeof(detail), "random checker %s %.4f, exact band [%.4f, %.4f] at n = %lld", name, count / static_cast<double>(n),
+                      band.lo, band.hi, n);
+        std::cout << "  " << detail << '\n';
+        PT_EXPECT(ctx, band.contains(0.5), detail);
     }
 }
 

@@ -11,6 +11,7 @@
 #include <limits>
 #include <optional>
 #include <random>
+#include <string>
 #include <thread>
 #include <tuple>
 #include <vector>
@@ -41,11 +42,28 @@ using tools::reference::cosineAverageFresnel;
 using tools::reference::kMuBar;
 using tools::reference::referenceF82;
 
+constexpr double kPiDouble = tools::quadrature::kPi;
+
 // Each check keeps its own `ok` accumulator and per-row diagnostics carrying parameters, measurement and reference, reporting one verdict.
 void finish(tools::check::Context& ctx, bool ok, const char* what) {
     ctx.plan(1);
     PT_EXPECT(ctx, ok, what);
 }
+
+// Table accuracies the Exact checks assert, shared so a furnace's floor is the same bound: a row's floor sums its stacked lobes'.
+constexpr double kAlbedoRoughnessAxisBound = 1e-3;  // albedo_table_interpolation, roughness axis with mu on nodes
+constexpr double kAlbedoMuAxisBound = 3.7e-3;       // albedo_table_interpolation, mu axis with roughness on nodes
+// Bilinear error splits as (I - I_r) + I_r (I - I_mu) with |I_r| = 1, so an off-node read is within the sum of the two axis bounds.
+constexpr double kAlbedoTableBound = kAlbedoRoughnessAxisBound + kAlbedoMuAxisBound;
+// glossy_diffuse_albedo_scaling: the escape table's trilinear read at 32 x 64 x 64 dominates; the references are exact to ~1e-9.
+constexpr double kEscapeTableBound = 2e-3;
+// fuzz_ltc_normalisation: the LTC's integral against E_fuzz, Simpson resolving its grazing lobe at the smallest roughness swept.
+constexpr double kFuzzTableBound = 2e-3;
+// filmed_albedo_matches_lobe: the kernel rule's order-8 residual plus its bilinear blend across the 32 x 32 grid.
+constexpr double kKernelTableBound = 3e-3;
+// anisotropic_albedo_matches_lobe: the 4D rule's order-8 residual plus its quadrilinear blend over (r, a, sqrt(mu), phi).
+constexpr double kAnisoTableBound = 3e-3;
+constexpr double kEonFitBound = 1e-3;       // eon.cpp's quartic E_FON fit, within 0.1% of the exact form (Portsmouth et al. 2025, eq. 14)
 
 // OpenPBR inputs over a white base, worst case for albedo, edited by the caller and resolved as a hit resolves them.
 template <typename Edit>
@@ -91,66 +109,86 @@ Surface makeColoredMetalParams(float roughness, glm::vec3 specularColor = glm::v
     });
 }
 
-// Uniform-solid-angle hemisphere samples (z=u1, r=sqrt(1-u1^2)) integrate pdfBsdf, MIS-combined with sampleBsdf's density (Veach 1997 9.2).
+// One replicate of a density's integral over wo's hemisphere: `draws` uniform and `draws` of its own, balance-combined (Veach 1997 9.2).
+template <typename Density, typename Draw>
+double misDensityIntegral(int draws, std::uint32_t seed, Density density, Draw draw) {
+    const double uniformPdf = 1.0 / (2.0 * kPiDouble);
+    // The balance-heuristic denominator shared by both proposals: N q_uniform + N q_own.
+    const auto combined = [&](double p) { return draws * (uniformPdf + p); };
+    std::mt19937 rng(seed);
+    double integral = 0.0;
+    for (int i = 0; i < draws; ++i) {
+        const double p = density(sampleUniformHemisphere(rng));
+        integral += p / combined(p);
+    }
+    for (int i = 0; i < draws; ++i) {
+        pathtracer::scene::Sampler sampler(0, 0, i, draws, seed);
+        if (const std::optional<double> p = draw(sampler)) {
+            integral += *p / combined(*p);
+        }
+    }
+    return integral;
+}
+
+// A row's replicated integrals: their mean and standard error, the one-sided bound's inputs.
+template <typename Density, typename Draw>
+tools::stats::Welford replicatedDensityIntegral(tools::check::Context& ctx, const std::string& label, int draws, Density density, Draw draw) {
+    tools::stats::Welford integral;
+    for (const double replicate : tools::fixtures::replicated(ctx.threads(), ctx.subSeed(label), [&](std::uint64_t seed) {
+             return misDensityIntegral(draws, static_cast<std::uint32_t>(seed), density, draw);
+         })) {
+        integral.add(replicate);
+    }
+    return integral;
+}
+
+// A density integrates to at most 1, so the row fails only when its lower confidence limit, mean - t SE one-sided at alpha, exceeds 1.
+bool integratesToAtMostOne(const tools::stats::Welford& integral, double alpha) {
+    return integral.mean() - (tools::stats::studentTTwoSided(2.0 * alpha, tools::stats::kReplicates - 1) * integral.standardError()) <= 1.0;
+}
+
+// pdfBsdf over wo's hemisphere by uniform directions, balance-combined with sampleBsdf's own draws and densities.
 PT_CHECK(pdf_normalization, Slow, Statistical) {
-    std::mt19937 rng(7);
-    constexpr int kUniformSamples = 50000;
-    constexpr int kBsdfSamples = 50000;
-    constexpr std::uint32_t kBsdfSeed = 7;
-    constexpr float kTolerance = 0.05F;
-    constexpr double kUniformPdf = 1.0 / (2.0 * kPi);
-    // The balance-heuristic denominator, shared by both proposals: N1*q1 + N2*q2 with q2 == pdfBsdf.
-    const auto combinedDensity = [](double p) {
-        return (kUniformSamples * kUniformPdf) + (kBsdfSamples * p);
-    };
+    constexpr int kDraws = 1 << 10;  // per replicate
     const std::array<float, 4> roughnesses = {0.05F, 0.25F, 0.5F, 1.0F};
     const std::array<float, 2> metallics = {0.0F, 1.0F};
     const std::array<float, 4> ndotVs = {0.2F, 0.6F, 1.0F, -0.6F};
     const std::array<float, 3> diffuseRoughnesses = {0.0F, 0.5F, 1.0F};
 
-    bool ok = true;
+    ctx.plan(static_cast<int>(roughnesses.size() * metallics.size() * ndotVs.size() * diffuseRoughnesses.size()));
+    const double alpha = ctx.alpha();
     double worstIntegral = 0.0;
-    for (float roughness : roughnesses) {
-        for (float metallic : metallics) {
-            for (float diffuseRoughness : diffuseRoughnesses) {
-                for (float ndotV : ndotVs) {
+    for (const float roughness : roughnesses) {
+        for (const float metallic : metallics) {
+            for (const float diffuseRoughness : diffuseRoughnesses) {
+                for (const float ndotV : ndotVs) {
+                    char label[128];
+                    std::snprintf(label, sizeof(label), "roughness %g metallic %g diffuseRoughness %g ndotV %g", static_cast<double>(roughness),
+                                  static_cast<double>(metallic), static_cast<double>(diffuseRoughness), static_cast<double>(ndotV));
                     const Surface params = makeParams(roughness, metallic, 0.0F, diffuseRoughness);
                     const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
-                    double integral = 0.0;
-                    for (int i = 0; i < kUniformSamples; ++i) {
-                        glm::vec3 wi = sampleUniformHemisphere(rng);
-                        // pdfBsdf mirrors wi into wo's hemisphere, so a below-surface wo has zero +z density; the sample flips to match.
-                        if (ndotV < 0.0F) {
-                            wi.z = -wi.z;
-                        }
-                        const double p = pathtracer::scene::pdfBsdf(params, wo, wi);
-                        integral += p / combinedDensity(p);
-                    }
-                    // sampleBsdf returns wi in woLocal's convention with the density it drew, so no second pdfBsdf call and no mirroring.
-                    for (int i = 0; i < kBsdfSamples; ++i) {
-                        pathtracer::scene::Sampler sampler(0, 0, i, kBsdfSamples, kBsdfSeed);
-                        const std::optional<pathtracer::scene::BsdfSample> sample =
-                            pathtracer::scene::sampleBsdf(params, wo, sampler);
-                        if (sample.has_value()) {
-                            integral += sample->pdf / combinedDensity(sample->pdf);
-                        }
-                    }
-                    worstIntegral = std::max(worstIntegral, integral);
-                    if (!(integral <= 1.0 + kTolerance)) {
-                        std::cerr << "bsdf_validate: FAILED pdf normalization UPPER bound at roughness="
-                                  << roughness << " metallic=" << metallic
-                                  << " diffuseRoughness=" << diffuseRoughness << " ndotV=" << ndotV
-                                  << " integral=" << integral << " (expected <= 1.0)\n";
-                        ok = false;
-                    }
+                    const tools::stats::Welford integral = replicatedDensityIntegral(
+                        ctx, label, kDraws,
+                        [&](glm::vec3 wi) {
+                            // pdfBsdf mirrors wi into wo's hemisphere, so a below-surface wo has zero +z density; the draw flips to match.
+                            wi.z = ndotV < 0.0F ? -wi.z : wi.z;
+                            return static_cast<double>(pathtracer::scene::pdfBsdf(params, wo, wi));
+                        },
+                        // sampleBsdf returns wi in woLocal's convention with the density it drew: no second pdfBsdf call, no mirroring.
+                        [&](pathtracer::scene::Sampler& sampler) -> std::optional<double> {
+                            const std::optional<pathtracer::scene::BsdfSample> sample = pathtracer::scene::sampleBsdf(params, wo, sampler);
+                            return sample ? std::optional<double>(sample->pdf) : std::nullopt;
+                        });
+                    worstIntegral = std::max(worstIntegral, integral.mean());
+                    char detail[192];
+                    std::snprintf(detail, sizeof(detail), "%s: integral %.5f +/- %.2e (SE), must not exceed 1", label, integral.mean(),
+                                  integral.standardError());
+                    PT_EXPECT(ctx, integratesToAtMostOne(integral, alpha), detail);
                 }
             }
         }
     }
-    std::cout << "bsdf_validate: pdf normalization, worst integral " << worstIntegral << " (must be <= "
-              << 1.0 + kTolerance << ")\n";
-    finish(ctx, ok, "pdf_normalization failed; see the rows above");
-    return;
+    std::cout << "bsdf_validate: pdf normalization, worst integral " << worstIntegral << '\n';
 }
 
 // sampleBsdf's density must equal pdfBsdf at the direction returned: exact, both being the same arithmetic over one closure.
@@ -206,26 +244,99 @@ PT_CHECK(sample_density_consistency, Slow, Exact) {
     return;
 }
 
-glm::vec3 furnaceLo(const Surface& params, const glm::vec3& wo, int sampleCount, std::uint32_t seed) {
-    glm::vec3 accum(0.0F);
-    for (int i = 0; i < sampleCount; ++i) {
-        pathtracer::scene::Sampler sampler(0, 0, i, sampleCount, seed);
-        const std::optional<pathtracer::scene::BsdfSample> sample =
-            pathtracer::scene::sampleBsdf(params, wo, sampler);
+// One replicate's mean throughput at L0 = 1 over `draws` RQMC directions, in double: a float sum's ulp at 1e5 draws rivals the band.
+glm::dvec3 furnaceLo(const Surface& params, const glm::vec3& wo, int draws, std::uint32_t seed) {
+    glm::dvec3 accum(0.0);
+    for (int i = 0; i < draws; ++i) {
+        pathtracer::scene::Sampler sampler(0, 0, i, draws, seed);
+        const std::optional<pathtracer::scene::BsdfSample> sample = pathtracer::scene::sampleBsdf(params, wo, sampler);
         if (sample.has_value()) {
-            accum += sample->throughputWeight;  // L0=1
+            accum += glm::dvec3(sample->throughputWeight);
         }
     }
-    return accum / static_cast<float>(sampleCount);
+    return accum / static_cast<double>(draws);
 }
 
 float maxChannel(const glm::vec3& v) { return std::max({v.x, v.y, v.z}); }
 float minChannel(const glm::vec3& v) { return std::min({v.x, v.y, v.z}); }
 
-// Asserts the pass condition, not the failure one: a `min < lo || max > hi` form would be satisfied by a NaN and report success.
-bool withinBand(const glm::vec3& value, float centre, float tolerance) {
-    return minChannel(value) >= centre - tolerance && maxChannel(value) <= centre + tolerance;
+using Replicates = std::array<glm::dvec3, tools::stats::kReplicates>;
+
+// Replicate means reduced per channel: the row's centre and standard error come from their spread alone (Owen 1997b replicated RQMC).
+struct ChannelEstimate {
+    glm::dvec3 mean;
+    glm::dvec3 standardError;
+};
+
+ChannelEstimate channelEstimate(const Replicates& replicates) {
+    std::array<tools::stats::Welford, 3> channels;
+    for (const glm::dvec3& replicate : replicates) {
+        for (int c = 0; c < 3; ++c) {
+            channels[static_cast<std::size_t>(c)].add(replicate[c]);
+        }
+    }
+    ChannelEstimate estimate{};
+    for (int c = 0; c < 3; ++c) {
+        estimate.mean[c] = channels[static_cast<std::size_t>(c)].mean();
+        estimate.standardError[c] = channels[static_cast<std::size_t>(c)].standardError();
+    }
+    return estimate;
 }
+
+// A furnace row: kReplicates replicates of `draws` each, scrambled from the row label's sub-seed; a power of two completes a Sobol net.
+ChannelEstimate furnace(tools::check::Context& ctx, const std::string& label, const Surface& params, const glm::vec3& wo, int draws) {
+    return channelEstimate(tools::fixtures::replicated(ctx.threads(), ctx.subSeed(label), [&](std::uint64_t seed) {
+        return furnaceLo(params, wo, draws, static_cast<std::uint32_t>(seed));
+    }));
+}
+
+// The replicates' two-sided t quantile at a row's alpha, Sidak-split over its three channels.
+double channelT(double rowAlpha) { return tools::stats::studentTTwoSided(tools::stats::sidak(rowAlpha, 3), tools::stats::kReplicates - 1); }
+
+// Pass form, so a NaN fails: every channel within t SE + floor of `expected`, the floor a model residual an Exact check asserts.
+bool withinBand(const ChannelEstimate& estimate, double expected, double t, double floor) {
+    const glm::dvec3 half = (t * estimate.standardError) + floor;
+    return glm::all(glm::lessThanEqual(glm::abs(estimate.mean - expected), half));
+}
+
+// One-sided pass form: no channel's lower confidence limit, mean - t SE at the row's alpha Sidak-split over channels, above `bound`.
+bool belowBound(const ChannelEstimate& estimate, double bound, double rowAlpha) {
+    const double t = tools::stats::studentTTwoSided(2.0 * tools::stats::sidak(rowAlpha, 3), tools::stats::kReplicates - 1);
+    return glm::all(glm::lessThanEqual(estimate.mean - (t * estimate.standardError), glm::dvec3(bound)));
+}
+
+// One row's verdict line: the measured mean per channel against the expectation and the derived half-width.
+std::string rowDetail(const std::string& label, const ChannelEstimate& estimate, double expected, double t, double floor) {
+    const glm::dvec3 half = (t * estimate.standardError) + floor;
+    char detail[256];
+    std::snprintf(detail, sizeof(detail), "%s: Lo (%.5f, %.5f, %.5f) vs %.4f +/- (%.2e, %.2e, %.2e)", label.c_str(), estimate.mean.x,
+                  estimate.mean.y, estimate.mean.z, expected, half.x, half.y, half.z);
+    return detail;
+}
+
+// One furnace row: a surface seen from wo, against 1 within t SE plus the summed table bounds of the lobes it stacks.
+struct FurnaceRow {
+    std::string label;
+    Surface surface;
+    glm::vec3 wo;
+    double floor;
+};
+
+// Each row's replicated furnace as one assertion, the check's alpha Sidak-split over its rows by plan().
+void expectFurnaceRows(tools::check::Context& ctx, const char* title, const std::vector<FurnaceRow>& rows, int draws) {
+    ctx.plan(static_cast<int>(rows.size()));
+    const double t = channelT(ctx.alpha());
+    std::cout << "bsdf_validate: " << title << " (1.0 = energy conserved)\n";
+    for (const FurnaceRow& row : rows) {
+        const ChannelEstimate lo = furnace(ctx, row.label, row.surface, row.wo, draws);
+        const std::string detail = rowDetail(row.label, lo, 1.0, t, row.floor);
+        std::cout << "  " << detail << '\n';
+        PT_EXPECT(ctx, withinBand(lo, 1.0, t, row.floor), detail);
+    }
+}
+
+// wo at cosine mu in the xz plane.
+glm::vec3 viewAt(float mu) { return {std::sqrt(std::max(0.0F, 1.0F - (mu * mu))), 0.0F, mu}; }
 
 // Support coverage: every direction with BSDF value must carry mixture density (Veach 1997 9.2 unbiasedness); exact, not a tolerance.
 PT_CHECK(strategy_coverage, Fast, Exact) {
@@ -294,56 +405,48 @@ PT_CHECK(strategy_coverage, Fast, Exact) {
 
 // Furnace through sampleBsdf over both hemispheres: bound 1.0, except on the exiting side below the critical angle where eta^2 is correct.
 PT_CHECK(furnace_energy_bound, Slow, Statistical) {
-    constexpr int kSampleCount = 50000;
-    constexpr float kTolerance = 0.1F;
+    constexpr int kDraws = 1 << 10;  // per replicate
     constexpr float kIor = 1.5F;  // matches makeParams/makeColoredMetalParams
     const std::array<float, 4> roughnesses = {0.05F, 0.25F, 0.5F, 1.0F};
     const std::array<float, 2> metallics = {0.0F, 1.0F};
     const std::array<float, 3> transmissions = {0.0F, 0.5F, 1.0F};
     const std::array<float, 5> ndotVs = {0.2F, 0.6F, 1.0F, -0.9F, -0.3F};  // last two: exiting/TIR
 
-    bool ok = true;
-    std::uint32_t seed = 0;
-    for (float roughness : roughnesses) {
-        for (float metallic : metallics) {
-            for (float transmission : transmissions) {
-                for (float ndotV : ndotVs) {
-                    ++seed;
-                    const Surface params = makeParams(roughness, metallic, transmission);
-                    const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F,
-                                        ndotV);
-                    const float maxLo = maxChannel(furnaceLo(params, wo, kSampleCount, seed));
-                    const bool exitingTransmissive = ndotV < 0.0F && transmission > 0.0F;
-                    const float energyBound = exitingTransmissive ? kIor * kIor : 1.0F;
-                    if (!(maxLo <= energyBound + kTolerance)) {
-                        std::cerr << "bsdf_validate: FAILED furnace test at roughness=" << roughness
-                                  << " metallic=" << metallic << " transmission=" << transmission
-                                  << " ndotV=" << ndotV << " Lo=" << maxLo
-                                  << " (expected <= " << energyBound << ")\n";
-                        ok = false;
-                    }
+    struct Row {
+        std::string label;
+        Surface surface;
+        float ndotV;
+        double bound;
+        double floor;
+    };
+    std::vector<Row> rows;
+    for (const float roughness : roughnesses) {
+        for (const float metallic : metallics) {
+            for (const float transmission : transmissions) {
+                for (const float ndotV : ndotVs) {
+                    const bool exitingTransmissive = ndotV < 0.0F && transmission > 0.0F && metallic == 0.0F;
+                    rows.push_back({"roughness " + std::to_string(roughness) + " metallic " + std::to_string(metallic) + " transmission " +
+                                        std::to_string(transmission) + " ndotV " + std::to_string(ndotV),
+                                    makeParams(roughness, metallic, transmission), ndotV, exitingTransmissive ? kIor * kIor : 1.0,
+                                    metallic == 1.0F ? kAlbedoTableBound : kEscapeTableBound});
                 }
             }
         }
-    }
-
-    // Coloured metal (base_color 0.5): below a white F0's perfect mirror, where the furnace has energy to lose or gain.
-    for (float roughness : roughnesses) {
-        for (float ndotV : ndotVs) {
-            ++seed;
-            const Surface params = makeColoredMetalParams(roughness);
-            const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
-            const float maxLo = maxChannel(furnaceLo(params, wo, kSampleCount, seed));
-            if (!(maxLo <= 1.0F + kTolerance)) {
-                std::cerr << "bsdf_validate: FAILED colored-metal furnace test at roughness="
-                          << roughness << " ndotV=" << ndotV << " Lo=" << maxLo
-                          << " (expected <= 1.0)\n";
-                ok = false;
-            }
+        // Coloured metal (base_color 0.5): below a white F0's perfect mirror, where the furnace has energy to lose or gain.
+        for (const float ndotV : ndotVs) {
+            rows.push_back({"coloured metal roughness " + std::to_string(roughness) + " ndotV " + std::to_string(ndotV),
+                            makeColoredMetalParams(roughness), ndotV, 1.0, kAlbedoTableBound});
         }
     }
-    finish(ctx, ok, "furnace_energy_bound failed; see the rows above");
-    return;
+
+    ctx.plan(static_cast<int>(rows.size()));
+    const double rowAlpha = ctx.alpha();
+    for (const Row& row : rows) {
+        const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (row.ndotV * row.ndotV))), 0.0F, row.ndotV);
+        const ChannelEstimate lo = furnace(ctx, row.label, row.surface, wo, kDraws);
+        // The bound is physical; the tables' asserted error lets the expected energy sit that far above it.
+        PT_EXPECT(ctx, belowBound(lo, row.bound + row.floor, rowAlpha), rowDetail(row.label, lo, row.bound, 0.0, row.floor) + " (upper bound)");
+    }
 }
 
 // Two-sided white furnace must return exactly 1.0: single-scatter GGX loses what Smith G2 masks (0.307 at roughness 1, Heitz 2016).
@@ -354,8 +457,7 @@ struct WhiteFurnaceCase {
 };
 
 PT_CHECK(white_furnace_two_sided, Slow, Statistical) {
-    constexpr int kSampleCount = 400000;
-    constexpr float kTolerance = 0.02F;
+    constexpr int kDraws = 1 << 13;  // per replicate
     const std::array<WhiteFurnaceCase, 16> cases = {{
         {0.0F, 1.0F, false},
         {0.0F, 0.4F, false},
@@ -375,86 +477,65 @@ PT_CHECK(white_furnace_two_sided, Slow, Statistical) {
         {0.8215686F, 0.5464398F, true},
         {0.8215686F, 0.2949981F, true},
     }};
+    // The metal's Kulla-Conty lobe reads the albedo table, the dielectric's albedo scaling the escape table.
+    struct Lobe {
+        const char* name;
+        float metallic;
+        double floor;
+    };
+    const std::array<Lobe, 2> lobes = {{{"metal", 1.0F, kAlbedoTableBound}, {"dielectric", 0.0F, kEscapeTableBound}}};
 
-    bool ok = true;
-    std::uint32_t seed = 9000;
+    ctx.plan(static_cast<int>(cases.size() * lobes.size()));
+    const double t = channelT(ctx.alpha());
     std::cout << "bsdf_validate: white furnace energy (1.0 = perfectly energy-conserving)\n";
-    std::cout << "  roughness  ndotV  metal      dielectric\n";
     for (const WhiteFurnaceCase& entry : cases) {
-        ++seed;
-        const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (entry.ndotV * entry.ndotV))), 0.0F,
-                            entry.ndotV);
-        const glm::vec3 conductor =
-            furnaceLo(makeParams(entry.roughness, 1.0F, 0.0F), wo, kSampleCount, seed);
-        const glm::vec3 dielectric =
-            furnaceLo(makeParams(entry.roughness, 0.0F, 0.0F), wo, kSampleCount, seed + 500U);
-        std::cout << "  " << entry.roughness << "       " << entry.ndotV << "    "
-                  << minChannel(conductor) << "   " << minChannel(dielectric)
-                  << (entry.offGrid ? "   (off-grid)" : "") << '\n';
-
-        const std::array<std::pair<const char*, glm::vec3>, 2> measured = {
-            {{"metal", conductor}, {"dielectric", dielectric}}};
-        for (const auto& [label, value] : measured) {
-            if (!withinBand(value, 1.0F, kTolerance)) {
-                std::cerr << "bsdf_validate: FAILED white-" << label
-                          << " furnace energy conservation at roughness=" << entry.roughness
-                          << " ndotV=" << entry.ndotV << " Lo=[" << minChannel(value) << ", "
-                          << maxChannel(value) << "] (expected 1.0 +/- " << kTolerance << ")\n";
-                ok = false;
-            }
+        const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (entry.ndotV * entry.ndotV))), 0.0F, entry.ndotV);
+        for (const Lobe& lobe : lobes) {
+            const std::string label = std::string(lobe.name) + " r=" + std::to_string(entry.roughness) + " mu=" + std::to_string(entry.ndotV) +
+                                      (entry.offGrid ? " (off-grid)" : "");
+            const ChannelEstimate lo = furnace(ctx, label, makeParams(entry.roughness, lobe.metallic, 0.0F), wo, kDraws);
+            const std::string detail = rowDetail(label, lo, 1.0, t, lobe.floor);
+            std::cout << "  " << detail << '\n';
+            PT_EXPECT(ctx, withinBand(lo, 1.0, t, lobe.floor), detail);
         }
     }
-    finish(ctx, ok, "white_furnace_two_sided failed; see the rows above");
-    return;
 }
 
     // EON rough-diffuse energy preservation over diffuseRoughness: its multi-scatter term holds 1.0 where Oren-Nayar variants lose energy.
 PT_CHECK(eon_diffuse_furnace, Slow, Statistical) {
-    constexpr int kSampleCount = 400000;
-    constexpr float kTolerance = 0.02F;
+    constexpr int kDraws = 1 << 13;  // per replicate
     constexpr float kRoughness = 0.5F;
     const std::array<float, 5> diffuseRoughnesses = {0.0F, 0.25F, 0.5F, 0.75F, 1.0F};
     const std::array<float, 3> ndotVs = {1.0F, 0.6F, 0.2F};
     const std::array<float, 2> metallics = {0.0F, 1.0F};
 
-    bool ok = true;
+    // Every band row, plus the metal's invariance at each nonzero diffuseRoughness, an exact assertion.
+    ctx.plan(static_cast<int>((metallics.size() * diffuseRoughnesses.size() * ndotVs.size()) + ((diffuseRoughnesses.size() - 1) * ndotVs.size())));
+    const double t = channelT(ctx.alpha());
     std::cout << "bsdf_validate: EON diffuse-roughness furnace energy (1.0 = perfectly energy-conserving)\n";
-    std::cout << "  metallic  diffuseRoughness  ndotV  Lo\n";
-    for (std::size_t m = 0; m < metallics.size(); ++m) {
-        const float metallic = metallics[m];
-        // Per-ndotV reading at diffuseRoughness 0, the reference the metal rows must reproduce bit for bit.
-        std::array<glm::vec3, 3> baseline{};
-        for (float diffuseRoughness : diffuseRoughnesses) {
+    for (const float metallic : metallics) {
+        // A metal reads the albedo table; the glossy-diffuse reads the escape table and EON's fit, whose 0.1% bounds its albedo.
+        const double floor = metallic == 1.0F ? kAlbedoTableBound : kEscapeTableBound + kEonFitBound;
+        std::array<ChannelEstimate, 3> baseline{};
+        for (const float diffuseRoughness : diffuseRoughnesses) {
             for (std::size_t v = 0; v < ndotVs.size(); ++v) {
                 const float ndotV = ndotVs[v];
                 // Seeded by (metallic, ndotV) only, not diffuseRoughness: the exact assertion needs both readings to draw one sequence.
-                const std::uint32_t seed = 20000 + static_cast<std::uint32_t>((m * ndotVs.size()) + v);
-                const Surface params = makeParams(kRoughness, metallic, 0.0F, diffuseRoughness);
+                const std::string seedLabel = "metallic " + std::to_string(metallic) + " mu " + std::to_string(ndotV);
                 const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
-                const glm::vec3 lo = furnaceLo(params, wo, kSampleCount, seed);
-                std::cout << "  " << metallic << "         " << diffuseRoughness << "              "
-                          << ndotV << "    " << minChannel(lo) << '\n';
-                if (!withinBand(lo, 1.0F, kTolerance)) {
-                    std::cerr << "bsdf_validate: FAILED EON diffuse furnace energy at metallic="
-                              << metallic << " diffuseRoughness=" << diffuseRoughness
-                              << " ndotV=" << ndotV << " Lo=[" << minChannel(lo) << ", "
-                              << maxChannel(lo) << "] (expected 1.0 +/- " << kTolerance << ")\n";
-                    ok = false;
-                }
+                const ChannelEstimate lo = furnace(ctx, seedLabel, makeParams(kRoughness, metallic, 0.0F, diffuseRoughness), wo, kDraws);
+                const std::string detail = rowDetail(seedLabel + " diffuseRoughness " + std::to_string(diffuseRoughness), lo, 1.0, t, floor);
+                std::cout << "  " << detail << '\n';
+                PT_EXPECT(ctx, withinBand(lo, 1.0, t, floor), detail);
                 if (diffuseRoughness == 0.0F) {
                     baseline[v] = lo;
-                } else if (metallic == 1.0F && lo != baseline[v]) {
-                    std::cerr << "bsdf_validate: FAILED metal diffuseRoughness invariance at ndotV="
-                              << ndotV << " diffuseRoughness=" << diffuseRoughness << " Lo="
-                              << minChannel(lo) << " vs " << minChannel(baseline[v])
-                              << " (a metal has no diffuse lobe; diffuseRoughness must reach nothing)\n";
-                    ok = false;
+                } else if (metallic == 1.0F) {
+                    PT_EXPECT(ctx, lo.mean == baseline[v].mean && lo.standardError == baseline[v].standardError,
+                              detail + ": a metal has no diffuse lobe, so diffuseRoughness must reach nothing");
                 }
             }
         }
     }
-    finish(ctx, ok, "eon_diffuse_furnace failed; see the rows above");
-    return;
 }
 
 // Listing 1's E_EON at normal incidence, rho*E_F + rho_ms*(1-E_F), transcribed independently of evaluateEon so neither shares a mistake.
@@ -477,69 +558,45 @@ Surface makeDiffuseParams(const glm::vec3& baseColor, float diffuseRoughness, fl
     });
 }
 
-struct AlbedoEstimate {
-    glm::vec3 mean;
-    glm::vec3 stdError;
-};
-
-// Cosine-weighted integral of the shipped diffuse lobe at normal incidence; the second moment makes the band the estimator's own error.
-AlbedoEstimate measureDiffuseAlbedo(const Surface& params, int sampleCount, std::mt19937& rng) {
+// One replicate's cosine-weighted albedo of the shipped diffuse lobe at normal incidence, by uniform hemisphere draws summed in double.
+glm::dvec3 measureDiffuseAlbedo(const Surface& params, int draws, std::uint32_t seed) {
     const glm::vec3 wo(0.0F, 0.0F, 1.0F);
-    glm::vec3 sum(0.0F);
-    glm::vec3 sumSq(0.0F);
-    for (int i = 0; i < sampleCount; ++i) {
-        const glm::vec3 wi = sampleUniformHemisphere(rng);
-        const glm::vec3 sample =
-            pathtracer::scene::evaluateBsdfSplit(params, wo, wi).diffuse * 2.0F * kPi;
-        sum += sample;
-        sumSq += sample * sample;
+    std::mt19937 rng(seed);
+    glm::dvec3 sum(0.0);
+    for (int i = 0; i < draws; ++i) {
+        sum += glm::dvec3(pathtracer::scene::evaluateBsdfSplit(params, wo, sampleUniformHemisphere(rng)).diffuse) * (2.0 * kPiDouble);
     }
-    const auto n = static_cast<float>(sampleCount);
-    const glm::vec3 mean = sum / n;
-    const glm::vec3 variance = glm::max((sumSq / n) - (mean * mean), glm::vec3(0.0F));
-    return {mean, glm::sqrt(variance / n)};
+    return sum / static_cast<double>(draws);
 }
 
 // OpenPBR's albedo scaling takes rho = base_color itself (spec 2.3): the shipped lobe's normal-incidence albedo is E_EON(rho = C).
 PT_CHECK(eon_albedo_is_rho, Slow, Statistical) {
-    constexpr int kSampleCount = 400000;
-    // Two named bounded residuals: kSigmaBand is a confidence level on the measured standard error, kFitTolerance the model residual.
-    constexpr float kSigmaBand = 5.0F;
-    constexpr float kFitTolerance = 0.001F;
+    constexpr int kDraws = 1 << 13;  // per replicate
     const std::array<float, 5> diffuseRoughnesses = {0.0F, 0.25F, 0.5F, 0.75F, 1.0F};
-    const std::array<glm::vec3, 3> albedos = {glm::vec3(1.0F), glm::vec3(0.5F),
-                                               glm::vec3(0.8F, 0.3F, 0.1F)};
+    const std::array<glm::vec3, 3> albedos = {glm::vec3(1.0F), glm::vec3(0.5F), glm::vec3(0.8F, 0.3F, 0.1F)};
 
-    bool ok = true;
-    std::mt19937 rng(31337);
+    ctx.plan(static_cast<int>(albedos.size() * diffuseRoughnesses.size()));
+    const double t = channelT(ctx.alpha());
     std::cout << "bsdf_validate: EON at rho = C, observed albedo vs E_EON(C) at normal incidence\n";
-    std::cout << "  diffuseRoughness  authored              E_EON(C)              observed              worst err\n";
     for (const glm::vec3& authored : albedos) {
-        for (float diffuseRoughness : diffuseRoughnesses) {
+        for (const float diffuseRoughness : diffuseRoughnesses) {
+            char label[96];
+            std::snprintf(label, sizeof(label), "rho (%g, %g, %g) diffuseRoughness %g", static_cast<double>(authored.x),
+                          static_cast<double>(authored.y), static_cast<double>(authored.z), static_cast<double>(diffuseRoughness));
             const Surface params = makeDiffuseParams(authored, diffuseRoughness);
-            const glm::vec3 analytic = referenceEonAlbedo(authored, diffuseRoughness);
-            const AlbedoEstimate measured = measureDiffuseAlbedo(params, kSampleCount, rng);
-            const glm::vec3 band = (kSigmaBand * measured.stdError) + (kFitTolerance * glm::max(analytic, 0.01F));
-            const glm::vec3 measuredErr = glm::abs(measured.mean - analytic);
-
-            std::cout << "  " << diffuseRoughness << "               [" << authored.x << ", "
-                       << authored.y << ", " << authored.z << "]   [" << analytic.x << ", " << analytic.y << ", " << analytic.z << "]   ["
-                       << measured.mean.x << ", " << measured.mean.y << ", " << measured.mean.z
-                       << "]   " << maxChannel(measuredErr) << '\n';
-
-            if (!glm::all(glm::lessThanEqual(measuredErr, band))) {
-                std::cerr << "bsdf_validate: FAILED EON albedo at rho = C at diffuseRoughness="
-                           << diffuseRoughness << " authored=[" << authored.x << ", " << authored.y
-                           << ", " << authored.z << "] observed=[" << measured.mean.x << ", "
-                           << measured.mean.y << ", " << measured.mean.z
-                           << "] err=" << maxChannel(measuredErr) << " (expected <= "
-                           << maxChannel(band) << ")\n";
-                ok = false;
-            }
+            const ChannelEstimate measured = channelEstimate(tools::fixtures::replicated(ctx.threads(), ctx.subSeed(label), [&](std::uint64_t seed) {
+                return measureDiffuseAlbedo(params, kDraws, static_cast<std::uint32_t>(seed));
+            }));
+            // The fit's 0.1% is relative, so the floor scales with each channel's albedo.
+            const glm::dvec3 analytic(referenceEonAlbedo(authored, diffuseRoughness));
+            const glm::dvec3 half = (t * measured.standardError) + (kEonFitBound * analytic);
+            char detail[256];
+            std::snprintf(detail, sizeof(detail), "%s: albedo (%.5f, %.5f, %.5f) vs E_EON (%.5f, %.5f, %.5f) +/- (%.2e, %.2e, %.2e)", label,
+                          measured.mean.x, measured.mean.y, measured.mean.z, analytic.x, analytic.y, analytic.z, half.x, half.y, half.z);
+            std::cout << "  " << detail << '\n';
+            PT_EXPECT(ctx, glm::all(glm::lessThanEqual(glm::abs(measured.mean - analytic), half)), detail);
         }
     }
-    finish(ctx, ok, "eon_albedo_is_rho failed; see the rows above");
-    return;
 }
 
 // EON BRDF value (eq. 16-19) in double, transcribed independently with c1/c2 re-derived; the 1e-7 floors are the model's guard at r=0.
@@ -668,85 +725,74 @@ PT_CHECK(index_matched_glossy_layer, Fast, Exact) {
     return;
 }
 
-// Mean throughput with transmitted draws divided by eta^2, putting every sample in one domain; in double, a float ulp being 0.008 at 200k.
-glm::vec3 transmissiveEnergyLo(const Surface& params, const glm::vec3& wo, int sampleCount,
-                                std::uint32_t seed) {
-    const float eta = wo.z < 0.0F ? params.specularIor : 1.0F / params.specularIor;  // etaI/etaT, exiting vs entering
-    const float etaSq = eta * eta;
+// One replicate's mean throughput with transmitted draws divided by eta^2, putting every sample in the energy domain; summed in double.
+glm::dvec3 transmissiveEnergyLo(const Surface& params, const glm::vec3& wo, int draws, std::uint32_t seed) {
+    const double eta = wo.z < 0.0F ? params.specularIor : 1.0 / params.specularIor;  // etaI/etaT, exiting vs entering
+    const double etaSq = eta * eta;
     glm::dvec3 accum(0.0);
-    for (int i = 0; i < sampleCount; ++i) {
-        pathtracer::scene::Sampler sampler(0, 0, i, sampleCount, seed);
-        const std::optional<pathtracer::scene::BsdfSample> sample =
-            pathtracer::scene::sampleBsdf(params, wo, sampler);
+    for (int i = 0; i < draws; ++i) {
+        pathtracer::scene::Sampler sampler(0, 0, i, draws, seed);
+        const std::optional<pathtracer::scene::BsdfSample> sample = pathtracer::scene::sampleBsdf(params, wo, sampler);
         if (!sample.has_value()) {
             continue;
         }
-        accum += glm::dvec3(sample->type == pathtracer::scene::LobeType::Transmission
-                                 ? sample->throughputWeight / etaSq
-                                 : sample->throughputWeight);
+        const glm::dvec3 weight(sample->throughputWeight);
+        accum += sample->type == pathtracer::scene::LobeType::Transmission ? weight / etaSq : weight;
     }
-    return glm::vec3(accum / static_cast<double>(sampleCount));
+    return accum / static_cast<double>(draws);
 }
 
 // Two-sided energy balance, 1.0 in the energy domain: catches compensation over the wrong hemisphere and a double-counted escape budget.
 PT_CHECK(transmissive_energy_balance, Slow, Statistical) {
-    constexpr int kSampleCount = 200000;
-    // Same tolerance as the opaque white furnace; the residual is model error, measured worst 0.0036 at transmission_weight 0.5 entering.
-    constexpr float kTolerance = 0.02F;
+    constexpr int kDraws = 1 << 12;  // per replicate
     const std::array<float, 4> roughnesses = {0.05F, 0.4F, 0.7F, 1.0F};
     const std::array<float, 4> ndotVs = {1.0F, 0.6F, -0.9F, -0.4F};  // entering, entering, exiting, TIR
     const std::array<float, 2> transmissions = {0.5F, 1.0F};
     const std::array<float, 2> metallics = {0.0F, 1.0F};
-
-    bool ok = true;
-    std::uint32_t seed = 12000;
-    std::cout << "bsdf_validate: transmissive energy balance (1.0 = perfectly energy-conserving)\n";
-    std::cout << "  roughness  ndotV  transmission  metallic  Lo\n";
-    for (float roughness : roughnesses) {
-        for (float transmission : transmissions) {
-            for (float metallic : metallics) {
-                for (float ndotV : ndotVs) {
-                    ++seed;
-                    const Surface params = makeParams(roughness, metallic, transmission);
-                    const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F,
-                                        ndotV);
-                    const glm::vec3 lo = transmissiveEnergyLo(params, wo, kSampleCount, seed);
-                    std::cout << "  " << roughness << "        " << ndotV << "     " << transmission
-                              << "           " << metallic << "       " << minChannel(lo) << '\n';
-                    if (!withinBand(lo, 1.0F, kTolerance)) {
-                        std::cerr << "bsdf_validate: FAILED transmissive energy balance at roughness="
-                                  << roughness << " ndotV=" << ndotV
-                                  << " transmission=" << transmission << " metallic=" << metallic
-                                  << " Lo=[" << minChannel(lo) << ", " << maxChannel(lo)
-                                  << "] (expected 1.0 +/- " << kTolerance << ")\n";
-                        ok = false;
-                    }
-                }
-            }
-        }
-    }
     // A sphere's rim: entry at impact parameter b has mu sqrt(1 - b^2), the chord meets the far side at Snell's cosine, TIR past mu_c.
     const float ior = makeParams(0.0F, 0.0F, 1.0F).specularIor;
     const auto inside = [ior](float b) { return -std::sqrt(1.0F - ((b * b) / (ior * ior))); };
     const std::array<float, 7> rimCosines = {std::sqrt(1.0F - (0.9F * 0.9F)), std::sqrt(1.0F - (0.95F * 0.95F)), std::sqrt(1.0F - (0.98F * 0.98F)),
                                              inside(0.9F), inside(0.95F), inside(0.98F), inside(1.0F)};
     const std::array<float, 7> rimRoughnesses = {0.05F, 0.1F, 0.2F, 0.3F, 0.4F, 0.7F, 1.0F};
-    std::cout << "  rim cosines (entering at b = 0.9, 0.95, 0.98; exiting at their chords and the critical cosine)\n";
-    for (float roughness : rimRoughnesses) {
-        for (float ndotV : rimCosines) {
-            ++seed;
-            const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
-            const glm::vec3 lo = transmissiveEnergyLo(makeParams(roughness, 0.0F, 1.0F), wo, kSampleCount, seed);
-            std::cout << "  " << roughness << "        " << ndotV << "     " << minChannel(lo) << '\n';
-            if (!withinBand(lo, 1.0F, kTolerance)) {
-                std::cerr << "bsdf_validate: FAILED transmissive energy balance at the rim, roughness=" << roughness << " ndotV=" << ndotV
-                          << " Lo=[" << minChannel(lo) << ", " << maxChannel(lo) << "] (expected 1.0 +/- " << kTolerance << ")\n";
-                ok = false;
+
+    struct Row {
+        std::string label;
+        Surface surface;
+        float ndotV;
+    };
+    std::vector<Row> rows;
+    for (const float roughness : roughnesses) {
+        for (const float transmission : transmissions) {
+            for (const float metallic : metallics) {
+                for (const float ndotV : ndotVs) {
+                    rows.push_back({"roughness " + std::to_string(roughness) + " transmission " + std::to_string(transmission) + " metallic " +
+                                        std::to_string(metallic) + " ndotV " + std::to_string(ndotV),
+                                    makeParams(roughness, metallic, transmission), ndotV});
+                }
             }
         }
     }
-    finish(ctx, ok, "transmissive_energy_balance failed; see the rows above");
-    return;
+    for (const float roughness : rimRoughnesses) {
+        for (const float ndotV : rimCosines) {
+            rows.push_back({"rim roughness " + std::to_string(roughness) + " ndotV " + std::to_string(ndotV), makeParams(roughness, 0.0F, 1.0F), ndotV});
+        }
+    }
+
+    ctx.plan(static_cast<int>(rows.size()));
+    const double t = channelT(ctx.alpha());
+    std::cout << "bsdf_validate: transmissive energy balance (1.0 = perfectly energy-conserving)\n";
+    for (const Row& row : rows) {
+        const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (row.ndotV * row.ndotV))), 0.0F, row.ndotV);
+        const ChannelEstimate lo = channelEstimate(tools::fixtures::replicated(ctx.threads(), ctx.subSeed(row.label), [&](std::uint64_t seed) {
+            return transmissiveEnergyLo(row.surface, wo, kDraws, static_cast<std::uint32_t>(seed));
+        }));
+        // A metal reads the albedo table, every dielectric row the escape table.
+        const double floor = row.surface.baseMetalness == 1.0F ? kAlbedoTableBound : kEscapeTableBound;
+        const std::string detail = rowDetail(row.label, lo, 1.0, t, floor);
+        std::cout << "  " << detail << '\n';
+        PT_EXPECT(ctx, withinBand(lo, 1.0, t, floor), detail);
+    }
 }
 
 // Round-trip closure of a rough dielectric slab, 1.0 by BSDF sampling alone; the floor is the table's 1e-3 accuracy over a worst 6.2e-4.
@@ -765,20 +811,9 @@ PT_CHECK(transmissive_slab_walk, Slow, Statistical) {
         std::snprintf(label, sizeof(label), "slab walk r=%g", static_cast<double>(roughness));
         const std::uint64_t rowSeed = ctx.subSeed(label);
         const Surface params = makeParams(roughness, /*metallic=*/0.0F, /*transmission=*/1.0F);
-        std::array<tools::fixtures::SlabWalk, tools::stats::kReplicates> replicates{};
-        std::atomic<int> next{0};
-        std::vector<std::thread> workers;
-        for (int w = 0; w < std::min(ctx.threads(), tools::stats::kReplicates); ++w) {
-            workers.emplace_back([&] {
-                for (int r = next++; r < tools::stats::kReplicates; r = next++) {
-                    replicates[static_cast<std::size_t>(r)] =
-                        tools::fixtures::slabWalkLo(params, kPathsPerReplicate, static_cast<std::uint32_t>(rowSeed + r), kMaxVertices);
-                }
-            });
-        }
-        for (std::thread& worker : workers) {
-            worker.join();
-        }
+        const auto replicates = tools::fixtures::replicated(ctx.threads(), rowSeed, [&](std::uint64_t seed) {
+            return tools::fixtures::slabWalkLo(params, kPathsPerReplicate, static_cast<std::uint32_t>(seed), kMaxVertices);
+        });
         tools::stats::Welford lo;
         tools::stats::Welford vertices;
         long long truncated = 0;
@@ -977,7 +1012,6 @@ PT_CHECK(average_fresnel, Fast, Exact) {
 }
 
 // --- Independent reference for the reflect-side albedo table: the generator's measure under a different rule, Simpson in phi.
-constexpr double kPiDouble = tools::quadrature::kPi;
 
 // The shared Gauss-Legendre rule of N nodes, built once per node count.
 template <int N>
@@ -1085,8 +1119,6 @@ void parallelRows(int rows, int threads, Row row) {
 PT_CHECK(albedo_table_interpolation, Slow, Exact) {
     // Each bound is the measured worst plus ~1.7x; the three directional worsts sit at roughness <= 0.022 and mu <= 4.4e-3.
     constexpr double kControlTolerance = 5e-5;
-    constexpr double kRoughnessAxisTolerance = 1e-3;
-    constexpr double kMuAxisTolerance = 3.7e-3;
     // In E*mu: measured worst 7.1e-8 at roughness 1/255, where the grazing layer (width ~alpha) is narrower than the cell.
     constexpr double kFirstMuCellTolerance = 1.2e-7;
     constexpr double kAverageAlbedoTolerance = 8e-6;
@@ -1168,8 +1200,8 @@ PT_CHECK(albedo_table_interpolation, Slow, Exact) {
 
     const std::array<std::tuple<const char*, InterpolationError, double>, 5> measurements = {{
         {"control: both axes on nodes    ", reduce(controlRows), kControlTolerance},
-        {"roughness axis, mu on nodes    ", reduce(roughnessRows), kRoughnessAxisTolerance},
-        {"mu axis cells 1..n, r on nodes ", reduce(muRows), kMuAxisTolerance},
+        {"roughness axis, mu on nodes    ", reduce(roughnessRows), kAlbedoRoughnessAxisBound},
+        {"mu axis cells 1..n, r on nodes ", reduce(muRows), kAlbedoMuAxisBound},
         {"first mu cell in E*mu, r on nodes", reduce(firstCellRows), kFirstMuCellTolerance},
         {"Eavg lerp, 1-D in roughness    ", reduce(averageRows), kAverageAlbedoTolerance},
     }};
@@ -1215,8 +1247,6 @@ double referenceDielectricReflectAlbedo(double mu, double alpha, double ior) {
 
 // OpenPBR's glossy-diffuse is albedo scaling, f_spec + (1 - E_spec(mu_o)) f_diffuse: the diffuse weight is a function of wo alone.
 PT_CHECK(glossy_diffuse_albedo_scaling, Slow, Exact) {
-    // The escape table's trilinear read over (roughness, mu, eta) at 32 x 64 x 64 dominates; the references are exact to ~1e-9.
-    constexpr double kTableTolerance = 2e-3;
     // Simpson over the hemisphere against the lobe's own normalisation: the GGX peak at roughness 0.25 is the hardest panel.
     constexpr double kClosureTolerance = 2e-3;
     constexpr int kPanels = 256;
@@ -1271,7 +1301,7 @@ PT_CHECK(glossy_diffuse_albedo_scaling, Slow, Exact) {
     for (std::size_t k = 0; k < iors.size(); ++k) {
         const Worst& worst = worstByIor[k];
         std::cout << "    ior " << iors[k] << "   " << worst.table << "   " << worst.closure << "   " << worst.invariance << '\n';
-        if (!(worst.table <= kTableTolerance && worst.closure <= kClosureTolerance && worst.invariance <= kWiInvarianceTolerance)) {
+        if (!(worst.table <= kEscapeTableBound && worst.closure <= kClosureTolerance && worst.invariance <= kWiInvarianceTolerance)) {
             std::cerr << "bsdf_validate: FAILED glossy-diffuse albedo scaling at ior=" << iors[k] << '\n';
             ok = false;
         }
@@ -1763,43 +1793,6 @@ PT_CHECK(transmission_reciprocity, Fast, Exact) {
     return;
 }
 
-// Round trip: the eta^2 compression (Veach 1997 5.2) applies entering and exiting and must cancel exactly, so this asserts the product.
-PT_CHECK(transmission_round_trip, Slow, Statistical) {
-    constexpr int kSampleCount = 200000;
-    // Not tight to 1.0: each side's furnace contains its reflected lobe too, so a Fresnel cross-term stays; compounding lands near ior^2.
-    constexpr float kTolerance = 0.08F;
-    constexpr float kIorRoundTrip = 1.5F;  // matches makeParams
-    const std::array<float, 3> ndotVs = {1.0F, 0.8F, 0.5F};
-
-    bool ok = true;
-    std::uint32_t seed = 4000;
-    for (float ndotV : ndotVs) {
-        ++seed;
-        // Snell-correct pairing: the exit angle is not the entry angle, and reusing thetaI would put the exit past the critical angle.
-        const Surface params = makeParams(0.05F, 0.0F, 1.0F);
-        const float sinThetaI = std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV)));
-        const float sinThetaT = sinThetaI / kIorRoundTrip;
-        const float cosThetaT = std::sqrt(std::max(0.0F, 1.0F - (sinThetaT * sinThetaT)));
-        const glm::vec3 woIn(sinThetaI, 0.0F, ndotV);
-        const glm::vec3 woOut(sinThetaT, 0.0F, -cosThetaT);
-        const float entering = maxChannel(furnaceLo(params, woIn, kSampleCount, seed));
-        const float exiting = maxChannel(furnaceLo(params, woOut, kSampleCount, seed + 700U));
-        const float roundTrip = entering * exiting;
-        std::cout << "  transmission round trip ndotV=" << ndotV << ": " << entering << " x "
-                  << exiting << " = " << roundTrip << '\n';
-        // Two-sided deliberately: an upper bound alone is blind to the factors under-cancelling, which loses energy just as wrongly.
-        if (!(roundTrip >= 1.0F - kTolerance && roundTrip <= 1.0F + kTolerance)) {
-            std::cerr << "bsdf_validate: FAILED transmission round trip at ndotV=" << ndotV
-                      << " -- entering " << entering << " x exiting " << exiting << " = " << roundTrip
-                      << "; the eta^2 radiance-compression factors must cancel over a round trip "
-                         "(expected 1.0 +/- " << kTolerance << ").\n";
-            ok = false;
-        }
-    }
-    finish(ctx, ok, "transmission_round_trip failed; see the rows above");
-    return;
-}
-
 // Transmission at ior 1, needing no reference: the only check reaching the Snell block's cos^2 TIR predicate there, at every roughness.
 PT_CHECK(index_matched_transmission, Fast, Exact) {
     // Straight-through is algebraic at r == 1, but it is reached through the shipped code path rather than asserted of it.
@@ -2133,7 +2126,6 @@ PT_CHECK(sampling_chi_square, Slow, Statistical) {
     constexpr int kSampleCount = 280000;
     // Cochran's rule: the count below which a cell's chi-square term is not trustworthy and must be pooled.
     constexpr double kMinExpected = 5.0;
-    constexpr std::uint32_t kSeed = 0x9E3779B9U;
 
     // Transmissive rows sit either side of the interface; coated, fuzzed and filmed rows put each layer's lobe and masses in the draw.
     const std::array<ChiSquareCase, 27> cases = {{
@@ -2198,7 +2190,8 @@ PT_CHECK(sampling_chi_square, Slow, Statistical) {
         expected.back() = std::max(1.0 - mass, 0.0) * kSampleCount;
 
         std::vector<double> observed(expected.size(), 0.0);
-        std::mt19937 rng(kSeed);
+        // Each case's own stream from its index, so adding a case leaves every other case's draws bit-identical.
+        std::mt19937 rng(static_cast<std::uint32_t>(ctx.subSeed("case " + std::to_string(&testCase - cases.data()))));
         for (int i = 0; i < kSampleCount; ++i) {
             pathtracer::scene::Sampler sampler(0, 0, 0, 1, rng());
             const std::optional<pathtracer::scene::BsdfSample> sample = pathtracer::scene::sampleBsdf(params, wo, sampler);
@@ -2306,63 +2299,63 @@ PT_CHECK(smooth_reflection_is_a_delta, Fast, Exact) {
 
 // fresnelAtMicrofacet, the Fresnel AOV's estimator: the half-vector must come from sampleBsdf's VNDF, and E[F(wo.wh)] varies with alpha.
 PT_CHECK(microfacet_fresnel, Slow, Statistical) {
+    constexpr int kPerReplicate = 1 << 12;
     ctx.plan(3);
-    constexpr int kDraws = 200000;
-    constexpr std::uint32_t kSeed = 7919U;
-    // Expectation of F over D_vis at this roughness and view angle, by the same draws the renderer makes.
-    const auto expectation = [](const Surface& params, float ndotV) {
-        const pathtracer::scene::BsdfClosure closure =
-            pathtracer::scene::makeBsdfClosure(params, glm::vec3(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV));
+    // Both statistical rows are one-sided: t at their per-assertion alpha, doubled for the single tail.
+    const double t = tools::stats::studentTTwoSided(2.0 * ctx.alpha(), tools::stats::kReplicates - 1);
+    // One replicate's mean of F over D_vis at this roughness and view angle, by the same draws the renderer makes.
+    const auto expectation = [](const Surface& params, float ndotV, std::uint32_t seed) {
+        const pathtracer::scene::BsdfClosure closure = pathtracer::scene::makeBsdfClosure(params, viewAt(ndotV));
         glm::dvec3 sum(0.0);
-        for (int i = 0; i < kDraws; ++i) {
-            pathtracer::scene::Sampler sampler(0, 0, i, kDraws, kSeed);
+        for (int i = 0; i < kPerReplicate; ++i) {
+            pathtracer::scene::Sampler sampler(0, 0, i, kPerReplicate, seed);
             sum += glm::dvec3(pathtracer::scene::fresnelAtMicrofacet(closure, sampler.next2D()));
         }
-        return glm::vec3(sum / static_cast<double>(kDraws));
+        return sum / static_cast<double>(kPerReplicate);
     };
 
     // Roughness 0, the smooth surface: its visible normals are the macro normal, so E[F] is the macro Fresnel exactly.
-    bool smoothOk = true;
-    float worstSmooth = 0.0F;
+    double worstSmooth = 0.0;
     for (const float ndotV : {0.1F, 0.4F, 0.7F, 1.0F}) {
         for (const float metallic : {0.0F, 1.0F}) {
             const Surface params = makeParams(0.0F, metallic, 0.0F);
-            const glm::vec3 mean = expectation(params, ndotV);
-            const glm::vec3 macro = viewFresnel(params, ndotV);
-            for (int c = 0; c < 3; ++c) {
-                worstSmooth = std::max(worstSmooth, std::abs(mean[c] - macro[c]));
-            }
+            const glm::dvec3 macro(viewFresnel(params, ndotV));
+            const glm::dvec3 mean = expectation(params, ndotV, static_cast<std::uint32_t>(ctx.subSeed("smooth")));
+            worstSmooth = std::max({worstSmooth, std::abs(mean.x - macro.x), std::abs(mean.y - macro.y), std::abs(mean.z - macro.z)});
         }
     }
     // Exact: every draw returns the macro Fresnel itself, and a double sum of identical floats divides back to it.
-    smoothOk = worstSmooth == 0.0F;
     char smoothDetail[192];
-    std::snprintf(smoothDetail, sizeof(smoothDetail), "worst |E[F(wo.wh)] - F(n.wo)| on the smooth surface is %.3e, which must be 0",
-                  static_cast<double>(worstSmooth));
-    PT_EXPECT(ctx, smoothOk, smoothDetail);
+    std::snprintf(smoothDetail, sizeof(smoothDetail), "worst |E[F(wo.wh)] - F(n.wo)| on the smooth surface is %.3e, which must be 0", worstSmooth);
+    PT_EXPECT(ctx, worstSmooth == 0.0, smoothDetail);
 
     // Grazing, where the macro ramp is steepest and the lobe average therefore departs from it most.
     constexpr float kGrazing = 0.1F;
     const Surface rough = makeParams(0.6F, 0.0F, 0.0F);
-    const glm::vec3 roughMean = expectation(rough, kGrazing);
-    const glm::vec3 roughMacro = viewFresnel(rough, kGrazing);
+    const double roughMacro = viewFresnel(rough, kGrazing).x;
+    tools::stats::Welford roughMean;
+    for (const glm::dvec3& replicate : tools::fixtures::replicated(ctx.threads(), ctx.subSeed("rough grazing"), [&](std::uint64_t seed) {
+             return expectation(rough, kGrazing, static_cast<std::uint32_t>(seed));
+         })) {
+        roughMean.add(replicate.x);
+    }
     char flatDetail[192];
-    std::snprintf(flatDetail, sizeof(flatDetail),
-                  "at roughness 0.6, grazing: E[F] = %.4f against a macro F of %.4f, which it must fall below",
-                  static_cast<double>(roughMean.x), static_cast<double>(roughMacro.x));
-    PT_EXPECT(ctx, roughMean.x < roughMacro.x, flatDetail);
+    std::snprintf(flatDetail, sizeof(flatDetail), "at roughness 0.6, grazing: E[F] = %.4f +/- %.1e against a macro F of %.4f, which it must fall below",
+                  roughMean.mean(), t * roughMean.standardError(), roughMacro);
+    PT_EXPECT(ctx, roughMean.mean() + (t * roughMean.standardError()) < roughMacro, flatDetail);
 
     // A coloured metal, the reason the lane carries RGB: F82's specular_color tints per channel, so the mean is chromatic.
     const Surface tinted = makeColoredMetalParams(0.2F, glm::vec3(0.9F, 0.6F, 0.3F));
-    const glm::vec3 tintedMean = expectation(tinted, kGrazing);
-    const float spread = std::max({tintedMean.x, tintedMean.y, tintedMean.z}) -
-                          std::min({tintedMean.x, tintedMean.y, tintedMean.z});
+    tools::stats::Welford spread;
+    for (const glm::dvec3& replicate : tools::fixtures::replicated(ctx.threads(), ctx.subSeed("tinted grazing"), [&](std::uint64_t seed) {
+             return expectation(tinted, kGrazing, static_cast<std::uint32_t>(seed));
+         })) {
+        spread.add(std::max({replicate.x, replicate.y, replicate.z}) - std::min({replicate.x, replicate.y, replicate.z}));
+    }
     char chromaDetail[192];
-    std::snprintf(chromaDetail, sizeof(chromaDetail),
-                  "F82-tinted metal spans %.4f across RGB (%.4f, %.4f, %.4f); a greyscale lane would report one",
-                  static_cast<double>(spread), static_cast<double>(tintedMean.x),
-                  static_cast<double>(tintedMean.y), static_cast<double>(tintedMean.z));
-    PT_EXPECT(ctx, spread > 1e-3F, chromaDetail);
+    std::snprintf(chromaDetail, sizeof(chromaDetail), "F82-tinted metal spans %.4f +/- %.1e across RGB; a greyscale lane would report none",
+                  spread.mean(), t * spread.standardError());
+    PT_EXPECT(ctx, spread.mean() - (t * spread.standardError()) > 0.0, chromaDetail);
 }
 
 
@@ -2539,34 +2532,23 @@ PT_CHECK(index_matched_coat_is_absorption, Fast, Exact) {
 
 // Over a base that reflects all, a clear coat conserves energy exactly: E_coat + (1 - E_coat) * 1, darkening being 1 at E_b = 1.
 PT_CHECK(coated_white_furnace, Slow, Statistical) {
-    constexpr int kSampleCount = 200000;
-    constexpr float kTolerance = 0.02F;
-    // Glass at specular_ior 1 bends nothing, a delta refraction that must carry the multiple scattering the coat's Fresnel shift leaves.
-    Surface unbent = makeParams(1.0F, 0.0F, 1.0F);
-    unbent.specularIor = 1.0F;
-    const std::array<Surface, 4> bases = {makeParams(0.2F, 1.0F, 0.0F), makeParams(0.6F, 1.0F, 0.0F), makeParams(0.5F, 0.0F, 0.0F), unbent};
-    const std::array<float, 3> coatRoughnesses = {0.0F, 0.3F, 0.7F};
-    const std::array<float, 3> ndotVs = {1.0F, 0.6F, 0.25F};
-    bool ok = true;
-    std::uint32_t seed = 61000;
-    std::cout << "bsdf_validate: clear coat over white bases (1.0 = energy conserved)\n";
-    for (const Surface& base : bases) {
-        for (float weight : {0.5F, 1.0F}) {
-            for (float coatRoughness : coatRoughnesses) {
-                for (float ndotV : ndotVs) {
-                    const Surface coat = coated(base, weight, glm::vec3(1.0F), coatRoughness, 1.5F, 1.0F);
-                    const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
-                    const glm::vec3 lo = furnaceLo(coat, wo, kSampleCount, ++seed);
-                    if (!withinBand(lo, 1.0F, kTolerance)) {
-                        std::cerr << "bsdf_validate: FAILED coated furnace at metal=" << base.baseMetalness << " ior=" << base.specularIor << " C=" << weight
-                                  << " coat_roughness=" << coatRoughness << " ndotV=" << ndotV << " Lo=" << minChannel(lo) << '\n';
-                        ok = false;
-                    }
+    // The coat's escape table over each base's own; opaque only, darkening's normal-incidence E_b (spec) loses 1.8% over glass at mu 0.25
+    const std::array<std::pair<Surface, double>, 3> bases = {{{makeParams(0.2F, 1.0F, 0.0F), kAlbedoTableBound},
+                                                              {makeParams(0.6F, 1.0F, 0.0F), kAlbedoTableBound},
+                                                              {makeParams(0.5F, 0.0F, 0.0F), kEscapeTableBound}}};
+    std::vector<FurnaceRow> rows;
+    for (const auto& [base, baseFloor] : bases) {
+        for (const float weight : {0.5F, 1.0F}) {
+            for (const float coatRoughness : {0.0F, 0.3F, 0.7F}) {
+                for (const float ndotV : {1.0F, 0.6F, 0.25F}) {
+                    rows.push_back({"metal " + std::to_string(base.baseMetalness) + " ior " + std::to_string(base.specularIor) + " C " +
+                                        std::to_string(weight) + " coat_roughness " + std::to_string(coatRoughness) + " ndotV " + std::to_string(ndotV),
+                                    coated(base, weight, glm::vec3(1.0F), coatRoughness, 1.5F, 1.0F), viewAt(ndotV), kEscapeTableBound + baseFloor});
                 }
             }
         }
     }
-    finish(ctx, ok, "coated_white_furnace failed; see the rows above");
+    expectFurnaceRows(ctx, "clear coat over white bases", rows, 1 << 12);
 }
 
 // Over a base that reflects nothing, the coat alone remains: a GGX interface whose multiple scattering is Kulla-Conty's symmetric form.
@@ -2604,45 +2586,44 @@ PT_CHECK(coat_reciprocity, Fast, Exact) {
 
 // A tilted geometry_coat_normal: every draw's density is pdfBsdf's exactly, and the mixture integrates to at most one.
 PT_CHECK(tilted_coat_normal_sampling, Slow, Statistical) {
-    constexpr int kDraws = 20000;
-    constexpr int kUniform = 50000;
-    constexpr float kTolerance = 0.05F;
+    constexpr int kDraws = 1 << 10;  // per replicate
     const std::array<glm::vec3, 2> normals = {glm::normalize(glm::vec3(0.0F, std::sin(0.3F), std::cos(0.3F))),
                                               glm::normalize(glm::vec3(0.25F, 0.25F, 1.0F))};
     const std::array<Surface, 2> bases = {makeParams(0.4F, 0.0F, 0.0F), makeColoredMetalParams(0.3F)};
-    std::mt19937 rng(97);
-    bool ok = true;
-    long long compared = 0;
-    double worstIntegral = 0.0;
-    for (const glm::vec3& normal : normals) {
-        for (const Surface& base : bases) {
-            for (float ndotV : {0.9F, 0.5F}) {
-                const Surface coat = coated(base, 0.8F, glm::vec3(0.9F, 0.8F, 0.7F), 0.3F, 1.5F, 1.0F);
-                const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
-                const pathtracer::scene::BsdfClosure closure = pathtracer::scene::makeBsdfClosure(coat, wo, std::nullopt, normal);
-                double integral = 0.0;
-                const auto combined = [&](double p) { return (kUniform / (2.0 * kPi)) + (kDraws * p); };
-                for (int i = 0; i < kDraws; ++i) {
-                    pathtracer::scene::Sampler sampler(0, 0, i, kDraws, 4100U);
-                    const auto sample = pathtracer::scene::sampleBsdf(closure, sampler);
-                    if (!sample || sample->delta) {
-                        continue;
-                    }
-                    ++compared;
-                    ok = ok && pathtracer::scene::evaluateBsdfSplit(closure, sample->wiLocal).pdf == sample->pdf;
-                    integral += sample->pdf / combined(sample->pdf);
-                }
-                for (int i = 0; i < kUniform; ++i) {
-                    const double p = pathtracer::scene::evaluateBsdfSplit(closure, sampleUniformHemisphere(rng)).pdf;
-                    integral += p / combined(p);
-                }
-                worstIntegral = std::max(worstIntegral, integral);
-                ok = ok && integral <= 1.0 + kTolerance;
+    constexpr int kRows = 8;
+    // Per row its integral bound, plus one exact assertion over every draw's density and the anti-vacuity count.
+    ctx.plan(kRows + 1);
+    const double alpha = ctx.alpha();
+    std::atomic<long long> compared{0};
+    std::atomic<long long> mismatched{0};
+    for (std::size_t n = 0; n < normals.size(); ++n) {
+        for (std::size_t b = 0; b < bases.size(); ++b) {
+            for (const float ndotV : {0.9F, 0.5F}) {
+                const std::string label = "normal " + std::to_string(n) + " base " + std::to_string(b) + " ndotV " + std::to_string(ndotV);
+                const Surface coat = coated(bases[b], 0.8F, glm::vec3(0.9F, 0.8F, 0.7F), 0.3F, 1.5F, 1.0F);
+                const pathtracer::scene::BsdfClosure closure = pathtracer::scene::makeBsdfClosure(coat, viewAt(ndotV), std::nullopt, normals[n]);
+                const tools::stats::Welford integral = replicatedDensityIntegral(
+                    ctx, label, kDraws, [&](const glm::vec3& wi) { return static_cast<double>(pathtracer::scene::evaluateBsdfSplit(closure, wi).pdf); },
+                    [&](pathtracer::scene::Sampler& sampler) -> std::optional<double> {
+                        const auto sample = pathtracer::scene::sampleBsdf(closure, sampler);
+                        if (!sample || sample->delta) {
+                            return std::nullopt;
+                        }
+                        ++compared;
+                        mismatched += pathtracer::scene::evaluateBsdfSplit(closure, sample->wiLocal).pdf == sample->pdf ? 0 : 1;
+                        return static_cast<double>(sample->pdf);
+                    });
+                char detail[192];
+                std::snprintf(detail, sizeof(detail), "%s: pdf integral %.5f +/- %.2e (SE), must not exceed 1", label.c_str(), integral.mean(),
+                              integral.standardError());
+                std::cout << "  " << detail << '\n';
+                PT_EXPECT(ctx, integratesToAtMostOne(integral, alpha), detail);
             }
         }
     }
-    std::cout << "bsdf_validate: tilted coat normal, " << compared << " draws re-evaluated, worst pdf integral " << worstIntegral << '\n';
-    finish(ctx, ok && compared > 0, "a tilted coat normal broke sample/pdf consistency or normalisation");
+    const std::string detail = std::to_string(mismatched.load()) + " of " + std::to_string(compared.load()) +
+                               " draws carried a density pdfBsdf does not re-evaluate to exactly";
+    PT_EXPECT(ctx, compared > 0 && mismatched == 0, detail);
 }
 
 // OpenPBR's darkening over a smooth metal, where E_b = F0 and K = F_coat(mu_o) exactly: Delta = (1-K)/(1-F0 K), lerp(1, Delta, C delta).
@@ -2764,7 +2745,6 @@ PT_CHECK(fuzz_table_matches_published, Fast, Exact) {
 PT_CHECK(fuzz_ltc_normalisation, Slow, Exact) {
     // Simpson over the hemisphere, panels resolving the LTC's grazing lobe at the smallest roughness swept.
     constexpr int kPanels = 256;
-    constexpr double kTolerance = 2e-3;
     const Surface black = paramsWith([](Surface& inputs) {
         inputs.baseWeight = 0.0F;
         inputs.specularWeight = 0.0F;
@@ -2789,7 +2769,7 @@ PT_CHECK(fuzz_ltc_normalisation, Slow, Exact) {
             const double albedo = integrate([](const pathtracer::scene::BsdfEval& eval) { return eval.specular.x; });
             const double expected = pathtracer::scene::fuzzAlbedo(roughness, mu);
             worst = std::max({worst, std::abs(pdf - 1.0), std::abs(albedo - expected)});
-            if (!(std::abs(pdf - 1.0) <= kTolerance && std::abs(albedo - expected) <= kTolerance)) {
+            if (!(std::abs(pdf - 1.0) <= kFuzzTableBound && std::abs(albedo - expected) <= kFuzzTableBound)) {
                 std::cerr << "bsdf_validate: FAILED fuzz LTC at roughness=" << roughness << " mu=" << mu << ": pdf integral " << pdf
                           << ", value integral " << albedo << " vs E_fuzz " << expected << '\n';
                 ok = false;
@@ -2802,28 +2782,24 @@ PT_CHECK(fuzz_ltc_normalisation, Slow, Exact) {
 
 // White fuzz over a base that reflects all conserves energy exactly: F E_fuzz + (1 - F E_fuzz) * 1.
 PT_CHECK(fuzzed_white_furnace, Slow, Statistical) {
-    constexpr int kSampleCount = 200000;
-    constexpr float kTolerance = 0.02F;
-    const std::array<Surface, 3> bases = {makeParams(0.5F, 0.0F, 0.0F), makeParams(0.3F, 1.0F, 0.0F),
-                                          coated(makeParams(0.5F, 0.0F, 0.0F), 1.0F, glm::vec3(1.0F), 0.2F, 1.5F, 1.0F)};
-    bool ok = true;
-    std::uint32_t seed = 63000;
-    for (const Surface& base : bases) {
-        for (float weight : {0.5F, 1.0F}) {
-            for (float roughness : {0.3F, 0.8F}) {
-                for (float ndotV : {1.0F, 0.5F, 0.15F}) {
-                    const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
-                    const glm::vec3 lo = furnaceLo(fuzzed(base, weight, glm::vec3(1.0F), roughness), wo, kSampleCount, ++seed);
-                    if (!withinBand(lo, 1.0F, kTolerance)) {
-                        std::cerr << "bsdf_validate: FAILED fuzzed furnace at F=" << weight << " roughness=" << roughness << " ndotV=" << ndotV
-                                  << " Lo=" << minChannel(lo) << '\n';
-                        ok = false;
-                    }
+    // The fuzz's LTC bound over each base's: escape for the glossy-diffuse, albedo for the metal, two escape reads for the coated one.
+    const std::array<std::pair<Surface, double>, 3> bases = {
+        {{makeParams(0.5F, 0.0F, 0.0F), kEscapeTableBound},
+         {makeParams(0.3F, 1.0F, 0.0F), kAlbedoTableBound},
+         {coated(makeParams(0.5F, 0.0F, 0.0F), 1.0F, glm::vec3(1.0F), 0.2F, 1.5F, 1.0F), 2.0 * kEscapeTableBound}}};
+    std::vector<FurnaceRow> rows;
+    for (std::size_t b = 0; b < bases.size(); ++b) {
+        for (const float weight : {0.5F, 1.0F}) {
+            for (const float roughness : {0.3F, 0.8F}) {
+                for (const float ndotV : {1.0F, 0.5F, 0.15F}) {
+                    rows.push_back({"base " + std::to_string(b) + " F " + std::to_string(weight) + " roughness " + std::to_string(roughness) +
+                                        " ndotV " + std::to_string(ndotV),
+                                    fuzzed(bases[b].first, weight, glm::vec3(1.0F), roughness), viewAt(ndotV), kFuzzTableBound + bases[b].second});
                 }
             }
         }
     }
-    finish(ctx, ok, "fuzzed_white_furnace failed; see the rows above");
+    expectFurnaceRows(ctx, "white fuzz over white bases", rows, 1 << 12);
 }
 
 
@@ -2942,31 +2918,24 @@ PT_CHECK(thin_film_over_perfect_conductor, Fast, Exact) {
 
 // A filmed base over a white substrate conserves energy: the film only moves light between reflection and transmission.
 PT_CHECK(filmed_white_furnace, Slow, Statistical) {
-    constexpr int kSampleCount = 200000;
-    constexpr float kTolerance = 0.02F;
-    const std::array<Surface, 3> bases = {makeParams(0.4F, 0.0F, 0.0F), makeParams(0.8F, 0.0F, 0.0F), makeParams(0.3F, 1.0F, 0.0F)};
-    bool ok = true;
-    std::uint32_t seed = 65000;
-    for (const Surface& base : bases) {
-        for (float thickness : {0.3F, 0.7F}) {
-            for (float ndotV : {1.0F, 0.5F, 0.2F}) {
-                const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
-                const glm::vec3 lo = furnaceLo(filmed(base, 1.0F, thickness, 1.33F), wo, kSampleCount, ++seed);
-                if (!withinBand(lo, 1.0F, kTolerance)) {
-                    std::cerr << "bsdf_validate: FAILED filmed furnace at metal=" << base.baseMetalness << " roughness=" << base.specularRoughness
-                              << " d=" << thickness << "um ndotV=" << ndotV << " Lo=[" << minChannel(lo) << ", " << maxChannel(lo) << "]\n";
-                    ok = false;
-                }
+    // The film's kernel rule over each base's own table.
+    const std::array<std::pair<Surface, double>, 3> bases = {
+        {{makeParams(0.4F, 0.0F, 0.0F), kEscapeTableBound}, {makeParams(0.8F, 0.0F, 0.0F), kEscapeTableBound}, {makeParams(0.3F, 1.0F, 0.0F), kAlbedoTableBound}}};
+    std::vector<FurnaceRow> rows;
+    for (const auto& [base, baseFloor] : bases) {
+        for (const float thickness : {0.3F, 0.7F}) {
+            for (const float ndotV : {1.0F, 0.5F, 0.2F}) {
+                rows.push_back({"metal " + std::to_string(base.baseMetalness) + " roughness " + std::to_string(base.specularRoughness) + " d " +
+                                    std::to_string(thickness) + "um ndotV " + std::to_string(ndotV),
+                                filmed(base, 1.0F, thickness, 1.33F), viewAt(ndotV), kKernelTableBound + baseFloor});
             }
         }
     }
-    finish(ctx, ok, "filmed_white_furnace failed; see the rows above");
+    expectFurnaceRows(ctx, "thin film over white bases", rows, 1 << 12);
 }
 
 // The film's reflected energy, the kernel's Gauss rule over its Fresnel, is what the lobe integrates to: albedo scaling stays exact.
 PT_CHECK(filmed_albedo_matches_lobe, Slow, Exact) {
-    // The rule's own order-8 residual plus its bilinear blend across the 32 x 32 grid, at Simpson's resolution of the lobe.
-    constexpr double kTolerance = 3e-3;
     constexpr int kPanels = 256;
     double worst = 0.0;
     for (float roughness : {0.3F, 0.6F, 1.0F}) {
@@ -2988,7 +2957,7 @@ PT_CHECK(filmed_albedo_matches_lobe, Slow, Exact) {
         }
     }
     std::cout << "bsdf_validate: filmed albedo vs integrated lobe, worst " << worst << '\n';
-    finish(ctx, worst <= kTolerance, "a filmed interface's albedo does not match the energy its lobe reflects");
+    finish(ctx, worst <= kKernelTableBound, "a filmed interface's albedo does not match the energy its lobe reflects");
 }
 
 // specular_roughness_anisotropy and coat_roughness_anisotropy over the inputs.
@@ -3006,33 +2975,28 @@ glm::vec3 directionAt(float mu, float phi) {
 
 // White metal, glossy-diffuse and a coat over white metal at every anisotropy regime, a = 1 the one-dimensional lobe, across azimuth.
 PT_CHECK(anisotropic_white_furnace, Slow, Statistical) {
-    constexpr int kSampleCount = 200000;
-    constexpr float kTolerance = 0.02F;
-    bool ok = true;
-    std::uint32_t seed = 67000;
-    for (float anisotropy : {0.25F, 0.5F, 0.9F, 1.0F}) {
-        for (float roughness : {0.4F, 1.0F}) {
-            const std::array<std::pair<const char*, Surface>, 3> surfaces = {{
-                {"metal", anisotropic(makeParams(roughness, 1.0F, 0.0F), anisotropy, 0.0F)},
-                {"glossy-diffuse", anisotropic(makeParams(roughness, 0.0F, 0.0F), anisotropy, 0.0F)},
-                {"coated metal", anisotropic(coated(makeParams(0.4F, 1.0F, 0.0F), 1.0F, glm::vec3(1.0F), roughness, 1.5F, 1.0F), 0.0F, anisotropy)},
+    std::vector<FurnaceRow> rows;
+    for (const float anisotropy : {0.25F, 0.5F, 0.9F, 1.0F}) {
+        for (const float roughness : {0.4F, 1.0F}) {
+            // The anisotropic slab reads the 4D tables; the coated metal's coat adds an escape read over its isotropic metal's albedo.
+            const std::array<std::tuple<const char*, Surface, double>, 3> surfaces = {{
+                {"metal", anisotropic(makeParams(roughness, 1.0F, 0.0F), anisotropy, 0.0F), kAnisoTableBound},
+                {"glossy-diffuse", anisotropic(makeParams(roughness, 0.0F, 0.0F), anisotropy, 0.0F), kAnisoTableBound},
+                {"coated metal", anisotropic(coated(makeParams(0.4F, 1.0F, 0.0F), 1.0F, glm::vec3(1.0F), roughness, 1.5F, 1.0F), 0.0F, anisotropy),
+                 kAnisoTableBound + kAlbedoTableBound},
             }};
-            for (const auto& [label, surface] : surfaces) {
-                for (float phi : {0.0F, 0.25F * kPi, 0.5F * kPi}) {
-                    for (float mu : {0.8F, 0.35F}) {
-                        const glm::vec3 lo = furnaceLo(surface, directionAt(mu, phi), kSampleCount, ++seed);
-                        if (!withinBand(lo, 1.0F, kTolerance)) {
-                            std::cerr << "bsdf_validate: FAILED anisotropic " << label << " furnace at roughness=" << roughness
-                                      << " anisotropy=" << anisotropy << " phi=" << phi << " mu=" << mu << " Lo=[" << minChannel(lo) << ", "
-                                      << maxChannel(lo) << "]\n";
-                            ok = false;
-                        }
+            for (const auto& [name, surface, floor] : surfaces) {
+                for (const float phi : {0.0F, 0.25F * kPi, 0.5F * kPi}) {
+                    for (const float mu : {0.8F, 0.35F}) {
+                        rows.push_back({std::string(name) + " roughness " + std::to_string(roughness) + " anisotropy " + std::to_string(anisotropy) +
+                                            " phi " + std::to_string(phi) + " mu " + std::to_string(mu),
+                                        surface, directionAt(mu, phi), floor});
                     }
                 }
             }
         }
     }
-    finish(ctx, ok, "anisotropic_white_furnace failed; see the rows above");
+    expectFurnaceRows(ctx, "anisotropic white furnaces", rows, 1 << 12);
 }
 
 // Anisotropic GGX and its Kulla-Conty lobe are symmetric in (wo, wi) at any azimuth: f(wo, wi) = f(wi, wo) for metal and dielectric.
@@ -3104,8 +3068,6 @@ PT_CHECK(anisotropic_sample_density_consistency, Fast, Exact) {
 
 // The albedo each anisotropic slab reports, its selection mass and albedo-scaling weight, is the energy its lobe reflects.
 PT_CHECK(anisotropic_albedo_matches_lobe, Slow, Exact) {
-    // The 4D kernel rule's order-8 residual plus its quadrilinear blend over (r, a, sqrt(mu), phi), at Simpson's resolution of the lobe.
-    constexpr double kTolerance = 3e-3;
     constexpr int kPanels = 512;
     double worst = 0.0;
     for (float anisotropy : {0.5F, 0.9F}) {
@@ -3139,7 +3101,7 @@ PT_CHECK(anisotropic_albedo_matches_lobe, Slow, Exact) {
         }
     }
     std::cout << "bsdf_validate: anisotropic albedo vs integrated lobe, worst " << worst << '\n';
-    finish(ctx, worst <= kTolerance, "an anisotropic slab's albedo does not match the energy its lobe reflects");
+    finish(ctx, worst <= kAnisoTableBound, "an anisotropic slab's albedo does not match the energy its lobe reflects");
 }
 
 // A thin wall over the inputs: transmission_weight its translucent share, subsurface_weight the rest's white subsurface share.
@@ -3154,35 +3116,28 @@ Surface thinWalled(Surface inputs, float transmission, float subsurface = 0.0F, 
 
 // A white, lossless thin wall reflects or transmits all it receives (R + T = 1) at every roughness, layer and subsurface anisotropy.
 PT_CHECK(thin_wall_white_furnace, Slow, Statistical) {
-    constexpr int kSampleCount = 200000;
-    constexpr float kTolerance = 0.02F;
     const Surface clear = makeParams(0.3F, 0.0F, 0.0F);
-    const std::array<std::pair<const char*, Surface>, 11> surfaces = {{
-        {"smooth sheet", thinWalled(makeParams(0.0F, 0.0F, 0.0F), 1.0F)},
-        {"sheet r=0.3", thinWalled(clear, 1.0F)},
-        {"sheet r=1", thinWalled(makeParams(1.0F, 0.0F, 0.0F), 1.0F)},
-        {"anisotropic sheet", anisotropic(thinWalled(makeParams(0.5F, 0.0F, 0.0F), 1.0F), 0.7F, 0.0F)},
-        {"half sheet, half glossy-diffuse", thinWalled(clear, 0.5F)},
-        {"coated sheet", coated(thinWalled(clear, 1.0F), 1.0F, glm::vec3(1.0F), 0.2F, 1.6F, 0.0F)},
-        {"fuzzed sheet", fuzzed(thinWalled(clear, 1.0F), 1.0F, glm::vec3(1.0F), 0.5F)},
-        {"filmed sheet", filmed(thinWalled(clear, 1.0F), 1.0F, 0.4F, 1.33F)},
-        {"subsurface g=-1", thinWalled(clear, 0.0F, 1.0F, -1.0F)},
-        {"subsurface g=0", thinWalled(clear, 0.0F, 1.0F, 0.0F)},
-        {"subsurface g=1", thinWalled(clear, 0.0F, 1.0F, 1.0F)},
+    // Every sheet's ladder reads the escape table; a layer over it adds its own table's bound, the anisotropic sheet reads the 4D tables.
+    const std::array<std::tuple<const char*, Surface, double>, 11> surfaces = {{
+        {"smooth sheet", thinWalled(makeParams(0.0F, 0.0F, 0.0F), 1.0F), kEscapeTableBound},
+        {"sheet r=0.3", thinWalled(clear, 1.0F), kEscapeTableBound},
+        {"sheet r=1", thinWalled(makeParams(1.0F, 0.0F, 0.0F), 1.0F), kEscapeTableBound},
+        {"anisotropic sheet", anisotropic(thinWalled(makeParams(0.5F, 0.0F, 0.0F), 1.0F), 0.7F, 0.0F), kAnisoTableBound},
+        {"half sheet, half glossy-diffuse", thinWalled(clear, 0.5F), kEscapeTableBound},
+        {"coated sheet", coated(thinWalled(clear, 1.0F), 1.0F, glm::vec3(1.0F), 0.2F, 1.6F, 0.0F), 2.0 * kEscapeTableBound},
+        {"fuzzed sheet", fuzzed(thinWalled(clear, 1.0F), 1.0F, glm::vec3(1.0F), 0.5F), kFuzzTableBound + kEscapeTableBound},
+        {"filmed sheet", filmed(thinWalled(clear, 1.0F), 1.0F, 0.4F, 1.33F), kKernelTableBound + kEscapeTableBound},
+        {"subsurface g=-1", thinWalled(clear, 0.0F, 1.0F, -1.0F), kEscapeTableBound},
+        {"subsurface g=0", thinWalled(clear, 0.0F, 1.0F, 0.0F), kEscapeTableBound},
+        {"subsurface g=1", thinWalled(clear, 0.0F, 1.0F, 1.0F), kEscapeTableBound},
     }};
-    bool ok = true;
-    std::uint32_t seed = 69000;
-    for (const auto& [label, surface] : surfaces) {
-        for (float mu : {1.0F, 0.5F, 0.2F, -0.6F}) {
-            const glm::vec3 lo = furnaceLo(surface, directionAt(mu, 0.4F), kSampleCount, ++seed);
-            if (!withinBand(lo, 1.0F, kTolerance)) {
-                std::cerr << "bsdf_validate: FAILED thin-wall furnace for " << label << " at mu=" << mu << " Lo=[" << minChannel(lo) << ", "
-                          << maxChannel(lo) << "]\n";
-                ok = false;
-            }
+    std::vector<FurnaceRow> rows;
+    for (const auto& [name, surface, floor] : surfaces) {
+        for (const float mu : {1.0F, 0.5F, 0.2F, -0.6F}) {
+            rows.push_back({std::string(name) + " mu " + std::to_string(mu), surface, directionAt(mu, 0.4F), floor});
         }
     }
-    finish(ctx, ok, "thin_wall_white_furnace failed; see the rows above");
+    expectFurnaceRows(ctx, "white thin walls", rows, 1 << 12);
 }
 
 // One polarisation's reflectance from index 1 onto n at cosine mu, in double (Born & Wolf 1.5.3).
@@ -3484,7 +3439,7 @@ PT_CHECK(normal_map_sampling_matches_evaluation, Slow, Statistical) {
     for (const Case& c : cases) {
         const pathtracer::scene::NormalMappedBsdf bsdf = normalMapped(c.surface, directionAt(c.mu, 0.8F), geometricAt(c.tilt));
         std::vector<tools::stats::Welford> drawn(kBins);
-        std::mt19937 rng(0x5EED1U);
+        std::mt19937 rng(static_cast<std::uint32_t>(ctx.subSeed("case " + std::to_string(&c - cases.data()))));
         bool pdfShared = true;
         for (int i = 0; i < kSampleCount; ++i) {
             pathtracer::scene::Sampler sampler(0, 0, 0, 1, rng());
@@ -3626,31 +3581,45 @@ PT_CHECK(normal_map_limits, Fast, Exact) {
 
 // A window under a map passes light along -wo by its expected undeviated share: the walk's draws average to passThrough.
 PT_CHECK(normal_map_pass_through, Slow, Statistical) {
-    constexpr int kDraws = 200000;
+    constexpr int kPerReplicate = 1 << 12;
     const Surface window = thinWalled(makeParams(0.0F, 0.0F, 0.0F), 1.0F);
-    bool ok = true;
+    // Per row its band, plus one exact assertion: every undeviated draw leaves along -wo and every row passes some light.
+    ctx.plan(5);
+    const double t = channelT(ctx.alpha());
+    std::atomic<bool> exact{true};
     for (const float tilt : {0.3F, 0.8F}) {
         const glm::vec3 g = geometricAt(tilt);
         for (const float muO : {0.8F, 0.3F}) {
+            const std::string label = "tilt " + std::to_string(tilt) + " mu " + std::to_string(muO);
             const glm::vec3 wo = aboutGeometric(g, muO, 2.6F);
             const pathtracer::scene::NormalMappedBsdf bsdf = normalMapped(window, wo, g);
-            const glm::vec3 through = pathtracer::scene::passThrough(bsdf);
-            glm::dvec3 sum(0.0);
-            for (int i = 0; i < kDraws; ++i) {
-                pathtracer::scene::Sampler sampler(0, 0, i, kDraws, 75000U);
-                pathtracer::scene::Sampler walk(0, 0, i, kDraws, 75001U);
-                const std::optional<pathtracer::scene::BsdfSample> sample = drawFrom(bsdf, sampler, walk);
-                if (sample && sample->passThrough) {
-                    ok = ok && sample->wiLocal == -wo;
-                    sum += glm::dvec3(sample->throughputWeight);
+            const glm::dvec3 through(pathtracer::scene::passThrough(bsdf));
+            exact = exact && through.x > 0.0;
+            const std::uint64_t rowSeed = ctx.subSeed(label);
+            // The walk's stream sits a fixed offset from the draw's, so no replicate's walk reuses another replicate's draw seed.
+            const std::uint64_t walkOffset = ctx.subSeed(label + " walk") - rowSeed;
+            const ChannelEstimate mean = channelEstimate(tools::fixtures::replicated(ctx.threads(), rowSeed, [&](std::uint64_t seed) {
+                glm::dvec3 sum(0.0);
+                for (int i = 0; i < kPerReplicate; ++i) {
+                    pathtracer::scene::Sampler sampler(0, 0, i, kPerReplicate, static_cast<std::uint32_t>(seed));
+                    pathtracer::scene::Sampler walk(0, 0, i, kPerReplicate, static_cast<std::uint32_t>(seed + walkOffset));
+                    const std::optional<pathtracer::scene::BsdfSample> sample = drawFrom(bsdf, sampler, walk);
+                    if (sample && sample->passThrough) {
+                        exact = exact && sample->wiLocal == -wo;
+                        sum += glm::dvec3(sample->throughputWeight);
+                    }
                 }
-            }
-            const glm::vec3 mean(sum / static_cast<double>(kDraws));
-            std::cout << "  tilt " << tilt << " mu " << muO << ": passThrough " << through.x << ", walk " << mean.x << '\n';
-            ok = ok && through.x > 0.0F && std::abs(mean.x - through.x) <= 0.01F * through.x;
+                return sum / static_cast<double>(kPerReplicate);
+            }));
+            const glm::dvec3 half = t * mean.standardError;
+            char detail[192];
+            std::snprintf(detail, sizeof(detail), "%s: undeviated walk %.5f vs passThrough %.5f +/- %.2e", label.c_str(), mean.mean.x, through.x,
+                          half.x);
+            std::cout << "  " << detail << '\n';
+            PT_EXPECT(ctx, glm::all(glm::lessThanEqual(glm::abs(mean.mean - through), half)), detail);
         }
     }
-    finish(ctx, ok, "a mapped window's undeviated draws disagree with its passThrough");
+    PT_EXPECT(ctx, exact.load(), "an undeviated draw left off -wo, or a mapped window passed no light");
 }
 
 // Energy at all orders (the paper's Fig. 13 and 18): a facet that absorbs nothing loses nothing, by its draws and by its evaluation.

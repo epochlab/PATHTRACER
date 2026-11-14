@@ -41,9 +41,14 @@ public:
             bool quiet);
 
     // This check's master seed, derived from its NAME not its registry position, so adding a check reshuffles no other check's realization.
-    [[nodiscard]] std::uint64_t seed() const { return seed_; }
+    [[nodiscard]] std::uint64_t seed() {
+        seedQueried_ = true;
+        return seed_;
+    }
     // Per-case seed by the same name-derived argument one level down, so adding a row to a sweep leaves existing rows bit-identical.
-    [[nodiscard]] std::uint64_t subSeed(std::string_view label) const;
+    [[nodiscard]] std::uint64_t subSeed(std::string_view label);
+    // Whether the check drew its seed at all: a Statistical check that never does realizes one sample whatever calibration seeds it with.
+    [[nodiscard]] bool seedQueried() const { return seedQueried_; }
 
     [[nodiscard]] int threads() const { return threads_; }
 
@@ -71,6 +76,7 @@ private:
     double perCheckAlpha_;
     bool quiet_;
     bool alphaQueried_ = false;
+    bool seedQueried_ = false;
     int planned_ = -1;
     int asserted_ = 0;
     int failures_ = 0;

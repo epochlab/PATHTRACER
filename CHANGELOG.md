@@ -3,6 +3,42 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Derived test tolerances
+
+Every statistical test now derives its pass band from its own standard error and the suite's alpha, and draws its seed from the
+harness. 34 tests asserted a hand-picked band (0.02 and 0.05 energy, 5 and 6 sigma, `ratio < 0.5`, `|r| < 0.1`) on one fixed seed,
+so calibration could neither move them nor say whether they held. Each now repeats its experiment over 64 independently scrambled
+replicates (Owen 1997) and asserts `t(alpha, 63) * SE`, plus a model floor only where an Exact test asserts that bound. The
+tighter bands found a renderer error the old ones hid, an OpenPBR limitation, and three test setups too coarse for them.
+
+- fix: a quad light's solid angle is the sum of its two triangles' (Van Oosterom & Strackee 1983), each triple product formed from
+  the edges. Girard's angle sum minus 2 pi cancelled in float, under-lighting a 0.2 light at 4 by 7e-5 (16 standard errors). Cornell
+  moves by 1.4e-6 of its mean, at equal cost (`render_beauty` proxy B/A 0.991 [0.970, 1.005]).
+- test:
+  - the harness records whether a check drew its seed. `--calibrate` reports UNSEEDED for a statistical check that did not,
+    beside UNDERIVED, and fails both. `check_selftest.calibration_sees_seed_and_alpha_queries` covers the flags.
+  - BSDF furnaces: replicated and summed in double, as `transmissiveEnergyLo` already was. Each row's floor sums the table
+    bounds its lobes read, the constants their Exact tests assert: albedo 4.7e-3, escape 2e-3, fuzz 2e-3, kernel and
+    anisotropic 3e-3, EON fit 1e-3. Upper bounds (`pdf_normalization`, `furnace_energy_bound`) are one-sided.
+  - integrator: replicate renders at the row's sample budget. Irradiance references are read through a point camera, the
+    polygon form factor in double. Exact zeros and ones are asserted exactly. Shadow matte is Cochran's ratio estimator.
+    AO and the denoise lanes no longer treat a render's pixels as independent: they are shifts of one scrambled net.
+  - committed blue-noise masks are Exact. Their low-band share must reject white noise at alpha, Beta(M/2, (N-1-M)/2) under
+    Gaussian white noise. Channel and display-dither correlations are bounded by the random-shift variance (Parseval).
+    Random-checker bits use Clopper-Pearson.
+  - `transmission_round_trip` is removed: `transmissive_energy_balance`'s entering and exiting rows already pin eta^2.
+  - the lit floor spans the default camera's frame, not 2 km: float barycentrics place a hit to ~2^-24 of its triangle, and that
+    shifted the irradiance checks' receiver 5.6e-6 m, a 7e-6 bias at their 1/m gradient.
+  - the radial glass sphere is 1024x512 at 65536 bounces: at 256x128 the interpolated-normal residual read 0.9993 past b 0.98,
+    and at 4096 bounces TIR trapping in a 0.02-rough rim read 0.9994.
+  - `coated_white_furnace` keeps opaque bases only. OpenPBR's darkening reads E_b at normal incidence. Over glass it loses
+    grazing internal reflection, 0.982 at mu 0.25, which the old 0.02 band hid.
+- note:
+  - `normal_map_sampling_matches_evaluation` fails on any seed. It passed only on its fixed one. Its roadmap row,
+    Normal-map noise, stands.
+  - Calibration: 34 UNDERIVED before; 0 UNDERIVED or UNSEEDED after. A 0.5% BSDF energy gain fails 8 of 9 furnaces (old: 0).
+    A 1% quad-light gain fails the irradiance and window tests (old: neither). Evidence is in `results/derived_tolerances`.
+
 ## Hexagonal cropping
 
 `width x height` is now the frame in column pitches on both lattices, the field of view a square render of that size sees. Hexagonal
