@@ -43,8 +43,11 @@ patch over it. Select one with `-preset NAME`, `render_beauty --preset NAME`, `R
 ```
 cmake -B build -DPython3_EXECUTABLE=/path/to/python   # with pytest, numpy, OpenEXR and Imath, so api.python is registered
 ctest --test-dir build -j4
-ctest --test-dir build -C Calibration -L calibration -j8   # opt-in, hours: how often each statistical test fails by chance
+ctest --test-dir build -C Calibration -L calibration -j8   # opt-in, ~40 min: how often each statistical test fails by chance
 ```
+
+Every statistical test draws its seed from the harness and derives its band from its own standard error and the suite's alpha.
+Calibration reports UNSEEDED or UNDERIVED for a test that does not, and fails it.
 
 The `display_gl` tests open a hidden OpenGL window and report Not Run where none can be created.
 
@@ -95,9 +98,8 @@ Ordered by execution, easy wins first. ETA is agent working hours to a complete,
 | Colour | Film grading | No looks. Bleach bypass (retained silver as added neutral density) and three-strip Technicolor dye transfer (Kalmus 1938) in print density, before the view transform. | medium | 2 h | ready |
 | Camera | Film halation | Highlights have no film halo. Light reflected off the film base re-exposes the red-sensitive layer; a red-weighted glare from the bloom pyramid, picture AOVs only. | medium | 1 h | ready |
 | Cleanup | Codebase review | Remove dead code, duplicated logic, needless abstraction, redundant copies and loop-invariant work, output unchanged. | medium | 3 h | ready |
-| Validation | Derived test tolerances | 33 tests use literal tolerances or fixed seeds (UNDERIVED under -C Calibration). Derive each band from standard error and alpha. | medium | 3 h | ready |
 | BSDF | Smith-exact transmission | Rough glass multiple scattering uses a lopsided approximation. Random walk on the Smith microsurface (Heitz et al. 2016). | high | 3 h | ready |
-| BSDF | Normal-map noise | Multi-facet bounces on normal-mapped glossy surfaces have infinite variance; rough glass fails its sampling calibration. | high | 4 h | ready |
+| BSDF | Normal-map noise | Multi-facet bounces on normal-mapped glossy surfaces have infinite variance; rough glass fails its sampling check on any seed. | high | 4 h | ready |
 | Texture | Minification filtering | Unfiltered maps and checker. OIIO mips by ray-cone width, LEAN normals (Olano and Baker 2010), analytic box-filtered checker. | high | 3 h | ready |
 | Sampling | Blue noise beyond one dimension | The mask spreads error in one dimension only. Blue-noise-distributed Sobol scrambling and ranking (Heitz et al. 2019). | medium | 2 h | ready |
 | Sampling | Many-light sampling | Lights are picked uniformly. Light tree by power and orientation (Conty Estevez and Kulla 2018), then ReSTIR (Bitterli et al. 2020). | high | 6 h | ready |

@@ -55,7 +55,7 @@ using tools::fixtures::kPi;
 // A per-check directory under the system temp: grids reach the renderer as files, through the one loading path a scene uses.
 class Scratch {
 public:
-    explicit Scratch(const tools::check::Context& ctx)
+    explicit Scratch(tools::check::Context& ctx)
         : root_(std::filesystem::temp_directory_path() / ("volume_validate_" + std::to_string(ctx.seed()))) {
         openvdb::initialize();  // registers the grid types file I/O needs
         std::filesystem::create_directories(root_);

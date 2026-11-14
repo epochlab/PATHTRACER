@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -10,7 +9,6 @@
 #include <optional>
 #include <random>
 #include <string>
-#include <thread>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -19,6 +17,7 @@
 
 #include "check.h"
 #include "eon.h"
+#include "fixtures.h"
 #include "fuzz.h"
 #include "medium.h"
 #include "microfacet.h"
@@ -610,24 +609,14 @@ PT_CHECK(separable_integrator_matches_reference_sampler, Slow, Statistical) {
                       static_cast<double>(probe.mu));
         const std::uint64_t seed = ctx.subSeed(label);
         const vec3 wo(std::sqrt(1.0F - (probe.mu * probe.mu)), 0.0F, probe.mu);
-        std::array<double, tools::stats::kReplicates> replicates{};
-        std::atomic<int> next{0};
-        std::vector<std::thread> workers;
-        for (int w = 0; w < std::min(ctx.threads(), tools::stats::kReplicates); ++w) {
-            workers.emplace_back([&] {
-                for (int r = next++; r < tools::stats::kReplicates; r = next++) {
-                    std::mt19937_64 rng(seed + static_cast<std::uint64_t>(r));
-                    double sum = 0.0;
-                    for (int s = 0; s < kSamplesPerReplicate; ++s) {
-                        sum += adobeAlbedoSample(probe, wo, rng);
-                    }
-                    replicates[static_cast<std::size_t>(r)] = sum / kSamplesPerReplicate;
-                }
-            });
-        }
-        for (std::thread& worker : workers) {
-            worker.join();
-        }
+        const auto replicates = tools::fixtures::replicated(ctx.threads(), seed, [&](std::uint64_t replicateSeed) {
+            std::mt19937_64 rng(replicateSeed);
+            double sum = 0.0;
+            for (int s = 0; s < kSamplesPerReplicate; ++s) {
+                sum += adobeAlbedoSample(probe, wo, rng);
+            }
+            return sum / kSamplesPerReplicate;
+        });
         tools::stats::Welford estimate;
         for (const double replicate : replicates) {
             estimate.add(replicate);

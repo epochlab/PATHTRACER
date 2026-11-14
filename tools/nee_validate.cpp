@@ -666,12 +666,6 @@ PT_CHECK(disk_light_samples_land_on_the_disk, Fast, Exact) {
     }
 }
 
-// The two-sided t band about a replicated estimator's mean: its replicate means are iid, so their standard error carries it.
-tools::stats::Band meanBand(const tools::stats::Welford& estimate, double alpha) {
-    const double half = tools::stats::studentTTwoSided(alpha, static_cast<double>(estimate.count() - 1)) * estimate.standardError();
-    return {estimate.mean() - half, estimate.mean() + half};
-}
-
 // A smooth, asymmetric test function of direction: uniform sampling's mean of it must equal its solid-angle average.
 double probe(const glm::dvec3& dir) {
     const glm::dvec3 e1 = glm::normalize(glm::dvec3(0.3, -0.5, 0.81));
@@ -695,7 +689,7 @@ void expectUniform(tools::check::Context& ctx, const char* label, double oracle,
         }
         replicates.add(sum / kPerReplicate);
     }
-    const tools::stats::Band band = meanBand(replicates, ctx.alpha());
+    const tools::stats::Band band = tools::stats::meanBand(replicates, ctx.alpha());
     char detail[192];
     std::snprintf(detail, sizeof(detail), "%s: sampled mean %.6f, band [%.6f, %.6f], solid-angle average %.6f", label, replicates.mean(), band.lo,
                   band.hi, oracle);

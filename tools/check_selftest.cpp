@@ -16,7 +16,7 @@ namespace {
 
 const double kNaN = std::numeric_limits<double>::quiet_NaN();
 
-// A helper Context cannot be constructed outside the runner, so NaN rejection is asserted on the raw comparison the macro performs.
+// NaN rejection asserted on the raw comparisons every PT_EXPECT reduces to, the macro's single inversion being the guard.
 PT_CHECK(nan_fails_every_ordered_comparison, Fast, Exact) {
     ctx.plan(5);
     PT_EXPECT(ctx, !(kNaN <= 1.0), "NaN <= x must be false, so a negated-pass assert rejects it");
@@ -41,6 +41,28 @@ PT_CHECK(seed_is_name_derived_and_stable, Fast, Exact) {
     PT_EXPECT(ctx, ctx.seed() != 0, "a derived seed of zero means the mixing collapsed");
     PT_EXPECT(ctx, ctx.subSeed("row-a") != ctx.seed(), "a sub-seed must derive away from its master seed");
     PT_EXPECT(ctx, ctx.subSeed("row-a") != ctx.subSeed("row-b"), "distinct labels must give distinct sub-seeds");
+}
+
+void drawsNothing(::tools::check::Context&) {}
+void drawsSeedAndAlpha(::tools::check::Context& inner) {
+    inner.plan(1);
+    static_cast<void>(inner.subSeed("row"));
+    static_cast<void>(inner.alpha());
+}
+
+// --calibrate's UNSEEDED and UNDERIVED verdicts read these flags: unset by a check that draws neither, set by one that draws both.
+PT_CHECK(calibration_sees_seed_and_alpha_queries, Fast, Exact) {
+    ctx.plan(4);
+    const ::tools::check::Registration silent{"silent", &drawsNothing, ::tools::check::Speed::Fast, ::tools::check::Kind::Statistical};
+    const ::tools::check::Registration drawing{"drawing", &drawsSeedAndAlpha, ::tools::check::Speed::Fast, ::tools::check::Kind::Statistical};
+    ::tools::check::Context unseeded(silent, 1, "selftest", 1, ::tools::check::kFamilyAlpha, true);
+    silent.fn(unseeded);
+    ::tools::check::Context seeded(drawing, 1, "selftest", 1, ::tools::check::kFamilyAlpha, true);
+    drawing.fn(seeded);
+    PT_EXPECT(ctx, !unseeded.seedQueried(), "a check that never drew its seed reported one");
+    PT_EXPECT(ctx, !unseeded.alphaQueried(), "a check that never asked for alpha reported asking");
+    PT_EXPECT(ctx, seeded.seedQueried(), "subSeed() did not record the draw");
+    PT_EXPECT(ctx, seeded.alphaQueried() && seeded.failures() == 0, "alpha() after plan() did not record the query cleanly");
 }
 
 // The correction must be strictly tighter than the family rate, and tighter as a check asserts more, so more assertions buy no slack.

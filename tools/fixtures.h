@@ -1,9 +1,14 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <cmath>
+#include <cstdint>
+#include <numbers>
 #include <optional>
 #include <random>
+#include <thread>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -13,11 +18,31 @@
 #include "pathtracer/scene/environment_map.h"
 #include "pathtracer/scene/material.h"
 #include "pathtracer/scene/sampler.h"
+#include "stats.h"
 
 // Scenes, materials and analytic references shared by the validators. Oracles re-deriving shipped math stay independent transcriptions.
 namespace tools::fixtures {
 
 constexpr float kPi = 3.14159265F;
+
+// estimate(seed + r) for r < kReplicates on up to `threads` workers: independent scrambles whose means are iid (Owen 1997b).
+template <typename Estimate>
+auto replicated(int threads, std::uint64_t seed, Estimate estimate) {
+    std::array<decltype(estimate(seed)), tools::stats::kReplicates> results{};
+    std::atomic<int> next{0};
+    std::vector<std::thread> workers;
+    for (int w = 0; w < std::min(threads, tools::stats::kReplicates); ++w) {
+        workers.emplace_back([&] {
+            for (int r = next++; r < tools::stats::kReplicates; r = next++) {
+                results[static_cast<std::size_t>(r)] = estimate(seed + static_cast<std::uint64_t>(r));
+            }
+        });
+    }
+    for (std::thread& worker : workers) {
+        worker.join();
+    }
+    return results;
+}
 
 // Uniform hemisphere direction about +z, pdf = 1/(2*pi). Draws cosTheta then phi: the order is contract, callers depending on rng order.
 inline glm::vec3 sampleUniformHemisphere(std::mt19937& rng) {
@@ -29,15 +54,14 @@ inline glm::vec3 sampleUniformHemisphere(std::mt19937& rng) {
 }
 
 // Independent ground truth: Lo(wo) = int evaluateBsdf(wo,wi) dwi at L0 = 1, cosine-weighted. Uniform MC: under-samples a sharp GGX peak.
-inline float referenceLo(const pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant>& inputs, const glm::vec3& wo,
-                         int sampleCount, std::mt19937& rng) {
-    constexpr float kUniformPdf = 1.0F / (2.0F * kPi);
-    glm::vec3 accum(0.0F);
+inline double referenceLo(const pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant>& inputs, const glm::vec3& wo,
+                          int sampleCount, std::mt19937& rng) {
+    // Summed in double: a float sum's ulp at 1e4 draws rivals the standard error the callers' bands are built from.
+    glm::dvec3 accum(0.0);
     for (int i = 0; i < sampleCount; ++i) {
-        const glm::vec3 wi = sampleUniformHemisphere(rng);
-        accum += pathtracer::scene::evaluateBsdf(inputs, wo, wi) / kUniformPdf;
+        accum += glm::dvec3(pathtracer::scene::evaluateBsdf(inputs, wo, sampleUniformHemisphere(rng)));
     }
-    return std::max({accum.x, accum.y, accum.z}) / static_cast<float>(sampleCount);
+    return 2.0 * std::numbers::pi * std::max({accum.x, accum.y, accum.z}) / static_cast<double>(sampleCount);
 }
 
 // A white infinite slab under uniform L0 = 1 by BSDF sampling alone, to maxVertices scatterings: the BSDF's own round-trip energy closure.
