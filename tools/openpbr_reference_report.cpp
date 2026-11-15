@@ -192,8 +192,8 @@ void reportTables() {
 void reportReflectedShare() {
     std::printf("\n## Multiple scattering's reflected share\n\n");
     std::printf("The share of an interface's 2+ bounce energy leaving on the incident side: Adobe's IdealDielectricReflectionRatio against the\n");
-    std::printf("renderer's Smith random walk (Heitz et al. 2016), which replaced the single-scatter stand-in R_avg/(R_avg + T_avg).\n\n");
-    std::printf("| ior | roughness | Adobe | Random walk |\n|---|---|---|---|\n");
+    std::printf("renderer's Smith random walk (Heitz et al. 2016) at mu 0.5; the walk's share is directional, Adobe's a hemispherical ratio.\n\n");
+    std::printf("| ior | roughness | Adobe | Random walk, mu 0.5 |\n|---|---|---|---|\n");
     for (const int i : {2, 8, 13, 18, 23, 31}) {
         for (const int k : {8, 16, 24, 31}) {
             const auto eta = static_cast<float>(1.0 / adobeIor(i));

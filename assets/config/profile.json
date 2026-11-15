@@ -47,7 +47,7 @@
             "confidence": 0.95,
             "minSamples": 8,
             "foveation": {
-                "marSlope": 1.0
+                "marSlope": 0.0
             }
         }
     },

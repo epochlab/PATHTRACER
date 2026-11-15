@@ -124,7 +124,9 @@ std::unique_ptr<DriverFixture> makeFixture() {
     for (int i = 0; i < 2; ++i) {
         scene.instances.push_back(MeshInstance{tools::fixtures::makeMaterial(1.0F), glm::mat4(1.0F), ""});
     }
-    scene.instances[1].material.transmissionWeight = 1.0F;
+    // Indirect lanes need the floor's draws to reflect off the wall: a half-metal floor and half-glass wall fill each every pass.
+    scene.instances[0].material.baseMetalness = 0.5F;
+    scene.instances[1].material.transmissionWeight = 0.5F;
     scene.instanceLightIndex.assign(scene.instances.size(), -1);
     fixture->accel = EmbreeAccel::build(fixture->scene.worldTriangles);
     if (!fixture->accel.has_value()) {

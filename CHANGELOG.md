@@ -3,6 +3,41 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Smith-exact dielectric multiple scattering
+
+Rough glass, the specular layer of opaque dielectrics and coats took their multiple scattering from escape tables. Transmission was
+separable, E(mu_o) times a shape in mu_i, and every direction shared one mean reflected share. So it was neither eta^2-reciprocal nor
+directional. Every rough interface now scatters by a random walk on its Smith microsurface (Heitz, Hanika, d'Eon & Dachsbacher 2016).
+
+- feat: **sampling is the walk.** One technique per rough interface draws its whole walk from wo, every order, with a bounded weight.
+  - The first collision chooses its branch by what each side carries. Glass uses the tinted Fresnel odds (Walter 2007 5.3).
+  - An opaque slab or coat still refracts with odds a/(a+b), a = F, b = (1-F) sqrt(rho), so light that refracts in and returns
+    reflected keeps its energy.
+  - Heights ride as log C1 with Maechler's log(1 - e^x) for the side flip. Draws off the facets' support end the walk, as do level
+    rays refracting at the very top. Every walk terminates.
+  - Visible normals: one spherical-cap sampler (Dupuy & Benyoub 2023), valid below the horizon, replaces Heitz 2018's.
+- feat: **evaluation.** Order 1 stays closed form. Orders 2+ are a walk from each end, balance-weighted over both ends' direction
+  densities (Wang et al. 2022 eq. 14-15), with the first return forced.
+- feat: **tables.** kEscapeMultiReflect/Transmit split the quadrature deficit by forced double walks per (roughness, mu, eta). The
+  walk energy meets the deficit at worst |z| 3.80 over 131,072 nodes. The mean shares and the shape tables are gone.
+  - kAnisoMultiReflectDelta: paired walks per anisotropic cell and log eta give the 2+ reflection beyond the isotropic table. The
+    albedo scaling under an anisotropic interface or coat matches the exact walk; the isotropic tables alone left it 2.8% high.
+  - Per-node standard errors (kEscapeMultiReflectError, kAnisoMultiReflectDeltaError) give each furnace row its local table error.
+- feat: `evaluateClosedTechniques`, `multiReflectError` and `walkTableError` for the validators.
+- fix: a walk exit carrying no tint (an opaque slab's transmission) is no sample. A smooth or index-matched interface keeps its deltas.
+- test:
+  - `smith_walk_matches_tables`: runtime walk energies per side against the tables on their nodes. Glass, opaque slabs and coats.
+  - `interface_walk_sampling_matches_evaluation`: per direction bin and in total. The draw-side variance bound covers rarely hit bins.
+  - `dielectric_multi_reciprocity`: f eta_i^2 = f eta_o^2 in expectation.
+  - The chi-square drops rows the walk draws alone. `lobe_pdf_is_the_drawn_technique_density` covers the index-matched coat case.
+  - The driver fixture's floor is half metal and its wall half glass, so every indirect lane varies. On main, indirectSpecular
+    varied in one pass of eight.
+- note: renders move within seed noise (rough glass, cornell, stump, macbeth, cornell_sss), and the share's spread over mu reaches 0.40.
+  - Cost: NEE evaluates every rough dielectric's 2+ orders with two walks. Paired pass time is 1.37x on rough-glass cornell, 1.23x on
+    cornell (rough plastic walls) and 1.04x on the stump. Evidence is in `results/smith_exact_transmission`.
+- note: below roughness 0.3, order-2 reflections off facets met from below make uniform-in-bin evaluation heavy-tailed. The check
+  sweeps 0.3 and up; at 0.15 the evaluation converges to the draws at 1e7 evaluations per bin.
+
 ## Black edges on scanned geometry
 
 Scanned meshes rendered black slivers along ridges and creases, and black blobs. A 576 m, 2M-triangle Megascans terrain
