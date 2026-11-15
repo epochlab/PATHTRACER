@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <numbers>
 #include <vector>
 
 #include "pathtracer/scene/cie.h"
@@ -12,8 +13,6 @@ namespace pathtracer::scene {
 
 namespace {
 
-constexpr double kPi = 3.14159265358979323846;
-
 // Path differences tabulated to 40 um at 2 nm: past it the CIE x D65 transforms sit under 5e-3, a film incoherent there.
 constexpr double kOpdStepNm = 2.0;
 constexpr int kOpdSamples = 20001;
@@ -21,8 +20,8 @@ constexpr float kOpdLimitNm = static_cast<float>(kOpdStepNm * (kOpdSamples - 1))
 
 // Scene RGB of the spectrum cos(2 pi o / lambda + phi) under D65 is cos(phi) C(o) - sin(phi) S(o): its exact cosine and sine transforms.
 struct Sensitivity {
-    std::vector<glm::vec3> cosine;
-    std::vector<glm::vec3> sine;
+    std::vector<Rgb> cosine;
+    std::vector<Rgb> sine;
     float bound;  // the largest |cos(phi) C - sin(phi) S| = sqrt(C^2 + S^2) over the table, the series' tail bound per unit amplitude
 };
 
@@ -36,18 +35,18 @@ const Sensitivity& sensitivity() {
             weight[static_cast<std::size_t>(i)] = cie::xyzToScene() * (row.colourMatching * row.d65);
             whiteY += row.colourMatching.y * row.d65;
         }
-        Sensitivity built{std::vector<glm::vec3>(kOpdSamples), std::vector<glm::vec3>(kOpdSamples), 0.0F};
+        Sensitivity built{std::vector<Rgb>(kOpdSamples), std::vector<Rgb>(kOpdSamples), 0.0F};
         for (int s = 0; s < kOpdSamples; ++s) {
             glm::dvec3 cosine(0.0);
             glm::dvec3 sine(0.0);
             for (int i = 0; i < cie::kSampleCount; ++i) {
-                const double phase = 2.0 * kPi * (s * kOpdStepNm) / cie::wavelengthNm(i);
+                const double phase = 2.0 * std::numbers::pi * (s * kOpdStepNm) / cie::wavelengthNm(i);
                 cosine += weight[static_cast<std::size_t>(i)] * std::cos(phase);
                 sine += weight[static_cast<std::size_t>(i)] * std::sin(phase);
             }
-            built.cosine[static_cast<std::size_t>(s)] = glm::vec3(cosine / whiteY);
-            built.sine[static_cast<std::size_t>(s)] = glm::vec3(sine / whiteY);
-            const glm::dvec3 magnitude = glm::sqrt((cosine * cosine) + (sine * sine)) / whiteY;
+            built.cosine[static_cast<std::size_t>(s)] = Rgb(glm::vec3(cosine / whiteY));
+            built.sine[static_cast<std::size_t>(s)] = Rgb(glm::vec3(sine / whiteY));
+            const glm::dvec3 magnitude = sqrt((cosine * cosine) + (sine * sine)) / whiteY;
             built.bound = std::max({built.bound, static_cast<float>(magnitude.x), static_cast<float>(magnitude.y), static_cast<float>(magnitude.z)});
         }
         return built;
@@ -56,46 +55,46 @@ const Sensitivity& sensitivity() {
 }
 
 // The interference term's scene RGB at path difference opd (nm) and phase shift per channel; zero past the table, the film incoherent.
-glm::vec3 interference(float opd, const glm::vec3& shift) {
+Rgb interference(float opd, const Rgb& shift) {
     const float index = opd / static_cast<float>(kOpdStepNm);
     if (!(opd < kOpdLimitNm)) {
-        return glm::vec3(0.0F);
+        return Rgb(0.0F);
     }
     const Sensitivity& table = sensitivity();
     const auto i0 = static_cast<std::size_t>(index);
     const float t = index - static_cast<float>(i0);
-    const glm::vec3 cosine = table.cosine[i0] + (t * (table.cosine[i0 + 1] - table.cosine[i0]));
-    const glm::vec3 sine = table.sine[i0] + (t * (table.sine[i0 + 1] - table.sine[i0]));
-    return (glm::cos(shift) * cosine) - (glm::sin(shift) * sine);
+    const Rgb cosine = table.cosine[i0] + (t * (table.cosine[i0 + 1] - table.cosine[i0]));
+    const Rgb sine = table.sine[i0] + (t * (table.sine[i0 + 1] - table.sine[i0]));
+    return (cos(shift) * cosine) - (sin(shift) * sine);
 }
 
 // R_p and R_s from index 1 onto relative complex index (n, k), per channel (Born & Wolf 14.2), with a^2 + b^2 = |n^2 - k^2 - s^2 + 2ink|.
-void polarisedFresnel(float cosTheta, const glm::vec3& n, const glm::vec3& k, glm::vec3& rp, glm::vec3& rs) {
+void polarisedFresnel(float cosTheta, const Rgb& n, const Rgb& k, Rgb& rp, Rgb& rs) {
     const float cos2 = cosTheta * cosTheta;
     const float sin2 = 1.0F - cos2;
-    const glm::vec3 t0 = (n * n) - (k * k) - sin2;
-    const glm::vec3 a2b2 = glm::sqrt((t0 * t0) + (4.0F * n * n * k * k));
-    const glm::vec3 a = glm::sqrt(glm::max(0.5F * (a2b2 + t0), glm::vec3(0.0F)));
-    const glm::vec3 b = glm::sqrt(glm::max(0.5F * (a2b2 - t0), glm::vec3(0.0F)));
+    const Rgb t0 = (n * n) - (k * k) - sin2;
+    const Rgb a2b2 = sqrt((t0 * t0) + (4.0F * n * n * k * k));
+    const Rgb a = sqrt(max(0.5F * (a2b2 + t0), Rgb(0.0F)));
+    const Rgb b = sqrt(max(0.5F * (a2b2 - t0), Rgb(0.0F)));
     // Sums of squares, not differences: exactly non-negative, where the expanded form rounds below zero at Brewster's angle.
-    const glm::vec3 sCos = a - cosTheta;
-    const glm::vec3 sCosPlus = a + cosTheta;
+    const Rgb sCos = a - cosTheta;
+    const Rgb sCosPlus = a + cosTheta;
     rs = ((sCos * sCos) + (b * b)) / ((sCosPlus * sCosPlus) + (b * b));
-    const glm::vec3 pMinus = (a * cosTheta) - sin2;
-    const glm::vec3 pPlus = (a * cosTheta) + sin2;
-    const glm::vec3 bCos = b * cosTheta;
+    const Rgb pMinus = (a * cosTheta) - sin2;
+    const Rgb pPlus = (a * cosTheta) + sin2;
+    const Rgb bCos = b * cosTheta;
     rp = rs * ((pMinus * pMinus) + (bCos * bCos)) / ((pPlus * pPlus) + (bCos * bCos));
 }
 
 // Reflection phase from a medium of index eta1 onto (eta2, kappa2), per polarisation (Belcour & Barla 2017, eq. 12); kappa 0 is dielectric.
-void reflectionPhase(float cosTheta, float eta1, const glm::vec3& eta2, const glm::vec3& kappa2, glm::vec3& phiP, glm::vec3& phiS) {
-    const glm::vec3 k2 = kappa2 / eta2;
+void reflectionPhase(float cosTheta, float eta1, const Rgb& eta2, const Rgb& kappa2, Rgb& phiP, Rgb& phiS) {
+    const Rgb k2 = kappa2 / eta2;
     const float sin2 = 1.0F - (cosTheta * cosTheta);
-    const glm::vec3 a = (eta2 * eta2 * (1.0F - (k2 * k2))) - (eta1 * eta1 * sin2);
-    const glm::vec3 twoEtaK = 2.0F * eta2 * eta2 * k2;
-    const glm::vec3 b = glm::sqrt((a * a) + (twoEtaK * twoEtaK));
-    const glm::vec3 u = glm::sqrt(0.5F * (a + b));
-    const glm::vec3 v = glm::sqrt(glm::max(0.5F * (b - a), glm::vec3(0.0F)));
+    const Rgb a = (eta2 * eta2 * (1.0F - (k2 * k2))) - (eta1 * eta1 * sin2);
+    const Rgb twoEtaK = 2.0F * eta2 * eta2 * k2;
+    const Rgb b = sqrt((a * a) + (twoEtaK * twoEtaK));
+    const Rgb u = sqrt(0.5F * (a + b));
+    const Rgb v = sqrt(max(0.5F * (b - a), Rgb(0.0F)));
     const float c = eta1 * cosTheta;
     for (int i = 0; i < 3; ++i) {
         phiS[i] = std::atan2(2.0F * eta1 * v[i] * cosTheta, (u[i] * u[i]) + (v[i] * v[i]) - (c * c));
@@ -106,20 +105,20 @@ void reflectionPhase(float cosTheta, float eta1, const glm::vec3& eta2, const gl
 }
 
 // One polarisation's Airy series (Belcour & Barla 2017, eq. 10), to its tail below float resolution or past the table, where terms are 0.
-glm::vec3 airy(float r12, float t121, const glm::vec3& r23, float opd, const glm::vec3& phase) {
+Rgb airy(float r12, float t121, const Rgb& r23, float opd, const Rgb& phase) {
     // At grazing the outer interface reflects all and nothing enters the film to interfere.
     if (t121 == 0.0F) {
-        return glm::vec3(r12);
+        return Rgb(r12);
     }
-    const glm::vec3 transmitted = (t121 * t121 * r23) / (1.0F - (r12 * r23));
-    const glm::vec3 r123 = glm::sqrt(r12 * r23);
-    const float ratio = std::max({r123.x, r123.y, r123.z});
+    const Rgb transmitted = (t121 * t121 * r23) / (1.0F - (r12 * r23));
+    const Rgb r123 = sqrt(r12 * r23);
+    const float ratio = maxChannel(r123);
     // Each order m adds C_m S_m with |S_m| <= 2 bound and |C_m| = |C_0| r^m, so past order m the rest sums to at most that over 1 - r.
     const float tailScale = 2.0F * sensitivity().bound * ratio / (1.0F - ratio);
-    glm::vec3 amplitude = transmitted - t121;
-    glm::vec3 reflectance = r12 + transmitted;
+    Rgb amplitude = transmitted - t121;
+    Rgb reflectance = r12 + transmitted;
     for (int m = 1; static_cast<float>(m) * opd < kOpdLimitNm &&
-                    tailScale * std::max({std::abs(amplitude.x), std::abs(amplitude.y), std::abs(amplitude.z)}) >=
+                    tailScale * maxChannel(abs(amplitude)) >=
                         std::numeric_limits<float>::epsilon();
          ++m) {
         amplitude *= r123;
@@ -129,54 +128,54 @@ glm::vec3 airy(float r12, float t121, const glm::vec3& r23, float opd, const glm
 }
 
 // Each polarisation's Airy reflectance in scene space, unclamped: a fringe may lie outside the primaries' gamut.
-PolarisedReflectance airyReflectance(const ThinFilm& film, float cosTheta, float outerIor, const glm::vec3& substrateIor,
-                                     const glm::vec3& substrateKappa) {
+PolarisedReflectance airyReflectance(const ThinFilm& film, float cosTheta, float outerIor, const Rgb& substrateIor,
+                                     const Rgb& substrateKappa) {
     // Snell into the film; past its critical angle no light enters it, and the outer interface reflects all.
     const float ratio = outerIor / film.ior;
     const float cos2Film = 1.0F - ((1.0F - (cosTheta * cosTheta)) * ratio * ratio);
     if (!(cos2Film > 0.0F)) {
-        return {glm::vec3(1.0F), glm::vec3(1.0F)};
+        return {Rgb(1.0F), Rgb(1.0F)};
     }
     const float cosFilm = std::sqrt(cos2Film);
-    glm::vec3 r12p;
-    glm::vec3 r12s;
-    polarisedFresnel(cosTheta, glm::vec3(film.ior / outerIor), glm::vec3(0.0F), r12p, r12s);
-    glm::vec3 r23p;
-    glm::vec3 r23s;
+    Rgb r12p;
+    Rgb r12s;
+    polarisedFresnel(cosTheta, Rgb(film.ior / outerIor), Rgb(0.0F), r12p, r12s);
+    Rgb r23p;
+    Rgb r23s;
     polarisedFresnel(cosFilm, substrateIor / film.ior, substrateKappa / film.ior, r23p, r23s);
-    glm::vec3 phi21p;
-    glm::vec3 phi21s;
-    reflectionPhase(cosFilm, film.ior, glm::vec3(outerIor), glm::vec3(0.0F), phi21p, phi21s);
-    glm::vec3 phi23p;
-    glm::vec3 phi23s;
+    Rgb phi21p;
+    Rgb phi21s;
+    reflectionPhase(cosFilm, film.ior, Rgb(outerIor), Rgb(0.0F), phi21p, phi21s);
+    Rgb phi23p;
+    Rgb phi23s;
     reflectionPhase(cosFilm, film.ior, substrateIor, substrateKappa, phi23p, phi23s);
     // A perfect conductor (Gulbrandsen's r = 1) reflects all with phase pi, the limit both formulas reach at kappa -> infinity.
     for (int i = 0; i < 3; ++i) {
         if (std::isinf(substrateKappa[i])) {
             r23p[i] = r23s[i] = 1.0F;
-            phi23p[i] = phi23s[i] = static_cast<float>(kPi);
+            phi23p[i] = phi23s[i] = std::numbers::pi_v<float>;
         }
     }
     const float opd = 2.0F * film.ior * cosFilm * film.thicknessNm;
-    return {airy(r12p.x, 1.0F - r12p.x, r23p, opd, phi23p + phi21p), airy(r12s.x, 1.0F - r12s.x, r23s, opd, phi23s + phi21s)};
+    return {airy(r12p.r, 1.0F - r12p.r, r23p, opd, phi23p + phi21p), airy(r12s.r, 1.0F - r12s.r, r23s, opd, phi23s + phi21s)};
 }
 
 }  // namespace
 
 // Each wavelength reflects within [0, 1]; a fringe more saturated than the scene primaries is clipped to the RGB the renderer carries.
-glm::vec3 filmReflectance(const ThinFilm& film, float cosTheta, float outerIor, const glm::vec3& substrateIor,
-                          const glm::vec3& substrateKappa) {
+Rgb filmReflectance(const ThinFilm& film, float cosTheta, float outerIor, const Rgb& substrateIor,
+                          const Rgb& substrateKappa) {
     const PolarisedReflectance r = airyReflectance(film, cosTheta, outerIor, substrateIor, substrateKappa);
-    return glm::clamp(0.5F * (r.parallel + r.perpendicular), glm::vec3(0.0F), glm::vec3(1.0F));
+    return clamp(0.5F * (r.parallel + r.perpendicular), 0.0F, 1.0F);
 }
 
-PolarisedReflectance filmReflectancePolarised(const ThinFilm& film, float cosTheta, float outerIor, const glm::vec3& substrateIor,
-                                              const glm::vec3& substrateKappa) {
+PolarisedReflectance filmReflectancePolarised(const ThinFilm& film, float cosTheta, float outerIor, const Rgb& substrateIor,
+                                              const Rgb& substrateKappa) {
     const PolarisedReflectance r = airyReflectance(film, cosTheta, outerIor, substrateIor, substrateKappa);
-    return {glm::clamp(r.parallel, glm::vec3(0.0F), glm::vec3(1.0F)), glm::clamp(r.perpendicular, glm::vec3(0.0F), glm::vec3(1.0F))};
+    return {clamp(r.parallel, 0.0F, 1.0F), clamp(r.perpendicular, 0.0F, 1.0F)};
 }
 
-ComplexIor conductorIor(const glm::vec3& reflectance, const glm::vec3& edgeTint) {
+ComplexIor conductorIor(const Rgb& reflectance, const Rgb& edgeTint) {
     ComplexIor ior;
     for (int i = 0; i < 3; ++i) {
         const float r = reflectance[i];

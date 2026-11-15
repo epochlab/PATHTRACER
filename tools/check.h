@@ -112,3 +112,13 @@ int run(int argc, char** argv, const char* suiteName);
             (ctx).recordPass();                                                        \
         }                                                                              \
     } while (false)
+
+namespace tools::check {
+
+// A check keeping its own `ok` and per-row diagnostics reports one verdict: per-row assertions would lose that context.
+inline void finish(Context& ctx, bool ok, const char* what) {
+    ctx.plan(1);
+    PT_EXPECT(ctx, ok, what);
+}
+
+}  // namespace tools::check

@@ -1,5 +1,5 @@
 ---
-# RAII, pointers, a ~60-line function rule, bugprone-*. Vendored code is exempt; glm unions, ImGui varargs and main() are disabled as noise.
+# RAII, pointers, ~60-line functions, bugprone-*, performance-*. Noise: vendored code, glm unions, ImGui varargs, main(), cold strings.
 Checks: >
   bugprone-*,
   cppcoreguidelines-owning-memory,
@@ -7,13 +7,16 @@ Checks: >
   cppcoreguidelines-pro-type-cstyle-cast,
   cppcoreguidelines-pro-type-static-cast-downcast,
   misc-*,
+  performance-*,
   readability-function-size,
   -bugprone-easily-swappable-parameters,
   -bugprone-exception-escape,
   -cppcoreguidelines-pro-type-union-access,
   -cppcoreguidelines-pro-type-vararg,
   -misc-non-private-member-variables-in-classes,
-  -misc-include-cleaner
+  -misc-include-cleaner,
+  -performance-enum-size,
+  -performance-inefficient-string-concatenation
 WarningsAsErrors: ''
 # llvm::Regex (POSIX ERE) has no lookahead: '^(?!.*third_party)' matched nothing. Exclusion needs its own key, clang-tidy >= 19.
 HeaderFilterRegex: '.*/(include|src)/.*'

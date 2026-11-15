@@ -39,6 +39,7 @@
 namespace {
 
 using pathtracer::config::VolumeConfig;
+using pathtracer::scene::Rgb;
 using pathtracer::scene::FreeFlightEvent;
 using pathtracer::scene::Ray;
 using pathtracer::scene::Sampler;
@@ -220,7 +221,7 @@ PT_CHECK(transmittance_matches_closed_form, Slow, Statistical) {
         std::array<tools::stats::Welford, 3> estimate;
         for (int i = 0; i < kTrials; ++i) {
             Sampler sampler(0, 0, i, kTrials, static_cast<std::uint32_t>(ctx.subSeed(name + materialPath)));
-            const glm::vec3 t = set.transmittance(ray, 0.0F, std::numeric_limits<float>::infinity(), sampler);
+            const Rgb t = set.transmittance(ray, 0.0F, std::numeric_limits<float>::infinity(), sampler);
             for (int c = 0; c < 3; ++c) {
                 estimate[c].add(t[c]);
             }
@@ -244,7 +245,7 @@ PT_CHECK(spectral_tracking_is_unbiased, Slow, Statistical) {
     // Starts and ends inside, where the density is exactly 1, as a camera inside the medium and a surface hit within it.
     constexpr float kLength = 40.0F;
     const Ray ray{glm::vec3(10.0F, 31.0F, 31.0F), glm::vec3(1.0F, 0.0F, 0.0F), 0.0F, kLength};
-    const glm::vec3 throughput(0.7F, 1.0F, 0.4F);  // a coloured history, which the probabilities follow and the weights undo
+    const Rgb throughput(0.7F, 1.0F, 0.4F);  // a coloured history, which the probabilities follow and the weights undo
 
     constexpr int kTrials = 1 << 15;
     std::array<tools::stats::Welford, 3> escaped;
@@ -281,24 +282,24 @@ PT_CHECK(bounded_medium_free_flight_is_unbiased, Slow, Statistical) {
     };
     // The second leaves blue clear, so its odds are 0 and its escape weight must still read exactly T = 1.
     const std::array<Case, 2> cases{{
-        {"chromatic", {glm::vec3(0.01F, 0.05F, 0.02F), glm::vec3(0.06F, 0.01F, 0.03F), 0.0F}},
-        {"clear blue", {glm::vec3(0.02F, 0.0F, 0.0F), glm::vec3(0.05F, 0.08F, 0.0F), 0.0F}},
+        {"chromatic", {Rgb(0.01F, 0.05F, 0.02F), Rgb(0.06F, 0.01F, 0.03F), 0.0F}},
+        {"clear blue", {Rgb(0.02F, 0.0F, 0.0F), Rgb(0.05F, 0.08F, 0.0F), 0.0F}},
     }};
     constexpr float kLength = 40.0F;
-    const glm::vec3 throughput(0.7F, 1.0F, 0.4F);  // a coloured history, which the odds follow and the weights undo
+    const Rgb throughput(0.7F, 1.0F, 0.4F);  // a coloured history, which the odds follow and the weights undo
     constexpr int kTrials = 1 << 15;
     ctx.plan(static_cast<int>(cases.size()) * 6);
     const double t = tools::stats::studentTTwoSided(ctx.alpha(), static_cast<double>(kTrials - 1));
     for (const Case& testCase : cases) {
         const pathtracer::scene::HomogeneousMedium& medium = testCase.medium;
-        const glm::vec3 odds = pathtracer::scene::channelOdds(medium, throughput);
+        const Rgb odds = pathtracer::scene::channelOdds(medium, throughput);
         std::array<tools::stats::Welford, 3> escaped;
         std::array<tools::stats::Welford, 3> scattered;
         for (int i = 0; i < kTrials; ++i) {
             Sampler sampler(0, 0, i, kTrials, static_cast<std::uint32_t>(ctx.subSeed(testCase.name)));
             const float d = pathtracer::scene::sampleCollision(medium, odds, sampler.next2D());
-            const glm::vec3 escape = d < kLength ? glm::vec3(0.0F) : pathtracer::scene::passWeight(medium, odds, kLength);
-            const glm::vec3 scatter = d < kLength ? pathtracer::scene::collisionWeight(medium, odds, d) : glm::vec3(0.0F);
+            const Rgb escape = d < kLength ? Rgb(0.0F) : pathtracer::scene::passWeight(medium, odds, kLength);
+            const Rgb scatter = d < kLength ? pathtracer::scene::collisionWeight(medium, odds, d) : Rgb(0.0F);
             for (int c = 0; c < 3; ++c) {
                 escaped[c].add(escape[c]);
                 scattered[c].add(scatter[c]);
@@ -321,26 +322,26 @@ PT_CHECK(bounded_medium_free_flight_is_unbiased, Slow, Statistical) {
 PT_CHECK(bounded_medium_limits, Fast, Exact) {
     using pathtracer::scene::HomogeneousMedium;
     constexpr float kInf = std::numeric_limits<float>::infinity();
-    const HomogeneousMedium opaque{glm::vec3(kInf, 0.0F, 0.5F), glm::vec3(0.0F), 0.0F};
+    const HomogeneousMedium opaque{Rgb(kInf, 0.0F, 0.5F), Rgb(0.0F), 0.0F};
     pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant> glass;
     glass.transmissionWeight = 1.0F;
-    glass.transmissionColor = glm::vec3(0.0F, 0.5F, 1.0F);
+    glass.transmissionColor = Rgb(0.0F, 0.5F, 1.0F);
     glass.transmissionDepth = 0.5F;
     pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant> fog = glass;
-    fog.transmissionScatter = glm::vec3(0.2F);
+    fog.transmissionScatter = Rgb(0.2F);
     fog.transmissionScatterAnisotropy = 1.0F;
     pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant> wax;
     wax.subsurfaceWeight = 1.0F;
-    wax.subsurfaceRadiusScale = glm::vec3(1.0F, 0.5F, 0.0F);
+    wax.subsurfaceRadiusScale = Rgb(1.0F, 0.5F, 0.0F);
     const HomogeneousMedium waxMedium = pathtracer::scene::interiorMedium(wax);
     ctx.plan(6);
-    PT_EXPECT(ctx, pathtracer::scene::transmittance(opaque, 0.0F) == glm::vec3(1.0F), "T(0) must be 1 at infinite extinction");
-    PT_EXPECT(ctx, pathtracer::scene::transmittance(opaque, kInf) == glm::vec3(0.0F, 1.0F, 0.0F), "T(inf) must be 0 or, clear, 1");
-    PT_EXPECT(ctx, pathtracer::scene::transmittance(opaque, 2.0F) == glm::vec3(0.0F, 1.0F, std::exp(-1.0F)), "T(2) off the closed form");
+    PT_EXPECT(ctx, pathtracer::scene::transmittance(opaque, 0.0F) == Rgb(1.0F), "T(0) must be 1 at infinite extinction");
+    PT_EXPECT(ctx, pathtracer::scene::transmittance(opaque, kInf) == Rgb(0.0F, 1.0F, 0.0F), "T(inf) must be 0 or, clear, 1");
+    PT_EXPECT(ctx, pathtracer::scene::transmittance(opaque, 2.0F) == Rgb(0.0F, 1.0F, std::exp(-1.0F)), "T(2) off the closed form");
     PT_EXPECT(ctx, !pathtracer::scene::scatters(pathtracer::scene::interiorMedium(glass)), "an absorbing interior scattered");
     PT_EXPECT(ctx, !pathtracer::scene::scatters(pathtracer::scene::interiorMedium(fog)), "a g = 1 interior's forward delta scattered");
     // A zero-MFP channel takes the glossy-diffuse limit: no medium there, finite coefficients elsewhere.
-    PT_EXPECT(ctx, waxMedium.scattering.z == 0.0F && waxMedium.absorption.z == 0.0F && waxMedium.scattering.y == 2.0F * waxMedium.scattering.x,
+    PT_EXPECT(ctx, waxMedium.scattering.b == 0.0F && waxMedium.absorption.b == 0.0F && waxMedium.scattering.g == 2.0F * waxMedium.scattering.r,
               "a zero-MFP channel entered the medium, or 1/MFP left the open ones");
 }
 
@@ -359,8 +360,8 @@ PT_CHECK(free_flight_distance_distribution, Slow, Statistical) {
     bool unitWeights = true;
     for (int i = 0; i < kTrials; ++i) {
         Sampler sampler(0, 0, i, kTrials, static_cast<std::uint32_t>(ctx.seed()));
-        const pathtracer::scene::FreeFlight flight = set.sampleFreeFlight(ray, 0.0F, kLength, glm::vec3(1.0F), sampler);
-        unitWeights = unitWeights && flight.weight == glm::vec3(1.0F);
+        const pathtracer::scene::FreeFlight flight = set.sampleFreeFlight(ray, 0.0F, kLength, Rgb(1.0F), sampler);
+        unitWeights = unitWeights && flight.weight == Rgb(1.0F);
         const int bin = flight.event == FreeFlightEvent::Scattered
                             ? std::min(static_cast<int>(flight.t / kLength * static_cast<float>(kBins)), kBins - 1)
                             : kBins;
@@ -441,12 +442,12 @@ PT_CHECK(empty_space_draws_nothing, Fast, Exact) {
     // From the first blob's far side to the second's near side, one cell of margin clear of each majorant's dilated support.
     const Ray ray{glm::vec3(8.0F, 8.0F, 40.0F), glm::vec3(0.0F, 0.0F, 1.0F), 0.0F, 140.0F};
     Sampler used(0, 0, 0, 1, 7U);
-    const glm::vec3 transmittance = set.transmittance(ray, 0.0F, 140.0F, used);
-    const pathtracer::scene::FreeFlight flight = set.sampleFreeFlight(ray, 0.0F, 140.0F, glm::vec3(1.0F), used);
+    const Rgb transmittance = set.transmittance(ray, 0.0F, 140.0F, used);
+    const pathtracer::scene::FreeFlight flight = set.sampleFreeFlight(ray, 0.0F, 140.0F, Rgb(1.0F), used);
     Sampler fresh(0, 0, 0, 1, 7U);
     ctx.plan(3);
-    PT_EXPECT(ctx, transmittance == glm::vec3(1.0F), "transmittance through empty cells left 1");
-    PT_EXPECT(ctx, flight.event == FreeFlightEvent::Escaped && flight.weight == glm::vec3(1.0F), "the flight did not escape at weight 1");
+    PT_EXPECT(ctx, transmittance == Rgb(1.0F), "transmittance through empty cells left 1");
+    PT_EXPECT(ctx, flight.event == FreeFlightEvent::Escaped && flight.weight == Rgb(1.0F), "the flight did not escape at weight 1");
     PT_EXPECT(ctx, used.next2D() == fresh.next2D(), "empty space consumed sampler dimensions");
 }
 
@@ -508,11 +509,7 @@ PT_CHECK(volume_load_rejects_invalid_inputs, Fast, Exact) {
 
 // --- The integrator through media: renderPathTraced over volumes and, where a check needs one, a quad ----------------------------
 
-// One pool for the binary, sized from the runner's --threads so concurrent ctest jobs do not oversubscribe the machine.
-pathtracer::scene::ThreadPool& sharedPool(int threads) {
-    static pathtracer::scene::ThreadPool pool(static_cast<unsigned int>(threads));
-    return pool;
-}
+using tools::fixtures::sharedPool;
 
 struct Surfaces {
     std::vector<Triangle> world;
@@ -609,17 +606,6 @@ double slabDepthBelow(double z) {
 
 double slabDensity(double z) { return std::clamp(std::min(z + 1.0, 8.0 - z), 0.0, 1.0); }
 
-// Composite Simpson over [a, b] at n (even) panels: exact on cubics, so on the slab's piecewise-quadratic depths between its knots.
-template <typename F>
-double simpson(F f, double a, double b, int n) {
-    const double h = (b - a) / n;
-    double sum = f(a) + f(b);
-    for (int i = 1; i < n; ++i) {
-        sum += ((i % 2) != 0 ? 4.0 : 2.0) * f(a + (i * h));
-    }
-    return sum * h / 3.0;
-}
-
 // White furnace: albedo 1 in every channel, chromatic extinction, a uniform unit sky and an absent plane inside: every pixel reads 1.
 PT_CHECK(white_furnace_with_chromatic_extinction, Slow, Statistical) {
     const Scratch scratch(ctx);
@@ -669,12 +655,13 @@ PT_CHECK(single_scattering_matches_slab_quadrature, Slow, Statistical) {
                 const auto phase = [&](double mu) {
                     return 2.0 * kPi * pathtracer::scene::henyeyGreenstein(static_cast<float>(mu), g) * exitTransmittance(z, mu);
                 };
-                const double sky = simpson(phase, -1.0, 0.0, 4096) + simpson(phase, 0.0, 1.0, 4096);
+                const double sky = tools::stats::simpson(-1.0, 0.0, 4096, phase) + tools::stats::simpson(0.0, 1.0, 4096, phase);
                 return std::exp(-sigmaT * (8.0 - slabDepthBelow(z))) * scattering[c] * slabDensity(z) * sky;
             };
             double reference = std::exp(-sigmaT * 8.0);
             for (const auto& [a, b] : {std::pair{-1.0, 0.0}, std::pair{0.0, 7.0}, std::pair{7.0, 8.0}}) {
-                reference += simpson(inScatter, a, b, 256);
+                // Simpson is exact on cubics, so on the slab's piecewise-quadratic depths between its knots.
+                reference += tools::stats::simpson(a, b, 256, inScatter);
             }
             PT_EXPECT(ctx, std::abs(means[c].mean() - reference) <= t * means[c].standardError(),
                       "g " + std::to_string(g) + " channel " + std::to_string(c) + ": " + std::to_string(means[c].mean()) + " vs " +

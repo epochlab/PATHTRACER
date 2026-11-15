@@ -54,19 +54,8 @@ constexpr float kLineThicknessPx = 1.0F;
 constexpr int kEdgeSamples = 1024;
 constexpr Camera::FilmBack kFilmBack{36.0F, 24.0F};
 
-// OpenPBR defaults with a fractional metalness, varying only the two inputs the G-buffer AOVs under test read.
-Material makeMaterial(glm::vec3 baseColor, float roughness) {
-    Material material;
-    material.baseColor = baseColor;
-    material.baseMetalness = 0.2F;
-    material.specularRoughness = roughness;
-    return material;
-}
-
-glm::vec4 tangentFor(const glm::vec3& normal) {
-    const glm::vec3 up = std::fabs(normal.y) < 0.99F ? glm::vec3(0.0F, 1.0F, 0.0F) : glm::vec3(1.0F, 0.0F, 0.0F);
-    return glm::vec4(glm::normalize(glm::cross(up, normal)), 1.0F);
-}
+using tools::fixtures::makeMaterial;
+using tools::fixtures::tangentFor;
 
 // Random triangles overlapping in depth, dense enough near z=-1 that a camera inside the cluster has some behind its near clip.
 std::vector<ShadingTriangle> makeSyntheticTriangles(std::mt19937& rng) {
@@ -164,7 +153,7 @@ std::unique_ptr<Fixture> makeFixture(std::vector<ShadingTriangle> triangles, int
     auto fixture = std::make_unique<Fixture>();
     fixture->shadingTriangles = std::move(triangles);
     fixture->accel = EmbreeAccel::build(worldTrianglesOf(fixture->shadingTriangles));
-    const std::array<glm::vec3, kMaterialCount> colours{
+    const std::array<Rgb, kMaterialCount> colours{
         {{0.8F, 0.2F, 0.2F}, {0.2F, 0.8F, 0.2F}, {0.2F, 0.2F, 0.8F}, {0.8F, 0.8F, 0.2F}}};
     for (int i = 0; i < instanceCount; ++i) {
         const auto slot = static_cast<std::size_t>(i % kMaterialCount);
@@ -260,7 +249,7 @@ bool matchesOracle(const GBuffer& g, int x, int y, const Ray& ray, const glm::ma
     return texelAt(g.depth, x, y).x == hit.t &&
            texelAt(g.worldPos, x, y) == shading.position && glm::vec2(texelAt(g.uv, x, y)) == glm::fract(shading.uv) &&
            texelAt(g.normal, x, y) == frame[2] && texelAt(g.geomNormal, x, y) == glm::normalize(shading.normal) &&
-           texelAt(g.albedo, x, y) == inputs.baseWeight * inputs.baseColor && texelAt(g.metallic, x, y).x == inputs.baseMetalness &&
+           texelAt(g.albedo, x, y) == (inputs.baseWeight * inputs.baseColor).vec3() && texelAt(g.metallic, x, y).x == inputs.baseMetalness &&
            texelAt(g.roughness, x, y).x == inputs.specularRoughness && texelAt(g.tangent, x, y) == frame[0] &&
            texelAt(g.objectId, x, y) == falseColorForId(triangle.instanceIndex) &&
            texelAt(g.iorAov, x, y).x == modulatedIor(inputs, std::nullopt) && glm::vec2(texelAt(g.motionVector, x, y)) == glm::vec2(0.0F);
@@ -950,11 +939,11 @@ PT_CHECK(constant_inputs_match_unit_textures, Fast, Exact) {
                     texture = unitTexture(&value.x, pathtracer::gfx::kRgbChannels);
                     const glm::vec3 lookup = pathtracer::gfx::sampleTexture(**std::get_if<TextureHandle>(&texture), uv);
                     lookupsHold = lookupsHold && within(lookup, value);
-                    read = lookup;
+                    read = Rgb(lookup);
                 }
             },
             textured, asRead);
-        const glm::vec3 vertexColour(unit(rng), unit(rng), unit(rng));
+        const Rgb vertexColour(unit(rng), unit(rng), unit(rng));
         // Shading consumes a lookup exactly as a constant of the value it read: the texture path adds nothing past the filter.
         inputMismatches += lookupsHold && sameInputs(resolveInputs(asRead, uv, {}, vertexColour), resolveInputs(textured, uv, {}, vertexColour)) ? 0 : 1;
 
@@ -1036,8 +1025,8 @@ PT_CHECK(random_checker_is_cellwise, Fast, Exact) {
         material.baseColor = checker;
         material.baseWeight = checker;
         const pathtracer::gfx::TextureFootprint wide{glm::vec2(4.0F * checker.cellSize, 0.0F), glm::vec2(0.0F, 4.0F * checker.cellSize)};
-        const OpenPbrInputs<Constant> inputs = resolveInputs(material, centre, wide, glm::vec3(1.0F));
-        shadingMismatches += inputs.baseColor == glm::vec3(value) && inputs.baseWeight == value ? 0 : 1;
+        const OpenPbrInputs<Constant> inputs = resolveInputs(material, centre, wide, Rgb(1.0F));
+        shadingMismatches += inputs.baseColor == Rgb(value) && inputs.baseWeight == value ? 0 : 1;
     }
     std::cout << "gbuffer_validate: random checker over " << kCases << " cases -- " << definitionMismatches << " definition, " << cellMismatches
               << " cell, " << shadingMismatches << " shading mismatches\n";

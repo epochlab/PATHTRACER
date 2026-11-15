@@ -69,7 +69,7 @@ void appendShadingTriangles(const std::vector<Vertex>& vertices,
             v.uv,
             // sign det[M^-T N, MT, MB] = sign(det M): cross(N',T') tracks M*B only once w takes the determinant's sign.
             glm::vec4(glm::normalize(linear * glm::vec3(v.tangent)), v.tangent.w * handedness),
-            v.colour,
+            Rgb(v.colour),
         };
     };
     for (std::size_t i = 0; i + 2 < indices.size(); i += 3) {

@@ -70,9 +70,9 @@ float underFuzz(const BsdfClosure& closure, const glm::vec3& wi) {
 }
 
 // The base's weight under the coat toward wi (OpenPBR's lerp(1, T_coat (1 - E_coat), C), darkened): side decides which rays cross it.
-glm::vec3 underCoat(const BsdfClosure& closure, const glm::vec3& wi) {
+Rgb underCoat(const BsdfClosure& closure, const glm::vec3& wi) {
     if (closure.coatWeight == 0.0F) {
-        return glm::vec3(1.0F);
+        return Rgb(1.0F);
     }
     // A coat normal tilted past wi leaves wi at the grazing limit of the coat, where the transmittance is its own limit.
     glm::vec3 coatWi = closure.toCoat * wi;
@@ -81,10 +81,10 @@ glm::vec3 underCoat(const BsdfClosure& closure, const glm::vec3& wi) {
     if (closure.exiting) {
         // From inside only transmission crosses the coat, once, leaving toward wi; the base's internal reflection never reaches it.
         if (wi.z >= 0.0F) {
-            return glm::vec3(1.0F);
+            return Rgb(1.0F);
         }
         const float coatAlbedo = reflectionAlbedo(closure.coatRoughness, closure.coatAnisotropy, 1.0F, closure.coatIor, coatWi);
-        return glm::vec3(1.0F - closure.coatWeight) +
+        return Rgb(1.0F - closure.coatWeight) +
                ((closure.coatWeight * (1.0F - coatAlbedo)) * coatTransmittance(closure.coatColor, closure.coatIor, mu));
     }
     return wi.z < 0.0F ? closure.transmitUnder : closure.baseBare + (closure.baseUnder * coatTransmittance(closure.coatColor, closure.coatIor, mu));
@@ -112,12 +112,12 @@ OpenPbrInputs<Constant> relativeTo(const OpenPbrInputs<Constant>& inputs, float 
 // The base interface from wo's side: coat shift and film from outside, no tint inside; a thin wall's refracts nothing (the sheet does).
 InterfaceInputs baseInterface(const OpenPbrInputs<Constant>& inputs, float roughness, float ior, float fresnelIor, bool exiting) {
     // OpenPBR's two exclusive regimes: at transmission_depth > 0 the interior medium carries the colour; at 0 it tints the surface.
-    const glm::vec3 transmissionTint = inputs.transmissionDepth > 0.0F ? glm::vec3(1.0F) : inputs.transmissionColor;
+    const Rgb transmissionTint = inputs.transmissionDepth > 0.0F ? Rgb(1.0F) : inputs.transmissionColor;
     // Bulk subsurface refracts into the interior beside transmission (Adobe's trans + sss); a gated channel stays out.
-    const glm::vec3 subsurface = inputs.geometryThinWalled ? glm::vec3(0.0F)
+    const Rgb subsurface = inputs.geometryThinWalled ? Rgb(0.0F)
                                                            : ((1.0F - inputs.transmissionWeight) * inputs.subsurfaceWeight) * subsurfaceGate(inputs);
-    const float refracted = inputs.transmissionWeight + glm::compMax(subsurface);
-    const glm::vec3 transmitTint =
+    const float refracted = inputs.transmissionWeight + maxChannel(subsurface);
+    const Rgb transmitTint =
         exiting || !(refracted > 0.0F) ? transmissionTint : ((inputs.transmissionWeight * transmissionTint) + subsurface) / refracted;
     return InterfaceInputs{.roughness = roughness,
                            .anisotropy = inputs.specularRoughnessAnisotropy,
@@ -125,7 +125,7 @@ InterfaceInputs baseInterface(const OpenPbrInputs<Constant>& inputs, float rough
                            .etaT = exiting ? 1.0F : ior,
                            .fresnelEtaI = exiting ? ior : 1.0F,
                            .fresnelEtaT = exiting ? 1.0F : fresnelIor,
-                           .tint = exiting ? glm::vec3(1.0F) : inputs.specularColor,
+                           .tint = exiting ? Rgb(1.0F) : inputs.specularColor,
                            .refractWeight = exiting ? 1.0F : inputs.geometryThinWalled ? 0.0F : refracted,
                            .transmitTint = transmitTint,
                            .film = filmOf(inputs),
@@ -134,7 +134,7 @@ InterfaceInputs baseInterface(const OpenPbrInputs<Constant>& inputs, float rough
 }
 
 // The metal: base_metalness of the mix, its Fresnel tinted by specular_color and scaled by specular_weight.
-void addMetal(BsdfClosure& closure, const OpenPbrInputs<Constant>& inputs, const glm::vec3& baseAlbedo, float roughness) {
+void addMetal(BsdfClosure& closure, const OpenPbrInputs<Constant>& inputs, const Rgb& baseAlbedo, float roughness) {
     closure.metal = makeConductorSlab(roughness, inputs.specularRoughnessAnisotropy, baseAlbedo, inputs.specularColor, inputs.specularWeight,
                                       filmOf(inputs), closure.wo);
     massOf(closure, Technique::MetalSingle) = closure.metalWeight * closure.metal.singleEnergy;
@@ -142,7 +142,7 @@ void addMetal(BsdfClosure& closure, const OpenPbrInputs<Constant>& inputs, const
 }
 
 // The dielectric's interface over mix(glossy-diffuse, translucent, T), or thin-walled over mix(glossy-diffuse, subsurface, S) alone.
-void addDielectric(BsdfClosure& closure, const OpenPbrInputs<Constant>& inputs, const glm::vec3& baseAlbedo, float roughness, float ior,
+void addDielectric(BsdfClosure& closure, const OpenPbrInputs<Constant>& inputs, const Rgb& baseAlbedo, float roughness, float ior,
                    float fresnelIor) {
     // Only the interface faces a ray from inside: the translucent share is whole there, with no diffuse and no specular_color tint.
     const bool exiting = closure.exiting;
@@ -160,20 +160,20 @@ void addDielectric(BsdfClosure& closure, const OpenPbrInputs<Constant>& inputs, 
         return;
     }
     // Albedo scaling, f = f_spec + (1 - E_spec(wo)) f_diffuse: energy-exact for any substrate, non-reciprocal by the spec's definition.
-    const glm::vec3 underInterface = (weight * opaque) * (1.0F - (slab.tint * reflectAlbedo(slab)));
+    const Rgb underInterface = (weight * opaque) * (1.0F - (slab.tint * reflectAlbedo(slab)));
     closure.diffuseWeight = (1.0F - inputs.subsurfaceWeight) * underInterface;
     massOf(closure, Technique::Diffuse) = channelMean(closure.diffuseWeight * baseAlbedo);
     if (massOf(closure, Technique::Diffuse) > 0.0F) {
         closure.diffuse = makeDiffuseSlab(baseAlbedo, inputs.baseDiffuseRoughness, closure.wo);
     }
     // Albedo-1 lobes tinted by subsurface_color (spec 1266): thin-walled, f+ and f- in shares (1 -/+ g)/2; bulk, the zero-MFP limit.
-    const glm::vec3 surfaceShare = closure.thinWalled ? glm::vec3(1.0F) : 1.0F - subsurfaceGate(inputs);
+    const Rgb surfaceShare = closure.thinWalled ? Rgb(1.0F) : 1.0F - subsurfaceGate(inputs);
     closure.subsurfaceWeight = (inputs.subsurfaceWeight * underInterface) * inputs.subsurfaceColor * surfaceShare;
     massOf(closure, Technique::DiffuseSubsurface) = channelMean(closure.subsurfaceWeight);
     if (massOf(closure, Technique::DiffuseSubsurface) > 0.0F) {
         // A bulk interior's limit reflects whole: OpenPBR's glossy-diffuse BSDF, the medium's opaque face at infinite density.
         closure.subsurfaceReflectShare = closure.thinWalled ? 0.5F * (1.0F - inputs.subsurfaceScatterAnisotropy) : 1.0F;
-        closure.subsurface = makeDiffuseSlab(glm::vec3(1.0F), inputs.baseDiffuseRoughness, closure.wo);
+        closure.subsurface = makeDiffuseSlab(Rgb(1.0F), inputs.baseDiffuseRoughness, closure.wo);
         closure.thinTransmission = closure.thinTransmission || closure.subsurfaceReflectShare < 1.0F;
     }
 }
@@ -195,25 +195,25 @@ void addSheet(BsdfClosure& closure, const OpenPbrInputs<Constant>& inputs, float
 }
 
 // The whole base's albedo at normal incidence, E_b of OpenPBR's coat darkening: metal, and the glossy-diffuse or translucent dielectric.
-glm::vec3 baseAlbedoAtNormal(const OpenPbrInputs<Constant>& inputs, const glm::vec3& baseAlbedo, float roughness, float ior,
+Rgb baseAlbedoAtNormal(const OpenPbrInputs<Constant>& inputs, const Rgb& baseAlbedo, float roughness, float ior,
                              float fresnelIor) {
     const glm::vec3 normal(0.0F, 0.0F, 1.0F);
-    const glm::vec3 metal = makeConductorSlab(roughness, inputs.specularRoughnessAnisotropy, baseAlbedo, inputs.specularColor,
+    const Rgb metal = makeConductorSlab(roughness, inputs.specularRoughnessAnisotropy, baseAlbedo, inputs.specularColor,
                                               inputs.specularWeight, filmOf(inputs), normal)
                                 .albedo;
-    const glm::vec3 specular =
+    const Rgb specular =
         inputs.specularColor * reflectAlbedo(makeDielectricSlab(baseInterface(inputs, roughness, ior, fresnelIor, false), normal));
     if (!inputs.geometryThinWalled) {
         // The subsurface's albedo counts its every internal bounce, subsurface_color, open or at its zero-MFP limit (Adobe's E_b).
-        const glm::vec3 opaque = glm::mix(baseAlbedo, inputs.subsurfaceColor, inputs.subsurfaceWeight);
-        const glm::vec3 dielectric = specular + ((1.0F - inputs.transmissionWeight) * (1.0F - specular) * opaque);
+        const Rgb opaque = mix(baseAlbedo, inputs.subsurfaceColor, inputs.subsurfaceWeight);
+        const Rgb dielectric = specular + ((1.0F - inputs.transmissionWeight) * (1.0F - specular) * opaque);
         return (inputs.baseMetalness * metal) + ((1.0F - inputs.baseMetalness) * dielectric);
     }
     // Thin-walled: the sheet's reflection, and the subsurface's reflected share beside the diffuse under the interface.
-    const glm::vec3 subsurface = 0.5F * (1.0F - inputs.subsurfaceScatterAnisotropy) * inputs.subsurfaceColor;
-    const glm::vec3 underInterface = (1.0F - specular) * glm::mix(baseAlbedo, subsurface, inputs.subsurfaceWeight);
-    const glm::vec3 sheet = inputs.specularColor * sheetLadder(sheetInterfaces(inputs, ior, fresnelIor), 1.0F).reflect;
-    const glm::vec3 dielectric = glm::mix(specular + underInterface, sheet, inputs.transmissionWeight);
+    const Rgb subsurface = 0.5F * (1.0F - inputs.subsurfaceScatterAnisotropy) * inputs.subsurfaceColor;
+    const Rgb underInterface = (1.0F - specular) * mix(baseAlbedo, subsurface, inputs.subsurfaceWeight);
+    const Rgb sheet = inputs.specularColor * sheetLadder(sheetInterfaces(inputs, ior, fresnelIor), 1.0F).reflect;
+    const Rgb dielectric = mix(specular + underInterface, sheet, inputs.transmissionWeight);
     return (inputs.baseMetalness * metal) + ((1.0F - inputs.baseMetalness) * dielectric);
 }
 
@@ -234,7 +234,7 @@ void addFuzz(BsdfClosure& closure, const OpenPbrInputs<Constant>& inputs) {
 }
 
 // OpenPBR's coat: its slab at wo in its own frame, then the base's absorption, (1 - E_coat) and darkening weights under it.
-void addCoat(BsdfClosure& closure, const OpenPbrInputs<Constant>& inputs, const glm::vec3& baseAlbedo, float roughness, float ior,
+void addCoat(BsdfClosure& closure, const OpenPbrInputs<Constant>& inputs, const Rgb& baseAlbedo, float roughness, float ior,
              float fresnelIor, float specularRatio) {
     const float weight = closure.coatWeight;
     glm::vec3 coatWo = closure.toCoat * closure.wo;
@@ -246,9 +246,9 @@ void addCoat(BsdfClosure& closure, const OpenPbrInputs<Constant>& inputs, const 
                                                                                     .etaT = closure.coatIor,
                                                                                     .fresnelEtaI = 1.0F,
                                                                                     .fresnelEtaT = closure.coatIor,
-                                                                                    .tint = glm::vec3(1.0F),
+                                                                                    .tint = Rgb(1.0F),
                                                                                     .refractWeight = 0.0F,
-                                                                                    .transmitTint = glm::vec3(1.0F),
+                                                                                    .transmitTint = Rgb(1.0F),
                                                                                     .film = {},
                                                                                     .baseIor = closure.coatIor,
                                                                                     .fromBase = false},
@@ -258,8 +258,8 @@ void addCoat(BsdfClosure& closure, const OpenPbrInputs<Constant>& inputs, const 
         massOf(closure, isSmooth(coat.alpha.x) ? Technique::CoatSingle : Technique::CoatWalk) = weight * walkEnergy(coat).total();
     }
     // Darkening (OpenPBR): Delta = (1-K)/(1-E_b K), K the internal reflectance between the smooth (F) and Lambertian (K_r) base limits.
-    glm::vec3 darkening(1.0F);
-    glm::vec3 transmitGain(1.0F);
+    Rgb darkening(1.0F);
+    Rgb transmitGain(1.0F);
     if (inputs.coatDarkening > 0.0F) {
         const float nc2 = closure.coatIor * closure.coatIor;
         const float smoothK = fresnelDielectric(muO, 1.0F, closure.coatIor);
@@ -269,21 +269,21 @@ void addCoat(BsdfClosure& closure, const OpenPbrInputs<Constant>& inputs, const 
         const float dielectricRoughness = lerp1(1.0F, inputs.specularRoughness, std::min(inputs.specularWeight * specularF0, 1.0F));
         const float baseRoughness = lerp1(dielectricRoughness, inputs.specularRoughness, inputs.baseMetalness);
         const float k = lerp1(smoothK, roughK, baseRoughness);
-        const glm::vec3 below = 1.0F - (baseAlbedoAtNormal(inputs, baseAlbedo, roughness, ior, fresnelIor) * k);
+        const Rgb below = 1.0F - (baseAlbedoAtNormal(inputs, baseAlbedo, roughness, ior, fresnelIor) * k);
         // E_b K <= 1 with equality only at E_b = K = 1, where nothing is absorbed or transmitted: both factors' limit there is exactly 1.
-        glm::vec3 delta(1.0F);
-        glm::vec3 series(1.0F);
+        Rgb delta(1.0F);
+        Rgb series(1.0F);
         for (int c = 0; c < 3; ++c) {
             if (below[c] > 0.0F) {
                 delta[c] = (1.0F - k) / below[c];
                 series[c] = 1.0F / below[c];
             }
         }
-        darkening = glm::vec3(1.0F) + ((weight * inputs.coatDarkening) * (delta - 1.0F));
+        darkening = Rgb(1.0F) + ((weight * inputs.coatDarkening) * (delta - 1.0F));
         // Light the base transmits never re-crosses the coat: the same series sums to T/(1 - E_b K), with no (1 - K) exit (Elias 2001).
-        transmitGain = glm::vec3(1.0F) + ((weight * inputs.coatDarkening) * (series - 1.0F));
+        transmitGain = Rgb(1.0F) + ((weight * inputs.coatDarkening) * (series - 1.0F));
     }
-    const glm::vec3 throughCoat = (weight * (1.0F - reflectAlbedo(coat))) * coatTransmittance(closure.coatColor, closure.coatIor, muO);
+    const Rgb throughCoat = (weight * (1.0F - reflectAlbedo(coat))) * coatTransmittance(closure.coatColor, closure.coatIor, muO);
     closure.baseBare = (1.0F - weight) * darkening;
     closure.baseUnder = throughCoat * darkening;
     closure.transmitUnder = ((1.0F - weight) + throughCoat) * transmitGain;
@@ -300,7 +300,7 @@ float walkProxyPdf(const DielectricSlab& slab, const DielectricEval& single, con
 }
 
 // What a walk exit carries out of the slab: specular_color on its side, the transmission weight and colour across.
-glm::vec3 exitTint(const DielectricSlab& slab, bool reflected) {
+Rgb exitTint(const DielectricSlab& slab, bool reflected) {
     return reflected ? slab.tint : slab.refractWeight * slab.transmitTint;
 }
 
@@ -320,7 +320,7 @@ SlabEval evaluateSlabs(const BsdfClosure& closure, const glm::vec3& wi, LobePdfs
         }
     };
     // A walk-drawn interface in its own frame: its closed order 1, its walks' 2+ orders given a walk, and its technique's proxy density.
-    const auto addWalked = [&](const DielectricSlab& slab, const glm::vec3& slabWo, const glm::vec3& slabWi, const glm::vec3& scale,
+    const auto addWalked = [&](const DielectricSlab& slab, const glm::vec3& slabWo, const glm::vec3& slabWi, const Rgb& scale,
                                Technique technique) {
         const DielectricEval single = evaluateDielectric(slab, slabWo, slabWi);
         walked.specular += scale * single.reflect;
@@ -329,14 +329,14 @@ SlabEval evaluateSlabs(const BsdfClosure& closure, const glm::vec3& wi, LobePdfs
         walked.pdf += massOf(closure, technique) * lobe;
         record(technique, lobe);
         const bool reflected = slabWi.z > 0.0F;
-        const glm::vec3 tint = scale * exitTint(slab, reflected);
+        const Rgb tint = scale * exitTint(slab, reflected);
         if (walk != nullptr && channelMean(tint) > 0.0F) {
             (reflected ? walked.specular : walked.transmission) += tint * evaluateInterfaceMulti(slab, slabWo, slabWi, *walk);
         }
     };
     const glm::vec3& wo = closure.wo;
     const float beneath = underFuzz(closure, wi);
-    const glm::vec3 under = beneath * underCoat(closure, wi);
+    const Rgb under = beneath * underCoat(closure, wi);
     if (closure.metalWeight > 0.0F && wi.z > 0.0F) {
         const ConductorEval metal = evaluateConductor(closure.metal, wo, wi);
         eval.specular += (closure.metalWeight * under) * metal.value;
@@ -380,7 +380,7 @@ SlabEval evaluateSlabs(const BsdfClosure& closure, const glm::vec3& wi, LobePdfs
     }
     // The coat reflects in its own frame, its transmission the base's under albedo scaling; a smooth coat's mirror has no lobe here.
     if (massOf(closure, Technique::CoatWalk) > 0.0F) {
-        addWalked(closure.coat, closure.toCoat * wo, closure.toCoat * wi, glm::vec3(closure.coatWeight * beneath), Technique::CoatWalk);
+        addWalked(closure.coat, closure.toCoat * wo, closure.toCoat * wi, Rgb(closure.coatWeight * beneath), Technique::CoatWalk);
     }
     // The fuzz reflects in its own frame, its color tinting its own lobe alone; a sheen is reflection, so it reports as specular.
     if (massOf(closure, Technique::Fuzz) > 0.0F) {
@@ -410,12 +410,12 @@ std::optional<BsdfSample> weighSample(const BsdfClosure& closure, const glm::vec
 }
 
 // A walk technique's draw: its exit's value over its selection mass, unbiased for its interface's every order, the rest of the split.
-std::optional<BsdfSample> weighWalk(const BsdfClosure& closure, const glm::vec3& wi, const glm::vec3& value, Technique technique) {
+std::optional<BsdfSample> weighWalk(const BsdfClosure& closure, const glm::vec3& wi, const Rgb& value, Technique technique) {
     LobePdfs lobePdfs{};
     const SlabEval slabs = evaluateSlabs(closure, wi, &lobePdfs, nullptr);
-    const glm::vec3 weight = value / massOf(closure, technique);
+    const Rgb weight = value / massOf(closure, technique);
     const bool crossed = wi.z < 0.0F;
-    return BsdfSample{glm::vec3(wi.x, wi.y, wi.z * closure.sign), weight, crossed ? weight : glm::vec3(0.0F),
+    return BsdfSample{glm::vec3(wi.x, wi.y, wi.z * closure.sign), weight, crossed ? weight : Rgb(0.0F),
                       crossed ? LobeType::Transmission : LobeType::SpecularReflection, slabs.eval.pdf, false, false,
                       lobePdfs[static_cast<std::size_t>(technique)], true};
 }
@@ -428,19 +428,19 @@ std::optional<BsdfSample> walkInterface(const BsdfClosure& closure, const Dielec
         return std::nullopt;
     }
     // An exit to a side carrying no tint (an opaque slab's or a coat's transmission, the base's light) has neither value nor density.
-    const glm::vec3 tint = exitTint(slab, exit->reflected);
+    const Rgb tint = exitTint(slab, exit->reflected);
     if (!(channelMean(tint) > 0.0F)) {
         return std::nullopt;
     }
     const glm::vec3 wi = glm::transpose(toSlab) * exit->direction;
-    const glm::vec3 above = underFuzz(closure, wi) * (belowCoat ? underCoat(closure, wi) : glm::vec3(1.0F));
+    const Rgb above = underFuzz(closure, wi) * (belowCoat ? underCoat(closure, wi) : Rgb(1.0F));
     return weighWalk(closure, wi, (scale * above) * tint * exit->weight, technique);
 }
 
 // A delta technique's sample: its value over its own mass, pdf 0, so NEE has no density to double-count against.
-BsdfSample deltaSample(const BsdfClosure& closure, const glm::vec3& wi, const glm::vec3& value, Technique technique, LobeType type) {
-    const glm::vec3 weight = value / massOf(closure, technique);
-    return BsdfSample{glm::vec3(wi.x, wi.y, wi.z * closure.sign), weight, type == LobeType::Transmission ? weight : glm::vec3(0.0F), type, 0.0F, true};
+BsdfSample deltaSample(const BsdfClosure& closure, const glm::vec3& wi, const Rgb& value, Technique technique, LobeType type) {
+    const Rgb weight = value / massOf(closure, technique);
+    return BsdfSample{glm::vec3(wi.x, wi.y, wi.z * closure.sign), weight, type == LobeType::Transmission ? weight : Rgb(0.0F), type, 0.0F, true};
 }
 
 // wi mirrored through the wall when uSplit falls past the reflected share: a thin wall's transmission is its reflection's mirror.
@@ -455,11 +455,11 @@ BsdfSample sampleSmoothSheet(const BsdfClosure& closure, float uSplit) {
     const float mass = massOf(closure, Technique::SheetSingle);
     if (uSplit < sheet.reflectShare) {
         const glm::vec3 mirror(-wo.x, -wo.y, wo.z);
-        const glm::vec3 weight = (sheet.reflect * underFuzz(closure, mirror) * underCoat(closure, mirror)) / (mass * sheet.reflectShare);
-        return BsdfSample{glm::vec3(mirror.x, mirror.y, mirror.z * closure.sign), weight, glm::vec3(0.0F), LobeType::SpecularReflection, 0.0F,
+        const Rgb weight = (sheet.reflect * underFuzz(closure, mirror) * underCoat(closure, mirror)) / (mass * sheet.reflectShare);
+        return BsdfSample{glm::vec3(mirror.x, mirror.y, mirror.z * closure.sign), weight, Rgb(0.0F), LobeType::SpecularReflection, 0.0F,
                           true};
     }
-    const glm::vec3 weight = passThrough(closure) / (mass * (1.0F - sheet.reflectShare));
+    const Rgb weight = passThrough(closure) / (mass * (1.0F - sheet.reflectShare));
     return BsdfSample{glm::vec3(-wo.x, -wo.y, -wo.z * closure.sign), weight, weight, LobeType::Transmission, 0.0F, true, true};
 }
 
@@ -470,7 +470,7 @@ BsdfSample sampleDeltaRefraction(const BsdfClosure& closure) {
     const float eta = slab.etaI / slab.etaT;
     const glm::vec3 wt(-eta * wo.x, -eta * wo.y, -std::sqrt(cos2Transmitted(wo.z, eta)));
     // Non-symmetric radiance compression for camera-originated transport (Veach 1997 sec. 5.2): eta^2 = (etaI/etaT)^2.
-    const glm::vec3 value = (slab.transmitTint * underFuzz(closure, wt) * underCoat(closure, wt)) *
+    const Rgb value = (slab.transmitTint * underFuzz(closure, wt) * underCoat(closure, wt)) *
                             (closure.dielectricWeight * slab.refractWeight * slab.transmitSingle * slab.etaSq);
     return deltaSample(closure, wt, value, Technique::DielectricRefract, LobeType::Transmission);
 }
@@ -485,7 +485,7 @@ std::optional<BsdfSample> sampleTechnique(const BsdfClosure& closure, Technique 
         case Technique::CoatSingle: {
             const glm::vec3 woCoat = closure.toCoat * wo;
             const glm::vec3 wi = glm::transpose(closure.toCoat) * glm::vec3(-woCoat.x, -woCoat.y, woCoat.z);
-            const glm::vec3 value = (closure.coatWeight * underFuzz(closure, wi)) * closure.coat.reflectSingle;
+            const Rgb value = (closure.coatWeight * underFuzz(closure, wi)) * closure.coat.reflectSingle;
             return deltaSample(closure, wi, value, technique, LobeType::SpecularReflection);
         }
         case Technique::CoatWalk:
@@ -493,7 +493,7 @@ std::optional<BsdfSample> sampleTechnique(const BsdfClosure& closure, Technique 
         case Technique::MetalSingle: {
             const ConductorSlab& slab = closure.metal;
             if (isSmooth(slab.alpha.x)) {
-                const glm::vec3 value =
+                const Rgb value =
                     (closure.metalWeight * underFuzz(closure, mirror) * underCoat(closure, mirror)) * conductorFresnel(slab, wo.z);
                 return deltaSample(closure, mirror, value, technique, LobeType::SpecularReflection);
             }
@@ -505,7 +505,7 @@ std::optional<BsdfSample> sampleTechnique(const BsdfClosure& closure, Technique 
         case Technique::DielectricSingle: {
             const DielectricSlab& slab = closure.dielectric;
             if (isSmooth(slab.alpha.x)) {
-                const glm::vec3 value =
+                const Rgb value =
                     (slab.tint * underFuzz(closure, mirror) * underCoat(closure, mirror)) * (closure.dielectricWeight * slab.reflectSingle);
                 return deltaSample(closure, mirror, value, technique, LobeType::SpecularReflection);
             }
@@ -569,7 +569,7 @@ float dispersedIor(float ior, float abbeNumber, float dispersionScale, std::opti
         return ior;
     }
     // V_d's least value keeping the longest hero band's index on its side of the surround (the spec allows V_d = 0, unbounded dispersion).
-    const float longest = std::max({kRgbWavelengthsNm.x, kRgbWavelengthsNm.y, kRgbWavelengthsNm.z});
+    const float longest = maxChannel(kRgbWavelengthsNm);
     const float leastAbbe = ((1.0F / (kLambdaDNm * kLambdaDNm)) - (1.0F / (longest * longest))) /
                             ((1.0F / (kLambdaFNm * kLambdaFNm)) - (1.0F / (kLambdaCNm * kLambdaCNm)));
     const float abbe = std::max(abbeNumber / dispersionScale, leastAbbe);
@@ -582,10 +582,10 @@ float modulatedIor(const OpenPbrInputs<Constant>& inputs, std::optional<int> her
     return modulatedRatio(bulkIor(inputs, heroChannel), inputs.specularWeight);
 }
 
-glm::vec3 coatTransmittance(const glm::vec3& coatColor, float coatIor, float mu) {
+Rgb coatTransmittance(const Rgb& coatColor, float coatIor, float mu) {
     // Past the coat's critical cosine (coat_ior < 1) no ray refracts in: mu_t = 0 and the exponent's limit is exact.
     const float muT = std::sqrt(std::max(1.0F - ((1.0F - (mu * mu)) / (coatIor * coatIor)), 0.0F));
-    return glm::pow(coatColor, glm::vec3(0.5F / muT));
+    return pow(coatColor, Rgb(0.5F / muT));
 }
 
 BsdfClosure makeBsdfClosure(const OpenPbrInputs<Constant>& authored, const glm::vec3& woLocal, std::optional<int> heroChannel,
@@ -598,7 +598,7 @@ BsdfClosure makeBsdfClosure(const OpenPbrInputs<Constant>& authored, const glm::
     closure.exiting = closure.sign < 0.0F && hasInterior(inputs);
     closure.metalWeight = inputs.baseMetalness;
     closure.dielectricWeight = (1.0F - inputs.baseMetalness) * (closure.thinWalled ? 1.0F - inputs.transmissionWeight : 1.0F);
-    const glm::vec3 baseAlbedo = inputs.baseWeight * inputs.baseColor;
+    const Rgb baseAlbedo = inputs.baseWeight * inputs.baseColor;
     // A thin wall transmits undeviated, so the hero band disperses nothing there.
     const std::optional<int> hero = closure.thinWalled ? std::nullopt : heroChannel;
     // eta_s, the base's coat-aware index ratio to the ambient before specular_weight modulates it: darkening's F_s reads it.
@@ -699,9 +699,9 @@ float pdfBsdf(const BsdfClosure& closure, const glm::vec3& wiLocal) {
     return evaluateSlabs(closure, glm::vec3(wiLocal.x, wiLocal.y, wiLocal.z * closure.sign), nullptr, nullptr).eval.pdf;
 }
 
-glm::vec3 passThrough(const BsdfClosure& closure) {
+Rgb passThrough(const BsdfClosure& closure) {
     if (!(massOf(closure, Technique::SheetSingle) > 0.0F) || !isSmooth(closure.sheet.lobe.alpha.x)) {
-        return glm::vec3(0.0F);
+        return Rgb(0.0F);
     }
     const glm::vec3 through = -closure.wo;
     return closure.sheet.transmit * underFuzz(closure, through) * underCoat(closure, through);
@@ -735,8 +735,8 @@ std::optional<BsdfSample> sampleBsdf(const BsdfClosure& closure, Sampler& sample
 namespace {
 
 // The base slabs' reflected Fresnel at cosTheta, each at its mix weight: metal F82 and tinted dielectric.
-glm::vec3 baseFresnel(const BsdfClosure& closure, float cosTheta) {
-    glm::vec3 fresnel(0.0F);
+Rgb baseFresnel(const BsdfClosure& closure, float cosTheta) {
+    Rgb fresnel(0.0F);
     if (closure.metalWeight > 0.0F) {
         const ConductorSlab& slab = closure.metal;
         fresnel += closure.metalWeight * conductorFresnel(slab, cosTheta);
@@ -760,43 +760,23 @@ float facetCosine(const glm::vec3& wo, const glm::vec2& alpha, glm::vec2 u) {
 
 }  // namespace
 
-glm::vec3 fresnelAtViewAngle(const BsdfClosure& closure, float cosTheta) {
+Rgb fresnelAtViewAngle(const BsdfClosure& closure, float cosTheta) {
     const glm::vec3 mirror(-closure.wo.x, -closure.wo.y, closure.wo.z);
-    glm::vec3 fresnel = underCoat(closure, mirror) * baseFresnel(closure, cosTheta);
+    Rgb fresnel = underCoat(closure, mirror) * baseFresnel(closure, cosTheta);
     if (massOf(closure, Technique::CoatSingle) > 0.0F) {
-        fresnel += glm::vec3(closure.coatWeight * fresnelDielectric(cosTheta, 1.0F, closure.coatIor));
+        fresnel += Rgb(closure.coatWeight * fresnelDielectric(cosTheta, 1.0F, closure.coatIor));
     }
     return underFuzz(closure, mirror) * fresnel;
 }
 
-glm::vec3 fresnelAtMicrofacet(const BsdfClosure& closure, glm::vec2 u) {
+Rgb fresnelAtMicrofacet(const BsdfClosure& closure, glm::vec2 u) {
     const glm::vec3 mirror(-closure.wo.x, -closure.wo.y, closure.wo.z);
-    glm::vec3 fresnel = underCoat(closure, mirror) * baseFresnel(closure, facetCosine(closure.wo, closure.baseAlpha, u));
+    Rgb fresnel = underCoat(closure, mirror) * baseFresnel(closure, facetCosine(closure.wo, closure.baseAlpha, u));
     if (massOf(closure, Technique::CoatSingle) > 0.0F) {
         const float cosine = facetCosine(closure.toCoat * closure.wo, closure.coat.alpha, u);
-        fresnel += glm::vec3(closure.coatWeight * fresnelDielectric(cosine, 1.0F, closure.coatIor));
+        fresnel += Rgb(closure.coatWeight * fresnelDielectric(cosine, 1.0F, closure.coatIor));
     }
     return underFuzz(closure, mirror) * fresnel;
-}
-
-BsdfEval evaluateBsdfSplit(const OpenPbrInputs<Constant>& inputs, const glm::vec3& woLocal, const glm::vec3& wiLocal, Sampler& walk) {
-    return evaluateBsdfSplit(makeBsdfClosure(inputs, woLocal), wiLocal, walk);
-}
-
-BsdfEval evaluateClosedForm(const OpenPbrInputs<Constant>& inputs, const glm::vec3& woLocal, const glm::vec3& wiLocal) {
-    return evaluateClosedForm(makeBsdfClosure(inputs, woLocal), wiLocal);
-}
-
-float pdfBsdf(const OpenPbrInputs<Constant>& inputs, const glm::vec3& woLocal, const glm::vec3& wiLocal) {
-    return pdfBsdf(makeBsdfClosure(inputs, woLocal), wiLocal);
-}
-
-glm::vec3 evaluateBsdf(const OpenPbrInputs<Constant>& inputs, const glm::vec3& woLocal, const glm::vec3& wiLocal, Sampler& walk) {
-    return evaluateBsdfSplit(inputs, woLocal, wiLocal, walk).total();
-}
-
-std::optional<BsdfSample> sampleBsdf(const OpenPbrInputs<Constant>& inputs, const glm::vec3& woLocal, Sampler& sampler) {
-    return sampleBsdf(makeBsdfClosure(inputs, woLocal), sampler, sampler);
 }
 
 namespace {
@@ -833,7 +813,7 @@ void accumulate(BsdfEval& eval, const BsdfEval& lobes, float weight, bool atVert
 }
 
 // eval += weight * terms by lobe, the density by pdfWeight: lambda for a first-vertex branch, zero for the walk's later orders.
-void addScaled(BsdfEval& eval, const BsdfEval& terms, const glm::vec3& weight, float pdfWeight) {
+void addScaled(BsdfEval& eval, const BsdfEval& terms, const Rgb& weight, float pdfWeight) {
     eval.diffuse += weight * terms.diffuse;
     eval.specular += weight * terms.specular;
     eval.transmission += weight * terms.transmission;
@@ -872,7 +852,7 @@ struct Leg {
 };
 
 // Draws from closure and walks the ray to its next event; sigma and weight carry the ray's medium and throughput across the leg.
-std::optional<Leg> leave(const NormalMappedBsdf& bsdf, const BsdfClosure& closure, float& sigma, glm::vec3& weight, Sampler& draw,
+std::optional<Leg> leave(const NormalMappedBsdf& bsdf, const BsdfClosure& closure, float& sigma, Rgb& weight, Sampler& draw,
                          Sampler& walk) {
     const std::optional<BsdfSample> drawn = sampleBsdf(closure, draw, walk);
     if (!drawn) {
@@ -904,10 +884,10 @@ BsdfEval evaluateFirstScattering(const NormalMappedBsdf& bsdf, const glm::vec3& 
     }
     BsdfEval eval{};
     if (bsdf.lambdaP > 0.0F) {
-        addScaled(eval, exitsAt(bsdf, bsdf.facet, bsdf.side, wiLocal, walk), glm::vec3(bsdf.lambdaP), bsdf.lambdaP);
+        addScaled(eval, exitsAt(bsdf, bsdf.facet, bsdf.side, wiLocal, walk), Rgb(bsdf.lambdaP), bsdf.lambdaP);
     }
     if (bsdf.lambdaT > 0.0F) {
-        addScaled(eval, exitsAt(bsdf, bsdf.viaWall, bsdf.side, wiLocal, walk), glm::vec3(bsdf.lambdaT), bsdf.lambdaT);
+        addScaled(eval, exitsAt(bsdf, bsdf.viaWall, bsdf.side, wiLocal, walk), Rgb(bsdf.lambdaT), bsdf.lambdaT);
     }
     return eval;
 }
@@ -966,12 +946,12 @@ bool transmits(const NormalMappedBsdf& bsdf) {
 }
 
 // Along -wo exactly only the facet-first walk's direct escape: the wall turns every other undeviated ray aside.
-glm::vec3 passThrough(const NormalMappedBsdf& bsdf) {
+Rgb passThrough(const NormalMappedBsdf& bsdf) {
     if (!bsdf.perturbed) {
         return passThrough(bsdf.facet);
     }
     if (!(bsdf.lambdaP > 0.0F)) {
-        return glm::vec3(0.0F);
+        return Rgb(0.0F);
     }
     const glm::vec3 through = -bsdf.facet.wo * glm::vec3(1.0F, 1.0F, bsdf.facet.sign);
     return (bsdf.lambdaP * masking(bsdf, through, Facet::Perturbed, -bsdf.side)) * passThrough(bsdf.facet);
@@ -985,14 +965,14 @@ BsdfEval walkedOrders(const NormalMappedBsdf& bsdf, const glm::vec3& wiLocal, co
                       float lightPdf, BsdfEval* weighted) {
     BsdfEval eval = evaluateFirstScattering(bsdf, wiLocal, &walk);
     if (weighted != nullptr) {
-        addScaled(*weighted, eval, glm::vec3(powerHeuristic(lightPdf, eval.pdf)), 0.0F);
+        addScaled(*weighted, eval, Rgb(powerHeuristic(lightPdf, eval.pdf)), 0.0F);
     }
     if (!revisit) {
         return eval;
     }
     // The later orders: each facet vertex the walk returns to adds its exits toward wiLocal, weighted by its throughput.
     float sigma = revisit->sigma;
-    glm::vec3 weight = revisit->weight;
+    Rgb weight = revisit->weight;
     glm::vec3 direction = revisit->direction;
     while (true) {
         const BsdfClosure vertex = returnedTo(bsdf, direction);
@@ -1002,7 +982,7 @@ BsdfEval walkedOrders(const NormalMappedBsdf& bsdf, const glm::vec3& wiLocal, co
             addScaled(*weighted, exits, weight * powerHeuristic(lightPdf, exits.pdf), 0.0F);
         }
         const std::optional<Leg> leg = leave(bsdf, vertex, sigma, weight, walk, walk);
-        if (!leg || leg->escaped || weight == glm::vec3(0.0F)) {
+        if (!leg || leg->escaped || weight == Rgb(0.0F)) {
             return eval;
         }
         direction = leg->direction;
@@ -1034,28 +1014,28 @@ std::optional<BsdfSample> sampleBsdf(const NormalMappedBsdf& bsdf, Sampler& samp
     }
     const bool facetFirst = bsdf.lambdaT == 0.0F || (bsdf.lambdaP > 0.0F && sampler.next1D() < bsdf.lambdaP);
     float sigma = bsdf.side;
-    glm::vec3 weight(1.0F);
+    Rgb weight(1.0F);
     std::optional<Leg> leg = leave(bsdf, facetFirst ? bsdf.facet : bsdf.viaWall, sigma, weight, sampler, walk);
     // Only the facet-first walk's direct escape along -wo is the null vertex passThrough counts; a later exit there is a plain delta.
     const bool passesThrough = leg && leg->drawn.passThrough && facetFirst && leg->direct;
-    if (leg && !leg->escaped && weight != glm::vec3(0.0F)) {
+    if (leg && !leg->escaped && weight != Rgb(0.0F)) {
         revisit = WalkVertex{leg->direction, sigma, weight};
     }
     std::optional<BsdfClosure> vertex;  // the facet vertex the exit leg left, past the first
     float vertexSigma = sigma;
-    while (leg && !leg->escaped && weight != glm::vec3(0.0F)) {
+    while (leg && !leg->escaped && weight != Rgb(0.0F)) {
         vertex = returnedTo(bsdf, leg->direction);
         vertexSigma = sigma;
         leg = leave(bsdf, *vertex, sigma, weight, walk, walk);
     }
-    if (!leg || weight == glm::vec3(0.0F)) {
+    if (!leg || weight == Rgb(0.0F)) {
         return std::nullopt;
     }
     const glm::vec3 wi = leg->direction;
     const bool reflected = sigma == bsdf.side;
     const LobeType last = leg->drawn.type == LobeType::Transmission ? LobeType::SpecularReflection : leg->drawn.type;
     const LobeType type = reflected ? last : LobeType::Transmission;
-    const glm::vec3 transmitted = reflected ? glm::vec3(0.0F) : weight;
+    const Rgb transmitted = reflected ? Rgb(0.0F) : weight;
     // NEE weighs each vertex's exits against that vertex's exit density, so a smooth exit leg has none to share whatever came before.
     if (leg->drawn.delta) {
         return BsdfSample{wi, weight, transmitted, type, 0.0F, true, passesThrough};
@@ -1064,11 +1044,11 @@ std::optional<BsdfSample> sampleBsdf(const NormalMappedBsdf& bsdf, Sampler& samp
     return BsdfSample{wi, weight, transmitted, type, pdf, false, false, leg->drawn.lobePdf};
 }
 
-glm::vec3 fresnelAtMicrofacet(const NormalMappedBsdf& bsdf, glm::vec2 u) {
+Rgb fresnelAtMicrofacet(const NormalMappedBsdf& bsdf, glm::vec2 u) {
     if (!bsdf.perturbed) {
         return fresnelAtMicrofacet(bsdf.facet, u);
     }
-    glm::vec3 fresnel(0.0F);
+    Rgb fresnel(0.0F);
     if (bsdf.lambdaP > 0.0F) {
         fresnel += bsdf.lambdaP * fresnelAtMicrofacet(bsdf.facet, u);
     }

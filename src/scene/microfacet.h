@@ -32,13 +32,13 @@ namespace pathtracer::scene {
 [[nodiscard]] glm::vec3 sampleVisibleNormal(const glm::vec3& w, const glm::vec2& alpha, glm::vec2 u);
 
 // The conductor slab at wo: f0 = base_weight * base_color, specular_color the F82 tint, specular_weight the Fresnel scale.
-[[nodiscard]] ConductorSlab makeConductorSlab(float roughness, float anisotropy, const glm::vec3& f0, const glm::vec3& tint, float scale,
+[[nodiscard]] ConductorSlab makeConductorSlab(float roughness, float anisotropy, const Rgb& f0, const Rgb& tint, float scale,
                                               const FilmLayer& film, const glm::vec3& wo);
 
 // A slab's Fresnel at a facet cosine: the conductor's F82, the interface's dielectric, each mixed with the film's by its weight.
-[[nodiscard]] glm::vec3 conductorFresnel(const ConductorSlab& slab, float cosTheta);
+[[nodiscard]] Rgb conductorFresnel(const ConductorSlab& slab, float cosTheta);
 // The interface's from wo's side, or from below it: the Fresnel ratio inverted and the film met from its other face.
-[[nodiscard]] glm::vec3 interfaceFresnel(const DielectricSlab& slab, float cosTheta, bool below = false);
+[[nodiscard]] Rgb interfaceFresnel(const DielectricSlab& slab, float cosTheta, bool below = false);
 
 // One dielectric interface: geometry ratio etaI/etaT bends refraction, the Fresnel ratio sets R and T (OpenPBR's coat moves it alone).
 struct InterfaceInputs {
@@ -48,9 +48,9 @@ struct InterfaceInputs {
     float etaT;
     float fresnelEtaI;
     float fresnelEtaT;
-    glm::vec3 tint;
+    Rgb tint;
     float refractWeight;
-    glm::vec3 transmitTint;
+    Rgb transmitTint;
     FilmLayer film;
     float baseIor;   // n_b, the film's substrate from outside or its incident medium from inside
     bool fromBase;
@@ -63,17 +63,12 @@ struct InterfaceInputs {
 [[nodiscard]] float reflectionAlbedo(float roughness, float anisotropy, float etaI, float etaT, const glm::vec3& w);
 
 // The interface's reflection albedo at wo, single plus multiple scattering, untinted: E_spec of OpenPBR's albedo scaling.
-[[nodiscard]] inline glm::vec3 reflectAlbedo(const DielectricSlab& slab) { return slab.reflectSingle + slab.multiReflect; }
-
-// Fresnel-matched and unfilmed: the interface reflects nothing at any angle.
-[[nodiscard]] inline bool isIndexMatched(const DielectricSlab& slab) {
-    return slab.fresnelEtaI == slab.fresnelEtaT && slab.film.weight == 0.0F;
-}
+[[nodiscard]] inline Rgb reflectAlbedo(const DielectricSlab& slab) { return slab.reflectSingle + slab.multiReflect; }
 
 // A thin wall's albedos at cosine mu, every internal bounce summed per polarisation: exact for a smooth wall (Born & Wolf 1.6).
 struct SheetLadder {
-    glm::vec3 reflect;   // R', untinted
-    glm::vec3 transmit;  // T', transmission_color along the refracted path included
+    Rgb reflect;         // R', untinted
+    Rgb transmit;        // T', transmission_color along the refracted path included
 };
 [[nodiscard]] SheetLadder sheetLadder(const SheetInterfaces& sheet, float mu);
 
@@ -82,14 +77,14 @@ struct SheetLadder {
 
 // A slab's cosine-weighted value at wi and the density of each of its techniques there, unweighted by selection mass.
 struct ConductorEval {
-    glm::vec3 value;
+    Rgb value;
     float pdfSingle;
     float pdfMulti;
 };
 
 struct DielectricEval {
-    glm::vec3 reflect;
-    glm::vec3 transmit;
+    Rgb reflect;
+    Rgb transmit;
     float pdfSingle;
     float lobePdfSingle;  // pdfSingle given its reflect or refract branch: the VNDF lobe's own density, wi and h one-to-one
 };
@@ -101,8 +96,11 @@ struct DielectricEval {
 [[nodiscard]] std::optional<glm::vec3> sampleConductorSingle(const ConductorSlab& slab, const glm::vec3& wo, glm::vec2 u);
 [[nodiscard]] glm::vec3 sampleConductorMulti(const ConductorSlab& slab, glm::vec2 u);
 
+// Refracts wo about microfacet normal ht at index ratio eta, unnormalised; false on total internal reflection or a back-facing facet.
+[[nodiscard]] bool refractAbout(const glm::vec3& wo, const glm::vec3& ht, float eta, glm::vec3& wi);
+
 // The odds the interface reflects about a facet of this Fresnel (Walter 2007 5.3), by its tinted and refracting energies; 1 when opaque.
-[[nodiscard]] float facetReflectProbability(const DielectricSlab& slab, const glm::vec3& fresnel);
+[[nodiscard]] float facetReflectProbability(const DielectricSlab& slab, const Rgb& fresnel);
 
 // The rough interface's VNDF facet, reflected or refracted by uSplit against the facet's Fresnel split; nullopt on a wrong-side draw.
 struct InterfaceSample {

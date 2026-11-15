@@ -16,8 +16,8 @@ namespace {
 
 // Scene luminance, floored at 0: a negative texel makes the CDF non-monotonic, which invertCdf's search needs.
 float luminanceOf(const pathtracer::gfx::HdrImage& image, int x, int y) {
-    const glm::vec3 texel = image.rgb((static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width)) + static_cast<std::size_t>(x));
-    return std::max(0.0F, glm::dot(cie::sceneLuminanceWeights(), texel));
+    const Rgb texel(image.rgb((static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width)) + static_cast<std::size_t>(x)));
+    return std::max(0.0F, luminance(texel));
 }
 
 // The integer texel a direction falls in, plus that row's sin(theta) for the Jacobian, as pdf()'s piecewise-constant cell.
@@ -110,17 +110,17 @@ EnvironmentMap::EnvironmentMap(std::shared_ptr<const pathtracer::gfx::ImageTextu
     radianceScale_ = illuminanceLux ? *illuminanceLux / upwardIlluminance_ : 1.0F;
 }
 
-glm::vec3 EnvironmentMap::sampleDirection(const glm::vec3& direction, const glm::mat3& rotation) const {
-    return pathtracer::gfx::sampleTexture(*texture_, latLongUv(mapLocalOf(direction, rotation))) * radianceScale_;
+Rgb EnvironmentMap::sampleDirection(const glm::vec3& direction, const glm::mat3& rotation) const {
+    return Rgb(pathtracer::gfx::sampleTexture(*texture_, latLongUv(mapLocalOf(direction, rotation)))) * radianceScale_;
 }
 
-glm::vec3 EnvironmentMap::sampleDirection(const glm::vec3& direction, const glm::mat2x3& dirFootprint, const glm::mat3& rotation) const {
+Rgb EnvironmentMap::sampleDirection(const glm::vec3& direction, const glm::mat2x3& dirFootprint, const glm::mat3& rotation) const {
     const glm::vec3 local = mapLocalOf(direction, rotation);
     // mapLocalOf is linear, so it carries the differential's columns as it carries the direction.
     const glm::mat3x2 uvPerLocal = latLongUvJacobian(local);
     const pathtracer::gfx::TextureFootprint footprint{uvPerLocal * mapLocalOf(dirFootprint[0], rotation),
                                                       uvPerLocal * mapLocalOf(dirFootprint[1], rotation)};
-    return pathtracer::gfx::sampleTexture(*texture_, latLongUv(local), footprint) * radianceScale_;
+    return Rgb(pathtracer::gfx::sampleTexture(*texture_, latLongUv(local), footprint)) * radianceScale_;
 }
 
 EnvironmentMap::EnvSample EnvironmentMap::importanceSampleDirection(glm::vec2 u,
@@ -137,31 +137,19 @@ EnvironmentMap::EnvSample EnvironmentMap::importanceSampleDirection(glm::vec2 u,
     const float uCoord = (static_cast<float>(colSample.index) + colSample.fraction) / static_cast<float>(width);
 
     const glm::vec3 direction = worldOfMapLocal(latLongDirection(glm::vec2(uCoord, v)), rotation);
-    const float sinTheta = std::sin(v * glm::pi<float>());
-
-    const float pdfV = (marginalCdf_[static_cast<std::size_t>(rowSample.index) + 1] -
-                         marginalCdf_[static_cast<std::size_t>(rowSample.index)]) *
-                        static_cast<float>(height);
-    const float pdfU = (row[colSample.index + 1] - row[colSample.index]) * static_cast<float>(width);
-    // Jacobian from (u,v) to solid angle: dw = sin(theta) * (pi dv) * (2pi du), so the pdf is pdf_uv / (2 * pi^2 * sin(theta)).
-    const float pdfSolidAngle =
-        (pdfU * pdfV) / std::max(2.0F * glm::pi<float>() * glm::pi<float>() * sinTheta, 1e-6F);
-    return {direction, std::max(pdfSolidAngle, 1e-8F)};
+    return {direction, texelPdf(colSample.index, rowSample.index, std::sin(v * glm::pi<float>()))};
 }
 
 float EnvironmentMap::pdf(const glm::vec3& direction, const glm::mat3& rotation) const {
-    const int width = width_;
-    const int height = height_;
-    const EquirectTexel texel = equirectTexelOf(width, height, direction, rotation);
-    const float* row =
-        &conditionalCdf_[static_cast<std::size_t>(texel.y) * (static_cast<std::size_t>(width) + 1)];
+    const EquirectTexel texel = equirectTexelOf(width_, height_, direction, rotation);
+    return texelPdf(texel.x, texel.y, texel.sinTheta);
+}
 
-    const float pdfV = (marginalCdf_[static_cast<std::size_t>(texel.y) + 1] -
-                         marginalCdf_[static_cast<std::size_t>(texel.y)]) *
-                        static_cast<float>(height);
-    const float pdfU = (row[texel.x + 1] - row[texel.x]) * static_cast<float>(width);
-    const float pdfSolidAngle =
-        (pdfU * pdfV) / std::max(2.0F * glm::pi<float>() * glm::pi<float>() * texel.sinTheta, 1e-6F);
+float EnvironmentMap::texelPdf(int x, int y, float sinTheta) const {
+    const float* row = &conditionalCdf_[static_cast<std::size_t>(y) * (static_cast<std::size_t>(width_) + 1)];
+    const float pdfV = (marginalCdf_[static_cast<std::size_t>(y) + 1] - marginalCdf_[static_cast<std::size_t>(y)]) * static_cast<float>(height_);
+    const float pdfU = (row[x + 1] - row[x]) * static_cast<float>(width_);
+    const float pdfSolidAngle = (pdfU * pdfV) / std::max(2.0F * glm::pi<float>() * glm::pi<float>() * sinTheta, 1e-6F);
     return std::max(pdfSolidAngle, 1e-8F);
 }
 

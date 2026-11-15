@@ -47,7 +47,7 @@ endif()
 # Every first-party target's compile flags in one place. NATIVE/IPO/TIDY are opt-in.
 function(pathtracer_target_defaults target)
     cmake_parse_arguments(ARG "NATIVE;IPO;TIDY" "" "" ${ARGN})
-    target_compile_options(${target} PRIVATE -Wall -Wextra -Werror)
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Werror -Wunused-member-function -Wunused-template)
     if(ARG_NATIVE)
         target_compile_options(${target} PRIVATE -march=native)
     endif()
@@ -238,17 +238,6 @@ pathtracer_target_defaults(pathtracer NATIVE IPO TIDY)
 target_link_libraries(pathtracer PRIVATE pathtracer_gl "-framework AppKit" "-framework QuartzCore")
 set_source_files_properties(src/platform/display_link.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
 
-# Asset/codegen CLIs, deliberately not linking pathtracer_core.
-add_executable(test_pattern tools/test_pattern.cpp)
-target_compile_definitions(test_pattern PRIVATE
-    ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
-pathtracer_target_defaults(test_pattern)
-target_link_libraries(test_pattern PRIVATE OpenEXR::OpenEXR Imath::Imath)
-
-add_executable(downsample tools/downsample.cpp)
-pathtracer_target_defaults(downsample)
-target_link_libraries(downsample PRIVATE OpenEXR::OpenEXR Imath::Imath)
-
 # Offline generator for blue_noise_mask.inc: it produces a committed artifact rather than checking one, so it stays out of ctest.
 add_executable(bluenoise_mask tools/bluenoise_mask.cpp)
 pathtracer_target_defaults(bluenoise_mask NATIVE IPO)
@@ -297,26 +286,31 @@ target_include_directories(check_selftest PRIVATE tools)
 pathtracer_target_defaults(check_selftest NATIVE)
 target_link_libraries(check_selftest PRIVATE glm::glm)
 
+# A harness binary: tools/<target>.cpp, SOURCES and the check harness, native IPO codegen, linking LINK; ASSETS names assets/ for it.
+function(pathtracer_add_check target)
+    cmake_parse_arguments(ARG "ASSETS" "LINK" "SOURCES" ${ARGN})
+    add_executable(${target} tools/${target}.cpp ${ARG_SOURCES} $<TARGET_OBJECTS:pathtracer_check>)
+    target_include_directories(${target} PRIVATE tools)
+    pathtracer_target_defaults(${target} NATIVE IPO)
+    target_link_libraries(${target} PRIVATE ${ARG_LINK})
+    if(ARG_ASSETS)
+        target_compile_definitions(${target} PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
+    endif()
+endfunction()
+
 # Every validator links pathtracer_core and pathtracer_check; what each asserts is documented at the top of its own tools/*.cpp.
-foreach(validator embree_validate bsdf_validate sampler_validate nee_validate gbuffer_validate
-                  integrator_validate driver_validate io_validate display_validate filter_validate
-                  camera_validate volume_validate)
-    add_executable(${validator} tools/${validator}.cpp $<TARGET_OBJECTS:pathtracer_check>)
-    target_include_directories(${validator} PRIVATE tools)
-    pathtracer_target_defaults(${validator} NATIVE IPO)
-    target_link_libraries(${validator} PRIVATE pathtracer_core)
+foreach(validator embree_validate bsdf_validate sampler_validate nee_validate gbuffer_validate driver_validate display_validate
+                  filter_validate camera_validate volume_validate)
+    pathtracer_add_check(${validator} LINK pathtracer_core)
 endforeach()
+# integrator_validate and io_validate resolve real assets/ files against named instances -- the materialOverrides path.
+pathtracer_add_check(integrator_validate LINK pathtracer_core ASSETS)
+pathtracer_add_check(io_validate LINK pathtracer_core ASSETS)
 
 # The viewer's GL display path run in a hidden context against the CPU encode; each check skips where no context can be created.
-add_executable(display_gl_validate tools/display_gl_validate.cpp $<TARGET_OBJECTS:pathtracer_check>)
-target_include_directories(display_gl_validate PRIVATE tools)
-pathtracer_target_defaults(display_gl_validate NATIVE IPO)
-target_link_libraries(display_gl_validate PRIVATE pathtracer_gl)
+pathtracer_add_check(display_gl_validate LINK pathtracer_gl)
 
 target_link_libraries(nee_validate PRIVATE Boost::headers)
-# integrator_validate and io_validate resolve real assets/ files against named instances -- the materialOverrides path.
-target_compile_definitions(integrator_validate PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
-target_compile_definitions(io_validate PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
 # camera_validate drives the viewer's orbit controller too; its fly input reads a Window, so that TU and GLFW link without a window.
 target_sources(camera_validate PRIVATE src/scene/debug_camera_controller.cpp src/platform/window.cpp)
 target_link_libraries(camera_validate PRIVATE glfw)
@@ -325,11 +319,9 @@ target_include_directories(volume_validate PRIVATE src/scene)
 target_link_libraries(volume_validate PRIVATE OpenVDB::openvdb)
 
 # Adobe's openpbr-bsdf as a numerical oracle: its headers reach this validator alone, never pathtracer_core; src/scene for the slab API.
-add_executable(openpbr_reference_validate tools/openpbr_reference_validate.cpp $<TARGET_OBJECTS:pathtracer_check>)
-target_include_directories(openpbr_reference_validate PRIVATE tools src/scene)
+pathtracer_add_check(openpbr_reference_validate LINK pathtracer_core)
+target_include_directories(openpbr_reference_validate PRIVATE src/scene)
 target_include_directories(openpbr_reference_validate SYSTEM PRIVATE third_party/openpbr-bsdf)
-pathtracer_target_defaults(openpbr_reference_validate NATIVE IPO)
-target_link_libraries(openpbr_reference_validate PRIVATE pathtracer_core)
 # Its companion report, Markdown on stdout for results/: where Adobe departs by design, measured rather than asserted.
 add_executable(openpbr_reference_report tools/openpbr_reference_report.cpp)
 target_include_directories(openpbr_reference_report PRIVATE tools src/scene)
@@ -338,20 +330,12 @@ pathtracer_target_defaults(openpbr_reference_report NATIVE IPO)
 target_link_libraries(openpbr_reference_report PRIVATE pathtracer_core)
 
 # CIE 1931 module and the measured-metal fit, checked end to end against the Fresnel the renderer shades chrome.json with.
-add_executable(colour_validate tools/colour_validate.cpp
-               $<TARGET_OBJECTS:metal_fit_core> $<TARGET_OBJECTS:colorchecker_core> $<TARGET_OBJECTS:pathtracer_check>)
-target_include_directories(colour_validate PRIVATE tools)
-target_compile_definitions(colour_validate PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets"
-                           TOOLS_DATA_DIR="${CMAKE_SOURCE_DIR}/tools/data")
-pathtracer_target_defaults(colour_validate NATIVE IPO)
-target_link_libraries(colour_validate PRIVATE pathtracer_core)
+pathtracer_add_check(colour_validate LINK pathtracer_core ASSETS
+                     SOURCES $<TARGET_OBJECTS:metal_fit_core> $<TARGET_OBJECTS:colorchecker_core>)
+target_compile_definitions(colour_validate PRIVATE TOOLS_DATA_DIR="${CMAKE_SOURCE_DIR}/tools/data")
 
 # The headless render path through HeadlessRenderer: producer dispatch, per-AOV channel counts, agreement with renderPathTraced.
-add_executable(api_validate tools/api_validate.cpp $<TARGET_OBJECTS:pathtracer_check>)
-target_include_directories(api_validate PRIVATE tools)
-target_compile_definitions(api_validate PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
-pathtracer_target_defaults(api_validate NATIVE IPO)
-target_link_libraries(api_validate PRIVATE pathtracer_core)
+pathtracer_add_check(api_validate LINK pathtracer_core ASSETS)
 
 # The exported C ABI as a foreign caller sees it: links only the shared library, and compiles pathtracer_c.h as strict ISO C11.
 add_executable(c_abi_validate tools/c_abi_validate.cpp tools/c_abi_header.c $<TARGET_OBJECTS:pathtracer_check>)
@@ -362,11 +346,7 @@ pathtracer_target_defaults(c_abi_validate NATIVE)
 target_link_libraries(c_abi_validate PRIVATE pathtracer_c)
 
 # Headless before/after comparison renders. Not a correctness gate: its output is a picture, and a full render outlasts any validator.
-add_executable(render_beauty tools/render_beauty.cpp $<TARGET_OBJECTS:pathtracer_check>)
-target_include_directories(render_beauty PRIVATE tools)
-target_compile_definitions(render_beauty PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
-pathtracer_target_defaults(render_beauty NATIVE IPO)
-target_link_libraries(render_beauty PRIVATE pathtracer_core)
+pathtracer_add_check(render_beauty LINK pathtracer_core ASSETS)
 
 # Timing harness, not a correctness gate, so it stays out of the add_test loop. Same flags as the validators, timing the shipped codegen.
 add_executable(gbuffer_bench tools/gbuffer_bench.cpp)

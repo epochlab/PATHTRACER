@@ -20,15 +20,6 @@ PT_DEFAULT = -1
 # PT_ABI_VERSION in pathtracer_c.h. PtCamera and PtRenderRequest cross the boundary by value, so a layout drift must fail loudly.
 PT_ABI_VERSION = 13
 
-# PtCamera.lens_projection, PT_LENS_* in pathtracer_c.h. Index-parallel with LENS_PROJECTIONS in __init__.py.
-PT_LENS_RECTILINEAR = 0
-PT_LENS_FISHEYE_POLYNOMIAL = 1
-PT_LENS_OMNIDIRECTIONAL = 2
-
-# PtCamera.pixel_lattice, PT_LATTICE_* in pathtracer_c.h. Index-parallel with PIXEL_LATTICES in __init__.py.
-PT_LATTICE_SQUARE = 0
-PT_LATTICE_HEXAGONAL = 1
-
 
 class PtCamera(ctypes.Structure):
     """Mirrors ``PtCamera`` in include/pathtracer/api/pathtracer_c.h, field for field and in order."""

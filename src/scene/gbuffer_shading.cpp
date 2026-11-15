@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstddef>
 #include <type_traits>
 #include <variant>
 
@@ -97,7 +96,7 @@ LineProximity nearLineSegmentPx(glm::vec2 p, glm::vec2 a, glm::vec2 b, float thi
 }
 
 OpenPbrInputs<Constant> resolveInputs(const Material& material, glm::vec2 uv, const pathtracer::gfx::TextureFootprint& footprint,
-                                      const glm::vec3& vertexColour) {
+                                      const Rgb& vertexColour) {
     OpenPbrInputs<Constant> inputs;
     // Footprint filtering is exact in expectation only where radiance is linear; a lobe-shaping input is point-sampled.
     forEachInput(
@@ -123,15 +122,15 @@ bool isDispersive(const OpenPbrInputs<Constant>& inputs, bool ambientDisperses) 
            (inputs.transmissionWeight > 0.0F || inputs.subsurfaceWeight > 0.0F) && inputs.baseMetalness < 1.0F;
 }
 
-glm::vec3 emittedRadiance(const Material& material, const ShadingTriangle& triangle, const ShadingVertex& shading, const glm::vec3& wo,
-                          const pathtracer::gfx::TextureFootprint& footprint) {
+Rgb emittedRadiance(const Material& material, const ShadingTriangle& triangle, const ShadingVertex& shading, const glm::vec3& wo,
+                    const pathtracer::gfx::TextureFootprint& footprint) {
     // Most surfaces emit nothing: a zero luminance needs no colour lookup.
     const float luminance = evaluate(material.emissionLuminance, shading.uv, footprint, InputRange::NonNegative);
     // A bulk surface bounds an interior, so it emits outward alone; a thin wall has no interior and emits from both faces.
     if (!(luminance > 0.0F) || (!material.geometryThinWalled && !(glm::dot(wo, geometricNormalOf(triangle)) > 0.0F))) {
-        return glm::vec3(0.0F);
+        return Rgb(0.0F);
     }
-    glm::vec3 emitted = luminance * evaluate(material.emissionColor, shading.uv, footprint, InputRange::NonNegative);
+    Rgb emitted = luminance * evaluate(material.emissionColor, shading.uv, footprint, InputRange::NonNegative);
     // OpenPBR's layers over the emitter, their inputs as a vertex reads them, the coat's lerp(1, T_coat (1 - E_coat(wo)), C) along wo.
     const float coatWeight = evaluate(material.coatWeight, shading.uv, {}, InputRange::Unit);
     const auto normalOf = [&](const NormalInput& input) { return buildShadingFrame(triangle, shading, input)[2]; };
@@ -146,8 +145,8 @@ glm::vec3 emittedRadiance(const Material& material, const ShadingTriangle& trian
         const float coatAlbedo = reflectionAlbedo(evaluate(material.coatRoughness, shading.uv, {}, InputRange::Unit),
                                                   evaluate(material.coatRoughnessAnisotropy, shading.uv, {}, InputRange::Unit), 1.0F, coatIor,
                                                   coatWo);
-        const glm::vec3 transmittance = coatTransmittance(evaluate(material.coatColor, shading.uv, {}, InputRange::Unit), coatIor, coatWo.z);
-        emitted *= glm::vec3(1.0F - coatWeight) + (coatWeight * (1.0F - coatAlbedo) * transmittance);
+        const Rgb transmittance = coatTransmittance(evaluate(material.coatColor, shading.uv, {}, InputRange::Unit), coatIor, coatWo.z);
+        emitted *= Rgb(1.0F - coatWeight) + (coatWeight * (1.0F - coatAlbedo) * transmittance);
     }
     // The fuzz withholds what it reflects, 1 - F E_fuzz, its normal lerp(base, coat, C) as at a vertex: emission is "further reduced".
     const float fuzzWeight = evaluate(material.fuzzWeight, shading.uv, footprint, InputRange::Unit);

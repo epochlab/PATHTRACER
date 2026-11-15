@@ -105,10 +105,10 @@ struct SceneInputs {
 }
 
 // Each light's colour for this request: its kelvin override resolved on the light's own illuminant locus, else the authored colour.
-[[nodiscard]] std::optional<std::vector<glm::vec3>> lightColours(const HeadlessRenderer::Request& request,
+[[nodiscard]] std::optional<std::vector<pathtracer::scene::Rgb>> lightColours(const HeadlessRenderer::Request& request,
                                                                  const std::vector<pathtracer::config::LightConfig>& lights,
                                                                  std::string& error) {
-    std::vector<glm::vec3> colours;
+    std::vector<pathtracer::scene::Rgb> colours;
     colours.reserve(lights.size());
     for (std::size_t i = 0; i < lights.size(); ++i) {
         if (!request.lightKelvins.has_value()) {
@@ -122,7 +122,7 @@ struct SceneInputs {
                     " lies outside its illuminant's domain or the scene gamut";
             return std::nullopt;
         }
-        colours.emplace_back(*rgb);
+        colours.emplace_back(glm::vec3(*rgb));
     }
     return colours;
 }
@@ -232,39 +232,13 @@ struct SceneInputs {
     return accumulated;
 }
 
-}  // namespace
-
-std::optional<HeadlessRenderer::Geometry> HeadlessRenderer::buildGeometry(
-    const std::string& assetRoot, const pathtracer::config::ModelConfig& model,
-    const std::vector<pathtracer::config::LightConfig>& lights, std::string& error) {
-    const glm::mat4 rootTransform = pathtracer::scene::rootTransformOf(model);
-    // No glTF is an empty model: the lights below are then the only triangles.
-    std::optional<pathtracer::scene::LoadedModel> loaded =
-        model.gltfPath ? pathtracer::scene::loadGltf(assetRoot + "/" + *model.gltfPath, rootTransform, model.vertexColor)
-                       : pathtracer::scene::LoadedModel{};
-    if (!loaded) {
-        error = "failed to load glTF " + assetRoot + "/" + *model.gltfPath;
-        return std::nullopt;
-    }
-    std::vector<int> instanceLightIndex(loaded->instances.size(), -1);
-    std::optional<std::vector<pathtracer::scene::AreaLight>> areaLights = pathtracer::scene::buildLights(lights, rootTransform, assetRoot);
-    if (!areaLights) {
-        error = "failed to build the scene's lights";
-        return std::nullopt;
-    }
-    pathtracer::scene::appendLightGeometry(*loaded, *areaLights, instanceLightIndex);
-    // After appendLightGeometry, so the lights' own instances are bounded too.
-    std::vector<pathtracer::scene::AabbBounds> instanceBounds =
-        pathtracer::scene::computeInstanceBounds(loaded->shadingTriangles, static_cast<int>(loaded->instances.size()), loaded->shapes);
-    std::optional<pathtracer::scene::EmbreeAccel> accel =
-        pathtracer::scene::EmbreeAccel::build(std::move(loaded->worldTriangles), std::move(loaded->shapes));
-    if (!accel) {
-        error = "Embree scene build failed";
-        return std::nullopt;
-    }
-    return Geometry{std::move(*loaded), std::move(*areaLights), std::move(instanceLightIndex), std::move(instanceBounds),
-                    std::move(*accel)};
+// The image parallel to key: at(), not [], as a key absent from keys indexes one past the end, which must not pass silently.
+template <typename Images, typename Keys, typename Key>
+auto& parallelAt(Images& images, const Keys& keys, const Key& key) {
+    return images.at(static_cast<std::size_t>(std::find(keys.begin(), keys.end(), key) - keys.begin()));
 }
+
+}  // namespace
 
 std::unique_ptr<HeadlessRenderer> HeadlessRenderer::open(const std::string& assetRoot,
                                                           const std::string& scenePath,
@@ -275,18 +249,18 @@ std::unique_ptr<HeadlessRenderer> HeadlessRenderer::open(const std::string& asse
         return nullptr;
     }
     const pathtracer::config::SceneConfig& scene = inputs->scene;
-    std::optional<Geometry> geometry = buildGeometry(assetRoot, scene.model, scene.lights, error);
+    std::optional<pathtracer::scene::SceneGeometry> geometry = pathtracer::scene::buildSceneGeometry(assetRoot, scene.model, scene.lights, error);
     if (!geometry) {
         return nullptr;
     }
     // Materials before textures, which bind over the constants; each call logs the reason it fails. Without a model there are none.
-    if (scene.materialPath &&
-        (!pathtracer::scene::applySceneMaterials(geometry->model.instances, *scene.materialPath, scene.materialOverrides, assetRoot) ||
-         !pathtracer::scene::bindSceneTextures(geometry->model.instances, scene.textures, assetRoot))) {
+    const std::span<pathtracer::scene::MeshInstance> surfaces = pathtracer::scene::surfaceInstances(*geometry);
+    if (scene.materialPath && (!pathtracer::scene::applySceneMaterials(surfaces, *scene.materialPath, scene.materialOverrides, assetRoot) ||
+                               !pathtracer::scene::bindSceneTextures(surfaces, scene.textures, assetRoot))) {
         error = "failed to bind scene materials";
         return nullptr;
     }
-    // World-space media, independent of the pose a request may change, so loaded once here rather than in buildGeometry.
+    // World-space media, independent of the pose a request may change, so loaded once here rather than with the geometry.
     std::optional<pathtracer::scene::VolumeSet> volumes = pathtracer::scene::VolumeSet::load(scene.volumes, assetRoot, error);
     if (!volumes) {
         return nullptr;
@@ -311,7 +285,8 @@ std::unique_ptr<HeadlessRenderer> HeadlessRenderer::open(const std::string& asse
 }
 
 HeadlessRenderer::HeadlessRenderer(std::string assetRoot, pathtracer::config::ProfileConfig profile,
-                                   pathtracer::config::SceneConfig scene, Geometry geometry, pathtracer::scene::VolumeSet volumes,
+                                   pathtracer::config::SceneConfig scene, pathtracer::scene::SceneGeometry geometry,
+                                   pathtracer::scene::VolumeSet volumes,
                                    pathtracer::scene::PathTraceSettings baseSettings,
                                    pathtracer::scene::EnvironmentMap environmentMap, const pathtracer::scene::Camera& defaultCamera)
     : assetRoot_(std::move(assetRoot)),
@@ -329,7 +304,7 @@ HeadlessRenderer::~HeadlessRenderer() = default;
 
 bool HeadlessRenderer::applyPose(const Request& request, std::string& error) {
     const glm::vec3 rootRotation = request.rootRotationDegrees.value_or(scene_.model.rotation);
-    std::vector<glm::vec3> lightRotations = request.lightRotationsDegrees.value_or(rotationsOf(scene_.lights));
+    std::vector<glm::vec3> lightRotations = request.lightRotationsDegrees ? *request.lightRotationsDegrees : rotationsOf(scene_.lights);
     if (rootRotation == builtRootRotationDegrees_ && lightRotations == builtLightRotationsDegrees_) {
         return true;
     }
@@ -339,7 +314,7 @@ bool HeadlessRenderer::applyPose(const Request& request, std::string& error) {
     for (std::size_t i = 0; i < lights.size(); ++i) {
         lights[i].rotation = lightRotations[i];
     }
-    std::optional<Geometry> geometry = buildGeometry(assetRoot_, model, lights, error);
+    std::optional<pathtracer::scene::SceneGeometry> geometry = pathtracer::scene::buildSceneGeometry(assetRoot_, model, lights, error);
     if (!geometry) {
         return false;
     }
@@ -366,9 +341,7 @@ void HeadlessRenderer::resizeBuffers(int width, int height) {
 }
 
 const pathtracer::gfx::HdrImage& HeadlessRenderer::accumulatedImage(PathTracedLane lane) const {
-    // at(), not []: a lane absent from the parallel lane vector indexes exactly one past the end, which render() must not do silently.
-    const auto it = std::find(accumulatedLanes_.begin(), accumulatedLanes_.end(), lane);
-    return accumulators_.at(static_cast<std::size_t>(it - accumulatedLanes_.begin()));
+    return parallelAt(accumulators_, accumulatedLanes_, lane);
 }
 
 const pathtracer::gfx::HdrImage& HeadlessRenderer::lastImage(AovId aov) const {
@@ -377,11 +350,8 @@ const pathtracer::gfx::HdrImage& HeadlessRenderer::lastImage(AovId aov) const {
             return accumulatedImage(pathtracer::debug::pathTracedLane(aov));
         case AovSource::GBuffer:
             return gbuffer_.*pathtracer::debug::gbufferLane(aov);
-        // at(), not []: an AOV absent from the parallel name vector indexes exactly one past the end, which render() must not do silently.
-        case AovSource::BeautyFilter: {
-            const auto it = std::find(filteredAovs_.begin(), filteredAovs_.end(), aov);
-            return filtered_.at(static_cast<std::size_t>(it - filteredAovs_.begin()));
-        }
+        case AovSource::BeautyFilter:
+            return parallelAt(filtered_, filteredAovs_, aov);
     }
     // Not dead: a scoped enum holds any value of its underlying type, so falling off a covered switch is still undefined behaviour.
     return gbuffer_.depth;
@@ -408,7 +378,7 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
     if (!validRequest(request, scene_.lights.size(), profile_.denoiser.enabled, error)) {
         return false;
     }
-    const std::optional<std::vector<glm::vec3>> colours = lightColours(request, scene_.lights, error);
+    const std::optional<std::vector<pathtracer::scene::Rgb>> colours = lightColours(request, scene_.lights, error);
     if (!colours || !applyPose(request, error)) {
         return false;
     }
@@ -584,13 +554,9 @@ void HeadlessRenderer::applyDisplayOptics(const Request& request) {
             continue;
         }
         applied.push_back(aov);
-        const PathTracedLane lane = pathtracer::debug::pathTracedLane(aov);
-        pathtracer::gfx::HdrImage& image =
-            pathtracer::debug::aovSource(aov) == AovSource::PathTraced
-                ? accumulators_.at(static_cast<std::size_t>(std::find(accumulatedLanes_.begin(), accumulatedLanes_.end(), lane) -
-                                                            accumulatedLanes_.begin()))
-                : filtered_.at(static_cast<std::size_t>(std::find(filteredAovs_.begin(), filteredAovs_.end(), aov) -
-                                                        filteredAovs_.begin()));
+        pathtracer::gfx::HdrImage& image = pathtracer::debug::aovSource(aov) == AovSource::PathTraced
+                                               ? parallelAt(accumulators_, accumulatedLanes_, pathtracer::debug::pathTracedLane(aov))
+                                               : parallelAt(filtered_, filteredAovs_, aov);
         pathtracer::gfx::applyDisplayOptics(image, lattice, wraps, request.displayOptics, threadPool_);
     }
     stats_.opticsMilliseconds =

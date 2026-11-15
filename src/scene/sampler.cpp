@@ -24,51 +24,22 @@ std::uint64_t hashSeed(int extra, std::uint32_t runSeed) {
 constexpr int kSobolDimensions = 2;
 constexpr int kSobolBits = 32;  // direction vectors are scaled by 2^32, so a 32-bit index spans the sequence's period
 
-constexpr int kMaxDegree = 1;  // largest polynomial degree across the generated rows, reported by generate_sobol_table
-struct SobolPolynomial {
-    std::uint32_t degree;
-    std::uint32_t coefficients;
-    std::array<std::uint32_t, kMaxDegree> initial;
-};
-
-// Sobol dimension 2 only; dimension 1 needs no seeds and is generated directly below.
-constexpr std::array<SobolPolynomial, kSobolDimensions - 1> kSobolPolynomials = {{
-#include "sobol_direction_seeds.inc"
-}};
-
-// Direction vectors V from Joe & Kuo (ACM Alg. 659), derived at static init.
 using SobolDirections = std::array<std::array<std::uint32_t, kSobolBits>, kSobolDimensions>;
 
-SobolDirections buildSobolDirections() {
+// Van der Corput, then Joe & Kuo 2008's row "2 1 0 1" (degree 1, m_1 = 1), whose recurrence is v_b = v_(b-1) ^ (v_(b-1) >> 1).
+constexpr SobolDirections buildSobolDirections() {
     SobolDirections directions{};
-
-    // Sobol dimension 1: every initial direction number is 1, giving the van der Corput sequence in base 2.
     for (int b = 0; b < kSobolBits; ++b) {
         directions[0][static_cast<std::size_t>(b)] = 1U << (kSobolBits - 1 - b);
     }
-
-    for (std::size_t d = 1; d < kSobolDimensions; ++d) {
-        const SobolPolynomial& poly = kSobolPolynomials[d - 1];
-        const auto degree = static_cast<int>(poly.degree);
-        std::array<std::uint32_t, kSobolBits>& v = directions[d];
-
-        for (int b = 0; b < degree; ++b) {
-            v[static_cast<std::size_t>(b)] = poly.initial[static_cast<std::size_t>(b)] << (kSobolBits - 1 - b);
-        }
-        for (int b = degree; b < kSobolBits; ++b) {
-            const std::uint32_t previous = v[static_cast<std::size_t>(b - degree)];
-            std::uint32_t next = previous ^ (previous >> degree);
-            for (int k = 1; k < degree; ++k) {
-                const std::uint32_t coefficient = (poly.coefficients >> (degree - 1 - k)) & 1U;
-                next ^= coefficient * v[static_cast<std::size_t>(b - k)];
-            }
-            v[static_cast<std::size_t>(b)] = next;
-        }
+    directions[1][0] = directions[0][0];
+    for (std::size_t b = 1; b < kSobolBits; ++b) {
+        directions[1][b] = directions[1][b - 1] ^ (directions[1][b - 1] >> 1U);
     }
     return directions;
 }
 
-const SobolDirections kSobolDirections = buildSobolDirections();
+constexpr SobolDirections kSobolDirections = buildSobolDirections();
 
 std::uint32_t reverseBits(std::uint32_t x) {
 #if defined(__has_builtin)

@@ -33,8 +33,9 @@ struct VolumeSet::Volume {
     glm::mat3 indexFromWorld;
     glm::vec3 indexOffset;
     float gridUnitsPerWorldUnit;  // 1/scale: the coefficients are per grid unit, so a world ray parameter covers this many
-    glm::vec3 absorption;
-    glm::vec3 scattering;
+    Rgb absorption;
+    Rgb scattering;
+    Rgb extinction;         // absorption + scattering, read per ratio-tracking step
     float extinctionBound;  // max channel of absorption + scattering: the majorant density's scalar spectral bound
     float anisotropy;
 };
@@ -211,9 +212,11 @@ std::optional<VolumeSet::Volume> loadVolume(const pathtracer::config::VolumeConf
         1.0F / config.scale,
         material->density * material->absorption,
         material->density * material->scattering,
-        material->density * glm::compMax(material->absorption + material->scattering),
+        Rgb(0.0F),
+        material->density * maxChannel(material->absorption + material->scattering),
         material->anisotropy,
     };
+    volume.extinction = volume.absorption + volume.scattering;
     volume.density = volume.densityHandle.grid<float>();
     volume.majorant = volume.majorantHandle.grid<float>();
     return volume;
@@ -301,7 +304,7 @@ std::optional<VolumeSet> VolumeSet::load(const std::vector<pathtracer::config::V
 
 bool VolumeSet::empty() const { return volumes_ == nullptr || volumes_->empty(); }
 
-FreeFlight VolumeSet::sampleFreeFlight(const Ray& ray, float t0, float t1, const glm::vec3& throughput, Sampler& sampler) const {
+FreeFlight VolumeSet::sampleFreeFlight(const Ray& ray, float t0, float t1, const Rgb& throughput, Sampler& sampler) const {
     // Overlapping volumes are independent Poisson processes of tentative collisions; their union is met in t order, earliest first.
     std::vector<std::pair<Tracker, glm::vec2>>& pending = pendingCollisions;
     pending.clear();
@@ -313,18 +316,18 @@ FreeFlight VolumeSet::sampleFreeFlight(const Ray& ray, float t0, float t1, const
             }
         }
     }
-    FreeFlight flight{FreeFlightEvent::Escaped, t1, 0.0F, glm::vec3(1.0F)};
+    FreeFlight flight{FreeFlightEvent::Escaped, t1, 0.0F, Rgb(1.0F)};
     while (!pending.empty()) {
         const auto earliest = std::min_element(pending.begin(), pending.end(), [](const auto& a, const auto& b) { return a.second.x < b.second.x; });
         Tracker& tracker = earliest->first;
         const Volume& volume = tracker.volume();
         const float density = tracker.density();
         const float bound = tracker.majorant() * volume.extinctionBound;
-        const glm::vec3 absorption = density * volume.absorption;
-        const glm::vec3 scattering = density * volume.scattering;
-        const glm::vec3 null = glm::max(glm::vec3(bound) - absorption - scattering, glm::vec3(0.0F));
+        const Rgb absorption = density * volume.absorption;
+        const Rgb scattering = density * volume.scattering;
+        const Rgb null = max(Rgb(bound) - absorption - scattering, Rgb(0.0F));
         // History-aware probabilities (Kutz et al. 2017 sec. 5.1): each event's share of the throughput-weighted collision rate.
-        const glm::vec3 history = throughput * flight.weight;
+        const Rgb history = throughput * flight.weight;
         const float pa = channelMean(history * absorption);
         const float ps = channelMean(history * scattering);
         const float pn = channelMean(history * null);
@@ -354,19 +357,18 @@ FreeFlight VolumeSet::sampleFreeFlight(const Ray& ray, float t0, float t1, const
     return flight;
 }
 
-glm::vec3 VolumeSet::transmittance(const Ray& ray, float t0, float t1, Sampler& sampler) const {
-    glm::vec3 transmittance(1.0F);
+Rgb VolumeSet::transmittance(const Ray& ray, float t0, float t1, Sampler& sampler) const {
+    Rgb transmittance(1.0F);
     // Independent media multiply: each volume's ratio-tracking estimate is unbiased on its own, and so is their product.
     for (const Volume& volume : *volumes_) {
         Tracker tracker(volume);
         if (!tracker.start(ray, t0, t1)) {
             continue;
         }
-        const glm::vec3 extinction = volume.absorption + volume.scattering;
         while (tracker.next(sampler)) {
             const float bound = tracker.majorant() * volume.extinctionBound;
-            transmittance *= glm::max(glm::vec3(1.0F) - (tracker.density() * extinction / bound), glm::vec3(0.0F));
-            if (transmittance == glm::vec3(0.0F)) {
+            transmittance *= max(Rgb(1.0F) - (tracker.density() * volume.extinction / bound), Rgb(0.0F));
+            if (isBlack(transmittance)) {
                 return transmittance;
             }
         }

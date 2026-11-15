@@ -1,18 +1,19 @@
 #pragma once
 
 #include <cmath>
+#include <numbers>
 
 #include <glm/glm.hpp>
 
 // The scalar helpers every shading source shares, defined once.
 namespace pathtracer::scene {
 
-inline constexpr float kPi = 3.14159265F;
+inline constexpr float kPi = std::numbers::pi_v<float>;
 
 inline float lerp1(float a, float b, float t) { return a + ((b - a) * t); }
 
-// The equal-weight RGB mean: selection masses and energies compare channels on one scale.
-inline float channelMean(const glm::vec3& v) { return (v.x + v.y + v.z) / 3.0F; }
+// atan2(|a x b|, a.b), PBRT v4's AngleBetween: robust near 0 and pi, where acos of a dot product loses half its digits.
+inline float angleBetween(const glm::vec3& a, const glm::vec3& b) { return std::atan2(glm::length(glm::cross(a, b)), glm::dot(a, b)); }
 
 // Rows (t, b, n) of an orthonormal basis about unit n, branchless (Duff et al. 2017); the identity at n = +z.
 inline glm::mat3 toFrameAbout(const glm::vec3& n) {

@@ -214,8 +214,8 @@ void expectMeasuredMetal(tools::check::Context& ctx, const std::string& table, c
         return;
     }
     const pathtracer::scene::BsdfClosure closure = pathtracer::scene::makeBsdfClosure(*material, glm::vec3(0.0F, 0.0F, 1.0F));
-    const glm::vec3 normal = pathtracer::scene::fresnelAtViewAngle(closure, 1.0F);
-    const glm::vec3 grazing = pathtracer::scene::fresnelAtViewAngle(closure, static_cast<float>(tools::reference::kMuBar));
+    const pathtracer::scene::Rgb normal = pathtracer::scene::fresnelAtViewAngle(closure, 1.0F);
+    const pathtracer::scene::Rgb grazing = pathtracer::scene::fresnelAtViewAngle(closure, static_cast<float>(tools::reference::kMuBar));
     char detail[200];
     for (int c = 0; c < 3; ++c) {
         std::snprintf(detail, sizeof(detail), "%s base_color[%d] %.9g != metal_fit %.9g; re-run metal_fit", materialFile, c,

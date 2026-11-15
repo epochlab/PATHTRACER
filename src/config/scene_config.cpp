@@ -4,7 +4,6 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <fstream>
 #include <initializer_list>
 #include <iostream>
 #include <limits>
@@ -103,7 +102,7 @@ std::optional<std::map<std::string, std::map<std::string, TextureConfig>>> parse
 
 // A light's unit-luminance colour and the locus a kelvin override resolves on.
 struct LightColor {
-    glm::vec3 rgb;
+    pathtracer::scene::Rgb rgb;
     pathtracer::scene::cie::Illuminant illuminant;
 };
 
@@ -122,10 +121,10 @@ std::optional<LightColor> lightColor(const nlohmann::json& light, const std::str
             std::cerr << "loadSceneConfig: " << path << ": lights[" << index << "] illuminant needs kelvin, not color\n";
             return std::nullopt;
         }
-        const auto rgb = color->get<glm::vec3>();
+        const auto rgb = color->get<pathtracer::scene::Rgb>();
         // Negative radiance is unrepresentable and would propagate through NEE as a permanent bias no downstream clamp removes.
-        const float luminance = glm::dot(pathtracer::scene::cie::sceneLuminanceWeights(), rgb);
-        if (glm::any(glm::lessThan(rgb, glm::vec3(0.0F))) || !(luminance > 0.0F)) {
+        const float luminance = pathtracer::scene::luminance(rgb);
+        if (pathtracer::scene::minChannel(rgb) < 0.0F || !(luminance > 0.0F)) {
             std::cerr << "loadSceneConfig: " << path << ": lights[" << index << "] color is negative or black\n";
             return std::nullopt;
         }
@@ -153,7 +152,7 @@ std::optional<LightColor> lightColor(const nlohmann::json& light, const std::str
         }
         return std::nullopt;
     }
-    return LightColor{glm::vec3(*rgb), illuminant};
+    return LightColor{pathtracer::scene::Rgb(glm::vec3(*rgb)), illuminant};
 }
 
 // Exactly one of nits (luminance, cd/m^2) or lumens (luminous flux), positive: a zero light is an authoring error, not a dark one.
@@ -226,11 +225,11 @@ std::optional<std::variant<QuadShape, DiskShape, SphereShape, MeshShape>> lightS
                            path, "light")) {
             return std::nullopt;
         }
-        const MeshShape mesh{light.at("gltfPath").get<std::string>(), light.contains("scale") ? toFloat(light.at("scale")) : 1.0F};
-        if (!(mesh.scale > 0.0F)) {
+        const float scale = light.contains("scale") ? toFloat(light.at("scale")) : 1.0F;
+        if (!(scale > 0.0F)) {
             return reject("has a non-positive scale");
         }
-        return mesh;
+        return MeshShape{light.at("gltfPath").get<std::string>(), scale};
     }
     // Dispatched on rather than ignored: an unrecognised type must not silently load as another.
     std::cerr << "loadSceneConfig: " << path << ": lights[" << index << "] has unknown type '" << type
@@ -307,7 +306,7 @@ std::optional<std::vector<VolumeConfig>> parseVolumes(const nlohmann::json& j, c
 // One input's constant: in its specification range per channel.
 template <typename T>
 bool validInput(const pathtracer::scene::InputSpec& spec, const T& value, const std::string& path) {
-    const glm::vec3 channels(value);
+    const pathtracer::scene::Rgb channels(value);
     for (int c = 0; c < (std::is_same_v<T, float> ? 1 : 3); ++c) {
         if (!pathtracer::scene::inRange(channels[c], spec.range)) {
             std::cerr << "loadMaterialConfig: " << path << ": " << spec.name << " " << channels[c] << " is outside its OpenPBR range\n";
@@ -343,15 +342,12 @@ bool addRandomChecker(const pathtracer::scene::InputSpec& spec, const nlohmann::
 }  // namespace
 
 std::optional<SceneConfig> loadSceneConfig(const std::string& path) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file) {
-        std::cerr << "loadSceneConfig: could not read " << path << '\n';
+    const std::optional<nlohmann::json> parsed = readJson(path, "loadSceneConfig");
+    if (!parsed) {
         return std::nullopt;
     }
-
     try {
-        nlohmann::json j;
-        file >> j;
+        const nlohmann::json& j = *parsed;
 
         const nlohmann::json& environment = j.at("environment");
         if (!onlyKnownKeys(j, {"model", "environment", "materialPath", "materialOverrides", "textures", "lights", "volumes", "camera"},
@@ -433,21 +429,18 @@ void applySceneCamera(const SceneConfig& scene, ProfileConfig& profile) {
 }
 
 std::optional<VolumeMaterialConfig> loadVolumeMaterialConfig(const std::string& path) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file) {
-        std::cerr << "loadVolumeMaterialConfig: could not read " << path << '\n';
+    const std::optional<nlohmann::json> parsed = readJson(path, "loadVolumeMaterialConfig");
+    if (!parsed) {
         return std::nullopt;
     }
-
     try {
-        nlohmann::json j;
-        file >> j;
+        const nlohmann::json& j = *parsed;
         if (!onlyKnownKeys(j, {"absorption", "scattering", "anisotropy", "density"}, path, "volume material")) {
             return std::nullopt;
         }
         VolumeMaterialConfig material{
-            j.at("absorption").get<glm::vec3>(),
-            j.at("scattering").get<glm::vec3>(),
+            j.at("absorption").get<pathtracer::scene::Rgb>(),
+            j.at("scattering").get<pathtracer::scene::Rgb>(),
             toFloat(j.at("anisotropy")),
         };
         if (const auto it = j.find("density"); it != j.end()) {
@@ -458,9 +451,8 @@ std::optional<VolumeMaterialConfig> loadVolumeMaterialConfig(const std::string& 
             return std::nullopt;
         }
         // A negative coefficient is no medium; NaN fails both comparisons, and so does an infinite one, which tracking cannot bound.
-        const auto validCoefficient = [](const glm::vec3& c) {
-            const glm::vec3 infinity(std::numeric_limits<float>::infinity());
-            return glm::all(glm::greaterThanEqual(c, glm::vec3(0.0F))) && glm::all(glm::lessThan(c, infinity));
+        const auto validCoefficient = [](const pathtracer::scene::Rgb& c) {
+            return pathtracer::scene::minChannel(c) >= 0.0F && pathtracer::scene::maxChannel(c) < std::numeric_limits<float>::infinity();
         };
         if (!validCoefficient(material.absorption) || !validCoefficient(material.scattering)) {
             std::cerr << "loadVolumeMaterialConfig: " << path << ": absorption and scattering must be finite and non-negative\n";
@@ -479,15 +471,12 @@ std::optional<VolumeMaterialConfig> loadVolumeMaterialConfig(const std::string& 
 }
 
 std::optional<MaterialConfig> loadMaterialConfig(const std::string& path) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file) {
-        std::cerr << "loadMaterialConfig: could not read " << path << '\n';
+    const std::optional<nlohmann::json> parsed = readJson(path, "loadMaterialConfig");
+    if (!parsed) {
         return std::nullopt;
     }
-
     try {
-        nlohmann::json j;
-        file >> j;
+        const nlohmann::json& j = *parsed;
 
         // Closed key set: a legacy or misspelt key would otherwise load as the input's default, silently.
         const MaterialConfig defaults;
@@ -516,7 +505,7 @@ std::optional<MaterialConfig> loadMaterialConfig(const std::string& path) {
                 if constexpr (std::is_same_v<std::decay_t<decltype(value)>, float>) {
                     value = toFloat(*it);
                 } else {
-                    value = it->template get<glm::vec3>();
+                    value = it->template get<pathtracer::scene::Rgb>();
                 }
                 ok = validInput(spec, value, path) && ok;
             },

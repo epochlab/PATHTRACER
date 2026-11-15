@@ -18,7 +18,7 @@ struct Walker {
     glm::vec3 ray;
     float logCdf;
     bool upper;  // wo's medium; the far side's walk is the near side's under the point reflection through the mean plane
-    glm::vec3 weight;
+    Rgb weight;
 };
 
 // A side's own frame: GGX and the uniform heights are centrally symmetric, so the far side is the near side point-reflected.
@@ -58,7 +58,7 @@ float bendRatio(const DielectricSlab& slab, bool upper) { return upper ? slab.et
 
 // One collision's scattering from toward t to o, both in the side's own frame: its value per channel and its sampling density.
 struct Phase {
-    glm::vec3 value{0.0F};
+    Rgb value{0.0F};
     float pdf = 0.0F;
 };
 
@@ -80,19 +80,13 @@ Phase phase(const DielectricSlab& slab, const glm::vec3& t, const glm::vec3& o, 
     }
     const float denom = (eta * tm) + om;
     const float density = (tm * distributionGGX(m, slab.alpha) / projected) * (refracted ? -om / (denom * denom) : 0.25F / tm);
-    const glm::vec3 fresnel = interfaceFresnel(slab, tm, !upper);
+    const Rgb fresnel = interfaceFresnel(slab, tm, !upper);
     const float reflectOdds = channelMean(fresnel);
     return refracted ? Phase{density * (1.0F - fresnel), density * (1.0F - reflectOdds)} : Phase{density * fresnel, density * reflectOdds};
 }
 
-// How a collision picks reflection given its facet's Fresnel; the throughput carries the channels' ratio to it.
-using ReflectOdds = float (*)(const DielectricSlab&, const glm::vec3& fresnel);
-
-// The facet's own odds, its mean Fresnel: what every collision past the first draws by, and what phase() densities assume.
-float meanFresnel(const DielectricSlab& /*slab*/, const glm::vec3& fresnel) { return channelMean(fresnel); }
-
 // First-collision odds: glass by tinted Fresnel; where only wo's side counts (opaque, coat) a/(a+b), a = F, b = (1-F) sqrt(rho).
-float firstReflectOdds(const DielectricSlab& slab, const glm::vec3& fresnel) {
+float firstReflectOdds(const DielectricSlab& slab, const Rgb& fresnel) {
     if (slab.refractWeight > 0.0F) {
         return facetReflectProbability(slab, fresnel);
     }
@@ -105,8 +99,8 @@ float firstReflectOdds(const DielectricSlab& slab, const glm::vec3& fresnel) {
     return reflect + returns > 0.0F ? reflect / (reflect + returns) : 1.0F;
 }
 
-// A visible facet's draw, reflected or refracted by odds, the throughput by its channels; false where it carries no measure.
-bool scatter(const DielectricSlab& slab, Walker& walker, Sampler& walk, bool& refracted, ReflectOdds odds = meanFresnel) {
+// A facet draw by odds (firstReflectOdds first, then the mean Fresnel phase() assumes), throughput by channel; false where no measure.
+bool scatter(const DielectricSlab& slab, Walker& walker, Sampler& walk, bool& refracted, bool first = false) {
     const glm::vec3 t = own(-walker.ray, walker.upper);
     const glm::vec3 m = sampleVisibleNormal(t, slab.alpha, walk.next2D());
     const float tm = glm::dot(t, m);
@@ -114,8 +108,8 @@ bool scatter(const DielectricSlab& slab, Walker& walker, Sampler& walk, bool& re
     if (!(tm > 0.0F && m.z > 0.0F)) {
         return false;
     }
-    const glm::vec3 fresnel = interfaceFresnel(slab, tm, !walker.upper);
-    const float reflectOdds = odds(slab, fresnel);
+    const Rgb fresnel = interfaceFresnel(slab, tm, !walker.upper);
+    const float reflectOdds = first ? firstReflectOdds(slab, fresnel) : channelMean(fresnel);
     refracted = walk.next1D() >= reflectOdds;
     if (!refracted) {
         walker.ray = own((2.0F * tm * m) - t, walker.upper);
@@ -123,12 +117,11 @@ bool scatter(const DielectricSlab& slab, Walker& walker, Sampler& walk, bool& re
         return true;
     }
     // Only a coat-shifted Fresnel ratio below the bend's lets the facet transmit past the bend's critical angle: no direction carries it.
-    const float eta = bendRatio(slab, walker.upper);
-    const float cos2T = cos2Transmitted(tm, eta);
-    if (cos2T < 0.0F) {
+    glm::vec3 wi;
+    if (!refractAbout(t, m, bendRatio(slab, walker.upper), wi)) {
         return false;
     }
-    walker.ray = own(glm::normalize((((eta * tm) - std::sqrt(cos2T)) * m) - (eta * t)), walker.upper);
+    walker.ray = own(glm::normalize(wi), walker.upper);
     walker.weight *= (1.0F - fresnel) / (1.0F - reflectOdds);
     walker.upper = !walker.upper;
     walker.logCdf = farSide(walker.logCdf);
@@ -148,16 +141,16 @@ bool forceCollision(const DielectricSlab& slab, Walker& walker, float u) {
 
 // A walk entering from direction from at the top of its side, to its first collision: a falling ray never escapes.
 Walker enter(const DielectricSlab& slab, const glm::vec3& from, Sampler& walk) {
-    Walker walker{-from, 0.0F, from.z >= 0.0F, glm::vec3(1.0F)};
+    Walker walker{-from, 0.0F, from.z >= 0.0F, Rgb(1.0F)};
     static_cast<void>(collides(slab.alpha, walker, walk.next1D()));
     return walker;
 }
 
 // One walk's connections toward `to` from orders >= 2, each weighted P_this / (P_this + P_other) where weighed (Wang et al. 2022 eq. 15).
-glm::vec3 connections(const DielectricSlab& slab, const glm::vec3& from, const glm::vec3& to, Sampler& walk, bool weighed) {
+Rgb connections(const DielectricSlab& slab, const glm::vec3& from, const glm::vec3& to, Sampler& walk, bool weighed) {
     const bool toUpper = to.z >= 0.0F;
     Walker walker = enter(slab, from, walk);
-    glm::vec3 sum(0.0F);
+    Rgb sum(0.0F);
     // The other end's density of the interior directions over this walk's, in double: products of peaked densities overrun float.
     double ratio = 1.0;
     for (int order = 1;; ++order) {
@@ -199,7 +192,7 @@ std::optional<WalkExit> sampleInterfaceWalk(const DielectricSlab& slab, const gl
     Walker walker = enter(slab, wo, walk);
     bool refracted = false;
     // The first collision draws its branch by what each side's exits carry (Walter 2007 5.3), returning refraction included.
-    if (!scatter(slab, walker, walk, refracted, firstReflectOdds)) {
+    if (!scatter(slab, walker, walk, refracted, true)) {
         return std::nullopt;
     }
     while (collides(slab.alpha, walker, walk.next1D())) {
@@ -211,10 +204,10 @@ std::optional<WalkExit> sampleInterfaceWalk(const DielectricSlab& slab, const gl
     return WalkExit{walker.ray, walker.upper ? walker.weight : walker.weight * slab.etaSq, walker.upper};
 }
 
-glm::vec3 evaluateInterfaceMulti(const DielectricSlab& slab, const glm::vec3& wo, const glm::vec3& wi, Sampler& walk) {
+Rgb evaluateInterfaceMulti(const DielectricSlab& slab, const glm::vec3& wo, const glm::vec3& wi, Sampler& walk) {
     // Exit densities are f |cos| up to eta^2 across: from wo the radiance compression, from wi f(wo, wi) eta_wi^2 = f(wi, wo) eta_wo^2.
     const bool twoEnded = wo.z > 0.0F;
-    const glm::vec3 forward = connections(slab, wo, wi, walk, twoEnded) * (wi.z < 0.0F ? slab.etaSq : 1.0F);
+    const Rgb forward = connections(slab, wo, wi, walk, twoEnded) * (wi.z < 0.0F ? slab.etaSq : 1.0F);
     // A level wo is met only at the top, where no walk from wi can leave toward it: the walk from wo carries the whole value alone.
     if (!twoEnded) {
         return forward;

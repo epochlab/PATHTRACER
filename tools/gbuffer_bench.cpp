@@ -25,6 +25,7 @@
 #include "pathtracer/scene/path_tracer.h"
 #include "pathtracer/scene/shading_scene.h"
 #include "pathtracer/scene/thread_pool.h"
+#include "fixtures.h"
 
 namespace {
 
@@ -46,19 +47,8 @@ struct Options {
     std::string benchLogPath;  // appends the run to this JSON Lines benchmark log (bench_log.h); empty = no log
 };
 
-// OpenPBR defaults with a fractional metalness, varying only the two inputs the G-buffer AOVs under test read.
-Material makeMaterial(glm::vec3 baseColor, float roughness) {
-    Material material;
-    material.baseColor = baseColor;
-    material.baseMetalness = 0.2F;
-    material.specularRoughness = roughness;
-    return material;
-}
-
-glm::vec4 tangentFor(const glm::vec3& normal) {
-    const glm::vec3 up = std::fabs(normal.y) < 0.99F ? glm::vec3(0.0F, 1.0F, 0.0F) : glm::vec3(1.0F, 0.0F, 0.0F);
-    return glm::vec4(glm::normalize(glm::cross(up, normal)), 1.0F);
-}
+using tools::fixtures::makeMaterial;
+using tools::fixtures::tangentFor;
 
 // `layers` screen-filling shells sharing the triangle budget, emitted furthest first, so a pixel accumulates `layers` depth records.
 std::vector<ShadingTriangle> makeLayeredTriangles(const Options& options, const Camera& camera) {
@@ -183,10 +173,10 @@ int main(int argc, char** argv) {
 
     const std::vector<ShadingTriangle> shadingTriangles = makeLayeredTriangles(*options, camera);
     std::vector<MeshInstance> instances;
-    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.8F, 0.2F, 0.2F), 0.2F), glm::mat4(1.0F), ""});
-    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.2F, 0.8F, 0.2F), 0.5F), glm::mat4(1.0F), ""});
-    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.2F, 0.2F, 0.8F), 0.8F), glm::mat4(1.0F), ""});
-    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.8F, 0.8F, 0.2F), 1.0F), glm::mat4(1.0F), ""});
+    instances.push_back(MeshInstance{makeMaterial(Rgb(0.8F, 0.2F, 0.2F), 0.2F), glm::mat4(1.0F), ""});
+    instances.push_back(MeshInstance{makeMaterial(Rgb(0.2F, 0.8F, 0.2F), 0.5F), glm::mat4(1.0F), ""});
+    instances.push_back(MeshInstance{makeMaterial(Rgb(0.2F, 0.2F, 0.8F), 0.8F), glm::mat4(1.0F), ""});
+    instances.push_back(MeshInstance{makeMaterial(Rgb(0.8F, 0.8F, 0.2F), 1.0F), glm::mat4(1.0F), ""});
 
     // Once outside the timed loop, as the app does at load: the measured cost is testing the boxes' edges, not deriving them.
     const std::vector<AabbBounds> instanceBounds =

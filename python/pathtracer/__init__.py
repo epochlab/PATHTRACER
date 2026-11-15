@@ -154,10 +154,10 @@ def lattice_preview(image: np.ndarray, camera: Camera, *, scale: int = 8) -> np.
     return out
 
 
-# Index-parallel with PT_LENS_* in _ffi.py and LensProjection in scene/lens.h: the projection names Camera.lens accepts.
+# Index-parallel with PT_LENS_* in pathtracer_c.h and LensProjection in scene/lens.h: the projection names Camera.lens accepts.
 LENS_PROJECTIONS = ("rectilinear", "fisheye_polynomial", "omnidirectional")
 
-# Index-parallel with PT_LATTICE_* in _ffi.py and PixelLattice in gfx/pixel_lattice.h: the names Camera.pixel_lattice accepts.
+# Index-parallel with PT_LATTICE_* in pathtracer_c.h and PixelLattice in gfx/pixel_lattice.h: the names Camera.pixel_lattice accepts.
 PIXEL_LATTICES = ("square", "hexagonal")
 
 

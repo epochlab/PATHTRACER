@@ -6,8 +6,8 @@
 #include <stdexcept>
 #include <vector>
 
-#include "pathtracer/scene/cie.h"
 #include "pathtracer/scene/path_trace_driver.h"
+#include "pathtracer/scene/rgb.h"
 
 namespace pathtracer::debug {
 
@@ -24,14 +24,13 @@ using pathtracer::scene::ThreadPool;
 }  // namespace
 
 HdrImage luminanceAov(const HdrImage& beauty, ThreadPool& threadPool) {
-    const glm::vec3 weights = pathtracer::scene::cie::sceneLuminanceWeights();
     HdrImage out = makeAovImage(AovId::Luminance, beauty.width, beauty.height);
     threadPool.parallelFor(beauty.height, [&](int y) {
         const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(beauty.width);
         for (int x = 0; x < beauty.width; ++x) {
             const std::size_t texel = (row + static_cast<std::size_t>(x)) * static_cast<std::size_t>(beauty.channels);
-            out.texels[row + static_cast<std::size_t>(x)] = (beauty.texels[texel] * weights.r) + (beauty.texels[texel + 1] * weights.g) +
-                                                            (beauty.texels[texel + 2] * weights.b);
+            out.texels[row + static_cast<std::size_t>(x)] =
+                pathtracer::scene::luminance({beauty.texels[texel], beauty.texels[texel + 1], beauty.texels[texel + 2]});
         }
     });
     return out;
@@ -94,6 +93,9 @@ HdrImage snrAov(int width, int height, const float* replicateLuminance, int repl
     return out;
 }
 
+namespace {
+
+// Each texel's pass count as a float, the samples its estimate averages; null counts, before any pass, read zero.
 HdrImage sampleCountAov(int width, int height, const int* texelSamples, ThreadPool& threadPool) {
     HdrImage out = makeAovImage(AovId::SampleCount, width, height);
     if (texelSamples == nullptr) {
@@ -108,6 +110,7 @@ HdrImage sampleCountAov(int width, int height, const int* texelSamples, ThreadPo
     return out;
 }
 
+// 1 - direct luminance / unoccluded direct luminance at the primary vertex, as a ratio of means; 0 where no direct light arrives.
 HdrImage shadowAov(const HdrImage& lost, const HdrImage& unoccluded, ThreadPool& threadPool) {
     HdrImage out = makeAovImage(AovId::Shadow, lost.width, lost.height);
     threadPool.parallelFor(lost.height, [&](int y) {
@@ -120,6 +123,8 @@ HdrImage shadowAov(const HdrImage& lost, const HdrImage& unoccluded, ThreadPool&
     });
     return out;
 }
+
+}  // namespace
 
 HdrImage evaluateFilterAov(AovId aov, const FilterInput& input, ThreadPool& threadPool) {
     switch (aov) {

@@ -87,19 +87,6 @@ std::optional<std::string> ShaderProgram::readSource(const std::string& path) {
     return contents.str();
 }
 
-std::optional<ShaderProgram> ShaderProgram::loadFromFiles(const std::string& vertPath,
-                                                           const std::string& fragPath) {
-    const auto vertSrc = readSource(vertPath);
-    if (!vertSrc) {
-        return std::nullopt;
-    }
-    const auto fragSrc = readSource(fragPath);
-    if (!fragSrc) {
-        return std::nullopt;
-    }
-    return loadFromSource(*vertSrc, *fragSrc);
-}
-
 ShaderProgram::ShaderProgram(unsigned int program) : program_(program) {}
 
 ShaderProgram::~ShaderProgram() {

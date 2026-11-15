@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
-#include <fstream>
 #include <iterator>
 #include <iostream>
 
@@ -257,21 +256,6 @@ bool validPathTracer(const PathTracerConfig& pathTracer, const std::string& path
     return true;
 }
 
-// The whole file as JSON; nullopt and a stderr log naming it if missing, unreadable or unparseable.
-std::optional<nlohmann::json> readJson(const std::string& path) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file) {
-        std::cerr << "loadProfileConfig: could not read " << path << '\n';
-        return std::nullopt;
-    }
-    try {
-        return nlohmann::json::parse(file);
-    } catch (const nlohmann::json::exception& e) {
-        std::cerr << "loadProfileConfig: " << path << ": " << e.what() << '\n';
-        return std::nullopt;
-    }
-}
-
 // Only keys the base has, kind for kind (an unknown key merges unread, a null deletes one); the base's nesting bounds the recursion.
 
 // NOLINTNEXTLINE(misc-no-recursion)
@@ -353,12 +337,12 @@ bool validCounts(const RenderConfig& render, const PathTracerConfig& pathTracer,
 
 // Reads every block before any range check, so a file with several faults reports the first in read order, then in check order.
 std::optional<ProfileConfig> loadProfileConfig(const std::string& path, const std::optional<std::string>& overridePath) {
-    std::optional<nlohmann::json> j = readJson(path);
+    std::optional<nlohmann::json> j = readJson(path, "loadProfileConfig");
     if (!j) {
         return std::nullopt;
     }
     if (overridePath) {
-        const std::optional<nlohmann::json> patch = readJson(*overridePath);
+        const std::optional<nlohmann::json> patch = readJson(*overridePath, "loadProfileConfig");
         if (!patch || !validOverride(*j, *patch, "", *overridePath)) {
             return std::nullopt;
         }
@@ -414,15 +398,12 @@ std::optional<ProfileConfig> loadPreset(const std::string& assetRoot, const std:
 
 std::optional<std::vector<pathtracer::scene::Camera::FilmBackPreset>> loadFilmBackPresets(
     const std::string& path) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file) {
-        std::cerr << "loadFilmBackPresets: could not read " << path << '\n';
+    const std::optional<nlohmann::json> parsed = readJson(path, "loadFilmBackPresets");
+    if (!parsed) {
         return std::nullopt;
     }
-
     try {
-        nlohmann::json j;
-        file >> j;
+        const nlohmann::json& j = *parsed;
 
         std::vector<pathtracer::scene::Camera::FilmBackPreset> presets;
         presets.reserve(j.size());

@@ -104,13 +104,15 @@ struct DriverFixture {
     EnvironmentMap environment = tools::fixtures::makeUniformEnvironment();
     pathtracer::scene::VolumeSet volumes;  // none: these checks are of the driver, not of media
     std::optional<PathTraceDriver> driver;
-    pathtracer::scene::ThreadPool pool;
+    pathtracer::scene::ThreadPool pool;  // the oracle's, sized from the runner's --threads as ctest budgets it
+
+    explicit DriverFixture(int threads) : pool(static_cast<unsigned int>(threads)) {}
 
     [[nodiscard]] bool valid() const { return accel.has_value() && driver.has_value(); }
 };
 
-std::unique_ptr<DriverFixture> makeFixture() {
-    auto fixture = std::make_unique<DriverFixture>();
+std::unique_ptr<DriverFixture> makeFixture(int threads) {
+    auto fixture = std::make_unique<DriverFixture>(threads);
     TestScene& scene = fixture->scene;
     // Every image must vary across passes or the running-mean check is blind to it: the floor ends mid-frame, so Alpha varies there.
     pushQuad(scene,
@@ -283,7 +285,7 @@ OracleMean oracleBatchMean(DriverFixture& fixture, const Camera& camera, int pas
 
 // A task that throws must not strand parallelFor on its worker count. The pool stays usable afterwards, the dispatch being what failed.
 PT_CHECK(thread_pool_rethrows_and_stays_usable, Fast, Exact) {
-    pathtracer::scene::ThreadPool pool;
+    pathtracer::scene::ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
     ctx.plan(3);
 
     bool rethrown = false;
@@ -317,7 +319,7 @@ PT_CHECK(thread_pool_rethrows_and_stays_usable, Fast, Exact) {
 PT_CHECK(running_mean_matches_batch_mean, Slow, Exact) {
     constexpr int kPasses = 8;
     ctx.plan(3);
-    std::unique_ptr<DriverFixture> fixture = makeFixture();
+    std::unique_ptr<DriverFixture> fixture = makeFixture(ctx.threads());
     if (!fixture->valid()) {
         for (int i = 0; i < 3; ++i) {
             PT_EXPECT(ctx, false, "scene/driver construction failed");
@@ -380,7 +382,7 @@ PT_CHECK(running_mean_matches_batch_mean, Slow, Exact) {
 PT_CHECK(in_place_fold_is_bit_identical_to_driver, Slow, Exact) {
     constexpr int kPasses = 8;
     ctx.plan(2);
-    std::unique_ptr<DriverFixture> fixture = makeFixture();
+    std::unique_ptr<DriverFixture> fixture = makeFixture(ctx.threads());
     if (!fixture->valid()) {
         for (int i = 0; i < 2; ++i) {
             PT_EXPECT(ctx, false, "scene/driver construction failed");
@@ -425,7 +427,7 @@ PT_CHECK(in_place_fold_is_bit_identical_to_driver, Slow, Exact) {
 // A driver holding sampleBase at 0 publishes the mean of N identical passes (sampler.h); pinned at samplesPerPixel = 1, bit-identical.
 PT_CHECK(first_pass_is_bit_identical_to_oracle, Slow, Exact) {
     ctx.plan(1);
-    std::unique_ptr<DriverFixture> fixture = makeFixture();
+    std::unique_ptr<DriverFixture> fixture = makeFixture(ctx.threads());
     if (!fixture->valid()) {
         PT_EXPECT(ctx, false, "scene/driver construction failed");
         return;
@@ -457,7 +459,7 @@ PT_CHECK(first_pass_is_bit_identical_to_oracle, Slow, Exact) {
 PT_CHECK(sample_cap_is_respected, Slow, Exact) {
     constexpr int kCap = 4;
     ctx.plan(1);
-    std::unique_ptr<DriverFixture> fixture = makeFixture();
+    std::unique_ptr<DriverFixture> fixture = makeFixture(ctx.threads());
     if (!fixture->valid()) {
         PT_EXPECT(ctx, false, "scene/driver construction failed");
         return;
@@ -479,7 +481,7 @@ PT_CHECK(sample_cap_is_respected, Slow, Exact) {
 PT_CHECK(texel_samples_count_every_pass, Slow, Exact) {
     constexpr int kPasses = 6;
     ctx.plan(1);
-    std::unique_ptr<DriverFixture> fixture = makeFixture();
+    std::unique_ptr<DriverFixture> fixture = makeFixture(ctx.threads());
     if (!fixture->valid()) {
         PT_EXPECT(ctx, false, "scene/driver construction failed");
         return;
@@ -499,7 +501,7 @@ PT_CHECK(texel_samples_count_every_pass, Slow, Exact) {
 PT_CHECK(request_generation_labels_its_passes, Slow, Exact) {
     constexpr int kCap = 3;
     ctx.plan(2);
-    std::unique_ptr<DriverFixture> fixture = makeFixture();
+    std::unique_ptr<DriverFixture> fixture = makeFixture(ctx.threads());
     if (!fixture->valid()) {
         PT_EXPECT(ctx, false, "scene/driver construction failed");
         PT_EXPECT(ctx, false, "scene/driver construction failed");
@@ -519,7 +521,7 @@ PT_CHECK(request_generation_labels_its_passes, Slow, Exact) {
 PT_CHECK(every_pass_record_is_taken_once_in_order, Slow, Exact) {
     constexpr int kCap = 12;
     ctx.plan(2);
-    std::unique_ptr<DriverFixture> fixture = makeFixture();
+    std::unique_ptr<DriverFixture> fixture = makeFixture(ctx.threads());
     if (!fixture->valid()) {
         PT_EXPECT(ctx, false, "scene/driver construction failed");
         PT_EXPECT(ctx, false, "scene/driver construction failed");
@@ -544,7 +546,7 @@ PT_CHECK(every_pass_record_is_taken_once_in_order, Slow, Exact) {
 // A new request must RESTART accumulation, never mix camera poses; pins the bump-implies-engaged-request invariant 16 suppressions rest on.
 PT_CHECK(new_request_restarts_accumulation, Slow, Exact) {
     ctx.plan(2);
-    std::unique_ptr<DriverFixture> fixture = makeFixture();
+    std::unique_ptr<DriverFixture> fixture = makeFixture(ctx.threads());
     if (!fixture->valid()) {
         PT_EXPECT(ctx, false, "scene/driver construction failed");
         PT_EXPECT(ctx, false, "scene/driver construction failed");
@@ -574,7 +576,7 @@ PT_CHECK(new_request_restarts_accumulation, Slow, Exact) {
 // Suspension parks the driver for a G-buffer AOV: the generation is the scramble seed, so bumping it to cancel would restart the image.
 PT_CHECK(suspension_halts_and_resumes, Slow, Exact) {
     ctx.plan(3);
-    std::unique_ptr<DriverFixture> fixture = makeFixture();
+    std::unique_ptr<DriverFixture> fixture = makeFixture(ctx.threads());
     if (!fixture->valid()) {
         PT_EXPECT(ctx, false, "scene/driver construction failed");
         PT_EXPECT(ctx, false, "scene/driver construction failed");
@@ -617,8 +619,8 @@ PT_CHECK(suspension_halts_and_resumes, Slow, Exact) {
 PT_CHECK(suspension_preserves_the_accumulation_exactly, Slow, Exact) {
     ctx.plan(1);
     constexpr int kSamples = 6;
-    std::unique_ptr<DriverFixture> reference = makeFixture();
-    std::unique_ptr<DriverFixture> parked = makeFixture();
+    std::unique_ptr<DriverFixture> reference = makeFixture(ctx.threads());
+    std::unique_ptr<DriverFixture> parked = makeFixture(ctx.threads());
     if (!reference->valid() || !parked->valid()) {
         PT_EXPECT(ctx, false, "scene/driver construction failed");
         return;
@@ -664,7 +666,7 @@ PT_CHECK(suspension_preserves_the_accumulation_exactly, Slow, Exact) {
 // Three pooled images, two driver-held and one for the reader: acquireFreeBuffer must STALL rather than recycle a held result.
 PT_CHECK(published_results_are_not_overwritten, Slow, Exact) {
     ctx.plan(1);
-    std::unique_ptr<DriverFixture> fixture = makeFixture();
+    std::unique_ptr<DriverFixture> fixture = makeFixture(ctx.threads());
     if (!fixture->valid()) {
         PT_EXPECT(ctx, false, "scene/driver construction failed");
         return;
@@ -696,7 +698,7 @@ PT_CHECK(published_results_are_not_overwritten, Slow, Exact) {
 // The over-range histogram is a parallel reduction with a serial definition, recomputed single-threaded from the published image.
 PT_CHECK(over_range_stats_match_serial_scan, Slow, Exact) {
     ctx.plan(4);
-    std::unique_ptr<DriverFixture> fixture = makeFixture();
+    std::unique_ptr<DriverFixture> fixture = makeFixture(ctx.threads());
     if (!fixture->valid()) {
         for (int i = 0; i < 4; ++i) {
             PT_EXPECT(ctx, false, "scene/driver construction failed");
@@ -769,7 +771,7 @@ PT_CHECK(chunk_length_bounds_the_unit_and_fills_the_pool, Fast, Exact) {
 // Untraced texels are left as they were and traced ones match the full render: a subset pass is the full pass, restricted.
 PT_CHECK(render_of_a_texel_subset_is_the_full_render_restricted, Slow, Exact) {
     ctx.plan(2);
-    std::unique_ptr<DriverFixture> fixture = makeFixture();
+    std::unique_ptr<DriverFixture> fixture = makeFixture(ctx.threads());
     if (!fixture->valid()) {
         PT_EXPECT(ctx, false, "scene construction failed");
         return;
@@ -817,7 +819,7 @@ PT_CHECK(render_of_a_texel_subset_is_the_full_render_restricted, Slow, Exact) {
 // The load-bearing property of a list-derived chunk length: it partitions the work, it must not change the result.
 PT_CHECK(render_is_invariant_to_chunk_length, Slow, Exact) {
     ctx.plan(2);
-    std::unique_ptr<DriverFixture> fixture = makeFixture();
+    std::unique_ptr<DriverFixture> fixture = makeFixture(ctx.threads());
     if (!fixture->valid()) {
         PT_EXPECT(ctx, false, "scene construction failed");
         return;
@@ -862,7 +864,7 @@ PT_CHECK(render_is_invariant_to_chunk_length, Slow, Exact) {
 // Thread-count invariance on renderPathTraced (the pool is private): bit-identical, as chunks are owned outright and sample order is fixed.
 PT_CHECK(render_is_invariant_to_thread_count, Slow, Exact) {
     ctx.plan(1);
-    std::unique_ptr<DriverFixture> fixture = makeFixture();
+    std::unique_ptr<DriverFixture> fixture = makeFixture(ctx.threads());
     if (!fixture->valid()) {
         PT_EXPECT(ctx, false, "scene construction failed");
         return;
@@ -902,7 +904,7 @@ PT_CHECK(render_is_invariant_to_thread_count, Slow, Exact) {
 PT_CHECK(replicate_means_match_batch_means, Slow, Exact) {
     constexpr int kPasses = 8;
     ctx.plan(3);
-    std::unique_ptr<DriverFixture> fixture = makeFixture();
+    std::unique_ptr<DriverFixture> fixture = makeFixture(ctx.threads());
     if (!fixture->valid()) {
         for (int i = 0; i < 3; ++i) {
             PT_EXPECT(ctx, false, "scene/driver construction failed");
@@ -1018,7 +1020,7 @@ int parkAfter(PathTraceDriver& driver, std::uint64_t generation, int passes) {
 // Offline folds every pass but publishes none before the last: parked mid-accumulation, passes have run and nothing is on screen.
 PT_CHECK(offline_publishes_nothing_mid_accumulation, Slow, Exact) {
     ctx.plan(1);
-    std::unique_ptr<DriverFixture> fixture = makeFixture();
+    std::unique_ptr<DriverFixture> fixture = makeFixture(ctx.threads());
     if (!fixture->valid()) {
         PT_EXPECT(ctx, false, "scene/driver construction failed");
         return;
@@ -1036,7 +1038,7 @@ PT_CHECK(offline_publishes_nothing_mid_accumulation, Slow, Exact) {
 // The finished frame stays on screen while the next accumulation runs, and only it: a new request does not clear the hold.
 PT_CHECK(offline_holds_the_previous_frame_until_the_next_finishes, Slow, Exact) {
     ctx.plan(2);
-    std::unique_ptr<DriverFixture> fixture = makeFixture();
+    std::unique_ptr<DriverFixture> fixture = makeFixture(ctx.threads());
     if (!fixture->valid()) {
         PT_EXPECT(ctx, false, "scene/driver construction failed");
         PT_EXPECT(ctx, false, "scene/driver construction failed");
@@ -1057,7 +1059,7 @@ PT_CHECK(offline_holds_the_previous_frame_until_the_next_finishes, Slow, Exact) 
 // The mode is no part of the request: a switch either way neither restarts the accumulation nor loses a pass, it gates the next publish.
 PT_CHECK(render_mode_switch_keeps_the_accumulation, Slow, Exact) {
     ctx.plan(3);
-    std::unique_ptr<DriverFixture> fixture = makeFixture();
+    std::unique_ptr<DriverFixture> fixture = makeFixture(ctx.threads());
     if (!fixture->valid()) {
         for (int i = 0; i < 3; ++i) {
             PT_EXPECT(ctx, false, "scene/driver construction failed");
@@ -1161,7 +1163,7 @@ PT_CHECK(adaptive_driver_matches_the_sequential_fold, Slow, Exact) {
     // Uniform, then foveated steeply enough that the 8-texel frame's 3.4-degree texels pool off-centre.
     constexpr std::array<float, 2> kMarSlopes{0.0F, 1.0F};
     ctx.plan(static_cast<int>(kMarSlopes.size()) * 4 + 1);
-    std::unique_ptr<DriverFixture> fixture = makeFixture();
+    std::unique_ptr<DriverFixture> fixture = makeFixture(ctx.threads());
     if (!fixture->valid()) {
         for (int i = 0; i < static_cast<int>(kMarSlopes.size()) * 4 + 1; ++i) {
             PT_EXPECT(ctx, false, "scene/driver construction failed");
@@ -1230,7 +1232,7 @@ PT_CHECK(adaptive_driver_matches_the_sequential_fold, Slow, Exact) {
 // Once every texel has stopped there is no pass left to run, so the driver idles below its cap and says so in its records.
 PT_CHECK(adaptive_driver_idles_once_every_texel_stops, Slow, Exact) {
     ctx.plan(2);
-    std::unique_ptr<DriverFixture> fixture = makeFixture();
+    std::unique_ptr<DriverFixture> fixture = makeFixture(ctx.threads());
     if (!fixture->valid()) {
         PT_EXPECT(ctx, false, "scene/driver construction failed");
         PT_EXPECT(ctx, false, "scene/driver construction failed");
@@ -1259,8 +1261,8 @@ PT_CHECK(offline_final_frame_is_bit_identical_to_progressive, Slow, Exact) {
     // The threshold the sequential-fold check uses, so texels stop at several checkpoints and the carry path is exercised.
     constexpr float kThreshold = 0.5F;
     ctx.plan(2);
-    std::unique_ptr<DriverFixture> progressive = makeFixture();
-    std::unique_ptr<DriverFixture> offline = makeFixture();
+    std::unique_ptr<DriverFixture> progressive = makeFixture(ctx.threads());
+    std::unique_ptr<DriverFixture> offline = makeFixture(ctx.threads());
     if (!progressive->valid() || !offline->valid()) {
         PT_EXPECT(ctx, false, "scene/driver construction failed");
         PT_EXPECT(ctx, false, "scene/driver construction failed");
@@ -1296,7 +1298,7 @@ PT_CHECK(offline_final_frame_is_bit_identical_to_progressive, Slow, Exact) {
 // Offline finishes on adaptive stopping as on the cap: with every texel retired at the first checkpoint, that pass is published.
 PT_CHECK(offline_publishes_once_adaptive_stops_every_texel, Slow, Exact) {
     ctx.plan(1);
-    std::unique_ptr<DriverFixture> fixture = makeFixture();
+    std::unique_ptr<DriverFixture> fixture = makeFixture(ctx.threads());
     if (!fixture->valid()) {
         PT_EXPECT(ctx, false, "scene/driver construction failed");
         return;

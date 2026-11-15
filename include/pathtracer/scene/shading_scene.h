@@ -5,6 +5,7 @@
 #include <glm/glm.hpp>
 
 #include "pathtracer/scene/ray_types.h"
+#include "pathtracer/scene/rgb.h"
 
 namespace pathtracer::scene {
 
@@ -19,7 +20,7 @@ struct ShadingVertex {
     glm::vec3 normal;
     glm::vec2 uv;
     glm::vec4 tangent;              // xyz = tangent, w = bitangent handedness (glTF convention)
-    glm::vec3 colour = glm::vec3(1.0F);  // COLOR_0, multiplies baseColor; white = no vertex tint
+    Rgb colour = Rgb(1.0F);              // COLOR_0, multiplies baseColor; white = no vertex tint
 };
 
 // Indexed identically to the world-space Triangle list (ray_types.h) -- Hit::triangleIndex resolves directly into this.

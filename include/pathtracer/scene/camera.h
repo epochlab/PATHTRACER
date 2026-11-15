@@ -82,9 +82,6 @@ public:
     [[nodiscard]] ViewBasis viewBasis(float aspect) const;
 
     // Ray for ndc in [-1,1] (+Y up), tMin/tMax nearClip()/farClip(); nullopt outside a fisheye's circle. The lat-long is 2-periodic in x.
-    [[nodiscard]] std::optional<Ray> primaryRay(float ndcX, float ndcY, float aspect) const;
-
-    // Same ray from a basis the caller already built; the aspect-taking overload rebuilds the rotation's three sines and cosines per call.
     [[nodiscard]] std::optional<Ray> primaryRay(const ViewBasis& basis, float ndcX, float ndcY) const;
 
     // A primary ray and its exact differential (Igehy 1999): columns d(dir)/d(ndcX), d(dir)/d(ndcY) of the unit direction.

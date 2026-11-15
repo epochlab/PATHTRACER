@@ -11,11 +11,11 @@ namespace pathtracer::scene {
 [[nodiscard]] glm::mat3 toAzimuthFrame(const glm::vec3& w);
 
 // The slab at wo for single-scattering albedo rho and base_diffuse_roughness r, its sampling state precomputed; wo.z >= 0.
-[[nodiscard]] DiffuseSlab makeDiffuseSlab(const glm::vec3& rho, float r, const glm::vec3& wo);
+[[nodiscard]] DiffuseSlab makeDiffuseSlab(const Rgb& rho, float r, const glm::vec3& wo);
 
 // Cosine-weighted EON value at wi and the density of the slab's one-sample MIS sampler there; zero below the surface.
 struct DiffuseEval {
-    glm::vec3 value;
+    Rgb value;
     float pdf;
 };
 [[nodiscard]] DiffuseEval evaluateDiffuse(const DiffuseSlab& slab, const glm::vec3& wo, const glm::vec3& wi);

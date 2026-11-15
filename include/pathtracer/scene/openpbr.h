@@ -7,6 +7,7 @@
 #include <glm/glm.hpp>
 
 #include "pathtracer/gfx/hdr_image.h"
+#include "pathtracer/scene/rgb.h"
 
 namespace pathtracer::scene {
 
@@ -34,37 +35,37 @@ using Constant = T;
 template <template <typename> typename In>
 struct OpenPbrInputs {
     In<float> baseWeight = 1.0F;
-    In<glm::vec3> baseColor = glm::vec3(0.8F);
+    In<Rgb> baseColor = Rgb(0.8F);
     In<float> baseMetalness = 0.0F;
     In<float> baseDiffuseRoughness = 0.0F;
     In<float> specularWeight = 1.0F;
-    In<glm::vec3> specularColor = glm::vec3(1.0F);
+    In<Rgb> specularColor = Rgb(1.0F);
     In<float> specularRoughness = 0.3F;
     In<float> specularRoughnessAnisotropy = 0.0F;
     In<float> specularIor = 1.5F;
     In<float> transmissionWeight = 0.0F;
-    In<glm::vec3> transmissionColor = glm::vec3(1.0F);
+    In<Rgb> transmissionColor = Rgb(1.0F);
     In<float> transmissionDepth = 0.0F;
-    In<glm::vec3> transmissionScatter = glm::vec3(0.0F);
+    In<Rgb> transmissionScatter = Rgb(0.0F);
     In<float> transmissionScatterAnisotropy = 0.0F;
     In<float> transmissionDispersionScale = 0.0F;
     In<float> transmissionDispersionAbbeNumber = 20.0F;
     In<float> subsurfaceWeight = 0.0F;
-    In<glm::vec3> subsurfaceColor = glm::vec3(0.8F);
+    In<Rgb> subsurfaceColor = Rgb(0.8F);
     In<float> subsurfaceRadius = 1.0F;
-    In<glm::vec3> subsurfaceRadiusScale = glm::vec3(1.0F, 0.5F, 0.25F);
+    In<Rgb> subsurfaceRadiusScale = Rgb(1.0F, 0.5F, 0.25F);
     In<float> subsurfaceScatterAnisotropy = 0.0F;
     In<float> coatWeight = 0.0F;
-    In<glm::vec3> coatColor = glm::vec3(1.0F);
+    In<Rgb> coatColor = Rgb(1.0F);
     In<float> coatRoughness = 0.0F;
     In<float> coatRoughnessAnisotropy = 0.0F;
     In<float> coatIor = 1.6F;
     In<float> coatDarkening = 1.0F;
     In<float> fuzzWeight = 0.0F;
-    In<glm::vec3> fuzzColor = glm::vec3(1.0F);
+    In<Rgb> fuzzColor = Rgb(1.0F);
     In<float> fuzzRoughness = 0.5F;
     In<float> emissionLuminance = 0.0F;
-    In<glm::vec3> emissionColor = glm::vec3(1.0F);
+    In<Rgb> emissionColor = Rgb(1.0F);
     In<float> thinFilmWeight = 0.0F;
     In<float> thinFilmThickness = 0.5F;
     In<float> thinFilmIor = 1.4F;
