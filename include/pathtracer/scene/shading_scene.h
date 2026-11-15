@@ -33,8 +33,11 @@ struct ShadingTriangle {
 // Barycentric interpolation (u/v = Hit's Moller-Trumbore convention, w=1-u-v on v0); normal/tangent renormalized after blending.
 [[nodiscard]] ShadingVertex interpolateShading(const ShadingTriangle& tri, float u, float v);
 
-// Ray origin past the hit's rounding-error bound along unit geoNormal (PBR 4e 6.8.6), then Chiang's terminator lift; tMin 0 suffices.
+// Ray origin past the hit's rounding-error bound along unit geoNormal (PBR 4e 6.8.6), then Hanika's terminator lift; tMin 0 suffices.
 [[nodiscard]] glm::vec3 spawnOrigin(const ShadingTriangle& tri, float u, float v, const glm::vec3& geoNormal, bool normalSide);
+
+// normal unchanged where wo lies above it and its mirror above the face; else bent until the mirror meets the face (Keller et al. 2017).
+[[nodiscard]] glm::vec3 viewAdaptedNormal(const glm::vec3& normal, const glm::vec3& geoNormal, const glm::vec3& wo);
 
 // True for the inverted box computeInstanceBounds leaves on an instance with no triangles: a min/max identity, not a sentinel.
 [[nodiscard]] bool isEmpty(const AabbBounds& box);

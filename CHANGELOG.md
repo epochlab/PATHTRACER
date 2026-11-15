@@ -3,6 +3,49 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Black edges on scanned geometry
+
+Scanned meshes rendered black slivers along ridges and creases, and black blobs. The new `sandstone.json` scene (a 576 m,
+2M-triangle Megascans terrain) shows them in close-up. Every pixel of six close-ups was traced back to its triangle, which
+separated three causes.
+
+- fix: **folded vertex normals (most of the black).** On a fold the triangle faces the camera, but its interpolated normal
+  points away. The BSDF's microsurface stands on that normal, so it saw the viewer from below and returned almost nothing.
+  `viewAdaptedNormal` bends such a normal with Keller et al. 2017's shading-normal adaptation, until the view's mirror lies
+  on the face's horizon.
+  - The bend is worked out on the viewer's side of the face, so a back-face view keeps the normal on the face's side, as a
+    dielectric's medium rule needs.
+  - A normal that is already valid is returned unchanged, bit for bit.
+  - It is applied at the path vertex, the shadow pass-through and the G-buffer.
+- fix: **normal-map texels below their tangent plane (the blobs).** These are bake errors: 31,992 texels of the terrain's
+  map. Schussler's microsurface has no facet for them, so the BSDF was zero. Such a texel now leaves the normal unperturbed.
+- fix: **the terminator lift (the roadmap item, minor here).** The lift is Hanika 2021's, not Chiang, Li & Burley 2019's
+  as cited before.
+  - It is now a height along the face normal, Sum b_i max(0, below_i) n_i . side, clamped at 0.
+  - A folded n_i can no longer sink the origin; on the raw terrain it did so at 1,704 triangle centroids.
+  - The lift no longer slides the origin under a neighbouring triangle; before, its sideways share reached 100%.
+  - Each term is at most |p - p_i| / 2. The lift only adds to the rounding bound, so pbrt's argument holds unchanged.
+- test:
+  - `view_adapted_normal_is_identity_where_valid_and_bends_onto_the_horizon`: exact, 65,536 cases. The bound on the bent
+    mirror carries both normalisations' conditioning.
+  - `folded_shading_normal_is_lit`: an open white plane renders the clipped-cosine integral (1 + n' . Ng) / 2.
+  - `normal_mapped_furnace` gains a below-plane texel.
+  - `spawn_origin_clears_its_plane` gains folded and random vertex normals, and checks that the origin stays on the face
+    normal.
+  - Each fix, reverted, fails its check (`mutations.txt`).
+- note: the six close-ups go from 1-291 exact-black pixels each to 0. The folded regions rise from 5-44% of the view's
+  median to 76-108%; unaffected pixels move at most 0.3%.
+  - macbeth, cloud and 2AFC are bit-identical.
+  - cornell, cornell_sss and rough-glass cornell move under 0.03%, against seed noise of 0.12-0.20%.
+  - The stump, also a scan, gains 0.49% on its creases.
+  - Render cost is unchanged: paired pass time fix/main is 0.98 [0.90, 1.07] on cornell and 0.99 [0.89, 1.10] on sandstone
+    (n = 10, proxy).
+- note: `bsdf.normal_map_sampling_matches_evaluation` fails identically on `main`; it is the open "Normal-map noise" item.
+- docs: roadmap regrouped, with an "On hold" table.
+
+Evidence is in `results/displacement_bounds`: before/after mosaics, `evidence_*.json`, `mutations.sh`, `bench_*.txt` and
+`diagnose.py`.
+
 ## Kelvin light keys and CIE daylight
 
 Scene lights are now authored in units, as the environment's `lux` and the lights' `lumens` already were: `temperature` is

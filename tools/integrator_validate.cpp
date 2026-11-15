@@ -1741,22 +1741,35 @@ PT_CHECK(spawn_origin_clears_its_plane, Fast, Exact) {
     unitTriangles.insert(unitTriangles.end(), coarse.begin(), coarse.end());
     // A sliver 1e4 times longer than high, its vertex normals tilted 17 degrees apart so the terminator lift is live on either side.
     const glm::vec4 tangent(1.0F, 0.0F, 0.0F, 1.0F);
-    const auto sliverVertex = [&](glm::vec3 position, glm::vec3 normal) {
+    const auto vertexAt = [&](glm::vec3 position, glm::vec3 normal) {
         return ShadingVertex{position, glm::normalize(normal), glm::vec2(0.0F), tangent};
     };
-    unitTriangles.push_back(ShadingTriangle{sliverVertex({0.0F, 0.0F, 0.0F}, {-0.3F, 0.0F, 1.0F}),
-                                            sliverVertex({1.0F, 0.0F, 0.0F}, {0.3F, 0.0F, 1.0F}),
-                                            sliverVertex({0.5F, 1e-4F, 0.0F}, {0.0F, 0.3F, 1.0F}), 0});
+    unitTriangles.push_back(ShadingTriangle{vertexAt({0.0F, 0.0F, 0.0F}, {-0.3F, 0.0F, 1.0F}),
+                                            vertexAt({1.0F, 0.0F, 0.0F}, {0.3F, 0.0F, 1.0F}),
+                                            vertexAt({0.5F, 1e-4F, 0.0F}, {0.0F, 0.3F, 1.0F}), 0});
+    // Scan folds: vertex normals behind the face and in its plane, which sank the old lift's origin and slid it under neighbours.
+    unitTriangles.push_back(ShadingTriangle{vertexAt({0.0F, 0.0F, 0.0F}, {0.3F, 0.0F, -1.0F}),
+                                            vertexAt({1.0F, 0.0F, 0.0F}, {-1.0F, 0.0F, 0.0F}),
+                                            vertexAt({0.3F, 1.0F, 0.0F}, {0.0F, -1.0F, 0.2F}), 0});
+    std::mt19937_64 rng(ctx.subSeed("barycentrics"));
+    std::uniform_real_distribution<float> unit(0.0F, 1.0F);
+    std::normal_distribution<float> gauss;
+    // Random triangles with vertex normals uniform over the sphere: every relation of n_i to the face, folded ones half the time.
+    const auto sphereDirection = [&] { return glm::vec3(gauss(rng), gauss(rng), gauss(rng)); };
+    for (int t = 0; t < 64; ++t) {
+        const ShadingVertex a = vertexAt(sphereDirection(), sphereDirection());
+        const ShadingVertex b = vertexAt(sphereDirection(), sphereDirection());
+        unitTriangles.push_back(ShadingTriangle{a, b, vertexAt(sphereDirection(), sphereDirection()), 0});
+    }
 
     // Powers of two scale exactly; the translations are not representable sums, so every vertex rounds.
     const std::array<int, 5> exponents = {-20, -10, 0, 10, 20};
     const std::array<glm::vec3, 2> translations = {glm::vec3(0.0F), glm::vec3(1000.37F, -73.1F, 4.9e3F)};
-    std::mt19937_64 rng(ctx.subSeed("barycentrics"));
-    std::uniform_real_distribution<float> unit(0.0F, 1.0F);
 
     std::uint64_t spawned = 0;
     std::uint64_t wrongSide = 0;
     std::uint64_t overshoot = 0;
+    std::uint64_t offPrism = 0;
     double worstRatio = 0.0;
     for (int exponent : exponents) {
         const float scale = std::ldexp(1.0F, exponent);
@@ -1767,6 +1780,7 @@ PT_CHECK(spawn_origin_clears_its_plane, Fast, Exact) {
                     vertex->position = (vertex->position * scale) + (translation * scale);
                 }
                 const glm::vec3 geoNormal = pathtracer::scene::geometricNormalOf(tri);
+                const glm::dvec3 normalD = glm::normalize(glm::dvec3(geoNormal));
                 for (int s = 0; s < kSamplesPerTriangle; ++s) {
                     // The vertices and an edge midpoint, then uniform over the triangle by the square-root map.
                     const std::array<glm::vec2, 4> corners = {glm::vec2(0.0F), glm::vec2(1.0F, 0.0F), glm::vec2(0.0F, 1.0F),
@@ -1790,43 +1804,109 @@ PT_CHECK(spawn_origin_clears_its_plane, Fast, Exact) {
                     const double bound = glm::dot(glm::abs(glm::dvec3(geoNormal)), error);
                     for (bool normalSide : {true, false}) {
                         const double side = normalSide ? 1.0 : -1.0;
-                        const auto liftOf = [&](const ShadingVertex& vertex) {
-                            const double d = glm::dot(flat - glm::dvec3(vertex.position), glm::dvec3(vertex.normal));
-                            return (normalSide ? d < 0.0 : d > 0.0) ? -d * glm::dvec3(vertex.normal) : glm::dvec3(0.0);
+                        // The lift spawnOrigin adds along side: vertex i's tangent plane over a hit below it, by n_i . Ng, clamped at 0.
+                        const auto heightOf = [&](const ShadingVertex& vertex) {
+                            const glm::dvec3 normal(vertex.normal);
+                            return std::max(-side * glm::dot(flat - glm::dvec3(vertex.position), normal), 0.0) *
+                                   glm::dot(normal, glm::dvec3(geoNormal));
                         };
-                        // The lift's own float error: subtract, 3-term dot, scale, weight and 3-term sum, gamma_8 on |t_i|.|n_i| |n_i|.
-                        const auto liftErrorOf = [&](const ShadingVertex& vertex) {
+                        // Its float error: subtract, two 3-term dots, product, weight and 3-term sum, gamma_11; and the hit's error in d_i.
+                        const auto heightErrorOf = [&](const ShadingVertex& vertex) {
                             const glm::dvec3 normal = glm::abs(glm::dvec3(vertex.normal));
-                            return gamma(8) * glm::dot(glm::abs(flat - glm::dvec3(vertex.position)), normal) * normal;
+                            const double facing = std::abs(glm::dot(glm::dvec3(vertex.normal), glm::dvec3(geoNormal)));
+                            const double rounding = gamma(11) * glm::dot(glm::abs(flat - glm::dvec3(vertex.position)), normal);
+                            return (rounding + glm::dot(error, normal)) * facing;
                         };
-                        const glm::dvec3 lift = (w * liftOf(tri.v0)) + (u * liftOf(tri.v1)) + (v * liftOf(tri.v2));
-                        const glm::dvec3 liftError =
-                            (std::abs(w) * liftErrorOf(tri.v0)) + (u * liftErrorOf(tri.v1)) + (v * liftErrorOf(tri.v2));
+                        const double height = std::max((w * heightOf(tri.v0)) + (u * heightOf(tri.v1)) + (v * heightOf(tri.v2)), 0.0);
+                        const double heightError =
+                            (std::abs(w) * heightErrorOf(tri.v0)) + (u * heightErrorOf(tri.v1)) + (v * heightErrorOf(tri.v2));
                         const glm::vec3 origin = pathtracer::scene::spawnOrigin(tri, uv.x, uv.y, geoNormal, normalSide);
                         const double clearance = side * signedDistance(tri, glm::dvec3(origin));
-                        // Offset, the float hit's error, that error in the lift (|n|_1 <= sqrt 3), the lift's own, the sum and round-away.
-                        double ulps = 0.0;
+                        glm::dvec3 ulp(0.0);
                         for (int i = 0; i < 3; ++i) {
-                            ulps += std::abs(geoNormal[i]) * (std::nextafter(std::abs(origin[i]), std::numeric_limits<float>::infinity()) -
-                                                              std::abs(origin[i]));
+                            ulp[i] = std::nextafter(std::abs(origin[i]), std::numeric_limits<float>::infinity()) - std::abs(origin[i]);
                         }
-                        const double cap = (side * signedDistance(tri, flat + lift)) + ((2.0 + std::sqrt(3.0)) * bound) +
-                                           glm::dot(glm::abs(glm::dvec3(geoNormal)), liftError) + (2.0 * ulps);
+                        // Offset, the float hit's own error, the lift and its error, the sum's half ulp and the round-away's whole one.
+                        const double cap = height + (2.0 * bound) + heightError + (2.0 * glm::dot(glm::abs(glm::dvec3(geoNormal)), ulp));
+                        // Off the normal through the hit only by the hit's error, offset * side's rounding (u per component) and 1.5 ulp.
+                        const glm::dvec3 moved = glm::dvec3(origin) - flat;
+                        const double drift = glm::length(moved - (glm::dot(moved, normalD) * normalD));
+                        const double driftCap =
+                            glm::length(error) + (kUnitRoundoff * (bound + height + heightError)) + (1.5 * glm::length(ulp));
                         ++spawned;
                         wrongSide += clearance > 0.0 ? 0 : 1;
                         overshoot += clearance <= cap ? 0 : 1;
+                        offPrism += drift <= driftCap ? 0 : 1;
                         worstRatio = std::max(worstRatio, clearance / cap);
                     }
                 }
             }
         }
     }
-    std::printf("integrator_validate: %llu spawns, %llu on the wrong side, %llu past the bound, worst clearance %.3f of the cap\n",
+    std::printf("integrator_validate: %llu spawns, %llu on the wrong side, %llu past the bound, %llu off the normal, worst clearance %.3f "
+                "of the cap\n",
                 static_cast<unsigned long long>(spawned), static_cast<unsigned long long>(wrongSide),
-                static_cast<unsigned long long>(overshoot), worstRatio);
-    ctx.plan(2);
+                static_cast<unsigned long long>(overshoot), static_cast<unsigned long long>(offPrism), worstRatio);
+    ctx.plan(3);
     PT_EXPECT(ctx, wrongSide == 0, "a spawned origin sits on or behind its own face: a ray from it can re-hit the triangle it left");
     PT_EXPECT(ctx, overshoot == 0, "a spawned origin clears its face by more than its rounding bound: an absolute or curvature term");
+    PT_EXPECT(ctx, offPrism == 0, "a spawned origin slid along its face: a lift off the face normal can carry it under a neighbour");
+}
+
+// The view adaptation leaves a face's own normal bit-exact, and any other ends with wo above it, on wo's side, its mirror on the face.
+PT_CHECK(view_adapted_normal_is_identity_where_valid_and_bends_onto_the_horizon, Fast, Exact) {
+    constexpr double kUnitRoundoff = std::numeric_limits<float>::epsilon() * 0.5;
+    const auto gamma = [](int n) { return (n * kUnitRoundoff) / (1.0 - (n * kUnitRoundoff)); };
+    constexpr int kCases = 1 << 16;
+    std::mt19937_64 rng(ctx.subSeed("view adaptation"));
+    std::normal_distribution<float> gauss;
+    std::uniform_int_distribution<int> decades(-20, 20);
+    const auto direction = [&] { return glm::normalize(glm::vec3(gauss(rng), gauss(rng), gauss(rng))); };
+    std::uint64_t faceMoved = 0;
+    std::uint64_t below = 0;
+    std::uint64_t crossed = 0;
+    std::uint64_t offHorizon = 0;
+    std::uint64_t bent = 0;
+    double worstHorizon = 0.0;
+    for (int i = 0; i < kCases; ++i) {
+        const glm::vec3 geoNormal = direction();
+        const glm::vec3 normal = direction();
+        // wo at any length: the adaptation reads its direction alone.
+        const glm::vec3 wo = std::ldexp(1.0F, decades(rng)) * direction();
+        faceMoved += pathtracer::scene::viewAdaptedNormal(geoNormal, geoNormal, wo) == geoNormal ? 0 : 1;
+        const glm::vec3 adapted = pathtracer::scene::viewAdaptedNormal(normal, geoNormal, wo);
+        const double sign = glm::dot(wo, geoNormal) < 0.0F ? -1.0 : 1.0;
+        const glm::dvec3 up = sign * glm::dvec3(geoNormal);
+        const glm::dvec3 view = glm::normalize(glm::dvec3(wo));
+        const glm::dvec3 n(adapted);
+        below += sign * glm::dot(view, n) > 0.0 ? 0 : 1;
+        crossed += glm::dot(glm::dvec3(geoNormal), n) > 0.0 ? 0 : 1;
+        if (adapted != normal) {
+            ++bent;
+            // The bend normalises the mirror's horizontal part, then view + horizon: each short one amplifies the float error by 1/|it|.
+            const glm::dvec3 shading = sign * glm::dvec3(normal);
+            const glm::dvec3 mirror = (2.0 * glm::dot(view, shading) * shading) - view;
+            const glm::dvec3 horizontal = mirror - (glm::dot(mirror, up) * up);
+            const double bisector = glm::length(view + glm::normalize(horizontal));
+            // The float bend carries gamma_48 per unit through its 12 chained steps; |d(r . up)/dn| <= 4 maps it onto the mirror.
+            const glm::dvec3 shaded = sign * n;
+            const glm::dvec3 reflected = (2.0 * glm::dot(view, shaded) * shaded) - view;
+            const double tolerance = 4.0 * gamma(48) * (1.0 + (1.0 / glm::length(horizontal))) / bisector;
+            const double ratio = std::abs(glm::dot(reflected, up)) / tolerance;
+            worstHorizon = std::max(worstHorizon, ratio);
+            offHorizon += ratio <= 1.0 ? 0 : 1;
+        }
+    }
+    std::printf("integrator_validate: %d adaptations, %llu bent, %llu faces moved, %llu with wo below, %llu across the face, %llu off the "
+                "horizon (worst %.3f of its bound)\n",
+                kCases, static_cast<unsigned long long>(bent), static_cast<unsigned long long>(faceMoved),
+                static_cast<unsigned long long>(below), static_cast<unsigned long long>(crossed),
+                static_cast<unsigned long long>(offHorizon), worstHorizon);
+    ctx.plan(4);
+    PT_EXPECT(ctx, faceMoved == 0, "a face's own normal changed: flat geometry would no longer render bit-identically");
+    PT_EXPECT(ctx, below == 0, "an adapted normal leaves wo below it: the BSDF sees the viewer from inside and returns black");
+    PT_EXPECT(ctx, crossed == 0, "an adapted normal crossed to the face's far side: a dielectric would read the wrong medium");
+    PT_EXPECT(ctx, offHorizon == 0, "a bent normal's mirror of wo missed the face's horizon: not Keller's minimal bend");
 }
 
 // Rough glass sphere over a diffuse floor, both scaled by `scale`; the light is the last instance, its quad returned beside it.
@@ -2242,13 +2322,19 @@ PT_CHECK(normal_mapped_furnace, Slow, Statistical) {
     const float pitch = glm::radians(kCameraPitch);
     const Camera camera(glm::vec3(0.0F, -5.0F * std::sin(pitch), 5.0F * std::cos(pitch)), glm::vec3(kCameraPitch, 0.0F, 0.0F),
                         Camera::FilmBack{36.0F, 24.0F}, kFocalLengthMm, 0.01F, 1000.0F, 2.8F, 1.0F / 125.0F, 100.0F);
-    // Per facet direction: the centre against the sky, and no texel black in any replicate, an exact assertion.
-    ctx.plan(4);
+    struct Facet {
+        const char* label;
+        glm::vec3 normal;
+    };
+    // Toward +y faces away from the camera, the classic black-fringe case; below its plane is a bake error, shaded unperturbed.
+    const std::array<Facet, 3> facets{{{"facet toward +y", glm::vec3(0.0F, std::sin(kTilt), std::cos(kTilt))},
+                                       {"facet toward -y", glm::vec3(0.0F, -std::sin(kTilt), std::cos(kTilt))},
+                                       {"texel below its plane", glm::vec3(0.0F, std::sin(kTilt), -std::cos(kTilt))}}};
+    // Per facet: the centre against the sky, and no texel black in any replicate, an exact assertion.
+    ctx.plan(2 * static_cast<int>(facets.size()));
     const double alpha = ctx.alpha();
-    for (const float toward : {1.0F, -1.0F}) {
-        // The facet tilted toward +y faces away from the camera, the classic black-fringe case; toward -y it faces the camera.
-        const glm::vec3 normal(0.0F, toward * std::sin(kTilt), std::cos(kTilt));
-        const glm::vec3 texel = 0.5F * (normal + 1.0F);
+    for (const Facet& facet : facets) {
+        const glm::vec3 texel = 0.5F * (facet.normal + 1.0F);
         if (!pathtracer::gfx::writeExr(map.string(), {1, 1, pathtracer::gfx::kRgbChannels, {texel.x, texel.y, texel.z}},
                                        pathtracer::gfx::ImageRole::Data)) {
             ctx.recordFailure("writeExr", map.string(), __FILE__, __LINE__);
@@ -2262,7 +2348,7 @@ PT_CHECK(normal_mapped_furnace, Slow, Statistical) {
             ctx.recordFailure("EmbreeAccel::build", "normal-mapped plane", __FILE__, __LINE__);
             return;
         }
-        const std::string label = toward > 0.0F ? "facet toward +y" : "facet toward -y";
+        const std::string label = facet.label;
         float darkest = std::numeric_limits<float>::infinity();
         const tools::stats::Welford lo = replicatedScalar(ctx.subSeed(label), [&](std::uint32_t scramble) {
             const pathtracer::scene::PathTraceResult result =
@@ -2277,6 +2363,53 @@ PT_CHECK(normal_mapped_furnace, Slow, Statistical) {
         PT_EXPECT(ctx, darkest > 0.0F, label + ": a texel went black, the microsurface's fringe");
     }
     std::filesystem::remove(map);
+}
+
+// Folded vertex normals facing away from wo shade with Keller's bend: an open white plane gives the clipped cosine (1 + n' . Ng) / 2.
+PT_CHECK(folded_shading_normal_is_lit, Slow, Statistical) {
+    constexpr float kFold = 1.2F;  // toward +y, away from the camera: wo . n < 0 while wo . Ng > 0, a scan fold
+    constexpr float kCameraPitch = 70.0F;
+    constexpr float kRegionNdc = 0.25F;  // centreMean's 4x4 of the 16x16 frame spans NDC [-0.25, 0.25] on both axes
+    constexpr int kQuadrature = 32;
+    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    const EnvironmentMap sky = makeUniformEnvironment();
+    const float pitch = glm::radians(kCameraPitch);
+    const Camera camera(glm::vec3(0.0F, -5.0F * std::sin(pitch), 5.0F * std::cos(pitch)), glm::vec3(kCameraPitch, 0.0F, 0.0F),
+                        Camera::FilmBack{36.0F, 24.0F}, kFocalLengthMm, 0.01F, 1000.0F, 2.8F, 1.0F / 125.0F, 100.0F);
+    TestScene scene = withSurface(makeQuadScene(1.0F), indexMatched);
+    const glm::vec3 fold(0.0F, std::sin(kFold), std::cos(kFold));
+    for (ShadingTriangle& tri : scene.shadingTriangles) {
+        for (ShadingVertex* vertex : {&tri.v0, &tri.v1, &tri.v2}) {
+            vertex->normal = fold;
+        }
+    }
+    std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+    if (!accel.has_value()) {
+        ctx.recordFailure("EmbreeAccel::build", "folded plane", __FILE__, __LINE__);
+        return;
+    }
+    // Every ray off the open plane escapes to the sky, so a pixel is one bounce: Lambert's lobe about n' clipped to the face's hemisphere.
+    const glm::vec3 geoNormal = pathtracer::scene::geometricNormalOf(scene.shadingTriangles[0]);
+    double reference = 0.0;
+    for (int j = 0; j < kQuadrature; ++j) {
+        for (int i = 0; i < kQuadrature; ++i) {
+            const float ndcX = kRegionNdc * ((2.0F * (static_cast<float>(i) + 0.5F) / kQuadrature) - 1.0F);
+            const float ndcY = kRegionNdc * ((2.0F * (static_cast<float>(j) + 0.5F) / kQuadrature) - 1.0F);
+            const glm::vec3 adapted = pathtracer::scene::viewAdaptedNormal(fold, geoNormal, -camera.primaryRay(ndcX, ndcY, 1.0F)->dir);
+            reference += 0.5 * (1.0 + static_cast<double>(glm::dot(adapted, geoNormal)));
+        }
+    }
+    reference /= kQuadrature * kQuadrature;
+    const tools::stats::Welford lo = replicatedScalar(ctx.subSeed("folded"), [&](std::uint32_t scramble) {
+        return static_cast<double>(
+            centreMean(renderPass(scene, sky, perReplicate(makeSettings(4, 999)), *accel, pool, true, scramble, camera).beauty).x);
+    });
+    char detail[160];
+    std::snprintf(detail, sizeof(detail), "folded plane: rendered %.5f (SE %.1e) against the clipped cosine's %.5f", lo.mean(),
+                  lo.standardError(), reference);
+    std::cout << "  " << detail << '\n';
+    ctx.plan(1);
+    PT_EXPECT(ctx, matchesReference(lo, reference, ctx.alpha(), 0.0), detail);
 }
 
 // A bulk surface emits from its front alone; a thin wall, with no interior, emits from both faces alike.
