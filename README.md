@@ -91,27 +91,16 @@ frame["depth"]    # (64, 128, 1) float32, camera-space Z
 
 ## Roadmap
 
-Ordered by execution, easy wins first. ETA is agent working hours to a complete, tested item.
-
 | Area | Item | Detail | Complexity | ETA | Status |
 | --- | --- | --- | --- | --- | --- |
-| Geometry | Displacement bounds and black edges | Black edges on geometry; find the root cause. Bound the terminator lift (Chiang et al. 2019) by triangle geometry and rounding error. | medium | 2 h | ready |
-| Camera | Sensor noise model | Images are noise-free. Shot, read and dark noise and quantisation per EMVA 1288, from the calibrated luminance. | medium | 2 h | ready |
-| Colour | Film grading | No looks. Bleach bypass (retained silver as added neutral density) and three-strip Technicolor dye transfer (Kalmus 1938) in print density, before the view transform. | medium | 2 h | ready |
-| Camera | Film halation | Highlights have no film halo. Light reflected off the film base re-exposes the red-sensitive layer; a red-weighted glare from the bloom pyramid, picture AOVs only. | medium | 1 h | ready |
-| Cleanup | Codebase review | Remove dead code, duplicated logic, needless abstraction, redundant copies and loop-invariant work, output unchanged. | medium | 3 h | ready |
 | BSDF | Smith-exact transmission | Rough glass multiple scattering uses a lopsided approximation. Random walk on the Smith microsurface (Heitz et al. 2016). | high | 3 h | ready |
 | BSDF | Normal-map noise | Multi-facet bounces on normal-mapped glossy surfaces have infinite variance; rough glass fails its sampling check on any seed. | high | 4 h | ready |
 | Texture | Minification filtering | Unfiltered maps and checker. OIIO mips by ray-cone width, LEAN normals (Olano and Baker 2010), analytic box-filtered checker. | high | 3 h | ready |
 | Sampling | Blue noise beyond one dimension | The mask spreads error in one dimension only. Blue-noise-distributed Sobol scrambling and ranking (Heitz et al. 2019). | medium | 2 h | ready |
 | Sampling | Many-light sampling | Lights are picked uniformly. Light tree by power and orientation (Conty Estevez and Kulla 2018), then ReSTIR (Bitterli et al. 2020). | high | 6 h | ready |
 | Performance | A/B tuning | Small local speed-ups, kept only on a significant paired-run gain on the proxy profile with output inside calibrated bands. | medium | 3 h | ready |
+| Cleanup | Codebase review | Remove dead code, duplicated logic, needless abstraction, redundant copies and loop-invariant work, output unchanged. | medium | 3 h | ready |
 | Sampling | Bidirectional paths | Light and eye subpaths joined by MIS (Veach and Guibas 1995) so caustics converge. Waits for Smith-exact transmission. | high | 8 h | blocked |
-| Camera | Lens model | Renders cannot match a calibrated camera. Principal point and pixel aspect on the Kannala and Brandt (2006) model; a measured-lens preset. | medium | 1 h | ready |
-| Light | IES profiles | Lights emit uniformly. Measured distributions (IES LM-63), importance-sampled from the table and scaled by the existing lumens. | medium | 1 h | ready |
-| Camera | Anamorphic and distortion | Anamorphic squeeze and Brown-Conrady distortion (Brown 1966), Newton-inverted for motion vectors and texture filtering. | high | 2 h | ready |
-| Camera | Event camera output | Log-contrast events for neuromorphic sensors, timed by interpolating between rendered frames (Rebecq et al. 2018). | medium | 3 h | ready |
-| Camera | Multi-viewpoint compound eyes | Facets share one viewpoint and angle. Per-facet position, axis and acceptance from measured eye data (Millward et al. 2022). | high | 3 h | ready |
 | Colour | Spectral transport | Per-path wavelength sampling (Wilkie et al. 2014) by channel sensitivity; spectral upsampling of textures and the HDRI (Jakob and Hanika 2019); kelvin lights emit their blackbody or CIE daylight spectra. | high | 6 h | ready |
 | Light | Emission spectra | Lights are a kelvin or an RGB colour. Measured spectral power distributions (spectroradiometer CSV) and CIE F-series and LED illuminants (CIE 015:2018) per light. Waits for spectral transport. | medium | 2 h | blocked |
 | Camera | Camera spectral sensitivity | Renders are ACEScg, not camera RGB. Measured camera sensitivities give camera-native RGB, then the camera's IDT to ACEScg, so CG matches the plate (Langlands and Fascione 2020). Waits for spectral transport. | high | 3 h | blocked |
@@ -126,4 +115,16 @@ Ordered by execution, easy wins first. ETA is agent working hours to a complete,
 | Output | Upscaling | Spatial or temporal (Xiao et al. 2020); temporal reads motionVector. Never replaces the converged Beauty. | medium | 3 h | ready |
 | Output | Generative channel | Diffusion refinement AOV and latents (Ho et al. 2020; Rombach et al. 2022) from the Denoised AOV. Never replaces Beauty. | high | 6 h | ready |
 | Performance | Wavefront rearchitecture | Single-ray inline shading caps throughput. Embree streams with material-sorted shading (Laine, Karras and Aila 2013), before GPU. | high | 16 h | ready |
-| Performance | GPU denoising | Move Open Image Denoise to its GPU device, output unchanged. Waits for a GPU backend after wavefront. | medium | 2 h | blocked |
+
+### On hold
+
+| Area | Item | Detail | Complexity | ETA | Status |
+| --- | --- | --- | --- | --- | --- |
+| Camera | Sensor noise model | Images are noise-free. Shot, read and dark noise and quantisation per EMVA 1288, from the calibrated luminance. | medium | 2 h | on hold |
+| Colour | Film grading | No looks. Bleach bypass (retained silver as added neutral density) and three-strip Technicolor dye transfer (Kalmus 1938) in print density, before the view transform. | medium | 2 h | on hold |
+| Camera | Film halation | Highlights have no film halo. Light reflected off the film base re-exposes the red-sensitive layer; a red-weighted glare from the bloom pyramid, picture AOVs only. | medium | 1 h | on hold |
+| Camera | Lens model | Renders cannot match a calibrated camera. Principal point and pixel aspect on the Kannala and Brandt (2006) model; a measured-lens preset. | medium | 1 h | on hold |
+| Light | IES profiles | Lights emit uniformly. Measured distributions (IES LM-63), importance-sampled from the table and scaled by the existing lumens. | medium | 1 h | on hold |
+| Camera | Anamorphic and distortion | Anamorphic squeeze and Brown-Conrady distortion (Brown 1966), Newton-inverted for motion vectors and texture filtering. | high | 2 h | on hold |
+| Camera | Event camera output | Log-contrast events for neuromorphic sensors, timed by interpolating between rendered frames (Rebecq et al. 2018). | medium | 3 h | on hold |
+| Camera | Multi-viewpoint compound eyes | Facets share one viewpoint and angle. Per-facet position, axis and acceptance from measured eye data (Millward et al. 2022). | high | 3 h | on hold |
