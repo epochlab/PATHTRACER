@@ -93,14 +93,15 @@ glm::vec3 roundAway(glm::vec3 p, const glm::vec3& dir) {
     return p;
 }
 
-// Chiang/Li/Burley 2019 as a displacement: each vertex's tangent-plane projection of a hit below it, along +-n_i, so never toward the face.
-glm::vec3 terminatorLift(const ShadingTriangle& tri, float w, float u, float v, const glm::vec3& flatPosition, bool normalSide) {
-    const auto lift = [&](const ShadingVertex& vertex) {
-        const float d = glm::dot(flatPosition - vertex.position, vertex.normal);
-        const bool below = normalSide ? (d < 0.0F) : (d > 0.0F);
-        return below ? -d * vertex.normal : glm::vec3(0.0F);
+// Hanika 2021's lift projected on side: each vertex's tangent plane over a hit below it, by n_i . side; each term at most |p - p_i| / 2.
+float terminatorHeight(const ShadingTriangle& tri, float w, float u, float v, const glm::vec3& flatPosition, float sign,
+                       const glm::vec3& side) {
+    const auto height = [&](const ShadingVertex& vertex) {
+        const glm::vec3 normal = sign * vertex.normal;
+        return std::max(-glm::dot(flatPosition - vertex.position, normal), 0.0F) * glm::dot(normal, side);
     };
-    return (w * lift(tri.v0)) + (u * lift(tri.v1)) + (v * lift(tri.v2));
+    // A folded n_i (n_i . side < 0) weighs negative: the clamp keeps the lift off the rounding bound, so it only adds clearance.
+    return std::max((w * height(tri.v0)) + (u * height(tri.v1)) + (v * height(tri.v2)), 0.0F);
 }
 
 }  // namespace
@@ -111,10 +112,27 @@ glm::vec3 spawnOrigin(const ShadingTriangle& tri, float u, float v, const glm::v
     // A 3-term dot product's gamma_3 (Higham 3.1), plus w's two roundings |1-u| u + |w| u carried by p0 since w + u + v drifts off 1.
     const glm::vec3 error = (gamma(3) * (glm::abs(w * tri.v0.position) + glm::abs(u * tri.v1.position) + glm::abs(v * tri.v2.position))) +
                             (gamma(1) * (std::abs(1.0F - u) + std::abs(w)) * glm::abs(tri.v0.position));
-    const glm::vec3 side = normalSide ? geoNormal : -geoNormal;
-    // The lift projects non-negatively on side, its rounding a sliver of that: offset plus lift clears the bound; a round-away seats it.
-    const glm::vec3 displacement = (glm::dot(glm::abs(geoNormal), error) * side) + terminatorLift(tri, w, u, v, flatPosition, normalSide);
-    return roundAway(flatPosition + displacement, side);
+    const float sign = normalSide ? 1.0F : -1.0F;
+    const glm::vec3 side = sign * geoNormal;
+    // Bound and lift are both >= 0 along side, so the lift only adds clearance and the round-away seats the sum past the bound.
+    const float offset = glm::dot(glm::abs(geoNormal), error) + terminatorHeight(tri, w, u, v, flatPosition, sign, side);
+    return roundAway(flatPosition + (offset * side), side);
+}
+
+glm::vec3 viewAdaptedNormal(const glm::vec3& normal, const glm::vec3& geoNormal, const glm::vec3& wo) {
+    // On wo's side of the face: a back-face view keeps its normal opposing wo as the face's does, the side a dielectric reads.
+    const float sign = glm::dot(wo, geoNormal) < 0.0F ? -1.0F : 1.0F;
+    const glm::vec3 up = sign * geoNormal;
+    const glm::vec3 shading = sign * normal;
+    const glm::vec3 view = glm::normalize(wo);
+    const float cosView = glm::dot(view, shading);
+    const glm::vec3 mirror = (2.0F * cosView * shading) - view;
+    if (cosView > 0.0F && glm::dot(mirror, up) >= 0.0F) {
+        return normal;
+    }
+    // Keller et al. 2017: the mirror dropped onto the face's horizon and the normal re-bisected, equal to n where the mirror meets it.
+    const glm::vec3 horizon = glm::normalize(mirror - (glm::dot(mirror, up) * up));
+    return sign * glm::normalize(view + horizon);
 }
 
 }  // namespace pathtracer::scene

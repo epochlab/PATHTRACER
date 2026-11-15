@@ -330,7 +330,8 @@ glm::vec3 transmittanceAlong(Ray ray, const PassThroughScene& scene, std::option
             return glm::vec3(0.0F);
         }
         const Material& material = scene.instances[instance].material;
-        const ShadingVertex shading = interpolateShading(triangle, hit->u, hit->v);
+        ShadingVertex shading = interpolateShading(triangle, hit->u, hit->v);
+        shading.normal = viewAdaptedNormal(shading.normal, geometricNormalOf(triangle), -ray.dir);
         const float opacity = opacityAt(material, shading.uv, {});
         glm::vec3 crossing(1.0F - opacity);
         if (opacity > 0.0F) {
@@ -681,7 +682,10 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
         const float hitWidth = coneWidth + (coneSpread * hit->t);
         const pathtracer::gfx::TextureFootprint footprint =
             bounce == 0 ? primaryHitFootprint(triangle, ray, hit->t, dirFootprint) : coneHitFootprint(triangle, ray, hitWidth);
-        const ShadingVertex shading = interpolateShading(triangle, hit->u, hit->v);
+        // True flat plane normal, for light-leak rejection and ray-origin offsets: both need geometry, not the shading normal.
+        const glm::vec3 geoNormal = geometricNormalOf(triangle);
+        ShadingVertex shading = interpolateShading(triangle, hit->u, hit->v);
+        shading.normal = viewAdaptedNormal(shading.normal, geoNormal, -ray.dir);
 
         // OpenPBR's presence, mix(ambient, surface, alpha) (spec eq. 23): absent, the same ray continues, no bounce and no vertex.
         if (scene.mayPassThrough[instance]) {
@@ -730,8 +734,6 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
 
         const ShadingFrame frame = buildShadingFrame(triangle, shading, material.geometryNormal);
         const glm::vec3 woWorld = -ray.dir;
-        // True flat plane normal, for light-leak rejection and ray-origin offsets: both need geometry, not the shading normal.
-        const glm::vec3 geoNormal = geometricNormalOf(triangle);
 
         // Built once for both estimators below: the continuation draw and NEE's evaluation share every wo-side lookup it holds.
         const float ambientIor = indexOf(ambient, heroChannel);

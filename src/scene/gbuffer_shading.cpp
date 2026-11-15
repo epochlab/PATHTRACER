@@ -170,7 +170,11 @@ ShadingFrame buildShadingFrame(const ShadingTriangle& triangle, const ShadingVer
     if (geometryNormal.map) {
         // Point-sampled like the bump below: a filtered normal shortens and shades flatter (Toksvig 2005), +13% on the minified stump.
         const glm::vec3 normalSample = pathtracer::gfx::sampleTexture(*geometryNormal.map, shading.uv);
-        mappedNormal = glm::normalize(ShadingFrame(tangent, bitangent, normal) * glm::normalize((normalSample * 2.0F) - 1.0F));
+        const glm::vec3 local = glm::normalize((normalSample * 2.0F) - 1.0F);
+        // A texel at or below its tangent plane is no height-field slope but a bake error, and Schussler's microsurface has none: n stands.
+        if (local.z > 0.0F) {
+            mappedNormal = glm::normalize(ShadingFrame(tangent, bitangent, normal) * local);
+        }
     }
 
     // Bump (Blinn 1978) as Mikkelsen's surface gradient: height h = heightMetres*H in world units, n' = n - grad_s(h).

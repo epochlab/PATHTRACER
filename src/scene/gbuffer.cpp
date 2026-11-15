@@ -229,7 +229,8 @@ std::optional<glm::vec3> nearBoxEdge(const std::vector<ViewBox>& boxes, const Pi
 // Resolves every surface field for one hit pixel: tracePath's bounce-0 sampling calls, never lighting or BSDF. Returns worldPos.
 glm::vec3 shadeHit(GBuffer& result, int x, int y, const Hit& hit, const PixelRay& pixel, const ShadingTriangle& triangle,
                    const Material& material) {
-    const ShadingVertex shading = interpolateShading(triangle, hit.u, hit.v);
+    ShadingVertex shading = interpolateShading(triangle, hit.u, hit.v);
+    shading.normal = viewAdaptedNormal(shading.normal, geometricNormalOf(triangle), -pixel.ray.dir);
     const pathtracer::gfx::TextureFootprint footprint = primaryHitFootprint(triangle, pixel.ray, hit.t, pixel.dirPerPixel);
     const ShadingFrame frame = buildShadingFrame(triangle, shading, material.geometryNormal);
     const OpenPbrInputs<Constant> inputs = resolveInputs(material, shading.uv, footprint, shading.colour);
