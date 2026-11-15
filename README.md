@@ -97,6 +97,7 @@ frame["depth"]    # (64, 128, 1) float32, camera-space Z
 | --- | --- | --- | --- | --- | --- |
 | Cleanup | Codebase review | Remove dead code, duplicated logic, needless abstraction, redundant copies and loop-invariant work, output unchanged. Radiance gets its own type, distinct from directions, so spectral transport is compiler-checked. | medium | 3 h | ready |
 | Colour | Spectral transport | Per-path wavelength sampling (Wilkie et al. 2014) by channel sensitivity; spectral upsampling of textures and the HDRI (Jakob and Hanika 2019); kelvin lights emit their blackbody or CIE daylight spectra. | high | 6 h | ready |
+| Output | Multispectral output | Only RGB is written. Per-wavelength radiance channels in the EXR (Fichet et al. 2021), so spectra are checked directly. Waits for spectral transport. | medium | 1 h | blocked |
 | Sampling | Bidirectional paths | Light and eye subpaths joined by MIS (Veach and Guibas 1995) so caustics converge. Waits for spectral transport. | high | 8 h | blocked |
 | Light | Emission spectra | Lights are a kelvin or an RGB colour. Measured spectral power distributions (spectroradiometer CSV) and CIE F-series and LED illuminants (CIE 015:2018) per light. Waits for spectral transport. | medium | 2 h | blocked |
 | Camera | Camera spectral sensitivity | Renders are ACEScg, not camera RGB. Measured camera sensitivities give camera-native RGB, then the camera's IDT to ACEScg, so CG matches the plate (Langlands and Fascione 2020). Waits for spectral transport. | high | 3 h | blocked |
@@ -108,22 +109,36 @@ frame["depth"]    # (64, 128, 1) float32, camera-space Z
 
 | Area | Item | Detail | Complexity | ETA | Status |
 | --- | --- | --- | --- | --- | --- |
-| Sampling | Many-light sampling | Lights are picked uniformly. Light tree by power and orientation (Conty Estevez and Kulla 2018), then ReSTIR (Bitterli et al. 2020). | high | 6 h | ready |
+| Camera | Sensor noise model | Images are noise-free. Shot, read and dark noise and quantisation per EMVA 1288, from the calibrated luminance. | medium | 2 h | ready |
+| Camera | Lens model | Renders cannot match a calibrated camera. Principal point and pixel aspect on the Kannala and Brandt (2006) model; a measured-lens preset. | medium | 1 h | ready |
+| Colour | Spectral data | Metals are RGB fits. Measured conductor eta/k, and reflectance and illuminant databases as material and light inputs. Waits for spectral transport. | medium | 2 h | blocked |
+| Texture | Metameric pairs | Patches differ in RGB or not at all. Pairs with different spectra but one RGB under a chosen illuminant, for colour constancy and spectral validation. Waits for spectral data. | medium | 1 h | blocked |
+| Light | IES profiles | Lights emit uniformly. Measured distributions (IES LM-63), importance-sampled from the table and scaled by the existing lumens. | medium | 1 h | ready |
+| Texture | Procedural stimuli | Patterns need image files. Sine and square gratings (orientation, spatial frequency, phase, contrast), Gabor patches, plaids, radial, concentric and log-polar gratings, bars, step edges, checkerboards and Mondrians (Land and McCann 1971), box-filtered by the ray footprint. | medium | 3 h | ready |
+| Texture | Minification filtering | Unfiltered maps and checker. OIIO mips by ray-cone width with EWA filtering (Greene and Heckbert 1986), LEAN normals (Olano and Baker 2010), analytic box-filtered checker. | high | 3 h | ready |
+| Texture | Calibration targets | Only the ColorChecker. Slanted edge (ISO 12233), Siemens star, USAF 1951 resolution chart and a grey step wedge, analytic and footprint-filtered. | medium | 2 h | ready |
+| Light | Image-textured area lights | Area lights emit one colour. An emission texture over the light, importance-sampled by its luminance, for screens and stimulus displays. | medium | 2 h | ready |
+| Camera | Multi-viewpoint compound eyes | Facets share one viewpoint and angle. Per-facet position, axis and acceptance from measured eye data (Millward et al. 2022). | high | 3 h | ready |
+| Camera | Event camera output | Log-contrast events for neuromorphic sensors, timed by interpolating between rendered frames (Rebecq et al. 2018). | medium | 3 h | ready |
+| Light | Physical sky | Daylight is an HDRI. Sun and sky from time of day and location, with Rayleigh and Mie scattering, spectral (Wilkie et al. 2021). Waits for spectral transport. | high | 4 h | blocked |
+| Camera | Anamorphic and distortion | Anamorphic squeeze and Brown-Conrady distortion (Brown 1966), Newton-inverted for motion vectors and texture filtering. | high | 2 h | ready |
+| Texture | Procedural noise | No noise inputs. White, pink (1/f) and band-pass noise, Perlin (2002), Worley (1996) and fBm, band-limited to the ray footprint. | medium | 2 h | ready |
+| Material | Measured BRDFs | Materials are analytic. Tabulated measured BRDFs (Dupuy and Jakob 2018), spectral, importance-sampled from the table. Waits for spectral transport. | medium | 2 h | blocked |
 | Sampling | Blue noise beyond one dimension | The mask spreads error in one dimension only. Blue-noise-distributed Sobol scrambling and ranking (Heitz et al. 2019). | medium | 2 h | ready |
-| Texture | Minification filtering | Unfiltered maps and checker. OIIO mips by ray-cone width, LEAN normals (Olano and Baker 2010), analytic box-filtered checker. | high | 3 h | ready |
+| Output | Geometry AOVs | No material, facing or curvature channels. Material ID beside objectID, facing ratio (N.V) and mean curvature (Meyer et al. 2003), with curvature as a shading input. | medium | 2 h | ready |
+| Sampling | Many-light sampling | Lights are picked uniformly. Light tree by power and orientation (Conty Estevez and Kulla 2018). | high | 4 h | ready |
+| Light | Polarisation | No polarisation state. Stokes-Mueller transport (Wilkie and Weidlich 2012) with a polarised sky (Wilkie et al. 2004). | high | 6 h | ready |
+| Sampling | Path guiding | Paths sample only the BSDF and the lights. Learned directional distributions per region (Müller et al. 2017), unbiased under MIS. | high | 6 h | ready |
+| Camera | Film halation | Highlights have no film halo. Light reflected off the film base re-exposes the red-sensitive layer; a red-weighted glare from the bloom pyramid, picture AOVs only. | medium | 1 h | ready |
+| Colour | Fluorescence | Light keeps its wavelength. Re-emission at longer wavelengths from excitation-emission spectra (Wilkie et al. 2006). Waits for spectral transport. | high | 3 h | blocked |
+| Texture | UDIM and Ptex | One image per input. UDIM tiles and per-face Ptex (Burley and Lacewell 2008) through the OIIO texture system. | medium | 2 h | ready |
+| Material | Measured skin | Skin is RGB subsurface. Spectral layered skin from melanin and haemoglobin (Donner and Jensen 2006) and measured skin spectra. Waits for spectral transport. | high | 3 h | blocked |
+| Colour | Film grading | No looks. Bleach bypass (retained silver as added neutral density) and three-strip Technicolor dye transfer (Kalmus 1938) in print density, before the view transform. | medium | 2 h | ready |
+| Output | Upscaling | Spatial or temporal (Xiao et al. 2020); temporal reads motionVector. Never replaces the converged Beauty. | medium | 3 h | ready |
+| Output | Generative channel | Diffusion refinement AOV and latents (Ho et al. 2020; Rombach et al. 2022) from the Denoised AOV. Never replaces Beauty. | high | 6 h | ready |
 | Geometry | Scene graph and instancing | Every copy is stored separately. Embree two-level instancing under a transform hierarchy. | high | 5 h | ready |
 | Geometry | OpenUSD scenes | Read USD meshes, transforms, instancing, UsdLux lights and UsdShade OpenPBR materials onto the scene graph. Waits for scene graph. | high | 6 h | blocked |
 | Geometry | Geometry motion vectors | Moving geometry reads as static. Reproject hits by previous instance transforms and USD time-sampled points. Waits for OpenUSD. | medium | 2 h | blocked |
 | Geometry | Subdivision surfaces | Smooth surfaces from coarse meshes via OpenSubdiv at load, honouring USD subdivision schemes. Waits for OpenUSD. | high | 2 h | blocked |
-| Camera | Lens model | Renders cannot match a calibrated camera. Principal point and pixel aspect on the Kannala and Brandt (2006) model; a measured-lens preset. | medium | 1 h | ready |
-| Camera | Sensor noise model | Images are noise-free. Shot, read and dark noise and quantisation per EMVA 1288, from the calibrated luminance. | medium | 2 h | ready |
-| Camera | Anamorphic and distortion | Anamorphic squeeze and Brown-Conrady distortion (Brown 1966), Newton-inverted for motion vectors and texture filtering. | high | 2 h | ready |
-| Camera | Multi-viewpoint compound eyes | Facets share one viewpoint and angle. Per-facet position, axis and acceptance from measured eye data (Millward et al. 2022). | high | 3 h | ready |
-| Camera | Event camera output | Log-contrast events for neuromorphic sensors, timed by interpolating between rendered frames (Rebecq et al. 2018). | medium | 3 h | ready |
-| Camera | Film halation | Highlights have no film halo. Light reflected off the film base re-exposes the red-sensitive layer; a red-weighted glare from the bloom pyramid, picture AOVs only. | medium | 1 h | ready |
-| Light | IES profiles | Lights emit uniformly. Measured distributions (IES LM-63), importance-sampled from the table and scaled by the existing lumens. | medium | 1 h | ready |
-| Light | Polarisation | No polarisation state. Stokes-Mueller transport (Wilkie and Weidlich 2012) with a polarised sky (Wilkie et al. 2004). | high | 6 h | ready |
-| Output | Upscaling | Spatial or temporal (Xiao et al. 2020); temporal reads motionVector. Never replaces the converged Beauty. | medium | 3 h | ready |
-| Output | Generative channel | Diffusion refinement AOV and latents (Ho et al. 2020; Rombach et al. 2022) from the Denoised AOV. Never replaces Beauty. | high | 6 h | ready |
-| Colour | Film grading | No looks. Bleach bypass (retained silver as added neutral density) and three-strip Technicolor dye transfer (Kalmus 1938) in print density, before the view transform. | medium | 2 h | ready |
+| Performance | GPU port | CPU only. The integrator on the GPU, its output inside the calibrated bands. | high | 16 h | ready |
 | Performance | Wavefront rearchitecture | Single-ray inline shading suits the CPU; batched stages pay off on GPU. Embree batches with material-sorted shading (Laine, Karras and Aila 2013). Waits for a GPU port. | high | 16 h | blocked |
