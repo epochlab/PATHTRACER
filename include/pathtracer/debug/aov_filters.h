@@ -17,15 +17,15 @@ namespace pathtracer::debug {
 [[nodiscard]] pathtracer::gfx::HdrImage hsvAov(const pathtracer::gfx::HdrImage& beauty,
                                             pathtracer::scene::ThreadPool& threadPool);
 
-// Scene luminance SNR from replicated RQMC: the replicates' mean over its standard error, from their spread (L'Ecuyer & Lemieux 2002).
-[[nodiscard]] pathtracer::gfx::HdrImage snrAov(int width, int height, const float* replicateLuminance, int replicates, int samples,
+// Colour SNR from replicated RQMC: mean channel level over the worst channel's standard error, from spread (L'Ecuyer & Lemieux 2002).
+[[nodiscard]] pathtracer::gfx::HdrImage snrAov(int width, int height, const float* replicateColour, int replicates, int samples,
                                             pathtracer::scene::ThreadPool& threadPool);
 
 // Everything a BeautyFilter AOV reads, as explicit fields rather than a PathTraceResult, so a validator can build one with no renderer.
 struct FilterInput {
     const pathtracer::gfx::HdrImage& beauty;  // published mean radiance, linear scene space, scene-referred and unbounded
-    // Per-replicate running luminance means, `replicates` per texel, and the passes averaged in: min(samples, replicates) are populated.
-    const float* replicateLuminance = nullptr;
+    // Per-replicate running RGB means, replicateStride per texel, and the passes averaged in: min(samples, replicates) are populated.
+    const float* replicateColour = nullptr;
     int replicates = 1;
     int samples = 0;
     const int* texelSamples = nullptr;  // passes per texel, `samples` wherever adaptive sampling never stopped it

@@ -3,6 +3,25 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Colour-aware adaptive convergence
+
+Adaptive sampling stopped a texel once its luminance was known to the threshold, so noise that changes hue but not brightness went
+unseen. Spectral transport, next on the roadmap, produces exactly that noise. Convergence now judges all three ACEScg channels.
+
+- feat: **replicate means per channel** (`PathTraceResult::replicateColour`). Each texel holds every channel's replicate means
+  channel-major, `replicateStride(K) = 3K` floats, three times the memory of the luminance means.
+- feat: **worst-channel stopping rule** (`replicateEstimate`, `convergenceStatistic`). A texel stops once every channel's
+  standard error is within `threshold` times its mean channel level (R + G + B)/3.
+  - The statistic is the largest of the three per-channel chi-squared statistics. As an intersection-union test (Berger 1982)
+    its p-value is valid inside the existing Benjamini-Hochberg step-up, with no further correction.
+  - The mean channel level is the reference. A channel's own mean never retires near-zero channels. Luminance would cost a pure
+    AP1 blue texel (luminance weight 0.054) about 1/0.054^2, roughly 340, times the samples. On grey texels the rule is the old one.
+  - A texel with no spread in any channel still gives no evidence.
+- feat: **SNR AOV** reads the mean channel level over the worst channel's standard error, the quantity texels stop on.
+- test: checks for the worst-channel estimate, the IUT's size at one and three boundary channels, and a chroma-noisy texel the
+  luminance rule would stop. The existing statistical checks run on grey texels, and the driver's precision check now runs per
+  channel.
+
 ## Codebase review
 
 Scene colour shared `glm::vec3` with directions and positions, so a radiance could be added to a normal and still compile. Spectral

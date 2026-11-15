@@ -8,6 +8,7 @@
 #include <numbers>
 #include <numeric>
 #include <random>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -21,6 +22,7 @@
 #include "pathtracer/gfx/hdr_image.h"
 #include "pathtracer/scene/path_trace_driver.h"
 #include "pathtracer/scene/path_tracer.h"
+#include "pathtracer/scene/rgb.h"
 #include "pathtracer/scene/thread_pool.h"
 
 namespace {
@@ -34,6 +36,16 @@ constexpr float kFloatEpsilon = 0x1p-23F;  // distance from 1 to the next float,
     return image.texels[(((static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width)) +
                           static_cast<std::size_t>(x)) * static_cast<std::size_t>(image.channels)) +
                         static_cast<std::size_t>(channel)];
+}
+
+// A grey texel's replicateStride means, one channel's replicates in all three: where the colour rule reduces to the scalar one.
+[[nodiscard]] std::vector<float> greyTexel(std::span<const float> means) {
+    std::vector<float> texel;
+    texel.reserve(means.size() * pathtracer::scene::kReplicateChannels);
+    for (int c = 0; c < pathtracer::scene::kReplicateChannels; ++c) {
+        texel.insert(texel.end(), means.begin(), means.end());
+    }
+    return texel;
 }
 
 }  // namespace
@@ -50,7 +62,8 @@ PT_CHECK(snr_matches_the_closed_form_of_alternating_replicates, Fast, Exact) {
     constexpr float kMean = 0.25F;
     constexpr float kDelta = 0.03125F;
     for (const int replicates : counts) {
-        std::vector<float> means(kPixels * static_cast<std::size_t>(replicates));
+        // Even K alternates identically in each channel block, so every texel is grey.
+        std::vector<float> means(kPixels * pathtracer::scene::replicateStride(replicates));
         for (std::size_t i = 0; i < means.size(); ++i) {
             means[i] = (i % 2 == 0) ? kMean + kDelta : kMean - kDelta;
         }
@@ -84,10 +97,11 @@ PT_CHECK(snr_reads_only_the_populated_replicates, Fast, Exact) {
     const std::array<float, kReplicates> pixel{kMean + kDelta, kMean - kDelta, kMean + kDelta, kMean - kDelta, kMean,
                                                std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::quiet_NaN(),
                                                std::numeric_limits<float>::quiet_NaN()};
+    const std::vector<float> texel = greyTexel(pixel);
     std::vector<float> means;
-    means.reserve(kPixels * kReplicates);
+    means.reserve(kPixels * texel.size());
     for (std::size_t i = 0; i < kPixels; ++i) {
-        means.insert(means.end(), pixel.begin(), pixel.end());
+        means.insert(means.end(), texel.begin(), texel.end());
     }
     const HdrImage snr = pathtracer::debug::snrAov(kWidth, kHeight, means.data(), kReplicates, kSamples, pool);
     const double expected = (static_cast<double>(kMean) * std::sqrt(static_cast<double>(kSamples))) / kDelta;
@@ -105,12 +119,13 @@ PT_CHECK(snr_is_zero_where_undefined_and_infinite_where_exact, Fast, Exact) {
     constexpr int kHeight = 24;
     constexpr int kReplicates = 4;
     constexpr std::size_t kPixels = static_cast<std::size_t>(kWidth) * kHeight;
-    std::vector<float> spread(kPixels * kReplicates);
+    constexpr std::size_t kStride = pathtracer::scene::replicateStride(kReplicates);
+    std::vector<float> spread(kPixels * kStride);
     for (std::size_t i = 0; i < spread.size(); ++i) {
         spread[i] = (i % 2 == 0) ? 0.75F : 0.5F;
     }
-    const std::vector<float> dark(kPixels * kReplicates, 0.0F);
-    const std::vector<float> agreed(kPixels * kReplicates, 0.75F);
+    const std::vector<float> dark(kPixels * kStride, 0.0F);
+    const std::vector<float> agreed(kPixels * kStride, 0.75F);
     const auto all = [](const HdrImage& image, float expected) {
         return std::all_of(image.texels.begin(), image.texels.end(), [expected](float value) { return value == expected; });
     };
@@ -142,7 +157,8 @@ PT_CHECK(replicate_estimate_matches_the_closed_form, Fast, Exact) {
         for (int r = 0; r < replicates; ++r) {
             means[static_cast<std::size_t>(r)] = r % 2 == 0 ? kMean + kDelta : kMean - kDelta;
         }
-        const pathtracer::scene::ReplicateEstimate estimate = pathtracer::scene::replicateEstimate(means.data(), replicates);
+        const pathtracer::scene::ReplicateEstimate estimate =
+            pathtracer::scene::replicateEstimate(greyTexel(means).data(), replicates, replicates);
         const double expected = static_cast<double>(kDelta) * kDelta / (replicates - 1.0);
         // Two roundings, 1/(K(K-1)) and its product, each within half an ulp of double.
         const double bound = 2.0 * std::numeric_limits<double>::epsilon() * expected;
@@ -170,8 +186,9 @@ PT_CHECK(convergence_statistic_needs_spread_and_signal, Fast, Exact) {
     ctx.plan(5);
     constexpr int kReplicates = 4;
     const auto statistic = [&](std::array<float, kReplicates> means, float threshold) {
-        return pathtracer::scene::convergenceStatistic(pathtracer::scene::replicateEstimate(means.data(), kReplicates), kReplicates,
-                                                       threshold);
+        const std::vector<float> texel = greyTexel(means);
+        return pathtracer::scene::convergenceStatistic(pathtracer::scene::replicateEstimate(texel.data(), kReplicates, kReplicates),
+                                                       kReplicates, threshold);
     };
     constexpr float kHuge = std::numeric_limits<float>::max();
     constexpr double kNoEvidence = std::numeric_limits<double>::infinity();
@@ -182,6 +199,90 @@ PT_CHECK(convergence_statistic_needs_spread_and_signal, Fast, Exact) {
     PT_EXPECT(ctx, statistic({0.25F, -0.25F, 0.25F, -0.25F}, kHuge) == kNoEvidence, "a zero mean with spread gave evidence of convergence");
     PT_EXPECT(ctx, statistic({0.5F, std::numeric_limits<float>::quiet_NaN(), 0.5F, 0.5F}, kHuge) == kNoEvidence,
               "a NaN replicate gave evidence");
+}
+
+// Channel blocks R, G, B: the level is their mean, the variance the worst channel's, and one noisy channel is evidence for the texel.
+PT_CHECK(replicate_estimate_takes_the_worst_channel, Fast, Exact) {
+    ctx.plan(3);
+    constexpr int kReplicates = 4;
+    constexpr float kSmall = 0.015625F;
+    constexpr float kLarge = 0.0625F;
+    // R spreads by kSmall about 1, G by kLarge about 2, B agrees on 3: exact powers of two throughout.
+    const std::array<float, pathtracer::scene::replicateStride(kReplicates)> texel{
+        1.0F + kSmall, 1.0F - kSmall, 1.0F + kSmall, 1.0F - kSmall, 2.0F + kLarge, 2.0F - kLarge, 2.0F + kLarge, 2.0F - kLarge,
+        3.0F,          3.0F,          3.0F,          3.0F};
+    const pathtracer::scene::ReplicateEstimate estimate = pathtracer::scene::replicateEstimate(texel.data(), kReplicates, kReplicates);
+    const double expected = static_cast<double>(kLarge) * kLarge / (kReplicates - 1.0);
+    const double bound = 2.0 * std::numeric_limits<double>::epsilon() * expected;
+    PT_EXPECT(ctx, estimate.mean == 2.0, "the level was not the mean of the channel means: " + std::to_string(estimate.mean));
+    PT_EXPECT(ctx, std::fabs(estimate.meanVariance - expected) <= bound,
+              "the variance was not the worst channel's: " + std::to_string(estimate.meanVariance));
+    PT_EXPECT(ctx, std::isfinite(pathtracer::scene::convergenceStatistic(estimate, kReplicates, 1.0F)),
+              "two agreeing channels beside a noisy one withheld the texel's evidence");
+}
+
+// Chroma noise with luminance held inside the tolerance: the luminance rule would stop the texel, the colour rule must not.
+PT_CHECK(chroma_noise_keeps_a_texel_the_luminance_rule_stops, Fast, Exact) {
+    ctx.plan(2);
+    constexpr int kReplicates = 4;
+    constexpr float kThreshold = 0.01F;
+    const glm::vec3 weights = pathtracer::scene::cie::sceneLuminanceWeights();
+    // R and B swing by +/-0.1 against each other in the ratio that cancels their luminance; G's 1e-4 swing leaves luminance spread.
+    const float swing = 0.1F;
+    const float blue = -swing * weights.x / weights.z;
+    const float green = 1e-4F;
+    std::array<float, pathtracer::scene::replicateStride(kReplicates)> colour{};
+    std::array<float, kReplicates> luminance{};
+    for (int r = 0; r < kReplicates; ++r) {
+        const float sign = r % 2 == 0 ? 1.0F : -1.0F;
+        const pathtracer::scene::Rgb rgb(1.0F + (sign * swing), 1.0F + (sign * green), 1.0F + (sign * blue));
+        colour[static_cast<std::size_t>(r)] = rgb.r;
+        colour[static_cast<std::size_t>(kReplicates + r)] = rgb.g;
+        colour[static_cast<std::size_t>((2 * kReplicates) + r)] = rgb.b;
+        luminance[static_cast<std::size_t>(r)] = pathtracer::scene::luminance(rgb);
+    }
+    // A lone texel's step-up rejects at p <= alpha, p the statistic's lower chi-squared tail.
+    const auto pValue = [](double x) { return 1.0 - tools::stats::chiSquareUpperTail(x, kReplicates - 1); };
+    constexpr double kAlpha = 0.05;
+    const double byLuminance = pathtracer::scene::convergenceStatistic(
+        pathtracer::scene::replicateEstimate(greyTexel(luminance).data(), kReplicates, kReplicates), kReplicates, kThreshold);
+    const double byColour = pathtracer::scene::convergenceStatistic(
+        pathtracer::scene::replicateEstimate(colour.data(), kReplicates, kReplicates), kReplicates, kThreshold);
+    PT_EXPECT(ctx, pValue(byLuminance) <= kAlpha, "the luminance rule did not stop the chroma-noisy texel: " + std::to_string(byLuminance));
+    PT_EXPECT(ctx, pValue(byColour) > kAlpha, "the colour rule stopped a texel with 10% chroma noise: " + std::to_string(byColour));
+}
+
+// The IUT's size: alpha when one channel sits on the boundary and the others far inside; below alpha with all three on it.
+PT_CHECK(colour_rule_size_is_alpha_at_its_least_favourable_point, Fast, Statistical) {
+    constexpr int kReplicates = 8;
+    constexpr double kAlpha = 0.05;
+    constexpr float kThreshold = 1e-3F;
+    constexpr long long kTrials = 200000;
+    ctx.plan(2);
+    std::mt19937_64 rng(ctx.seed());
+    const double boundary = static_cast<double>(kThreshold) * std::sqrt(static_cast<double>(kReplicates));
+    std::normal_distribution<double> onBoundary(1.0, boundary);
+    std::normal_distribution<double> inside(1.0, 0.01 * boundary);
+    std::array<float, pathtracer::scene::replicateStride(kReplicates)> texel{};
+    const auto rejectionRate = [&](int boundaryChannels) {
+        long long rejections = 0;
+        for (long long trial = 0; trial < kTrials; ++trial) {
+            for (std::size_t i = 0; i < texel.size(); ++i) {
+                texel[i] = static_cast<float>(static_cast<int>(i / kReplicates) < boundaryChannels ? onBoundary(rng) : inside(rng));
+            }
+            const double x = pathtracer::scene::convergenceStatistic(
+                pathtracer::scene::replicateEstimate(texel.data(), kReplicates, kReplicates), kReplicates, kThreshold);
+            rejections += 1.0 - tools::stats::chiSquareUpperTail(x, kReplicates - 1) <= kAlpha ? 1 : 0;
+        }
+        return tools::stats::clopperPearsonBand(rejections, kTrials, ctx.alpha());
+    };
+    const tools::stats::Band one = rejectionRate(1);
+    const tools::stats::Band all = rejectionRate(pathtracer::scene::kReplicateChannels);
+    char detail[160];
+    std::snprintf(detail, sizeof(detail), "one boundary channel: band [%.5f, %.5f] against %.2f", one.lo, one.hi, kAlpha);
+    PT_EXPECT(ctx, one.lo <= kAlpha && kAlpha <= one.hi, detail);
+    std::snprintf(detail, sizeof(detail), "three boundary channels: band [%.5f, %.5f], must sit below %.2f", all.lo, all.hi, kAlpha);
+    PT_EXPECT(ctx, all.hi < kAlpha, detail);
 }
 
 // Checkpoints are exactly n = K 2^j >= minSamples, and none exist with the threshold at zero.
@@ -234,7 +335,8 @@ PT_CHECK(convergence_statistic_is_chi_squared_at_the_boundary, Fast, Statistical
             for (float& mean : means) {
                 mean = static_cast<float>(replicate(rng));
             }
-            const pathtracer::scene::ReplicateEstimate estimate = pathtracer::scene::replicateEstimate(means.data(), replicates);
+            const pathtracer::scene::ReplicateEstimate estimate =
+                pathtracer::scene::replicateEstimate(greyTexel(means).data(), replicates, replicates);
             // The p-value through stats.h's own incomplete gamma, independent of the Boost.Math CDF the renderer ranks by.
             const double x = pathtracer::scene::convergenceStatistic(estimate, replicates, kThreshold);
             rejections += 1.0 - tools::stats::chiSquareUpperTail(x, replicates - 1) <= kAlpha ? 1 : 0;
@@ -269,11 +371,17 @@ PT_CHECK(retirement_holds_the_false_discovery_rate, Fast, Statistical) {
     std::normal_distribution<double> unconverged(1.0, boundarySpread);
     std::normal_distribution<double> converged(1.0, 0.1 * boundarySpread);
     tools::stats::Welford falseShare;
-    std::vector<float> means(static_cast<std::size_t>(kTexels) * kReplicates);
+    constexpr std::size_t kStride = pathtracer::scene::replicateStride(kReplicates);
+    std::vector<float> means(static_cast<std::size_t>(kTexels) * kStride);
+    std::array<float, kReplicates> draws{};
     for (int trial = 0; trial < kTrials; ++trial) {
-        for (std::size_t i = 0; i < means.size(); ++i) {
-            const bool isNull = static_cast<double>(i / kReplicates) < kNullShare * kTexels;
-            means[i] = static_cast<float>(isNull ? unconverged(rng) : converged(rng));
+        for (std::size_t texel = 0; texel < static_cast<std::size_t>(kTexels); ++texel) {
+            const bool isNull = static_cast<double>(texel) < kNullShare * kTexels;
+            for (float& draw : draws) {
+                draw = static_cast<float>(isNull ? unconverged(rng) : converged(rng));
+            }
+            const std::vector<float> grey = greyTexel(draws);
+            std::copy(grey.begin(), grey.end(), means.begin() + static_cast<std::ptrdiff_t>(texel * kStride));
         }
         std::vector<std::uint32_t> active(kTexels);
         std::iota(active.begin(), active.end(), 0U);
@@ -347,7 +455,8 @@ PT_CHECK(retirement_loosens_with_eccentricity, Fast, Exact) {
     const pathtracer::scene::FoveatedThreshold fovea(camera, kWidth, kHeight, settings.adaptive.marSlope);
     // Means 1 -+ a give SD(mbar) = a / sqrt(3); a = 2 sqrt(3) threshold puts it at twice the unscaled tolerance.
     const float a = 2.0F * std::sqrt(3.0F) * kThreshold;
-    std::vector<float> means(static_cast<std::size_t>(kWidth) * kHeight * kReplicates);
+    // Even K alternates identically in each channel block, so every texel is grey.
+    std::vector<float> means(static_cast<std::size_t>(kWidth) * kHeight * pathtracer::scene::replicateStride(kReplicates));
     for (std::size_t i = 0; i < means.size(); ++i) {
         means[i] = (i % 2 == 0) ? 1.0F - a : 1.0F + a;
     }

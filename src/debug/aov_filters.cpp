@@ -70,20 +70,20 @@ HdrImage hsvAov(const HdrImage& beauty, ThreadPool& threadPool) {
     return out;
 }
 
-HdrImage snrAov(int width, int height, const float* replicateLuminance, int replicates, int samples, ThreadPool& threadPool) {
+HdrImage snrAov(int width, int height, const float* replicateColour, int replicates, int samples, ThreadPool& threadPool) {
     HdrImage out = makeAovImage(AovId::SNR, width, height);
     // Replicates not yet drawn hold no estimate; fewer than two populated carry no spread, so the ratio is undefined and reads zero.
     const int populated = std::min(samples, replicates);
-    if (replicateLuminance == nullptr || populated < 2) {
+    if (replicateColour == nullptr || populated < 2) {
         return out;
     }
-    const auto stride = static_cast<std::size_t>(replicates);
+    const auto stride = pathtracer::scene::replicateStride(replicates);
     threadPool.parallelFor(height, [&](int y) {
         for (int x = 0; x < width; ++x) {
             const std::size_t pixel = (static_cast<std::size_t>(y) * static_cast<std::size_t>(width)) + static_cast<std::size_t>(x);
             // The adaptive stopping rule's own estimate, so the AOV shows exactly the error the sampler retires texels by.
             const pathtracer::scene::ReplicateEstimate estimate =
-                pathtracer::scene::replicateEstimate(replicateLuminance + (pixel * stride), populated);
+                pathtracer::scene::replicateEstimate(replicateColour + (pixel * stride), populated, replicates);
             const double standardError = std::sqrt(estimate.meanVariance);
             // No signal reads zero; a positive signal every replicate agreed on exactly is known exactly, so its SNR is +inf, not zero.
             const double ratio = estimate.mean > 0.0 ? estimate.mean / standardError : 0.0;
@@ -131,7 +131,7 @@ HdrImage evaluateFilterAov(AovId aov, const FilterInput& input, ThreadPool& thre
         case AovId::HSV:       return hsvAov(input.beauty, threadPool);
         case AovId::Luminance: return luminanceAov(input.beauty, threadPool);
         case AovId::SNR:
-            return snrAov(input.beauty.width, input.beauty.height, input.replicateLuminance, input.replicates, input.samples, threadPool);
+            return snrAov(input.beauty.width, input.beauty.height, input.replicateColour, input.replicates, input.samples, threadPool);
         case AovId::SampleCount:
             return sampleCountAov(input.beauty.width, input.beauty.height, input.texelSamples, threadPool);
         case AovId::Denoised:

@@ -2,7 +2,6 @@
 
 #include "pathtracer/debug/aov_filters.h"
 #include "pathtracer/debug/aov_routing.h"
-#include "pathtracer/scene/rgb.h"
 
 #include <boost/math/distributions/chi_squared.hpp>
 
@@ -39,13 +38,13 @@ void accumulateMean(PathTraceResult& sample, const PathTraceResult& previousMean
     const int replicate = (n - 1) % replicates;
     const int count = ((n - 1) / replicates) + 1;
     const float invCount = 1.0F / static_cast<float>(count);
-    const auto stride = static_cast<std::size_t>(replicates);
+    const auto stride = replicateStride(replicates);
     const auto fold = [&](std::uint32_t begin, std::uint32_t end) {
         const std::size_t run = end - begin;
         // Before the lane folds overwrite it: `beauty` still holds this pass's own radiance.
-        foldReplicateLuminance(previousMean.replicateLuminance.data() + (begin * stride),
+        foldReplicateColour(previousMean.replicateColour.data() + (begin * stride),
                                sample.beauty.texels.data() + (begin * beautyChannels), beautyChannels,
-                               sample.replicateLuminance.data() + (begin * stride), run, replicates, replicate, invCount);
+                               sample.replicateColour.data() + (begin * stride), run, replicates, replicate, invCount);
         for (const pathtracer::debug::PathTracedLane lane : lanes) {
             const auto channels = static_cast<std::size_t>((sample.*lane).channels);
             float* destination = (sample.*lane).texels.data() + (begin * channels);
@@ -55,8 +54,8 @@ void accumulateMean(PathTraceResult& sample, const PathTraceResult& previousMean
     };
     // An untraced texel keeps its estimate: the fresh buffer holds a stale pass there, so every lane, mean and count is carried over.
     const auto carry = [&](std::uint32_t begin, std::uint32_t end) {
-        const float* means = previousMean.replicateLuminance.data();
-        std::copy(means + (begin * stride), means + (end * stride), sample.replicateLuminance.data() + (begin * stride));
+        const float* means = previousMean.replicateColour.data();
+        std::copy(means + (begin * stride), means + (end * stride), sample.replicateColour.data() + (begin * stride));
         for (const pathtracer::debug::PathTracedLane lane : lanes) {
             const auto channels = static_cast<std::size_t>((sample.*lane).channels);
             const float* previous = (previousMean.*lane).texels.data();
@@ -125,9 +124,9 @@ void foldRunningMean(const float* previousMean, const float* drawn, float* mean,
     }
 }
 
-void foldReplicateLuminance(const float* previousMeans, const float* drawn, std::size_t channels, float* means, std::size_t pixels,
+void foldReplicateColour(const float* previousMeans, const float* drawn, std::size_t channels, float* means, std::size_t pixels,
                             int replicates, int replicate, float invCount) {
-    const auto stride = static_cast<std::size_t>(replicates);
+    const auto stride = replicateStride(replicates);
     const auto slot = static_cast<std::size_t>(replicate);
     for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
         const float* previous = previousMeans + (pixel * stride);
@@ -136,23 +135,31 @@ void foldReplicateLuminance(const float* previousMeans, const float* drawn, std:
         if (folded != previous) {
             std::copy(previous, previous + stride, folded);
         }
-        const std::size_t i = pixel * channels;
-        const float x = pathtracer::scene::luminance({drawn[i], drawn[i + 1], drawn[i + 2]});
-        folded[slot] = previous[slot] + ((x - previous[slot]) * invCount);
+        for (int c = 0; c < kReplicateChannels; ++c) {
+            const std::size_t at = (static_cast<std::size_t>(c) * static_cast<std::size_t>(replicates)) + slot;
+            folded[at] = previous[at] + ((drawn[(pixel * channels) + static_cast<std::size_t>(c)] - previous[at]) * invCount);
+        }
     }
 }
 
-ReplicateEstimate replicateEstimate(const float* means, int populated) {
-    const double mean = std::accumulate(means, means + populated, 0.0) / static_cast<double>(populated);
-    double squares = 0.0;
-    for (int r = 0; r < populated; ++r) {
-        squares += (means[r] - mean) * (means[r] - mean);
-    }
+ReplicateEstimate replicateEstimate(const float* texelMeans, int populated, int replicates) {
+    double level = 0.0;
+    double meanVariance = 0.0;
     const double inverseDegrees = 1.0 / (static_cast<double>(populated) * static_cast<double>(populated - 1));
-    return {mean, squares * inverseDegrees};
+    for (int c = 0; c < kReplicateChannels; ++c) {
+        const float* means = texelMeans + (static_cast<std::size_t>(c) * static_cast<std::size_t>(replicates));
+        const double mean = std::accumulate(means, means + populated, 0.0) / static_cast<double>(populated);
+        double squares = 0.0;
+        for (int r = 0; r < populated; ++r) {
+            squares += (means[r] - mean) * (means[r] - mean);
+        }
+        level += mean;
+        meanVariance = std::max(meanVariance, squares * inverseDegrees);
+    }
+    return {level / kReplicateChannels, meanVariance};
 }
 
-// Normal replicate means make (K-1) s^2 / sigma^2 chi-squared on K-1 dof (Cochran 1934): small at sigma below the tolerance.
+// Normal replicate means make (K-1) s^2 / sigma^2 chi-squared on K-1 dof (Cochran 1934); the worst channel's is the IUT (Berger 1982).
 double convergenceStatistic(const ReplicateEstimate& estimate, int replicates, float threshold) {
     const double tolerance = static_cast<double>(threshold) * estimate.mean;
     // Zero spread is no evidence: replicates of a few samples agree exactly when every sample missed a rare path, as at a silhouette.
@@ -216,9 +223,9 @@ float FoveatedThreshold::scale(std::uint32_t texel) const {
 }
 
 // Texels are independent under filter importance sampling, so the step-up holds the stopped set's false share to 1 - confidence.
-void retireConvergedTexels(std::vector<std::uint32_t>& active, const float* replicateLuminance, const PathTraceSettings& settings,
+void retireConvergedTexels(std::vector<std::uint32_t>& active, const float* replicateColour, const PathTraceSettings& settings,
                            const FoveatedThreshold& fovea, ThreadPool& threadPool) {
-    const auto stride = static_cast<std::size_t>(settings.replicates);
+    const auto stride = replicateStride(settings.replicates);
     const double alpha = 1.0 - static_cast<double>(settings.adaptive.confidence);
     const boost::math::chi_squared_distribution<double> chiSquared(static_cast<double>(settings.replicates) - 1.0);
     // p_(k) <= k alpha / m <= alpha, so only statistics at or below the alpha quantile can be rejected; they rank first among all m.
@@ -230,7 +237,8 @@ void retireConvergedTexels(std::vector<std::uint32_t>& active, const float* repl
         const auto begin = static_cast<std::size_t>(chunk) * static_cast<std::size_t>(chunkTexels);
         const std::size_t end = std::min(begin + static_cast<std::size_t>(chunkTexels), active.size());
         for (std::size_t i = begin; i < end; ++i) {
-            const ReplicateEstimate estimate = replicateEstimate(replicateLuminance + (active[i] * stride), settings.replicates);
+            const float* texelMeans = replicateColour + (active[i] * stride);
+            const ReplicateEstimate estimate = replicateEstimate(texelMeans, settings.replicates, settings.replicates);
             statistics[i] = convergenceStatistic(estimate, settings.replicates, settings.adaptive.threshold * fovea.scale(active[i]));
         }
     });
@@ -387,16 +395,16 @@ void PathTraceDriver::finishPass(const std::shared_ptr<PathTraceResult>& pass, s
         accumulateMean(*pass, *currentMean, passIndex, activeTexels_, threadPool_);
     } else {
         // Replicate 0's first pass is its mean; the rest start at exactly zero, not at whatever the reused slot held, and are not read yet.
-        std::fill(pass->replicateLuminance.begin(), pass->replicateLuminance.end(), 0.0F);
-        foldReplicateLuminance(pass->replicateLuminance.data(), pass->beauty.texels.data(),
-                               static_cast<std::size_t>(pass->beauty.channels), pass->replicateLuminance.data(),
+        std::fill(pass->replicateColour.begin(), pass->replicateColour.end(), 0.0F);
+        foldReplicateColour(pass->replicateColour.data(), pass->beauty.texels.data(),
+                               static_cast<std::size_t>(pass->beauty.channels), pass->replicateColour.data(),
                                pass->beauty.texels.size() / static_cast<std::size_t>(pass->beauty.channels), pass->replicates,
                                /*replicate=*/0, /*invCount=*/1.0F);
         std::fill(pass->texelSamples.begin(), pass->texelSamples.end(), 1);
     }
     if (adaptiveCheckpoint(passIndex, settings)) {
         const FoveatedThreshold fovea(request.camera, pass->beauty.width, pass->beauty.height, settings.adaptive.marSlope);
-        retireConvergedTexels(activeTexels_, pass->replicateLuminance.data(), settings, fovea, threadPool_);
+        retireConvergedTexels(activeTexels_, pass->replicateColour.data(), settings, fovea, threadPool_);
     }
     pass->activeTexels = activeTexels_.size();
     const double accumulateMs = millisecondsSince(accumulateStart);

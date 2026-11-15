@@ -433,7 +433,7 @@ void HeadlessRenderer::accumulatePathTraced(const Request& request) {
         laneSources.push_back(&(pathTraced_.*lane).texels);
     }
     // renderPathTraced writes images only, so pathTraced_ holds the replicate means and counts across passes, folded in place from zero.
-    std::fill(pathTraced_.replicateLuminance.begin(), pathTraced_.replicateLuminance.end(), 0.0F);
+    std::fill(pathTraced_.replicateColour.begin(), pathTraced_.replicateColour.end(), 0.0F);
     std::fill(pathTraced_.texelSamples.begin(), pathTraced_.texelSamples.end(), 0);
     activeTexels_ = pathtracer::scene::allTexels(bufferWidth_, bufferHeight_);
     // Ends at request.samples, or earlier once the stopping rule has retired every texel.
@@ -454,7 +454,7 @@ void HeadlessRenderer::accumulatePathTraced(const Request& request) {
         if (pathtracer::scene::adaptiveCheckpoint(pass + 1, baseSettings_)) {
             const pathtracer::scene::FoveatedThreshold fovea(request.camera, bufferWidth_, bufferHeight_,
                                                              baseSettings_.adaptive.marSlope);
-            pathtracer::scene::retireConvergedTexels(activeTexels_, pathTraced_.replicateLuminance.data(), baseSettings_, fovea,
+            pathtracer::scene::retireConvergedTexels(activeTexels_, pathTraced_.replicateColour.data(), baseSettings_, fovea,
                                                      threadPool_);
         }
     }
@@ -471,13 +471,13 @@ void HeadlessRenderer::accumulatePass(int pass, const std::vector<const std::vec
     const int replicate = pass % replicates;
     const int count = (pass / replicates) + 1;
     const float invCount = 1.0F / static_cast<float>(count);
-    const auto stride = static_cast<std::size_t>(replicates);
+    const auto stride = pathtracer::scene::replicateStride(replicates);
     const auto beautyChannels = static_cast<std::size_t>(pathTraced_.beauty.channels);
     const auto fold = [&](std::uint32_t begin, std::uint32_t end) {
         const std::size_t run = end - begin;
         // From the pass's own Beauty, which renderPathTraced always writes, so the means exist whichever lanes are accumulated.
-        float* means = pathTraced_.replicateLuminance.data() + (begin * stride);
-        pathtracer::scene::foldReplicateLuminance(means, pathTraced_.beauty.texels.data() + (begin * beautyChannels), beautyChannels, means,
+        float* means = pathTraced_.replicateColour.data() + (begin * stride);
+        pathtracer::scene::foldReplicateColour(means, pathTraced_.beauty.texels.data() + (begin * beautyChannels), beautyChannels, means,
                                                   run, replicates, replicate, invCount);
         std::fill(pathTraced_.texelSamples.data() + begin, pathTraced_.texelSamples.data() + end, pass + 1);
         for (std::size_t lane = 0; lane < laneSources.size(); ++lane) {
@@ -519,7 +519,7 @@ void HeadlessRenderer::evaluateFilters(const Request& request) {
         denoiser_ = std::make_unique<pathtracer::debug::Denoiser>(profile_.denoiser.options);
     }
     const pathtracer::debug::FilterInput filterInput{beauty,
-                                                     pathTraced_.replicateLuminance.data(),
+                                                     pathTraced_.replicateColour.data(),
                                                      pathTraced_.replicates,
                                                      request.samples,
                                                      pathTraced_.texelSamples.data(),

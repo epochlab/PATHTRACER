@@ -150,20 +150,20 @@ private:
 // Running mean m_n = m_{n-1} + (x_n - m_{n-1}) * invN over count floats; `mean` may alias either input. HeadlessRenderer shares it.
 void foldRunningMean(const float* previousMean, const float* drawn, float* mean, std::size_t count, float invN);
 
-// Folds drawn Beauty's scene luminance into one replicate's running mean, carrying the rest; means may alias previousMeans.
-void foldReplicateLuminance(const float* previousMeans, const float* drawn, std::size_t channels, float* means, std::size_t pixels,
+// Folds drawn Beauty's scene RGB into one replicate's running means, carrying the rest; means may alias previousMeans.
+void foldReplicateColour(const float* previousMeans, const float* drawn, std::size_t channels, float* means, std::size_t pixels,
                             int replicates, int replicate, float invCount);
 
-// One texel's replicated estimate of mean scene luminance and the variance of that mean.
+// One texel's replicated colour estimate: its mean channel level and the largest channel's variance of its mean.
 struct ReplicateEstimate {
-    double mean;
-    double meanVariance;  // sum (m_r - mbar)^2 / (K(K-1)), unbiased for Var(mbar) at any replicate counts
+    double mean;          // (R + G + B) / 3 of the replicate means: the scale every channel's error is judged against
+    double meanVariance;  // max over channels of sum (m_r - mbar)^2 / (K(K-1)), each unbiased for Var(mbar) at any replicate counts
 };
 
-// The estimate from `populated` replicate means, in double: a converged texel's deviations are rounding-scale differences of floats.
-[[nodiscard]] ReplicateEstimate replicateEstimate(const float* means, int populated);
+// The estimate from `populated` of a texel's replicateStride means, in double: converged deviations are rounding-scale float differences.
+[[nodiscard]] ReplicateEstimate replicateEstimate(const float* texelMeans, int populated, int replicates);
 
-// (K-1) s^2 / (threshold mean)^2, chi-squared on K-1 dof where SD(mbar) = threshold * mean; +inf for zero spread, zero mean or NaN.
+// (K-1) s^2 / (threshold mean)^2 of the worst channel, so every channel's SD(mbar) <= threshold * mean; +inf for no spread, mean or NaN.
 [[nodiscard]] double convergenceStatistic(const ReplicateEstimate& estimate, int replicates, float threshold);
 
 // Benjamini & Hochberg 1995 step-up: how many of the smallest of `tests` p-values, given ascending, are rejected at rate alpha.
@@ -200,7 +200,7 @@ private:
 };
 
 // Drops the texels of ascending `active` the step-up procedure finds converged at 1 - confidence each at its foveated threshold.
-void retireConvergedTexels(std::vector<std::uint32_t>& active, const float* replicateLuminance, const PathTraceSettings& settings,
+void retireConvergedTexels(std::vector<std::uint32_t>& active, const float* replicateColour, const PathTraceSettings& settings,
                            const FoveatedThreshold& fovea, ThreadPool& threadPool);
 
 // Splits [begin, end) into runs of consecutive texels in ascending `traced`, passed to fold(b, e), and the gaps, passed to carry(b, e).
