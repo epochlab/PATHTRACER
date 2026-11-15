@@ -5,9 +5,9 @@ their own sequence; every entry above them is standalone, most recent first.
 
 ## Black edges on scanned geometry
 
-Scanned meshes rendered black slivers along ridges and creases, and black blobs. The new `sandstone.json` scene (a 576 m,
-2M-triangle Megascans terrain) shows them in close-up. Every pixel of six close-ups was traced back to its triangle, which
-separated three causes.
+Scanned meshes rendered black slivers along ridges and creases, and black blobs. A 576 m, 2M-triangle Megascans terrain
+showed them in close-up; its scene was removed once the fix landed. Every pixel of six close-ups was traced back to its
+triangle, which separated three causes.
 
 - fix: **folded vertex normals (most of the black).** On a fold the triangle faces the camera, but its interpolated normal
   points away. The BSDF's microsurface stands on that normal, so it saw the viewer from below and returned almost nothing.
