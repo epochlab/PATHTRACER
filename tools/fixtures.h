@@ -58,8 +58,9 @@ inline double referenceLo(const pathtracer::scene::OpenPbrInputs<pathtracer::sce
                           int sampleCount, std::mt19937& rng) {
     // Summed in double: a float sum's ulp at 1e4 draws rivals the standard error the callers' bands are built from.
     glm::dvec3 accum(0.0);
+    pathtracer::scene::Sampler walk(0, 0, 0, 1, rng());
     for (int i = 0; i < sampleCount; ++i) {
-        accum += glm::dvec3(pathtracer::scene::evaluateBsdf(inputs, wo, sampleUniformHemisphere(rng)));
+        accum += glm::dvec3(pathtracer::scene::evaluateBsdf(inputs, wo, sampleUniformHemisphere(rng), walk));
     }
     return 2.0 * std::numbers::pi * std::max({accum.x, accum.y, accum.z}) / static_cast<double>(sampleCount);
 }

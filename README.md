@@ -95,11 +95,10 @@ frame["depth"]    # (64, 128, 1) float32, camera-space Z
 
 | Area | Item | Detail | Complexity | ETA | Status |
 | --- | --- | --- | --- | --- | --- |
-| BSDF | Smith-exact transmission | Rough glass multiple scattering uses a lopsided approximation. Random walk on the Smith microsurface (Heitz et al. 2016). | high | 3 h | ready |
 | BSDF | Normal-map noise | Multi-facet bounces on normal-mapped glossy surfaces have infinite variance; rough glass fails its sampling check on any seed. | high | 4 h | ready |
 | Cleanup | Codebase review | Remove dead code, duplicated logic, needless abstraction, redundant copies and loop-invariant work, output unchanged. Radiance gets its own type, distinct from directions, so spectral transport is compiler-checked. | medium | 3 h | ready |
 | Colour | Spectral transport | Per-path wavelength sampling (Wilkie et al. 2014) by channel sensitivity; spectral upsampling of textures and the HDRI (Jakob and Hanika 2019); kelvin lights emit their blackbody or CIE daylight spectra. | high | 6 h | ready |
-| Sampling | Bidirectional paths | Light and eye subpaths joined by MIS (Veach and Guibas 1995) so caustics converge. Waits for Smith-exact transmission and spectral transport. | high | 8 h | blocked |
+| Sampling | Bidirectional paths | Light and eye subpaths joined by MIS (Veach and Guibas 1995) so caustics converge. Waits for spectral transport. | high | 8 h | blocked |
 | Light | Emission spectra | Lights are a kelvin or an RGB colour. Measured spectral power distributions (spectroradiometer CSV) and CIE F-series and LED illuminants (CIE 015:2018) per light. Waits for spectral transport. | medium | 2 h | blocked |
 | Camera | Camera spectral sensitivity | Renders are ACEScg, not camera RGB. Measured camera sensitivities give camera-native RGB, then the camera's IDT to ACEScg, so CG matches the plate (Langlands and Fascione 2020). Waits for spectral transport. | high | 3 h | blocked |
 | Camera | White balance | No white balance: lights and the HDRI show their true cast. Per-channel gains on the camera-native response so a chosen kelvin (blackbody or daylight) or grey card reads neutral, before the IDT, as in camera. Never edits lights. Waits for camera spectral sensitivity. | medium | 1 h | blocked |

@@ -20,7 +20,7 @@ enum class LobeType { Diffuse, SpecularReflection, Transmission };
 
 struct BsdfSample {
     glm::vec3 wiLocal;            // sampled direction, local shading frame
-    glm::vec3 throughputWeight;   // f(wi)*|cosThetaI| / pdf(wi)
+    glm::vec3 throughputWeight;   // the drawn technique's estimate of f(wi)*|cosThetaI| / pdf(wi): a walk's is its exit throughput
     glm::vec3 transmitWeight;     // its transmission lobes' share: what a direction crossing the geometric surface carries
     LobeType type;
     // The mixture density wiLocal was drawn from, equal to pdfBsdf's; zero for a delta branch.
@@ -29,6 +29,7 @@ struct BsdfSample {
     bool passThrough = false;  // a smooth thin wall's undeviated transmission along -wo: a null vertex, the ray continues unchanged
     // The drawn lobe's own solid-angle density at wiLocal given its discrete branch, unscaled by selection mass: how narrow it is.
     float lobePdf = 0.0F;
+    bool walked = false;  // an interface walk's exit: throughput its estimate, lobePdf its MIS proxy, no closed-form density
 };
 
 // The BSDF's continuous lobes at one wi, cosine-weighted, f*|cos| about each lobe's own normal (Mitsuba 3's convention), by type.
@@ -40,23 +41,11 @@ struct BsdfEval {
     [[nodiscard]] glm::vec3 total() const { return diffuse + specular + transmission; }
 };
 
-// Bilinear (roughness, eta) weights over four tabulated escape rows, a mu lookup away from any directional value at that vertex.
-struct EscapeRow {
-    std::array<int, 4> base;
-    std::array<float, 4> weight;
-};
-
 // The four (roughness, anisotropy) rows of the anisotropic tables about one slab, each row's node alphas setting its azimuth axis.
 struct AnisoRows {
     std::array<int, 4> row;
     std::array<float, 4> weight;
     std::array<glm::vec2, 4> alpha;
-};
-
-// An escape row over the escape-deficit shape, with the reciprocal of its blended total; scale 0 where the shape holds no energy.
-struct EscapeShape {
-    EscapeRow row;
-    float scale;
 };
 
 // OpenPBR's thin film over a base slab's Fresnel: weight 0 where absent or zero-thick; ambient-side index 1, or the coat's n_c with C.
@@ -87,7 +76,7 @@ struct ConductorSlab {
     glm::vec3 filmKappa;
 };
 
-// A GGX dielectric interface at one wo (OpenPBR's specular slab): reflection, refraction and their escape-table multiple scattering.
+// A GGX dielectric interface at one wo (OpenPBR's specular slab): reflection, refraction, and the Smith walk's 2+ orders.
 struct DielectricSlab {
     glm::vec2 alpha;       // (alpha_t, alpha_b) along the frame's tangent and bitangent
     float etaI;            // the media either side, wo's first: refraction bends by etaI/etaT
@@ -100,14 +89,12 @@ struct DielectricSlab {
     // Of the light the interface transmits, the share leaving refracted: transmission_weight from above, 1 from inside, the rest diffuse.
     float refractWeight;
     glm::vec3 transmitTint;  // transmission_color on the surface when transmission_depth is 0; white when the medium carries it
-    EscapeRow row;           // forward eta etaI/etaT
-    EscapeShape reflectShape;   // escape-deficit shape at the forward eta, sampling the multiple scattering leaving on wo's side
-    EscapeShape transmitShape;  // the same at the reciprocal eta, for multiple scattering leaving refracted
     glm::vec3 reflectSingle;   // R_ss(mu_o), the film's through the kernel rule; F(mu_o) when smooth
     glm::vec3 transmitSingle;  // T_ss(mu_o), a selection mass: 1 - F(mu_o) when smooth; undeviated, plus transmitted multiple scattering
-    float multiReflect;      // the escape deficit at mu_o times the random walks' reflected share of 2+ bounce energy
-    float multiReflectScaleWo;  // multiReflect / (pi * (1 - Eavg)), the wo half of the reflected multiple-scattering lobe
-    float multiTransmit;     // the same deficit's transmitted share
+    float multiReflect;      // the walk's 2+ order energy at mu_o leaving on wo's side, untinted (Heitz et al. 2016)
+    float multiTransmit;     // the same leaving across the interface, before eta^2 and the transmission weights
+    float roughness;         // the escape tables' coordinates: specular roughness and anisotropy, for their per-node errors
+    float anisotropy;
     float etaSq;             // (etaI/etaT)^2, the radiance compression refraction carries
     FilmLayer film;
     float baseIor;           // the base's own index n_b, the film's substrate from outside and its incident medium from inside
@@ -155,14 +142,13 @@ struct FuzzSlab {
 // One slab's sampling strategy; the closure's selection masses are indexed by it, so the order is the sample stream's contract.
 enum class Technique : std::uint8_t {
     Fuzz,                    // the sheen LTC, sampled exactly
-    CoatSingle,              // the coat's VNDF reflection in its own frame, or its mirror when smooth
-    CoatMulti,               // the coat's reflected multiple scattering
+    CoatSingle,              // the smooth coat's mirror in its own frame
+    CoatWalk,                // the rough coat's whole Smith walk in its own frame (Heitz et al. 2016), reflected exits alone
     MetalSingle,             // VNDF reflection, or the mirror when smooth
     MetalMulti,              // the Kulla-Conty lobe, drawn from kMsReflectDensity
-    DielectricSingle,        // VNDF reflection or refraction split by the facet's Fresnel (Walter 2007), or the mirror when smooth
+    DielectricSingle,        // the smooth interface's mirror, or an index-matched rough one's VNDF reflection (Walter 2007)
     DielectricRefract,       // smooth or index-matched refraction, a delta
-    DielectricMultiReflect,  // escape-table multiple scattering leaving on wo's side
-    DielectricMultiTransmit, // escape-table multiple scattering leaving refracted
+    DielectricWalk,          // the rough refracting interface's whole Smith walk (Heitz et al. 2016), leaving either side
     Diffuse,                 // EON
     SheetSingle,             // a thin wall's VNDF lobe, reflected or mirrored through it by side; the mirror or -wo when smooth
     SheetMulti,              // its Kulla-Conty lobe, reflected or mirrored through the wall
@@ -269,18 +255,33 @@ struct WalkVertex {
                                                     const glm::vec3& coatNormalLocal, const glm::vec3& coatTangentLocal,
                                                     float ambientIor = 1.0F);
 
-// The continuous lobes at wiLocal, split by transport type; one call, so GGX, Fresnel and table reads are computed once.
-[[nodiscard]] BsdfEval evaluateBsdfSplit(const BsdfClosure& closure, const glm::vec3& wiLocal);
+// The continuous lobes at wiLocal, split by transport type, the interfaces' 2+ orders an unbiased estimate drawn from walk.
+[[nodiscard]] BsdfEval evaluateBsdfSplit(const BsdfClosure& closure, const glm::vec3& wiLocal, Sampler& walk);
 
-// Selects a technique by its mass and draws from it; the throughput divides by the whole mixture's density (one-sample MIS).
-[[nodiscard]] std::optional<BsdfSample> sampleBsdf(const BsdfClosure& closure, Sampler& sampler);
+// Every lobe but the interfaces' 2+ orders, deterministic, and the closed-form techniques' density, each scaled by its selection mass.
+[[nodiscard]] BsdfEval evaluateClosedForm(const BsdfClosure& closure, const glm::vec3& wiLocal);
+
+// The closed-form techniques' lobes alone and their density: a closed-form draw's throughput is exactly their ratio.
+[[nodiscard]] BsdfEval evaluateClosedTechniques(const BsdfClosure& closure, const glm::vec3& wiLocal);
+
+// multiReflect's standard error at wo: independent per-node errors through the read's weights, sqrt(sum w^2 sigma^2), both tables.
+[[nodiscard]] float multiReflectError(const DielectricSlab& slab, const glm::vec3& wo);
+
+// The walk tables' standard error in the 2+ reflection this closure's albedo scaling reads at wo: base interface and coat, in quadrature.
+[[nodiscard]] float walkTableError(const BsdfClosure& closure);
+
+// The whole mixture's density at wiLocal, the walks' by their proxy: the MIS density every estimator of this closure shares.
+[[nodiscard]] float pdfBsdf(const BsdfClosure& closure, const glm::vec3& wiLocal);
+
+// Selects a technique by its mass and draws from it, a walk technique's path on walk; MIS over the closed forms (Veach 1997 9.2.4).
+[[nodiscard]] std::optional<BsdfSample> sampleBsdf(const BsdfClosure& closure, Sampler& sampler, Sampler& walk);
 
 // The microsurface's forms, components by omega_g's side; walk draws the escapes, later vertices and the evaluation's higher orders.
 [[nodiscard]] bool scatters(const NormalMappedBsdf& bsdf);
 [[nodiscard]] bool transmits(const NormalMappedBsdf& bsdf);
 [[nodiscard]] glm::vec3 passThrough(const NormalMappedBsdf& bsdf);
-// The walk's first facet vertex in closed form: eq. 23 and the t-p-t exit. Its pdf is the MIS density both estimators share (sec. 7.3).
-[[nodiscard]] BsdfEval evaluateFirstScattering(const NormalMappedBsdf& bsdf, const glm::vec3& wiLocal);
+// Eq. 23 and the t-p-t exit, facets' walks on walk or closed forms without; its pdf, the same either way, is the MIS density (sec. 7.3).
+[[nodiscard]] BsdfEval evaluateFirstScattering(const NormalMappedBsdf& bsdf, const glm::vec3& wiLocal, Sampler* walk);
 // The first scattering plus the later orders, resumed from a draw's revisit: unbiased, as the draw's first leg is the walk's own.
 [[nodiscard]] BsdfEval evaluateBsdfSplit(const NormalMappedBsdf& bsdf, const glm::vec3& wiLocal, const std::optional<WalkVertex>& revisit,
                                          Sampler& walk);
@@ -292,13 +293,15 @@ struct WalkVertex {
 // The slabs' reflected Fresnel at cosTheta = dot(h, wo), each at its layer and mix weight: coat, metal F82, tinted dielectric.
 [[nodiscard]] glm::vec3 fresnelAtViewAngle(const BsdfClosure& closure, float cosTheta);
 
-// fresnelAtViewAngle at one VNDF half-vector (Heitz 2018), per Walter 2007. One sample of E[F]: THE CALLER MUST AVERAGE.
+// fresnelAtViewAngle at one VNDF half-vector (Dupuy & Benyoub 2023), per Walter 2007. One sample of E[F]: THE CALLER MUST AVERAGE.
 [[nodiscard]] glm::vec3 fresnelAtMicrofacet(const BsdfClosure& closure, glm::vec2 u);
 
-// The closure forms for validators with one direction to answer for: one closure, used once.
-[[nodiscard]] BsdfEval evaluateBsdfSplit(const OpenPbrInputs<Constant>& inputs, const glm::vec3& woLocal, const glm::vec3& wiLocal);
+// The closure forms for validators with one direction to answer for: one closure, used once; a draw walks on its own sampler.
+[[nodiscard]] BsdfEval evaluateBsdfSplit(const OpenPbrInputs<Constant>& inputs, const glm::vec3& woLocal, const glm::vec3& wiLocal,
+                                         Sampler& walk);
+[[nodiscard]] BsdfEval evaluateClosedForm(const OpenPbrInputs<Constant>& inputs, const glm::vec3& woLocal, const glm::vec3& wiLocal);
 [[nodiscard]] float pdfBsdf(const OpenPbrInputs<Constant>& inputs, const glm::vec3& woLocal, const glm::vec3& wiLocal);
-[[nodiscard]] glm::vec3 evaluateBsdf(const OpenPbrInputs<Constant>& inputs, const glm::vec3& woLocal, const glm::vec3& wiLocal);
+[[nodiscard]] glm::vec3 evaluateBsdf(const OpenPbrInputs<Constant>& inputs, const glm::vec3& woLocal, const glm::vec3& wiLocal, Sampler& walk);
 [[nodiscard]] std::optional<BsdfSample> sampleBsdf(const OpenPbrInputs<Constant>& inputs, const glm::vec3& woLocal, Sampler& sampler);
 
 // An index n_d at the hero band by Cauchy from V_d = abbe / scale; unset or zero scale, n_d itself. Bulks and their ambient alike.

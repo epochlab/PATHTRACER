@@ -207,7 +207,7 @@ float misCombinedLo(const OpenPbrInputs<Constant>& params, const glm::vec3& wo, 
         const EnvironmentMap::EnvSample lightSample =
             env.importanceSampleDirection(sampler.next2D());
         if (lightSample.direction.z > 0.0F) {
-            const glm::vec3 bsdfValue = pathtracer::scene::evaluateBsdf(params, wo, lightSample.direction);
+            const glm::vec3 bsdfValue = pathtracer::scene::evaluateBsdf(params, wo, lightSample.direction, sampler);
             const float bsdfPdf = pathtracer::scene::pdfBsdf(params, wo, lightSample.direction);
             if (bsdfPdf > 0.0F && (bsdfValue.x > 0.0F || bsdfValue.y > 0.0F || bsdfValue.z > 0.0F)) {
                 const float lightPdf2 = lightSample.pdf * lightSample.pdf;
@@ -812,7 +812,8 @@ float referenceLoArea(const OpenPbrInputs<Constant>& params, const glm::vec3& wo
     for (int i = 0; i < sampleCount; ++i) {
         const glm::vec3 wi = sampleUniformHemisphere(rng);
         if (const std::optional<LightHit> hit = hitLight(light, p, wi)) {
-            accum += pathtracer::scene::evaluateBsdf(params, wo, wi) * emittedAlong(light, wi, hit->normal) / kUniformPdf;
+            Sampler walk(0, 0, 0, 1, rng());
+            accum += pathtracer::scene::evaluateBsdf(params, wo, wi, walk) * emittedAlong(light, wi, hit->normal) / kUniformPdf;
         }
     }
     return std::max({accum.x, accum.y, accum.z}) / static_cast<float>(sampleCount);
@@ -830,7 +831,7 @@ float misCombinedLoArea(const OpenPbrInputs<Constant>& params, const glm::vec3& 
         // NEE.
         const std::optional<LightSample> lightSample = set.sample(p, sampler);
         if (lightSample.has_value() && lightSample->direction.z > 0.0F) {
-            const glm::vec3 bsdfValue = pathtracer::scene::evaluateBsdf(params, wo, lightSample->direction);
+            const glm::vec3 bsdfValue = pathtracer::scene::evaluateBsdf(params, wo, lightSample->direction, sampler);
             const float bsdfPdf = pathtracer::scene::pdfBsdf(params, wo, lightSample->direction);
             if (bsdfPdf > 0.0F && (bsdfValue.x > 0.0F || bsdfValue.y > 0.0F || bsdfValue.z > 0.0F)) {
                 const float lightPdf2 = lightSample->pdf * lightSample->pdf;

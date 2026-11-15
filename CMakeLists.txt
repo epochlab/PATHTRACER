@@ -177,6 +177,7 @@ add_library(pathtracer_core STATIC
     src/scene/ray_types.cpp
     src/scene/sampler.cpp
     src/scene/shading_scene.cpp
+    src/scene/smith_walk.cpp
     src/scene/thin_film.cpp
     src/scene/thread_pool.cpp
     src/scene/volume.cpp
