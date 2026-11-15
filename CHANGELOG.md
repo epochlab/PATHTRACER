@@ -3,6 +3,30 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Normal-map noise
+
+On a normal-mapped surface, NEE evaluates every facet vertex of Schussler et al. 2017's walk toward the light. One power-heuristic
+weight, from the first scattering's density alone, covered all of them, and a draw leaving at any vertex reported that same density.
+A later vertex's glossy peak toward the light was then weighted by neither strategy: fireflies, and a check that failed on any seed.
+
+- fix: **per-vertex MIS (Veach 1997 ch. 9).** Each walk vertex is its own NEE/BSDF pair.
+  - NEE weighs vertex k's exits by powerHeuristic(p_light, p_k), p_k being that vertex's exit density over both routes (direct or off
+    the wall), masking included. The first vertex keeps the first scattering's density.
+  - A draw leaving at vertex k reports p_k: the very density NEE weighs that vertex by, so the two weights sum to 1 on every path.
+  - A draw whose exit leg is smooth is a delta whatever came before. NEE never reaches a delta lobe, so its light hit keeps full
+    weight; before, a rough-then-smooth walk lost the NEE share of that hit.
+  - p_k is the pdf `exitsAt` already computed, so the cost is unchanged.
+- feat: `evaluateForLight` returns NEE's plain value and its per-vertex weighted value from one walk. `powerHeuristic` replaces the
+  integrator's four inline copies.
+- test: `normal_map_sampling_matches_evaluation` now checks NEE's share per direction bin and in total. Each bin is a light of density
+  1/area: draws weighted by the light's MIS weight at their exit density, against the per-vertex weighted evaluation.
+  - A smooth-coated case covers the delta exit. Mutations restoring either old rule fail it on every seed tried.
+  - Both sides take the rare-bin bound E[X^2] <= max(X) E[X]; sparse evaluation spikes had failed one seed in 40 without it.
+  - Passes seeds 1-40 and `--calibrate`.
+- note: on a close-up of the stump at roughness 0.25, per-pixel variance falls 3.0x on average and 11x at its 99.9th percentile. The
+  mean moves +0.03% (0.18 standard errors). The shipped stump (roughness 0.78-1.0) is unchanged within noise, and paired pass time is
+  1.005-1.011x. Evidence is in `results/normal_map_noise`.
+
 ## Smith-exact dielectric multiple scattering
 
 Rough glass, the specular layer of opaque dielectrics and coats took their multiple scattering from escape tables. Transmission was
