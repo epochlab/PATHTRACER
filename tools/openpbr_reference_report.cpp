@@ -2,13 +2,10 @@
 
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <functional>
 #include <random>
-#include <thread>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -17,6 +14,7 @@
 
 #include "microfacet.h"
 #include "microfacet_quadrature.h"
+#include "parallel.h"
 #include "pathtracer/scene/bsdf.h"
 #include "pathtracer/scene/sampler.h"
 #include "stats.h"
@@ -37,22 +35,6 @@ double adobeIor(int index) {
 }
 
 double adobeTable(const OpenPBR_EnergyTableElement* table, int flat) { return table[flat] / 65535.0; }
-
-// Rows run in parallel, each writing only its own slots.
-void parallelFor(int count, const std::function<void(int)>& body) {
-    std::atomic<int> next{0};
-    std::vector<std::thread> workers;
-    for (unsigned w = 0; w < std::max(1U, std::thread::hardware_concurrency()); ++w) {
-        workers.emplace_back([&] {
-            for (int i = next++; i < count; i = next++) {
-                body(i);
-            }
-        });
-    }
-    for (std::thread& worker : workers) {
-        worker.join();
-    }
-}
 
 struct Summary {
     double sum = 0.0;
@@ -111,7 +93,7 @@ void reportTables() {
 
     // Rows by roughness for the conductor; by (ior, roughness) for the interface, each slot written once.
     std::vector<std::array<double, 4>> metal(static_cast<std::size_t>(kTableSize * kTableSize));
-    parallelFor(kTableSize, [&](int k) {
+    tools::parallelFor(kTableSize, tools::hardwareThreads(), [&](int k) {
         const double alpha = std::pow(k / 31.0, 2.0);
         for (int j = 1; j < kTableSize && k > 0; ++j) {
             const double adobe = 1.0 - adobeTable(OpenPBR_IdealMetalEnergyComplement_Array, (k * kTableSize) + j);
@@ -142,7 +124,7 @@ void reportTables() {
     // Per (ior, roughness) row: [R+T sep, R+T hc, R sep, R hc] at each mu, then the two averages.
     std::vector<std::array<double, 4>> interface(static_cast<std::size_t>(kTableSize * kTableSize * kTableSize));
     std::vector<std::array<double, 4>> averages(static_cast<std::size_t>(kTableSize * kTableSize));
-    parallelFor(kTableSize * kTableSize, [&](int row) {
+    tools::parallelFor(kTableSize * kTableSize, tools::hardwareThreads(), [&](int row) {
         const int i = row / kTableSize;
         const int k = row % kTableSize;
         if (i == (kTableSize / 2) - 1 || i == kTableSize / 2 || k == 0) {
@@ -198,7 +180,7 @@ void reportReflectedShare() {
         for (const int k : {8, 16, 24, 31}) {
             const auto eta = static_cast<float>(1.0 / adobeIor(i));
             const float roughness = static_cast<float>(k) / 31.0F;
-            const scene::InterfaceInputs interface{roughness, 0.0F, eta, 1.0F, eta, 1.0F, glm::vec3(1.0F), 1.0F, glm::vec3(1.0F), scene::FilmLayer{}, 1.0F, false};
+            const scene::InterfaceInputs interface{roughness, 0.0F, eta, 1.0F, eta, 1.0F, scene::Rgb(1.0F), 1.0F, scene::Rgb(1.0F), scene::FilmLayer{}, 1.0F, false};
             const scene::DielectricSlab slab = scene::makeDielectricSlab(interface, glm::vec3(std::sqrt(0.75F), 0.0F, 0.5F));
             const double share = slab.multiReflect / (slab.multiReflect + slab.multiTransmit);
             std::printf("| %.3f | %.3f | %.4f | %.4f |\n", adobeIor(i), static_cast<double>(roughness),
@@ -226,13 +208,13 @@ void reportThinWall() {
     std::printf("| ior | colour | mu | R' | Adobe R | T' | Adobe T |\n|---|---|---|---|---|---|---|\n");
     for (const float ior : {1.5F, 2.4F}) {
         for (const float color : {1.0F, 0.6F}) {
-            const scene::SheetInterfaces sheet{glm::vec3(1.0F), glm::vec3(color), ior, ior, scene::FilmLayer{}};
+            const scene::SheetInterfaces sheet{scene::Rgb(1.0F), scene::Rgb(color), ior, ior, scene::FilmLayer{}};
             for (const float mu : {1.0F, 0.8F, 0.5F, 0.2F, 0.05F}) {
                 const scene::SheetLadder ours = scene::sheetLadder(sheet, mu);
                 const double adobeReflect = openpbr_thin_wall_fresnel(ior, mu);
                 const double adobeTransmit = (1.0 - adobeReflect) * openpbr_compute_final_transmission_tint(vec3(color), true, mu, ior).x;
                 std::printf("| %.2f | %.2f | %.2f | %.4f | %.4f | %.4f | %.4f |\n", static_cast<double>(ior), static_cast<double>(color),
-                            static_cast<double>(mu), static_cast<double>(ours.reflect.x), adobeReflect, static_cast<double>(ours.transmit.x),
+                            static_cast<double>(mu), static_cast<double>(ours.reflect.r), adobeReflect, static_cast<double>(ours.transmit.r),
                             adobeTransmit);
             }
         }
@@ -249,29 +231,29 @@ struct Material {
 OpenPBR_ResolvedInputs adobeInputs(const Surface& s) {
     OpenPBR_ResolvedInputs a = openpbr_make_default_resolved_inputs();
     a.base_weight = s.baseWeight;
-    a.base_color = s.baseColor;
+    a.base_color = s.baseColor.vec3();
     a.base_metalness = s.baseMetalness;
     a.base_diffuse_roughness = s.baseDiffuseRoughness;
     a.specular_weight = s.specularWeight;
-    a.specular_color = s.specularColor;
+    a.specular_color = s.specularColor.vec3();
     a.specular_roughness = s.specularRoughness;
     a.specular_roughness_anisotropy = s.specularRoughnessAnisotropy;
     a.specular_ior = s.specularIor;
     a.transmission_weight = s.transmissionWeight;
     a.coat_weight = s.coatWeight;
-    a.coat_color = s.coatColor;
+    a.coat_color = s.coatColor.vec3();
     a.coat_roughness = s.coatRoughness;
     a.coat_ior = s.coatIor;
     a.coat_darkening = s.coatDarkening;
     a.fuzz_weight = s.fuzzWeight;
-    a.fuzz_color = s.fuzzColor;
+    a.fuzz_color = s.fuzzColor.vec3();
     a.fuzz_roughness = s.fuzzRoughness;
     a.thin_film_weight = s.thinFilmWeight;
     a.thin_film_thickness = s.thinFilmThickness;
     a.thin_film_ior = s.thinFilmIor;
-    a.transmission_color = s.transmissionColor;
+    a.transmission_color = s.transmissionColor.vec3();
     a.subsurface_weight = s.subsurfaceWeight;
-    a.subsurface_color = s.subsurfaceColor;
+    a.subsurface_color = s.subsurfaceColor.vec3();
     a.subsurface_scatter_anisotropy = s.subsurfaceScatterAnisotropy;
     a.geometry_thin_walled = s.geometryThinWalled;
     return a;
@@ -289,18 +271,18 @@ void reportAlbedoSweep() {
     const std::array<Material, 12> materials{{
         material("white metal r 0.5", "separable G2", [](Surface& s) {
             s.baseMetalness = 1.0F;
-            s.baseColor = glm::vec3(1.0F);
+            s.baseColor = scene::Rgb(1.0F);
             s.specularRoughness = 0.5F;
         }),
         material("gold r 0.3", "separable G2; multiple-scattering colour F_avg^2 for Kulla-Conty's F_ms", [](Surface& s) {
             s.baseMetalness = 1.0F;
-            s.baseColor = glm::vec3(1.0F, 0.78F, 0.34F);
+            s.baseColor = scene::Rgb(1.0F, 0.78F, 0.34F);
             s.specularRoughness = 0.3F;
         }),
         material("dark metal tint 0 r 0.4", "separable G2; F82's average saturated after averaging, not averaged clamped", [](Surface& s) {
             s.baseMetalness = 1.0F;
-            s.baseColor = glm::vec3(0.1F);
-            s.specularColor = glm::vec3(0.0F);
+            s.baseColor = scene::Rgb(0.1F);
+            s.specularColor = scene::Rgb(0.0F);
             s.specularRoughness = 0.4F;
         }),
         material("glossy diffuse r 0.4", "diffuse scaled by (1 - E(mu_o))(1 - E(mu_i))/(1 - E_avg), not the spec's 1 - E(mu_o); separable G2 in E", [](Surface& s) { s.specularRoughness = 0.4F; }),
@@ -310,7 +292,7 @@ void reportAlbedoSweep() {
         }),
         material("rough glass r 0.4", "separable G2; tabulated reflected share; multiple scattering clamped to 1/mu", [](Surface& s) {
             s.transmissionWeight = 1.0F;
-            s.baseColor = glm::vec3(1.0F);
+            s.baseColor = scene::Rgb(1.0F);
             s.specularRoughness = 0.4F;
         }),
         material("coated metal", "darkening's K_s the fitted average Fresnel, not the spec's F(mu_o) (darkening off: within 0.3%); view-side attenuation only",
@@ -322,7 +304,7 @@ void reportAlbedoSweep() {
                  }),
         material("fuzz over diffuse", "fuzz roughens the layers beneath; the diffuse beneath scaled as in the glossy-diffuse rows", [](Surface& s) {
             s.fuzzWeight = 1.0F;
-            s.fuzzColor = glm::vec3(0.9F);
+            s.fuzzColor = scene::Rgb(0.9F);
             s.fuzzRoughness = 0.5F;
         }),
         material("film over metal", "Airy reflectance at three RGB wavelengths, not integrated over CIE x D65", [](Surface& s) {
@@ -333,14 +315,14 @@ void reportAlbedoSweep() {
         }),
         material("anisotropic metal a 0.8", "multiple scattering from the isotropic tables at the isotropic alpha", [](Surface& s) {
             s.baseMetalness = 1.0F;
-            s.baseColor = glm::vec3(0.95F);
+            s.baseColor = scene::Rgb(0.95F);
             s.specularRoughness = 0.4F;
             s.specularRoughnessAnisotropy = 0.8F;
         }),
         material("thin-walled sheet r 0.3", "window form 2R/(1+R), unpolarised and absorption-free; separable G2 in the mirrored lobe", [](Surface& s) {
             s.geometryThinWalled = true;
             s.transmissionWeight = 1.0F;
-            s.transmissionColor = glm::vec3(0.8F);
+            s.transmissionColor = scene::Rgb(0.8F);
             s.specularRoughness = 0.3F;
         }),
         material("thin-walled subsurface g 0.4", "subsurface under the interface scaled by Adobe's average-Fresnel albedo", [](Surface& s) {
@@ -362,7 +344,7 @@ void reportAlbedoSweep() {
             std::array<double, kBatches> ours{};
             std::array<double, kBatches> adobe{};
             const OpenPBR_ResolvedInputs reference = adobeInputs(m.inputs);
-            parallelFor(kBatches, [&](int batch) {
+            tools::parallelFor(kBatches, tools::hardwareThreads(), [&](int batch) {
                 const int per = kSamples / kBatches;
                 double sumOurs = 0.0;
                 double sumAdobe = 0.0;
@@ -371,11 +353,11 @@ void reportAlbedoSweep() {
                 const OpenPBR_PreparedBsdf prepared = openpbr_prepare(reference, vec3(1.0F), OpenPBR_BaseRgbWavelengths_nm, OpenPBR_VacuumIor, wo);
                 for (int s = 0; s < per; ++s) {
                     scene::Sampler sampler(0, 0, (batch * per) + s, kSamples, 0x5EEDU);
-                    if (const std::optional<scene::BsdfSample> sample = scene::sampleBsdf(m.inputs, wo, sampler)) {
+                    if (const std::optional<scene::BsdfSample> sample = scene::sampleBsdf(scene::makeBsdfClosure(m.inputs, wo), sampler, sampler)) {
                         // Entering from the ambient the radiance compression is (1/specular_ior)^2; a thin wall returns to the ambient.
                         const float compression = m.inputs.geometryThinWalled ? 1.0F : m.inputs.specularIor * m.inputs.specularIor;
-                        const glm::vec3 energy = sample->throughputWeight + (sample->transmitWeight * (compression - 1.0F));
-                        sumOurs += (energy.x + energy.y + energy.z) / 3.0;
+                        const scene::Rgb energy = sample->throughputWeight + (sample->transmitWeight * (compression - 1.0F));
+                        sumOurs += (energy.r + energy.g + energy.b) / 3.0;
                     }
                     vec3 direction;
                     OpenPBR_DiffuseSpecular weight;

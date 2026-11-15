@@ -2,7 +2,7 @@
 
 #include "pathtracer/debug/aov_filters.h"
 #include "pathtracer/debug/aov_routing.h"
-#include "pathtracer/scene/cie.h"
+#include "pathtracer/scene/rgb.h"
 
 #include <boost/math/distributions/chi_squared.hpp>
 
@@ -17,6 +17,8 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
+#include "shading_math.h"
 
 namespace pathtracer::scene {
 
@@ -125,7 +127,6 @@ void foldRunningMean(const float* previousMean, const float* drawn, float* mean,
 
 void foldReplicateLuminance(const float* previousMeans, const float* drawn, std::size_t channels, float* means, std::size_t pixels,
                             int replicates, int replicate, float invCount) {
-    const glm::vec3 weights = pathtracer::scene::cie::sceneLuminanceWeights();
     const auto stride = static_cast<std::size_t>(replicates);
     const auto slot = static_cast<std::size_t>(replicate);
     for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
@@ -136,7 +137,7 @@ void foldReplicateLuminance(const float* previousMeans, const float* drawn, std:
             std::copy(previous, previous + stride, folded);
         }
         const std::size_t i = pixel * channels;
-        const float x = (drawn[i] * weights.r) + (drawn[i + 1] * weights.g) + (drawn[i + 2] * weights.b);
+        const float x = pathtracer::scene::luminance({drawn[i], drawn[i + 1], drawn[i + 2]});
         folded[slot] = previous[slot] + ((x - previous[slot]) * invCount);
     }
 }
@@ -181,9 +182,8 @@ FoveatedThreshold::FoveatedThreshold(const Camera& camera, int width, int height
       lattice_(camera.pixelLattice()),
       frame_(pathtracer::gfx::frameExtent(lattice_, width, height)),
       basis_(camera.viewBasis(frame_.x / frame_.y)),
-      // d(ndc) across a pixel side, a square of the cell's area: renderPathTraced's footprint, so lattices compare by solid angle.
-      ndcPerPixel_((2.0F * pathtracer::gfx::pixelSide(lattice_)) / frame_.x, 0.0F, 0.0F,
-                   (-2.0F * pathtracer::gfx::pixelSide(lattice_)) / frame_.y),
+      // renderPathTraced's footprint, so lattices compare by solid angle.
+      ndcPerPixel_(pathtracer::gfx::ndcPerPixel(lattice_, frame_)),
       width_(static_cast<std::uint32_t>(width)),
       marSlope_(marSlope) {
     if (marSlope_ > 0.0F) {
@@ -198,10 +198,8 @@ float FoveatedThreshold::pooledSpan(const std::optional<Camera::RayDifferential>
     if (!ray) {
         return 1.0F;
     }
-    const glm::mat2x3 dirPerPixel = ray->dirPerNdc * ndcPerPixel_;
-    const float solidAngle = glm::length(glm::cross(dirPerPixel[0], dirPerPixel[1]));
-    // atan2 of |sin| and cos keeps the angle exact near the gaze, where acos of a dot product loses half its digits.
-    const float eccentricity = std::atan2(glm::length(glm::cross(ray->ray.dir, gaze_)), glm::dot(ray->ray.dir, gaze_));
+    const float solidAngle = pixelSolidAngle(ray->dirPerNdc, ndcPerPixel_);
+    const float eccentricity = angleBetween(ray->ray.dir, gaze_);
     // The slope is degrees per degree, so only the intercept converts to radians.
     const float mar = glm::radians(kFovealMarDegrees) + (marSlope_ * eccentricity);
     return std::max(1.0F, mar / std::sqrt(solidAngle));
@@ -213,7 +211,7 @@ float FoveatedThreshold::scale(std::uint32_t texel) const {
     }
     const glm::vec2 centre =
         pathtracer::gfx::pixelCentre(lattice_, static_cast<int>(texel % width_), static_cast<int>(texel / width_));
-    const glm::vec2 ndc(((centre.x / frame_.x) * 2.0F) - 1.0F, 1.0F - ((centre.y / frame_.y) * 2.0F));
+    const glm::vec2 ndc = pathtracer::gfx::filmToNdc(centre, frame_);
     return pooledSpan(camera_.primaryRayDifferential(basis_, ndc.x, ndc.y)) / gazeSpan_;
 }
 
@@ -271,7 +269,7 @@ PathTraceDriver::PathTraceDriver(const EmbreeAccel& accel,
       environmentMap_(environmentMap),
       lights_(lights),
       volumes_(volumes),
-      thread_([this](std::stop_token stopToken) { driverLoop(std::move(stopToken)); }) {}
+      thread_([this](const std::stop_token& stopToken) { driverLoop(stopToken); }) {}
 
 PathTraceDriver::~PathTraceDriver() = default;  // jthread requests stop + joins automatically
 
@@ -430,7 +428,7 @@ void PathTraceDriver::finishPass(const std::shared_ptr<PathTraceResult>& pass, s
 }
 
 // Runs until destruction on jthread's stop token, picking up the latest request whenever its generation changes.
-void PathTraceDriver::driverLoop(std::stop_token stopToken) {
+void PathTraceDriver::driverLoop(const std::stop_token& stopToken) {
     // The pool slot holding the last published mean of the active generation: read as the previous mean, never written again.
     std::shared_ptr<PathTraceResult> currentMean;
     std::optional<Request> activeRequest;

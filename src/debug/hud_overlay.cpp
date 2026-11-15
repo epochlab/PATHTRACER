@@ -6,8 +6,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cmath>
-#include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <vector>

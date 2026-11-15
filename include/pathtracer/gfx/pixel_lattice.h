@@ -43,6 +43,17 @@ static_assert(sizeof(kPixelLatticeNames) / sizeof(kPixelLatticeNames[0]) == stat
     return {static_cast<float>(width), static_cast<float>(height) * rowPitch(lattice)};
 }
 
+// Film point to NDC: two units span the film, +Y flipped because image row 0 is the top (the EXR and glTF convention).
+[[nodiscard]] inline glm::vec2 filmToNdc(glm::vec2 film, glm::vec2 frame) {
+    return {((film.x / frame.x) * 2.0F) - 1.0F, 1.0F - ((film.y / frame.y) * 2.0F)};
+}
+
+// d(ndc) across a pixel side, a square of the cell's area: its image on the unit sphere is the pixel's solid angle, whatever the lattice.
+[[nodiscard]] inline glm::mat2 ndcPerPixel(PixelLattice lattice, glm::vec2 frame) {
+    const float side = pixelSide(lattice);
+    return {(2.0F * side) / frame.x, 0.0F, 0.0F, (-2.0F * side) / frame.y};
+}
+
 // Reflection about the end samples of a line of `extent` without repeating them, any offset: the whole-sample mirror.
 [[nodiscard]] inline int mirrorIndex(int i, int extent) {
     if (extent <= 1) {

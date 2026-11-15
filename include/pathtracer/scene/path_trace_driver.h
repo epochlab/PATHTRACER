@@ -74,7 +74,7 @@ public:
     [[nodiscard]] std::vector<pathtracer::debug::PassRecord> takePassRecords();
 
 private:
-    void driverLoop(std::stop_token stopToken);
+    void driverLoop(const std::stop_token& stopToken);
     // Blocks until requestTrace or setSuspended bumps wakeEpoch_ past `seen`, or the driver stops. Replaces polling for new work.
     void idleUntilWake(const std::stop_token& stopToken, std::uint64_t seen);
     // width/height come from the rendered buffer, not the Request that asked: the numbers describing the image that actually exists.

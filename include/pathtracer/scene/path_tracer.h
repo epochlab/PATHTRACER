@@ -50,6 +50,12 @@ struct AcceptanceSample {
 [[nodiscard]] float scatteredSpread(float spread, float width, const glm::vec3& d, const glm::vec3& wi, const glm::vec3& n, float h,
                                     float eta, float share);
 
+// The solid angle a pixel subtends along a primary ray of direction differential dirPerNdc: |cross| of its edges on the unit sphere.
+[[nodiscard]] inline float pixelSolidAngle(const glm::mat2x3& dirPerNdc, const glm::mat2& ndcPerPixel) {
+    const glm::mat2x3 dirPerPixel = dirPerNdc * ndcPerPixel;
+    return glm::length(glm::cross(dirPerPixel[0], dirPerPixel[1]));
+}
+
 // Chunk length renderPathTraced splits `texels` into for `threadCount` workers: kPathTraceChunkTexels unless that leaves the pool idle.
 [[nodiscard]] int pathTraceChunkTexels(int texels, unsigned int threadCount);
 

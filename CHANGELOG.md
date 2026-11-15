@@ -3,6 +3,59 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Codebase review
+
+Scene colour shared `glm::vec3` with directions and positions, so a radiance could be added to a normal and still compile. Spectral
+transport, next on the roadmap, must find every place radiance flows. This review gives colour its own type and removes dead code,
+duplicated logic and invariant work. Output is byte-identical apart from the two changes noted below.
+
+- refactor: **`Rgb`, a distinct ACEScg triple** (`include/pathtracer/scene/rgb.h`). It carries material colour inputs, BSDF values,
+  throughput, light and environment radiance, media coefficients, thin-film optics and the AOV accumulators. 469 uses replace
+  `glm::vec3` across scene, config and API.
+  - Nothing converts implicitly in either direction. Texture lookups, JSON, image writes and `cie`'s double-precision API convert
+    at the boundary.
+  - Each operator is one arithmetic op per channel, and each function forwards to the glm call it replaces, so codegen and FMA
+    contraction match `glm::vec3`.
+  - Display-referred colour (bloom, OCIO, HUD) and non-RGB triples (HSV, motion) stay `glm::vec3`. When spectral transport adds a
+    sampled spectrum, every point where an `Rgb` input enters transport fails to compile until it is upsampled (pbrt-v4's split).
+- refactor: **one copy of each duplicated piece.**
+  - `luminance(Rgb)` replaces eight inline luminance sums.
+  - `buildSceneGeometry` replaces the viewer's and the headless renderer's separate scene builds.
+  - `readJson` replaces five config open/parse blocks; `texelPdf` serves both environment-map pdfs.
+  - `filmToNdc`, `ndcPerPixel` and `pixelSolidAngle` replace copies in the tracer and the adaptive driver; `logEtaFraction`
+    replaces three eta-axis lookups.
+  - `angleBetween` and `refractAbout` are each shared; `primaryRay` delegates to `primaryRayDifferential`.
+  - The G-buffer writes surface fields once for triangles and light shapes.
+  - The path tracer accumulates straight into its result, and one member table replaces 44 hand-indexed sample lanes.
+- refactor: **invariant work hoisted.**
+  - Mesh-light face normals are computed at construction, not per NEE sample.
+  - Volume extinction is stored, not summed per ratio-tracking call.
+  - The eta-axis logarithms are computed once, not per BSDF evaluation.
+  - The G-buffer's per-pixel footprint matrix is built once per frame.
+  - Sobol direction numbers are a `constexpr` closed form (Joe & Kuo's degree-1 row), replacing the general generator and its seed
+    table.
+- refactor: **dead code removed.** `ShaderProgram::loadFromFiles`, `config::floatOr`, the unused `PT_LENS_*`/`PT_LATTICE_*` Python
+  constants, unused includes, and the `test_pattern` and `downsample` tools (`oiiotool --resize` covers the latter).
+  - The five single-direction BSDF conveniences move out of the library into `tools/fixtures.h`, their only users.
+  - `isIndexMatched`, `sampleCountAov` and `shadowAov` become file-local.
+- fix: the headless renderer bound the scene material to the lights' emitter instances, because it bound after appending them. It
+  now binds the glTF's own instances (`surfaceInstances`), as the viewer always did. The Albedo, Roughness and IOR AOVs at emitter
+  pixels now read `Material{}`, as in the viewer.
+- note: the Luminance AOV and the adaptive driver's replicate luminance now share `luminance(Rgb)`'s rounding: 1-2 ulp on about 8%
+  of pixels.
+  - Where a texel sat exactly on the adaptive stopping threshold, its decision can flip. On macbeth (proxy), 677 px changed sample
+    count and 30 Beauty pixels changed, all within those 677. Mean luminance moved -0.0005%.
+- test: shared `finish`, `sharedPool`, `parallelFor` (`tools/parallel.h`), `makeMaterial(Rgb, roughness)` and `tangentFor`. Validators
+  that built a machine-wide `ThreadPool` now take ctest's `--threads` budget. `pathtracer_add_check` replaces six hand-written
+  validator blocks.
+- chore: clang-tidy `performance-*` (bar enum width and cold-path string concatenation) and
+  `-Wunused-member-function -Wunused-template`.
+- note: Beauty is byte-identical on cornell, macbeth, cornell_sss, stump and cloud (proxy) and cornell (research). 174 of 197 AOV
+  images are byte-identical; the rest are exactly the two changes above.
+  - Every paired timing interval contains 1: render_beauty cornell 1.003 and stump 1.009, viewer trace 1.003, G-buffer 1.011.
+  - The viewer, render_beauty, libpathtracer_c and pathtracer_core are 4-8 KB smaller.
+  - Evidence is in `results/codebase_review`.
+
 ## Normal-map noise
 
 On a normal-mapped surface, NEE evaluates every facet vertex of Schussler et al. 2017's walk toward the light. One power-heuristic

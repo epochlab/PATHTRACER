@@ -13,9 +13,7 @@
 #include <random>
 #include <limits>
 #include <numbers>
-#include <atomic>
 #include <string>
-#include <thread>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -23,6 +21,7 @@
 #include <glm/glm.hpp>
 
 #include "microfacet_quadrature.h"
+#include "parallel.h"
 #include "pathtracer/scene/fresnel_dielectric.h"
 
 namespace {
@@ -113,25 +112,6 @@ double etaAtIndex(int index) {
     return std::exp(std::log(kEtaMin) + (u * (std::log(kEtaMax) - std::log(kEtaMin))));
 }
 
-// Rows are independent and each writes only its own slice, so the split is a pure speedup with no effect on the values.
-template <typename Row>
-void parallelRows(int rows, Row row) {
-    const unsigned workers = std::max(1U, std::thread::hardware_concurrency());
-    std::atomic<int> next{0};
-    std::vector<std::thread> pool;
-    pool.reserve(workers);
-    for (unsigned w = 0; w < workers; ++w) {
-        pool.emplace_back([&] {
-            for (int i = next++; i < rows; i = next++) {
-                row(i);
-            }
-        });
-    }
-    for (std::thread& worker : pool) {
-        worker.join();
-    }
-}
-
 // --- Table assembly.
 
 struct AlbedoTable {
@@ -193,7 +173,7 @@ void buildReflect(AlbedoTable& table, int phiNodes, int psiNodes, int muNodes) {
     table.d.assign(static_cast<std::size_t>(kAlbedoRoughnessRes) * kAlbedoMuRes, 0.0F);
     table.davg.assign(kAlbedoRoughnessRes, 0.0F);
     // One roughness row per worker, sharing no accumulator, so the result is identical to serial order: the artifact stays deterministic.
-    parallelRows(kAlbedoRoughnessRes, [&](int ri) {
+    tools::parallelFor(kAlbedoRoughnessRes, tools::hardwareThreads(), [&](int ri) {
         const double alpha = gridAlpha(ri, kAlbedoRoughnessRes);
         for (int mi = 0; mi < kAlbedoMuRes; ++mi) {
             const Split split = reflectAlbedo(reflectMu(mi), alpha, phiRule, psiRule);
@@ -229,7 +209,7 @@ void buildTransmit(AlbedoTable& table, int nodes) {
     table.r.assign(cells, 0.0F);
     table.t.assign(cells, 0.0F);
     table.escapeDeficit.assign(cells, 0.0F);
-    parallelRows(kTransmitRoughnessRes, [&](int ri) {
+    tools::parallelFor(kTransmitRoughnessRes, tools::hardwareThreads(), [&](int ri) {
         const double alpha = gridAlpha(ri, kTransmitRoughnessRes);
         for (int ei = 0; ei < kEtaRes; ++ei) {
             const double eta = etaAtIndex(ei);
@@ -454,7 +434,7 @@ double buildKernel(AlbedoTable& table, int nodes) {
     table.kernelNode.assign(cells, 0.0F);
     table.kernelWeight.assign(cells, 0.0F);
     std::vector<double> worstByRow(kKernelRoughnessRes, 0.0);
-    parallelRows(kKernelRoughnessRes, [&](int ri) {
+    tools::parallelFor(kKernelRoughnessRes, tools::hardwareThreads(), [&](int ri) {
         const double alpha = gridAlpha(ri, kKernelRoughnessRes);
         for (int mi = 0; mi < kKernelMuRes; ++mi) {
             const double t = static_cast<double>(mi) / (kKernelMuRes - 1);
@@ -570,7 +550,7 @@ void buildAnisotropicKernel(AlbedoTable& table, int squareNodes, int muNodes, in
     table.anisoDeficitAvg.assign(static_cast<std::size_t>(kAnisoRoughnessRes) * kAnisoAnisotropyRes, 0.0F);
     table.anisoProbe.assign(cellCount * kKernelProbes.size(), 0.0);
     std::vector<double> excessByRow(static_cast<std::size_t>(kAnisoRoughnessRes) * kAnisoAnisotropyRes, 0.0);
-    parallelRows(kAnisoRoughnessRes * kAnisoAnisotropyRes, [&](int row) {
+    tools::parallelFor(kAnisoRoughnessRes * kAnisoAnisotropyRes, tools::hardwareThreads(), [&](int row) {
         const int ri = row / kAnisoAnisotropyRes;
         const int ai = row % kAnisoAnisotropyRes;
         const glm::dvec2 alpha = anisotropicAlpha(static_cast<double>(ri) / (kAnisoRoughnessRes - 1), anisoGridAnisotropy(ai));
@@ -850,7 +830,7 @@ WalkCheck buildEscapeWalk(AlbedoTable& table, int strata, double quadratureResid
     table.multiReflectError.assign(cells, 0.0F);
     std::vector<double> worstZ(kTransmitRoughnessRes, 0.0);
     std::vector<double> worstError(kTransmitRoughnessRes, 0.0);
-    parallelRows(kTransmitRoughnessRes, [&](int ri) {
+    tools::parallelFor(kTransmitRoughnessRes, tools::hardwareThreads(), [&](int ri) {
         const double alpha = gridAlpha(ri, kTransmitRoughnessRes);
         // Top down: at mu = 0 a level ray meets only the top, no walk reaches order 2: it takes its neighbour's bounded share (mu -> 0+).
         std::vector<double> shares(kEtaRes, 0.0);
@@ -925,7 +905,7 @@ double buildAnisoEscapeDelta(AlbedoTable& table, int strata) {
     table.anisoMultiReflectDelta.assign(cells, 0.0F);
     table.anisoMultiReflectDeltaError.assign(cells, 0.0F);
     std::vector<double> worstError(static_cast<std::size_t>(kAnisoRoughnessRes) * kAnisoAnisotropyRes, 0.0);
-    parallelRows(kAnisoRoughnessRes * kAnisoAnisotropyRes, [&](int row) {
+    tools::parallelFor(kAnisoRoughnessRes * kAnisoAnisotropyRes, tools::hardwareThreads(), [&](int row) {
         const int ri = row / kAnisoAnisotropyRes;
         const double roughness = static_cast<double>(ri) / (kAnisoRoughnessRes - 1);
         const glm::dvec2 alpha = anisotropicAlpha(roughness, anisoGridAnisotropy(row % kAnisoAnisotropyRes));

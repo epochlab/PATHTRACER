@@ -30,7 +30,7 @@ struct LineProximity {
 
 // The surface inputs at a shading point, filtered ones prefiltered over footprint; COLOR_0 tints base_color. Others keep defaults.
 [[nodiscard]] OpenPbrInputs<Constant> resolveInputs(const Material& material, glm::vec2 uv,
-                                                   const pathtracer::gfx::TextureFootprint& footprint, const glm::vec3& vertexColour);
+                                                   const pathtracer::gfx::TextureFootprint& footprint, const Rgb& vertexColour);
 
 // geometry_opacity at uv, prefiltered over footprint: the probability the surface is present (OpenPBR's mix with the ambient).
 [[nodiscard]] float opacityAt(const Material& material, glm::vec2 uv, const pathtracer::gfx::TextureFootprint& footprint);
@@ -39,7 +39,7 @@ struct LineProximity {
 [[nodiscard]] bool isDispersive(const OpenPbrInputs<Constant>& inputs, bool ambientDisperses);
 
 // emission_luminance * emission_color toward wo through the coat and fuzz above it, a bulk surface's front alone; 1 cd/m^2 a unit.
-[[nodiscard]] glm::vec3 emittedRadiance(const Material& material, const ShadingTriangle& triangle, const ShadingVertex& shading,
+[[nodiscard]] Rgb emittedRadiance(const Material& material, const ShadingTriangle& triangle, const ShadingVertex& shading,
                                         const glm::vec3& wo, const pathtracer::gfx::TextureFootprint& footprint);
 
 // Gram-Schmidt re-orthogonalized tangent frame: normal map, bump, then tangent map from one input; triangle's edges carry dP/duv.

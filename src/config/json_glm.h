@@ -1,9 +1,16 @@
 #pragma once
 
 #include <cmath>
+#include <fstream>
+#include <iostream>
+#include <optional>
+#include <string>
+#include <string_view>
 
 #include <glm/glm.hpp>
 #include <nlohmann/json.hpp>
+
+#include "pathtracer/scene/rgb.h"
 
 namespace pathtracer::config {
 
@@ -17,10 +24,19 @@ inline float toFloat(const nlohmann::json& j) {
     return narrowed;
 }
 
-// toFloat for an optional key, the json::value("key", fallback) form.
-inline float floatOr(const nlohmann::json& object, const char* key, float fallback) {
-    const auto it = object.find(key);
-    return it == object.end() ? fallback : toFloat(*it);
+// The whole file as JSON; nullopt and a stderr line, prefixed by the loader `who`, if missing, unreadable or unparseable.
+inline std::optional<nlohmann::json> readJson(const std::string& path, std::string_view who) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        std::cerr << who << ": could not read " << path << '\n';
+        return std::nullopt;
+    }
+    try {
+        return nlohmann::json::parse(file);
+    } catch (const nlohmann::json::exception& e) {
+        std::cerr << who << ": " << path << ": " << e.what() << '\n';
+        return std::nullopt;
+    }
 }
 
 }  // namespace pathtracer::config
@@ -43,3 +59,10 @@ inline void from_json(const nlohmann::json& j, vec3& v) {
 }
 
 }  // namespace glm
+
+// ADL hook for colour keys: a 3-element array as one Rgb, refused past the float range like every other float.
+namespace pathtracer::scene {
+
+inline void from_json(const nlohmann::json& j, Rgb& c) { c = Rgb(j.get<glm::vec3>()); }
+
+}  // namespace pathtracer::scene

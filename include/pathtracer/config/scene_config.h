@@ -11,6 +11,7 @@
 #include "pathtracer/config/profile_config.h"
 #include "pathtracer/scene/cie.h"
 #include "pathtracer/scene/material.h"
+#include "pathtracer/scene/rgb.h"
 
 namespace pathtracer::config {
 
@@ -81,7 +82,7 @@ struct LightConfig {
     glm::vec3 position;  // the shape's centre, before the model root transform
     glm::vec3 rotation;  // degrees; Rz*Ry*Rx as ModelConfig::rotation, so X applies first
     std::variant<QuadShape, DiskShape, SphereShape, MeshShape> shape;
-    glm::vec3 color;  // unit luminance: an authored colour over its own luminance, or the illuminant's colour at a kelvin
+    pathtracer::scene::Rgb color;  // unit luminance: an authored colour over its own luminance, or the illuminant's colour at a kelvin
     std::variant<Luminance, LuminousFlux> emission;  // exactly one of scene.json's nits or lumens, positive
     bool twoSided = false;  // a sphere's stays false
     // The locus a kelvin override resolves on; an authored colour keeps the blackbody default.
@@ -90,8 +91,8 @@ struct LightConfig {
 
 // A volume material file, MaterialX anisotropic_vdf's inputs: coefficients per unit of the grid's own space at density 1.
 struct VolumeMaterialConfig {
-    glm::vec3 absorption;
-    glm::vec3 scattering;
+    pathtracer::scene::Rgb absorption;
+    pathtracer::scene::Rgb scattering;
     float anisotropy;  // Henyey-Greenstein g in (-1, 1), positive forward
     float density = 1.0F;  // multiplies the grid's values: thickness without changing colour or albedo. Optional, default 1
 };

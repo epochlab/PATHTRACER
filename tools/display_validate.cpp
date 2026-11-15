@@ -433,7 +433,7 @@ PT_CHECK(bloom_matches_the_shader_passes, Fast, Exact) {
     constexpr std::array<Case, 4> kCases{{{37, 23, false}, {64, 15, true}, {3, 1, false}, {1, 1, true}}};
     constexpr float kStrength = 0.6F;
     ctx.plan(static_cast<int>(kCases.size()));
-    pathtracer::scene::ThreadPool pool;
+    pathtracer::scene::ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
     for (const Case& testCase : kCases) {
         HdrImage image = randomImage(testCase.width, testCase.height, ctx.seed());
         const ShaderImage reference = shaderBloom(image, kStrength, testCase.wraps);
@@ -461,7 +461,7 @@ PT_CHECK(bloom_wraps_a_lat_long_seam, Fast, Exact) {
     constexpr int kHeight = 16;
     const int roll = 1 << pathtracer::gfx::bloomOctaves(kWidth, kHeight);
     ctx.plan(1);
-    pathtracer::scene::ThreadPool pool;
+    pathtracer::scene::ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
     HdrImage image = randomImage(kWidth, kHeight, ctx.seed());
     HdrImage rolled = image;
     for (int y = 0; y < kHeight; ++y) {
@@ -671,7 +671,7 @@ PT_CHECK(hexagonal_bloom_is_loop_subdivision_and_its_adjoint, Fast, Exact) {
     constexpr std::array<Case, 5> kCases{{{37, 23, false}, {38, 24, false}, {64, 16, true}, {3, 2, false}, {1, 1, true}}};
     constexpr float kStrength = 0.6F;
     ctx.plan(static_cast<int>(kCases.size()));
-    pathtracer::scene::ThreadPool pool;
+    pathtracer::scene::ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
     for (const Case& testCase : kCases) {
         HdrImage image = randomImage(testCase.width, testCase.height, ctx.seed());
         const ShaderImage reference = hexagonalBloomReference(image, kStrength, testCase.wraps);
@@ -696,7 +696,7 @@ PT_CHECK(hexagonal_bloom_is_loop_subdivision_and_its_adjoint, Fast, Exact) {
 // Every hexagonal pass carries unit weight per output, so a constant frame blooms to itself, border cells included.
 PT_CHECK(hexagonal_bloom_preserves_a_constant_field, Fast, Exact) {
     ctx.plan(2);
-    pathtracer::scene::ThreadPool pool;
+    pathtracer::scene::ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
     constexpr int kWidth = 37;
     constexpr int kHeight = 23;
     constexpr float kLevel = 0.75F;
@@ -721,7 +721,7 @@ PT_CHECK(hexagonal_bloom_wraps_a_lat_long_seam, Fast, Exact) {
     constexpr int kHeight = 16;
     const int roll = 1 << pathtracer::gfx::bloomOctaves(kWidth, kHeight);
     ctx.plan(1);
-    pathtracer::scene::ThreadPool pool;
+    pathtracer::scene::ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
     HdrImage image = randomImage(kWidth, kHeight, ctx.seed());
     HdrImage rolled = image;
     for (int y = 0; y < kHeight; ++y) {
@@ -788,7 +788,7 @@ PT_CHECK(aberration_reads_the_shader_cell_of_the_scaled_film, Fast, Exact) {
     // Not a short decimal: 0.3 lands whole columns of 29 exactly on a cell edge, where GL's own rounding is unspecified.
     constexpr float kAberration = 0.2718282F;
     ctx.plan(static_cast<int>(kCases.size()));
-    pathtracer::scene::ThreadPool pool;
+    pathtracer::scene::ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
     for (const Case& testCase : kCases) {
         const HdrImage input = randomImage(kWidth, kHeight, ctx.seed());
         HdrImage image = input;
@@ -819,7 +819,7 @@ PT_CHECK(aberration_reads_the_shader_cell_of_the_scaled_film, Fast, Exact) {
 // Off is the identity, not a pass that happens to reproduce its input: every float of the image is left as it was.
 PT_CHECK(display_optics_off_is_identity, Fast, Exact) {
     ctx.plan(1);
-    pathtracer::scene::ThreadPool pool;
+    pathtracer::scene::ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
     const HdrImage input = randomImage(13, 7, ctx.seed());
     HdrImage image = input;
     pathtracer::gfx::applyDisplayOptics(image, PixelLattice::Square, false, DisplayOptics{}, pool);

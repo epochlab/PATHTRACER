@@ -50,7 +50,6 @@
 #include "pathtracer/platform/display_link.h"
 #include "pathtracer/platform/window.h"
 #include "pathtracer/scene/camera.h"
-#include "pathtracer/scene/cie.h"
 #include "pathtracer/scene/debug_camera_controller.h"
 #include "pathtracer/scene/embree_accel.h"
 #include "pathtracer/scene/environment_map.h"
@@ -60,6 +59,7 @@
 #include "pathtracer/scene/material_binding.h"
 #include "pathtracer/scene/path_trace_driver.h"
 #include "pathtracer/scene/path_tracer.h"
+#include "pathtracer/scene/rgb.h"
 #include "pathtracer/scene/gbuffer.h"
 #include "pathtracer/scene/thread_pool.h"
 
@@ -363,33 +363,35 @@ pathtracer::scene::DebugCameraController makeDebugCamera(const pathtracer::confi
 
 std::optional<AppScene> loadAppScene(const pathtracer::config::SceneConfig& sceneConfig,
                                      const pathtracer::config::ProfileConfig& profileConfig) {
-    const glm::mat4 sceneTransform = pathtracer::scene::rootTransformOf(sceneConfig.model);
     const auto loadStart = std::chrono::steady_clock::now();
-    // No glTF is an empty model: the scene's lights are then its only triangles.
-    std::optional<pathtracer::scene::LoadedModel> model =
-        sceneConfig.model.gltfPath
-            ? pathtracer::scene::loadGltf(std::string(ASSET_ROOT_DIR) + "/" + *sceneConfig.model.gltfPath, sceneTransform,
-                                          sceneConfig.model.vertexColor)
-            : pathtracer::scene::LoadedModel{};
-    // Materials, then the scene's textures over them, before anything reads a material; each call logs the reason it fails.
-    if (model && sceneConfig.materialPath &&
-        (!pathtracer::scene::applySceneMaterials(model->instances, *sceneConfig.materialPath, sceneConfig.materialOverrides,
-                                                 ASSET_ROOT_DIR) ||
-         !pathtracer::scene::bindSceneTextures(model->instances, sceneConfig.textures, ASSET_ROOT_DIR))) {
-        model.reset();
+    std::string error;
+    std::optional<pathtracer::scene::SceneGeometry> geometry =
+        pathtracer::scene::buildSceneGeometry(ASSET_ROOT_DIR, sceneConfig.model, sceneConfig.lights, error);
+    if (!geometry) {
+        std::cerr << "main: " << error << ", aborting startup\n";
+        return std::nullopt;
     }
-    std::string volumeError;
-    std::optional<pathtracer::scene::VolumeSet> volumes = pathtracer::scene::VolumeSet::load(sceneConfig.volumes, ASSET_ROOT_DIR, volumeError);
-    const double loadMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - loadStart).count();
+    // Materials, then the scene's textures over them, before anything reads a material; each call logs the reason it fails.
+    const std::span<pathtracer::scene::MeshInstance> surfaces = pathtracer::scene::surfaceInstances(*geometry);
+    if (sceneConfig.materialPath &&
+        (!pathtracer::scene::applySceneMaterials(surfaces, *sceneConfig.materialPath, sceneConfig.materialOverrides, ASSET_ROOT_DIR) ||
+         !pathtracer::scene::bindSceneTextures(surfaces, sceneConfig.textures, ASSET_ROOT_DIR))) {
+        std::cerr << "main: material load failed, aborting startup\n";
+        return std::nullopt;
+    }
+    std::optional<pathtracer::scene::VolumeSet> volumes = pathtracer::scene::VolumeSet::load(sceneConfig.volumes, ASSET_ROOT_DIR, error);
+    // Everything but the Embree build, which the spec block reports on its own.
+    const double loadMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - loadStart).count() - geometry->accelBuildMs;
     // A CPU texture the path tracer samples through the texture cache, never uploaded: the display shows only the traced image.
     std::shared_ptr<const pathtracer::gfx::ImageTexture> environmentTexture = pathtracer::gfx::openTexture(
         std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.environment.hdriPath, pathtracer::gfx::kRgbChannels,
         pathtracer::gfx::ImageRole::Colour, pathtracer::gfx::TextureWrap::LatLong, sceneConfig.environment.colorSpace);
     if (!volumes) {
-        std::cerr << "main: " << volumeError << '\n';
+        std::cerr << "main: " << error << '\n';
     }
-    if (!model || !environmentTexture || !volumes) {
-        std::cerr << "main: model, material, volume or environment map load failed, aborting startup\n";
+    if (!environmentTexture || !volumes) {
+        std::cerr << "main: volume or environment map load failed, aborting startup\n";
         return std::nullopt;
     }
     pathtracer::scene::EnvironmentMap environmentMap(std::move(environmentTexture), sceneConfig.environment.illuminanceLux);
@@ -397,35 +399,12 @@ std::optional<AppScene> loadAppScene(const pathtracer::config::SceneConfig& scen
         std::cerr << "main: environment.lux needs a map with light above its horizon, aborting startup\n";
         return std::nullopt;
     }
-
-    std::vector<int> instanceLightIndex(model->instances.size(), -1);
-    std::optional<std::vector<pathtracer::scene::AreaLight>> lights =
-        pathtracer::scene::buildLights(sceneConfig.lights, sceneTransform, ASSET_ROOT_DIR);
-    if (!lights) {
-        std::cerr << "main: light build failed, aborting startup\n";
-        return std::nullopt;
-    }
-    pathtracer::scene::appendLightGeometry(*model, *lights, instanceLightIndex);
-    const int totalTriangles = static_cast<int>(model->worldTriangles.size());
-    // After appendLightGeometry, so the lights' own instances are bounded too, and before the shapes move into the accel.
-    std::vector<pathtracer::scene::AabbBounds> instanceBounds =
-        pathtracer::scene::computeInstanceBounds(model->shadingTriangles, static_cast<int>(model->instances.size()), model->shapes);
-
-    const auto accelBuildStart = std::chrono::steady_clock::now();
-    std::optional<pathtracer::scene::EmbreeAccel> accel =
-        pathtracer::scene::EmbreeAccel::build(std::move(model->worldTriangles), std::move(model->shapes));
-    if (!accel) {
-        std::cerr << "main: Embree scene build failed, aborting startup\n";
-        return std::nullopt;
-    }
-    const double accelBuildMs =
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - accelBuildStart).count();
-
-    const pathtracer::scene::PathTraceSettings baseSettings =
-        pathtracer::scene::baseSettingsOf(profileConfig);
-    return AppScene{std::move(*model), std::move(instanceLightIndex), std::move(*lights),
-                    std::move(environmentMap), std::move(*accel), std::move(*volumes), baseSettings,
-                    std::move(instanceBounds), totalTriangles, loadMs, accelBuildMs};
+    const auto totalTriangles = static_cast<int>(geometry->model.shadingTriangles.size());
+    return AppScene{std::move(geometry->model), std::move(geometry->instanceLightIndex),
+                    std::move(geometry->lights), std::move(environmentMap),
+                    std::move(geometry->accel), std::move(*volumes),
+                    pathtracer::scene::baseSettingsOf(profileConfig),
+                    std::move(geometry->instanceBounds), totalTriangles, loadMs, geometry->accelBuildMs};
 }
 
 // Printed at the end of startup, not where each value becomes known: every number is real by now, and one block survives being piped.
@@ -743,8 +722,7 @@ pathtracer::debug::PixelProbeSample samplePixelProbe(
     if (!pathtracer::debug::aovIsPicture(aovId)) {
         return {true, glm::vec4(texel, 1.0F), std::nullopt};
     }
-    const float luminance = glm::dot(pathtracer::scene::cie::sceneLuminanceWeights(), texel);
-    return {true, glm::vec4(applyBeautyDisplayTransform(texel, app), 1.0F), luminance};
+    return {true, glm::vec4(applyBeautyDisplayTransform(texel, app), 1.0F), pathtracer::scene::luminance(pathtracer::scene::Rgb(texel))};
 }
 
 // Re-uploads only when the displayed image's contents changed: re-sending texels the GPU already holds is work without a reason.

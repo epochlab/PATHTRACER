@@ -247,26 +247,9 @@ Camera::ViewBasis Camera::viewBasis(float aspect) const {
                      maxRadiusMm, focalLengthMm_, lens_};
 }
 
-std::optional<Ray> Camera::primaryRay(float ndcX, float ndcY, float aspect) const {
-    return primaryRay(viewBasis(aspect), ndcX, ndcY);
-}
-
 std::optional<Ray> Camera::primaryRay(const ViewBasis& basis, float ndcX, float ndcY) const {
-    switch (basis.lens.projection) {
-        case LensProjection::FisheyePolynomial: {
-            const std::optional<FisheyeSample> sample = fisheyeSample(basis, ndcX, ndcY);
-            return sample ? std::optional(Ray{position_, sample->dir, nearClip_, farClip_}) : std::nullopt;
-        }
-        case LensProjection::Omnidirectional:
-            return Ray{position_, omnidirectionalDirection(basis, ndcX, ndcY), nearClip_, farClip_};
-        // No default arm: -Werror then makes an unrouted new projection a compile error. Count is never a lens.
-        case LensProjection::Rectilinear:
-        case LensProjection::Count:
-            break;
-    }
-    const glm::vec3 dir = glm::normalize(basis.forward + (ndcX * basis.halfWidth * basis.right) +
-                                          (ndcY * basis.halfHeight * basis.up));
-    return Ray{position_, dir, nearClip_, farClip_};
+    const std::optional<RayDifferential> differential = primaryRayDifferential(basis, ndcX, ndcY);
+    return differential ? std::optional(differential->ray) : std::nullopt;
 }
 
 std::optional<Camera::RayDifferential> Camera::primaryRayDifferential(const ViewBasis& basis, float ndcX,

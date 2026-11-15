@@ -594,10 +594,10 @@ PT_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
     PT_EXPECT(ctx, baseLoads,
                   "the unmutated base scene must load, or every mutated row below passes vacuously");
     PT_EXPECT(ctx, tempScene && tempScene->lights.at(0).illuminant == Illuminant::Blackbody &&
-                       tempScene->lights.at(0).color == glm::vec3(*pathtracer::scene::cie::kelvinToScene(Illuminant::Blackbody, 2856.0)),
+                       tempScene->lights.at(0).color == pathtracer::scene::Rgb(*pathtracer::scene::cie::kelvinToScene(Illuminant::Blackbody, 2856.0)),
               "a 2856 K light did not load as the blackbody colour");
     PT_EXPECT(ctx, tempScene && tempScene->lights.at(1).illuminant == Illuminant::Daylight &&
-                       tempScene->lights.at(1).color == glm::vec3(*pathtracer::scene::cie::kelvinToScene(Illuminant::Daylight, 6504.0)),
+                       tempScene->lights.at(1).color == pathtracer::scene::Rgb(*pathtracer::scene::cie::kelvinToScene(Illuminant::Daylight, 6504.0)),
               "a 6504 K daylight light did not load as the daylight colour");
     for (const Case& testCase : cases) {
         const std::filesystem::path path = writeJson(testCase.file, testCase.text);
@@ -633,12 +633,12 @@ PT_CHECK(scene_config_reads_every_light_shape, Fast, Exact) {
     const auto* luminance = std::get_if<pathtracer::config::Luminance>(&scene->lights[0].emission);
     PT_EXPECT(ctx, disk && disk->radius == 0.25F && scene->lights[0].position == glm::vec3(1.0F, 2.0F, 3.0F) &&
                        scene->lights[0].rotation == glm::vec3(10.0F, 20.0F, 30.0F) && scene->lights[0].twoSided &&
-                       scene->lights[0].color == unitColor && luminance && luminance->candelasPerSquareMetre == 4.0F,
+                       scene->lights[0].color.vec3() == unitColor && luminance && luminance->candelasPerSquareMetre == 4.0F,
               "the disk's radius, placement, side, unit-luminance colour or luminance did not read as authored");
     const auto* sphere = std::get_if<pathtracer::config::SphereShape>(&scene->lights[1].shape);
     using pathtracer::scene::cie::Illuminant;
     PT_EXPECT(ctx, sphere && sphere->radius == 0.5F && !scene->lights[1].twoSided && scene->lights[1].illuminant == Illuminant::Daylight &&
-                       scene->lights[1].color == glm::vec3(*pathtracer::scene::cie::kelvinToScene(Illuminant::Daylight, 6504.0)),
+                       scene->lights[1].color == pathtracer::scene::Rgb(*pathtracer::scene::cie::kelvinToScene(Illuminant::Daylight, 6504.0)),
               "the sphere's radius, kelvin or daylight illuminant did not read as authored");
     const auto* scaled = std::get_if<pathtracer::config::MeshShape>(&scene->lights[2].shape);
     const auto* unscaled = std::get_if<pathtracer::config::MeshShape>(&scene->lights[3].shape);
@@ -684,7 +684,7 @@ PT_CHECK(material_config_bulk_interior, Fast, Exact) {
     std::filesystem::remove(path);
     ctx.plan(2);
     PT_EXPECT(ctx, material && !material->geometryThinWalled && material->subsurfaceRadius == 0.05F &&
-                       material->subsurfaceRadiusScale == glm::vec3(1.0F, 0.5F, 0.0F) && material->transmissionScatter == glm::vec3(0.1F, 0.2F, 0.3F) &&
+                       material->subsurfaceRadiusScale == pathtracer::scene::Rgb(1.0F, 0.5F, 0.0F) && material->transmissionScatter == pathtracer::scene::Rgb(0.1F, 0.2F, 0.3F) &&
                        material->transmissionScatterAnisotropy == 0.4F,
               "a bulk material's interior inputs did not load as written");
     PT_EXPECT(ctx, material && material->randomCheckers.contains("subsurface_weight"), "a checker on a bulk subsurface_weight did not load");
@@ -1548,7 +1548,7 @@ PT_CHECK(json_float_reads_refuse_float_overflow, Fast, Exact) {
                 material[key] = value;
                 materialFields.push_back("/" + key);
             } else {
-                material[key] = {value.x, value.y, value.z};
+                material[key] = {value.r, value.g, value.b};
                 materialFields.push_back("/" + key + "/" + std::to_string(colourInputs++ % 3));
             }
         },
@@ -1767,13 +1767,13 @@ PT_CHECK(gltf_vertex_colours_convert_to_the_scene_space, Fast, Exact) {
     // Triangle 0 of the quad is vertices 0, 1, 2 and its second is 0, 2, 3, so v0 of triangle 1 is vertex 0 again.
     std::vector<float> expected = {0.8F, 0.1F, 0.05F, 0.1F, 0.6F, 0.2F, 0.2F, 0.3F, 0.9F};
     pathtracer::gfx::convertToSceneSpace(expected, pathtracer::gfx::kOcioLinearRec709);
-    const bool converted = tinted && glm::vec3(expected[0], expected[1], expected[2]) == tinted->shadingTriangles[0].v0.colour &&
-                           glm::vec3(expected[3], expected[4], expected[5]) == tinted->shadingTriangles[0].v1.colour &&
-                           glm::vec3(expected[6], expected[7], expected[8]) == tinted->shadingTriangles[0].v2.colour;
+    const bool converted = tinted && pathtracer::scene::Rgb(expected[0], expected[1], expected[2]) == tinted->shadingTriangles[0].v0.colour &&
+                           pathtracer::scene::Rgb(expected[3], expected[4], expected[5]) == tinted->shadingTriangles[0].v1.colour &&
+                           pathtracer::scene::Rgb(expected[6], expected[7], expected[8]) == tinted->shadingTriangles[0].v2.colour;
     PT_EXPECT(ctx, converted, "COLOR_0 did not arrive as OCIO's linear Rec.709 to the scene space");
-    PT_EXPECT(ctx, plain && plain->shadingTriangles[0].v0.colour == glm::vec3(1.0F), "a primitive with no COLOR_0 is not white");
+    PT_EXPECT(ctx, plain && plain->shadingTriangles[0].v0.colour == pathtracer::scene::Rgb(1.0F), "a primitive with no COLOR_0 is not white");
     const bool white = untinted && std::ranges::all_of(untinted->shadingTriangles, [](const pathtracer::scene::ShadingTriangle& t) {
-        return t.v0.colour == glm::vec3(1.0F) && t.v1.colour == glm::vec3(1.0F) && t.v2.colour == glm::vec3(1.0F);
+        return t.v0.colour == pathtracer::scene::Rgb(1.0F) && t.v1.colour == pathtracer::scene::Rgb(1.0F) && t.v2.colour == pathtracer::scene::Rgb(1.0F);
     });
     PT_EXPECT(ctx, white, "vertexColor false still read COLOR_0");
 }

@@ -21,6 +21,7 @@
 #include "pathtracer/scene/environment_map.h"
 #include "pathtracer/scene/gltf_loader.h"
 #include "pathtracer/scene/light.h"
+#include "pathtracer/scene/material_binding.h"
 #include "pathtracer/scene/path_tracer.h"
 #include "pathtracer/scene/gbuffer.h"
 #include "pathtracer/scene/shading_scene.h"
@@ -111,25 +112,11 @@ public:
     [[nodiscard]] const pathtracer::config::SceneConfig& scene() const { return scene_; }
 
 private:
-    // Everything the root and light rotations are baked into: the triangle soup, its BVH, the lights and the per-instance bounds.
-    struct Geometry {
-        pathtracer::scene::LoadedModel model;
-        std::vector<pathtracer::scene::AreaLight> lights;
-        std::vector<int> instanceLightIndex;  // parallel to model.instances, -1 where the instance emits nothing
-        std::vector<pathtracer::scene::AabbBounds> instanceBounds;
-        pathtracer::scene::EmbreeAccel accel;
-    };
-
     HeadlessRenderer(std::string assetRoot, pathtracer::config::ProfileConfig profile, pathtracer::config::SceneConfig scene,
-                     Geometry geometry, pathtracer::scene::VolumeSet volumes,
+                     pathtracer::scene::SceneGeometry geometry, pathtracer::scene::VolumeSet volumes,
                      pathtracer::scene::PathTraceSettings baseSettings,
                      pathtracer::scene::EnvironmentMap environmentMap, const pathtracer::scene::Camera& defaultCamera);
 
-    // Loads the glTF under model's root, places lights under it and builds the BVH: open() and every pose change share it.
-    [[nodiscard]] static std::optional<Geometry> buildGeometry(const std::string& assetRoot,
-                                                               const pathtracer::config::ModelConfig& model,
-                                                               const std::vector<pathtracer::config::LightConfig>& lights,
-                                                               std::string& error);
     // Rebuilds geometry_ for the request's root and light rotations unless already built for them; false leaves it untouched.
     [[nodiscard]] bool applyPose(const Request& request, std::string& error);
 
@@ -151,7 +138,7 @@ private:
     std::string assetRoot_;
     pathtracer::config::ProfileConfig profile_;
     pathtracer::config::SceneConfig scene_;
-    Geometry geometry_;
+    pathtracer::scene::SceneGeometry geometry_;
     pathtracer::scene::VolumeSet volumes_;  // world space, so a pose change leaves it as loaded
     // The rotations geometry_ is built for, compared per request so an unchanged pose costs nothing.
     glm::vec3 builtRootRotationDegrees_;

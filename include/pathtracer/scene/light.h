@@ -8,20 +8,21 @@
 
 #include "pathtracer/scene/environment_map.h"
 #include "pathtracer/scene/ray_types.h"
+#include "pathtracer/scene/rgb.h"
 #include "pathtracer/scene/sampler.h"
 
 namespace pathtracer::scene {
 
 // Rectangular emitter, perpendicular edges from origin, emitting along normalize(cross(edge0, edge1)). Back face dark unless twoSided.
 struct QuadLight {
-    QuadLight(glm::vec3 origin, glm::vec3 edge0, glm::vec3 edge1, glm::vec3 radiance, bool twoSided = false)
+    QuadLight(glm::vec3 origin, glm::vec3 edge0, glm::vec3 edge1, Rgb radiance, bool twoSided = false)
         : origin(origin), edge0(edge0), edge1(edge1), radiance(radiance), twoSided(twoSided),
           normal(glm::normalize(glm::cross(edge0, edge1))) {}
 
     glm::vec3 origin;
     glm::vec3 edge0;
     glm::vec3 edge1;
-    glm::vec3 radiance;  // constant Le over the emitting face, colour * luminance
+    Rgb radiance;        // constant Le over the emitting face, colour * luminance
     bool twoSided;
     // Derived from edge0/edge1 once here, not per query: every NEE sample of the quad reads it.
     glm::vec3 normal;
@@ -50,7 +51,7 @@ struct DiskLight {
     glm::vec3 centre;
     glm::mat3 frame;  // orthonormal columns tangent, bitangent, emitting normal: the placed local +X, -Y and -Z, as a quad's edges
     float radius;
-    glm::vec3 radiance;  // constant Le over the emitting face, colour * luminance
+    Rgb radiance;        // constant Le over the emitting face, colour * luminance
     bool twoSided;
 };
 
@@ -59,17 +60,18 @@ struct SphereLight {
     glm::vec3 centre;
     glm::mat3 frame;  // the placed local axes, orienting only the surface's uv: the emission itself has no direction to turn
     float radius;
-    glm::vec3 radiance;
+    Rgb radiance;
 };
 
 // A triangle soup emitting along each face's cross(v1 - v0, v2 - v0), back faces dark unless twoSided; NEE samples it by area.
 struct MeshLight {
-    MeshLight(std::vector<Triangle> triangles, glm::vec3 radiance, bool twoSided);
+    MeshLight(std::vector<Triangle> triangles, Rgb radiance, bool twoSided);
 
     std::vector<Triangle> triangles;
+    std::vector<glm::vec3> normals;  // unit cross(v1 - v0, v2 - v0) per face, fixed at construction
     std::vector<float> areaCdf;  // triangles.size() + 1 knots from 0 to 1: the area-proportional, so power-proportional, pick
     float area;                  // sum over triangles; > 0 is the caller's to ensure
-    glm::vec3 radiance;
+    Rgb radiance;
     bool twoSided;
 };
 
@@ -99,7 +101,7 @@ struct SphericalEllipse {
 
 struct LightSample {
     glm::vec3 direction;  // unit, from the shading point toward the light
-    glm::vec3 radiance;   // Le arriving from that direction (0 if the light doesn't emit that way)
+    Rgb radiance;         // Le arriving from that direction (0 if the light doesn't emit that way)
     float pdf;            // solid-angle density of `direction`, INCLUDING the light-selection probability; > 0
     float distance;       // Euclidean distance to the sampled point; FLT_MAX for the environment
 };
@@ -123,13 +125,13 @@ public:
     [[nodiscard]] float pdfArea(int lightIndex, const glm::vec3& p, const glm::vec3& point, const glm::vec3& normal) const;
 
     // Le toward `direction` (from the light toward the viewer) off a surface of geometric normal `normal`: 0 on a dark back face.
-    [[nodiscard]] glm::vec3 radianceToward(int lightIndex, const glm::vec3& direction, const glm::vec3& normal) const;
+    [[nodiscard]] Rgb radianceToward(int lightIndex, const glm::vec3& direction, const glm::vec3& normal) const;
 
     // Radiance from the environment toward `direction`, 0 if excluded. The one Le in the renderer: NEE and the miss path share it.
-    [[nodiscard]] glm::vec3 environmentRadiance(const glm::vec3& direction) const;
+    [[nodiscard]] Rgb environmentRadiance(const glm::vec3& direction) const;
 
     // The same Le filtered over a camera ray's footprint, dirFootprint's columns the direction's offsets along its two axes.
-    [[nodiscard]] glm::vec3 environmentRadiance(const glm::vec3& direction, const glm::mat2x3& dirFootprint) const;
+    [[nodiscard]] Rgb environmentRadiance(const glm::vec3& direction, const glm::mat2x3& dirFootprint) const;
 
 private:
     const EnvironmentMap* environment_;

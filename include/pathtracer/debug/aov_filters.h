@@ -21,13 +21,6 @@ namespace pathtracer::debug {
 [[nodiscard]] pathtracer::gfx::HdrImage snrAov(int width, int height, const float* replicateLuminance, int replicates, int samples,
                                             pathtracer::scene::ThreadPool& threadPool);
 
-// Each texel's pass count as a float, the samples its estimate averages; null counts, before any pass, read zero.
-[[nodiscard]] pathtracer::gfx::HdrImage sampleCountAov(int width, int height, const int* texelSamples, pathtracer::scene::ThreadPool& threadPool);
-
-// 1 - direct luminance / unoccluded direct luminance at the primary vertex, as a ratio of means; 0 where no direct light arrives.
-[[nodiscard]] pathtracer::gfx::HdrImage shadowAov(const pathtracer::gfx::HdrImage& lost, const pathtracer::gfx::HdrImage& unoccluded,
-                                               pathtracer::scene::ThreadPool& threadPool);
-
 // Everything a BeautyFilter AOV reads, as explicit fields rather than a PathTraceResult, so a validator can build one with no renderer.
 struct FilterInput {
     const pathtracer::gfx::HdrImage& beauty;  // published mean radiance, linear scene space, scene-referred and unbounded

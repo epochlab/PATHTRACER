@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <numbers>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -14,7 +15,7 @@
 // GGX single-scattering quadrature shared by the table generator and the reference validator, generic in the Smith shadowing model.
 namespace tools::quadrature {
 
-constexpr double kPi = 3.14159265358979323846;
+constexpr double kPi = std::numbers::pi;
 
 // Gauss-Legendre nodes/weights on [0,1] by Newton on P_n through Bonnet's recurrence (Numerical Recipes 3rd ed. 4.6.1); weights sum to 1.
 struct GaussLegendre {

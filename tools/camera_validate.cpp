@@ -129,7 +129,7 @@ PT_CHECK(rectilinear_primary_rays_match_the_closed_form, Fast, Exact) {
     ctx.plan(5);
     constexpr float kFocalMm = 35.0F;
     const Camera camera = makeCamera(kFocalMm, Lens{});
-    const std::optional<Ray> centre = camera.primaryRay(0.0F, 0.0F, kAspect);
+    const std::optional<Ray> centre = camera.primaryRay(camera.viewBasis(kAspect), 0.0F, 0.0F);
     PT_EXPECT(ctx, centre.has_value() && centre->dir == camera.forward(),
               "the optical axis must be the camera's forward direction bitwise");
 
@@ -142,7 +142,7 @@ PT_CHECK(rectilinear_primary_rays_match_the_closed_form, Fast, Exact) {
                                                              {{1.0F, 0.0F}, expectedRight},
                                                              {{-1.0F, 0.0F}, expectedRight}}};
     for (const auto& [ndc, expected] : cases) {
-        const std::optional<Ray> ray = camera.primaryRay(ndc.x, ndc.y, kAspect);
+        const std::optional<Ray> ray = camera.primaryRay(camera.viewBasis(kAspect), ndc.x, ndc.y);
         const float angle = angleBetween(ray->dir, forward);
         PT_EXPECT(ctx, ray.has_value() && std::abs(angle - expected) <= kClosedFormUlps * kEps * expected,
                   "ndc (" + std::to_string(ndc.x) + ", " + std::to_string(ndc.y) + ") subtends " +

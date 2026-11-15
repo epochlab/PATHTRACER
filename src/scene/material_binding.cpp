@@ -1,6 +1,7 @@
 #include "pathtracer/scene/material_binding.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <iostream>
 #include <limits>
@@ -25,7 +26,7 @@ namespace {
 
 // A key naming no instance is a typo: rejected, so a scene never renders silently with the wrong material or texture.
 template <typename Overrides>
-bool everyKeyNamesAnInstance(const Overrides& overrides, const std::vector<MeshInstance>& instances, const char* caller,
+bool everyKeyNamesAnInstance(const Overrides& overrides, std::span<const MeshInstance> instances, const char* caller,
                              const char* field) {
     std::set<std::string_view> instanceNames;
     for (const MeshInstance& instance : instances) {
@@ -220,7 +221,7 @@ float emittingArea(const AreaLight& placed) {
 
 }  // namespace
 
-bool applySceneMaterials(std::vector<MeshInstance>& instances, const std::string& materialPath,
+bool applySceneMaterials(std::span<MeshInstance> instances, const std::string& materialPath,
                          const std::map<std::string, std::string>& materialOverrides, const std::string& assetRoot) {
     if (!everyKeyNamesAnInstance(materialOverrides, instances, "applySceneMaterials", "materialOverrides")) {
         return false;
@@ -250,7 +251,7 @@ bool applySceneMaterials(std::vector<MeshInstance>& instances, const std::string
     return true;
 }
 
-bool bindSceneTextures(std::vector<MeshInstance>& instances,
+bool bindSceneTextures(std::span<MeshInstance> instances,
                        const std::map<std::string, std::map<std::string, pathtracer::config::TextureConfig>>& textures,
                        const std::string& assetRoot) {
     if (!everyKeyNamesAnInstance(textures, instances, "bindSceneTextures", "textures")) {
@@ -294,7 +295,7 @@ std::optional<std::vector<AreaLight>> buildLights(const std::vector<pathtracer::
         const glm::vec3 centre(lightToWorld * glm::vec4(0.0F, 0.0F, 0.0F, 1.0F));
         const glm::mat3 axes(lightToWorld);
         // Placed at unit-luminance colour first: a lumens light's luminance needs the placed area, a mesh's known only once loaded.
-        const glm::vec3& radiance = light.color;
+        const Rgb& radiance = light.color;
         if (const auto* quad = std::get_if<pathtracer::config::QuadShape>(&light.shape)) {
             const glm::vec2 halfSize = 0.5F * quad->size;
             // edge0 = +X, edge1 = -Y: cross(edge0, edge1) is local -Z, the emitting side, from the (-x, +y) corner.
@@ -354,6 +355,36 @@ float emittedLuminance(const pathtracer::config::LightConfig& light, const AreaL
 
 glm::mat4 rootTransformOf(const pathtracer::config::ModelConfig& model) {
     return placementTransform(model.position, model.rotation);
+}
+
+std::optional<SceneGeometry> buildSceneGeometry(const std::string& assetRoot, const pathtracer::config::ModelConfig& model,
+                                                const std::vector<pathtracer::config::LightConfig>& lights, std::string& error) {
+    const glm::mat4 rootTransform = rootTransformOf(model);
+    std::optional<LoadedModel> loaded =
+        model.gltfPath ? loadGltf(assetRoot + "/" + *model.gltfPath, rootTransform, model.vertexColor) : LoadedModel{};
+    if (!loaded) {
+        error = "failed to load glTF " + assetRoot + "/" + *model.gltfPath;
+        return std::nullopt;
+    }
+    std::vector<int> instanceLightIndex(loaded->instances.size(), -1);
+    std::optional<std::vector<AreaLight>> areaLights = buildLights(lights, rootTransform, assetRoot);
+    if (!areaLights) {
+        error = "failed to build the scene's lights";
+        return std::nullopt;
+    }
+    appendLightGeometry(*loaded, *areaLights, instanceLightIndex);
+    // After appendLightGeometry, so the lights' own instances are bounded too, and before the shapes move into the accel.
+    std::vector<AabbBounds> instanceBounds =
+        computeInstanceBounds(loaded->shadingTriangles, static_cast<int>(loaded->instances.size()), loaded->shapes);
+    const auto accelStart = std::chrono::steady_clock::now();
+    std::optional<EmbreeAccel> accel = EmbreeAccel::build(std::move(loaded->worldTriangles), std::move(loaded->shapes));
+    if (!accel) {
+        error = "Embree scene build failed";
+        return std::nullopt;
+    }
+    const double accelBuildMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - accelStart).count();
+    return SceneGeometry{std::move(*loaded), std::move(*areaLights), std::move(instanceLightIndex), std::move(instanceBounds),
+                         std::move(*accel), accelBuildMs};
 }
 
 PathTraceSettings baseSettingsOf(const pathtracer::config::ProfileConfig& profile) {

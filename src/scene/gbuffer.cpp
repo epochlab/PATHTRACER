@@ -89,11 +89,10 @@ ViewBox viewBox(const AabbBounds& box, const glm::vec3& eye, const glm::vec3& co
 struct GBufferView {
     const Camera& camera;
     pathtracer::gfx::PixelLattice lattice;
-    Camera::ViewBasis basis;
-    Projector current;
+    Projector current;  // its basis is the primary rays' too
     Projector previous;
     glm::vec2 pixelsPerNdc;  // half the film extent, (W/2, -H rowPitch/2): NDC +Y up to column pitches with row 0 at the top
-    float pixelSide;  // the cell's side as an equal-area square: the unit of dirPerPixel, so of footprints and line widths
+    glm::mat2 ndcPerPixel;  // d(ndc) per pixel side, the equal-area square: the unit of dirPerPixel, so of footprints and line widths
     std::vector<ViewBox> boxes;
     bool wrapsHorizontally;  // both views wrap, so a motion's x lives on a circle rather than a line
 };
@@ -114,13 +113,11 @@ std::optional<PixelRay> pixelRay(const GBufferView& view, int x, int y) {
     const glm::vec2 centre = pathtracer::gfx::pixelCentre(view.lattice, x, y);
     const float ndcX = (centre.x / view.pixelsPerNdc.x) - 1.0F;
     const float ndcY = 1.0F + (centre.y / view.pixelsPerNdc.y);
-    const std::optional<Camera::RayDifferential> differential = view.camera.primaryRayDifferential(view.basis, ndcX, ndcY);
+    const std::optional<Camera::RayDifferential> differential = view.camera.primaryRayDifferential(view.current.basis, ndcX, ndcY);
     if (!differential) {
         return std::nullopt;
     }
-    const glm::mat2x3 dirPerPixel = differential->dirPerNdc * glm::mat2(view.pixelSide / view.pixelsPerNdc.x, 0.0F, 0.0F,
-                                                                        view.pixelSide / view.pixelsPerNdc.y);
-    return PixelRay{differential->ray, dirPerPixel};
+    return PixelRay{differential->ray, differential->dirPerNdc * view.ndcPerPixel};
 }
 
 // Pixel distance to the image of the eye plane with normal n, |n.d| / |J^T n| (Baerentzen et al. 2006); NaN for n = 0 fails every test.
@@ -226,6 +223,22 @@ std::optional<glm::vec3> nearBoxEdge(const std::vector<ViewBox>& boxes, const Pi
     return color;
 }
 
+// The surface fields every hit writes, a triangle's or a light shape's: depth, position, uv, frame, inputs and identity.
+void writeSurface(GBuffer& result, int x, int y, float depth, const ShadingVertex& shading, const glm::vec3& normal,
+                  const glm::vec3& tangent, const glm::vec3& geomNormal, const OpenPbrInputs<Constant>& inputs, int instanceIndex) {
+    writeTexel(result.depth, x, y, depth);
+    writeTexel(result.worldPos, x, y, shading.position);
+    writeTexel(result.uv, x, y, glm::fract(shading.uv));
+    writeTexel(result.normal, x, y, normal);
+    writeTexel(result.geomNormal, x, y, geomNormal);
+    writeTexel(result.albedo, x, y, (inputs.baseWeight * inputs.baseColor).vec3());
+    writeTexel(result.metallic, x, y, inputs.baseMetalness);
+    writeTexel(result.roughness, x, y, inputs.specularRoughness);
+    writeTexel(result.tangent, x, y, tangent);
+    writeTexel(result.objectId, x, y, falseColorForId(instanceIndex));
+    writeTexel(result.iorAov, x, y, modulatedIor(inputs, std::nullopt));
+}
+
 // Resolves every surface field for one hit pixel: tracePath's bounce-0 sampling calls, never lighting or BSDF. Returns worldPos.
 glm::vec3 shadeHit(GBuffer& result, int x, int y, const Hit& hit, const PixelRay& pixel, const ShadingTriangle& triangle,
                    const Material& material) {
@@ -234,17 +247,7 @@ glm::vec3 shadeHit(GBuffer& result, int x, int y, const Hit& hit, const PixelRay
     const pathtracer::gfx::TextureFootprint footprint = primaryHitFootprint(triangle, pixel.ray, hit.t, pixel.dirPerPixel);
     const ShadingFrame frame = buildShadingFrame(triangle, shading, material.geometryNormal);
     const OpenPbrInputs<Constant> inputs = resolveInputs(material, shading.uv, footprint, shading.colour);
-    writeTexel(result.depth, x, y, hit.t);
-    writeTexel(result.worldPos, x, y, shading.position);
-    writeTexel(result.uv, x, y, glm::fract(shading.uv));
-    writeTexel(result.normal, x, y, frame[2]);
-    writeTexel(result.geomNormal, x, y, glm::normalize(shading.normal));
-    writeTexel(result.albedo, x, y, inputs.baseWeight * inputs.baseColor);
-    writeTexel(result.metallic, x, y, inputs.baseMetalness);
-    writeTexel(result.roughness, x, y, inputs.specularRoughness);
-    writeTexel(result.tangent, x, y, frame[0]);
-    writeTexel(result.objectId, x, y, falseColorForId(triangle.instanceIndex));
-    writeTexel(result.iorAov, x, y, modulatedIor(inputs, std::nullopt));
+    writeSurface(result, x, y, hit.t, shading, frame[2], frame[0], glm::normalize(shading.normal), inputs, triangle.instanceIndex);
     if (nearTriangleEdge(triangle, pixel)) {
         writeTexel(result.wireframe, x, y, kWireframeColor);
     }
@@ -255,17 +258,7 @@ glm::vec3 shadeHit(GBuffer& result, int x, int y, const Hit& hit, const PixelRay
 glm::vec3 shadeShapeHit(GBuffer& result, int x, int y, const Hit& hit, const PixelRay& pixel, const AnalyticShape& shape) {
     const ShadingVertex shading = shadingAt(shape, pixel.ray.origin + (hit.t * pixel.ray.dir));
     const OpenPbrInputs<Constant> inputs = resolveInputs(Material{}, shading.uv, {}, shading.colour);
-    writeTexel(result.depth, x, y, hit.t);
-    writeTexel(result.worldPos, x, y, shading.position);
-    writeTexel(result.uv, x, y, glm::fract(shading.uv));
-    writeTexel(result.normal, x, y, shading.normal);
-    writeTexel(result.geomNormal, x, y, shading.normal);
-    writeTexel(result.albedo, x, y, inputs.baseWeight * inputs.baseColor);
-    writeTexel(result.metallic, x, y, inputs.baseMetalness);
-    writeTexel(result.roughness, x, y, inputs.specularRoughness);
-    writeTexel(result.tangent, x, y, glm::vec3(shading.tangent));
-    writeTexel(result.objectId, x, y, falseColorForId(shape.instanceIndex));
-    writeTexel(result.iorAov, x, y, modulatedIor(inputs, std::nullopt));
+    writeSurface(result, x, y, hit.t, shading, shading.normal, glm::vec3(shading.tangent), shading.normal, inputs, shape.instanceIndex);
     return shading.position;
 }
 
@@ -377,8 +370,10 @@ void renderGBuffer(const Camera& camera, const Camera& previousCamera, const Emb
     result.pixelLattice = lattice;
     const glm::vec2 frame = pathtracer::gfx::frameExtent(lattice, width, height);
     const float aspect = frame.x / frame.y;
-    GBufferView view{camera, lattice, camera.viewBasis(aspect), projectorFor(camera, aspect), projectorFor(previousCamera, aspect),
-                     glm::vec2(0.5F * frame.x, -0.5F * frame.y), pathtracer::gfx::pixelSide(lattice), {},
+    const glm::vec2 pixelsPerNdc(0.5F * frame.x, -0.5F * frame.y);
+    const float pixelSide = pathtracer::gfx::pixelSide(lattice);
+    GBufferView view{camera, lattice, projectorFor(camera, aspect), projectorFor(previousCamera, aspect), pixelsPerNdc,
+                     glm::mat2(pixelSide / pixelsPerNdc.x, 0.0F, 0.0F, pixelSide / pixelsPerNdc.y), {},
                      result.wrapsHorizontally && wrapsHorizontally(previousCamera.lens().projection)};
     // One box per instance in its ObjectID false colour; an instance that contributed no triangles has an empty box and no edges.
     view.boxes.reserve(instanceBounds.size());

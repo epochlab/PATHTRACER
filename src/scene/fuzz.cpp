@@ -1,7 +1,6 @@
 #include "fuzz.h"
 
 #include <algorithm>
-#include <cmath>
 
 #include "eon.h"
 #include "shading_math.h"
@@ -46,7 +45,7 @@ Vector3f coefficients(float roughness, float mu) {
 
 float fuzzAlbedo(float roughness, float mu) { return coefficients(roughness, mu).albedo; }
 
-FuzzSlab makeFuzzSlab(const glm::vec3& color, float roughness, const glm::vec3& wo) {
+FuzzSlab makeFuzzSlab(const Rgb& color, float roughness, const glm::vec3& wo) {
     const Vector3f fit = coefficients(roughness, wo.z);
     return {color, fit.aInv, fit.bInv, fit.albedo, toAzimuthFrame(wo)};
 }
@@ -55,7 +54,7 @@ FuzzSlab makeFuzzSlab(const glm::vec3& color, float roughness, const glm::vec3& 
 FuzzEval evaluateFuzz(const FuzzSlab& slab, const glm::vec3& wi) {
     const glm::vec3 w = slab.basisT * wi;
     if (w.z <= 0.0F) {
-        return {glm::vec3(0.0F), 0.0F};
+        return {Rgb(0.0F), 0.0F};
     }
     const glm::vec3 original((slab.aInv * w.x) + (slab.bInv * w.z), slab.aInv * w.y, w.z);
     const float lenSq = glm::dot(original, original);

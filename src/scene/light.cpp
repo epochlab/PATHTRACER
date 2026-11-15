@@ -18,11 +18,6 @@ namespace pathtracer::scene {
 
 namespace {
 
-// atan2(|a x b|, a.b) -- PBRT v4's AngleBetween: robust near 0 and pi, where acos(dot) loses precision as gamma_i shrinks.
-float angleBetween(const glm::vec3& a, const glm::vec3& b) {
-    return std::atan2(glm::length(glm::cross(a, b)), glm::dot(a, b));
-}
-
 // Urena et al. 2013's local frame at referencePoint: unit edges x, y, normal z with z0 < 0, and the rectangle's extents in it.
 std::optional<SphericalRectangle> sphericalRectangleFrame(const QuadLight& quad, const glm::vec3& referencePoint) {
     const float exl = glm::length(quad.edge0);
@@ -155,8 +150,8 @@ float meshInversePdf(const glm::vec3& toPoint, const glm::vec3& normal, float ar
 
 // Area sampling, Heitz 2019's low-distortion triangle map (PBR 4e SampleUniformTriangle) on an area-picked face: pdf_A = 1/area.
 std::optional<AreaSample> sampleLight(const MeshLight& mesh, const glm::vec3& p, float uTriangle, glm::vec2 u) {
-    const Triangle& tri = mesh.triangles[static_cast<std::size_t>(
-        invertCdf(mesh.areaCdf.data(), static_cast<int>(mesh.triangles.size()), uTriangle).index)];
+    const auto face = static_cast<std::size_t>(invertCdf(mesh.areaCdf.data(), static_cast<int>(mesh.triangles.size()), uTriangle).index);
+    const Triangle& tri = mesh.triangles[face];
     glm::vec2 b;
     if (u.x < u.y) {
         b.x = 0.5F * u.x;
@@ -166,7 +161,7 @@ std::optional<AreaSample> sampleLight(const MeshLight& mesh, const glm::vec3& p,
         b.x = u.x - b.y;
     }
     const glm::vec3 point = (b.x * tri.v0) + (b.y * tri.v1) + ((1.0F - b.x - b.y) * tri.v2);
-    const glm::vec3 normal = glm::normalize(glm::cross(tri.v1 - tri.v0, tri.v2 - tri.v0));
+    const glm::vec3& normal = mesh.normals[face];
     const float inversePdf = meshInversePdf(point - p, normal, mesh.area);
     // Edge-on, the face subtends no solid angle: its density there is infinite and its contribution zero.
     if (!(inversePdf > 0.0F)) {
@@ -260,13 +255,13 @@ std::optional<EllipseCone> ellipseCone(const DiskLight& disk, const glm::vec3& r
 
 // Le toward `direction` off a surface of normal `normal`: a ray toward the light opposes the front face's normal; a sphere has no back.
 template <typename Light>
-glm::vec3 emittedToward(const Light& light, const glm::vec3& direction, const glm::vec3& normal) {
+Rgb emittedToward(const Light& light, const glm::vec3& direction, const glm::vec3& normal) {
     if constexpr (!std::is_same_v<Light, SphereLight>) {
         if (light.twoSided) {
             return light.radiance;
         }
     }
-    return glm::dot(direction, normal) < 0.0F ? light.radiance : glm::vec3(0.0F);
+    return glm::dot(direction, normal) < 0.0F ? light.radiance : Rgb(0.0F);
 }
 
 }  // namespace
@@ -357,13 +352,16 @@ glm::vec3 SphericalEllipse::sample(glm::vec2 u) const {
     return referencePoint + ((planeDistance / glm::dot(direction, planeNormal)) * direction);
 }
 
-MeshLight::MeshLight(std::vector<Triangle> triangles, glm::vec3 radiance, bool twoSided)
+MeshLight::MeshLight(std::vector<Triangle> triangles, Rgb radiance, bool twoSided)
     : triangles(std::move(triangles)), areaCdf(this->triangles.size() + 1, 0.0F), area(0.0F), radiance(radiance), twoSided(twoSided) {
+    normals.reserve(this->triangles.size());
     // Summed in double so the running total does not swamp a small face's area in a large mesh.
     std::vector<double> running(this->triangles.size() + 1, 0.0);
     for (std::size_t i = 0; i < this->triangles.size(); ++i) {
         const Triangle& tri = this->triangles[i];
-        running[i + 1] = running[i] + (0.5 * glm::length(glm::dvec3(glm::cross(tri.v1 - tri.v0, tri.v2 - tri.v0))));
+        const glm::vec3 cross = glm::cross(tri.v1 - tri.v0, tri.v2 - tri.v0);
+        normals.push_back(glm::normalize(cross));
+        running[i + 1] = running[i] + (0.5 * glm::length(glm::dvec3(cross)));
     }
     const double total = running.back();
     for (std::size_t i = 1; i < running.size(); ++i) {
@@ -384,16 +382,16 @@ int LightSet::count() const {
     return (environment_ != nullptr ? 1 : 0) + static_cast<int>(lights_.size());
 }
 
-glm::vec3 LightSet::environmentRadiance(const glm::vec3& direction) const {
+Rgb LightSet::environmentRadiance(const glm::vec3& direction) const {
     if (environment_ == nullptr) {
-        return glm::vec3(0.0F);
+        return Rgb(0.0F);
     }
     return environment_->sampleDirection(direction, envRotation_) * envExposure_;
 }
 
-glm::vec3 LightSet::environmentRadiance(const glm::vec3& direction, const glm::mat2x3& dirFootprint) const {
+Rgb LightSet::environmentRadiance(const glm::vec3& direction, const glm::mat2x3& dirFootprint) const {
     if (environment_ == nullptr) {
-        return glm::vec3(0.0F);
+        return Rgb(0.0F);
     }
     return environment_->sampleDirection(direction, dirFootprint, envRotation_) * envExposure_;
 }
@@ -405,7 +403,7 @@ float LightSet::pdfEnvironment(const glm::vec3& dir) const {
     return environment_->pdf(dir, envRotation_) / static_cast<float>(count());
 }
 
-glm::vec3 LightSet::radianceToward(int lightIndex, const glm::vec3& direction, const glm::vec3& normal) const {
+Rgb LightSet::radianceToward(int lightIndex, const glm::vec3& direction, const glm::vec3& normal) const {
     return std::visit([&](const auto& light) { return emittedToward(light, direction, normal); }, lights_[static_cast<std::size_t>(lightIndex)]);
 }
 
