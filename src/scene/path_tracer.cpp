@@ -575,8 +575,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
                     gShadowLost = glm::dot(luminance, direct * (1.0F - visibility));
                 }
                 if (visibility != glm::vec3(0.0F)) {
-                    const float lightPdf2 = lightSample->pdf * lightSample->pdf;
-                    const float misWeightLight = lightPdf2 / (lightPdf2 + (phase * phase));
+                    const float misWeightLight = powerHeuristic(lightSample->pdf, phase);
                     const glm::vec3 neeContribution =
                         visibility * throughput * lightSample->radiance * (phase * misWeightLight / lightSample->pdf);
                     radiance += neeContribution;
@@ -640,9 +639,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
             // Power heuristic (Veach 1997): full weight after the camera or a delta sample, neither having a density to balance.
             float misWeight = 1.0F;
             if (!lastSampleWasDelta) {
-                const float lightPdf = lights.pdfEnvironment(ray.dir);
-                const float bsdfPdf2 = lastBsdfPdf * lastBsdfPdf;
-                misWeight = bsdfPdf2 / (bsdfPdf2 + (lightPdf * lightPdf));
+                misWeight = powerHeuristic(lastBsdfPdf, lights.pdfEnvironment(ray.dir));
             }
             const glm::vec3 missRadiance = throughput * envRadiance * misWeight;
             radiance += missRadiance;
@@ -665,9 +662,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
             const glm::vec3 emitted = lights.radianceToward(lightIndex, ray.dir, lightNormal);
             float misWeight = 1.0F;
             if (!lastSampleWasDelta) {
-                const float lightPdf = lights.pdfArea(lightIndex, lastShadingPosition, point, lightNormal);
-                const float bsdfPdf2 = lastBsdfPdf * lastBsdfPdf;
-                misWeight = bsdfPdf2 / (bsdfPdf2 + (lightPdf * lightPdf));
+                misWeight = powerHeuristic(lastBsdfPdf, lights.pdfArea(lightIndex, lastShadingPosition, point, lightNormal));
             }
             const glm::vec3 hitRadiance = throughput * emitted * misWeight;
             radiance += hitRadiance;
@@ -811,10 +806,9 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
             const bool farSide = (geoCos > 0.0F) != woAbove;
             if (!farSide || transmits(closure)) {
                 const glm::vec3 wiLocalLight = lightSample->direction * frame;
-                // One evaluation for the value, pdf and per-lobe split, each lobe cosine-weighted about its own normal.
-                const BsdfEval eval = evaluateBsdfSplit(closure, wiLocalLight, revisit, walkSampler);
-                const glm::vec3 bsdfValue = farSide ? eval.transmission : eval.diffuse + eval.specular;
-                // A zero pdf is light only the walk's later orders reach: the BSDF draw's MIS weight is 0 there, so NEE takes it whole.
+                // One evaluation for the value and per-lobe split, each lobe cosine-weighted about its own normal, MIS-weighted per vertex.
+                const NeeEval nee = evaluateForLight(closure, wiLocalLight, revisit, walkSampler, lightSample->pdf);
+                const glm::vec3 bsdfValue = farSide ? nee.value.transmission : nee.value.diffuse + nee.value.specular;
                 if (bsdfValue.x > 0.0F || bsdfValue.y > 0.0F || bsdfValue.z > 0.0F) {
                     const glm::vec3 shadowOrigin = spawnOrigin(triangle, hit->u, hit->v, geoNormal, geoCos > 0.0F);
                     // pbrt's SpawnRayTo: re-formed from the offset origin to the sampled point, which a back-off along wi cannot reach.
@@ -844,19 +838,17 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
                         gShadowLost = glm::dot(luminance, direct * (1.0F - visibility));
                     }
                     if (visibility != glm::vec3(0.0F)) {
-                        const float lightPdf2 = lightSample->pdf * lightSample->pdf;
-                        const float bsdfPdf2 = eval.pdf * eval.pdf;
-                        const float misWeightLight = lightPdf2 / (lightPdf2 + bsdfPdf2);
-                        const glm::vec3 common = visibility * throughput * lightSample->radiance * misWeightLight / lightSample->pdf;
-                        const glm::vec3 neeContribution = bsdfValue * common;
+                        const glm::vec3 common = visibility * throughput * lightSample->radiance / lightSample->pdf;
+                        const BsdfEval& weighted = nee.weighted;
+                        const glm::vec3 neeContribution = (farSide ? weighted.transmission : weighted.diffuse + weighted.specular) * common;
                         radiance += neeContribution;
                         if (bounce == 0) {
                             // Bounce 0 splits NEE by the lobe that carried it, not sample->type, which names the continuation.
                             if (farSide) {
-                                refractionAccum += eval.transmission * common;
+                                refractionAccum += weighted.transmission * common;
                             } else {
-                                directDiffuseAccum += eval.diffuse * common;
-                                directSpecularAccum += eval.specular * common;
+                                directDiffuseAccum += weighted.diffuse * common;
+                                directSpecularAccum += weighted.specular * common;
                             }
                         } else {
                             // Deeper bounces keep the sticky bucket; only the primary walk's boundary takes direct light past bounce 0.

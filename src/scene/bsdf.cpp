@@ -978,9 +978,15 @@ glm::vec3 passThrough(const NormalMappedBsdf& bsdf) {
 }
 
 
-BsdfEval evaluateBsdfSplit(const NormalMappedBsdf& bsdf, const glm::vec3& wiLocal, const std::optional<WalkVertex>& revisit,
-                           Sampler& walk) {
+namespace {
+
+// All orders toward wiLocal, the later resumed from revisit; given weighted, each vertex's exits also by powerHeuristic(lightPdf, p_k).
+BsdfEval walkedOrders(const NormalMappedBsdf& bsdf, const glm::vec3& wiLocal, const std::optional<WalkVertex>& revisit, Sampler& walk,
+                      float lightPdf, BsdfEval* weighted) {
     BsdfEval eval = evaluateFirstScattering(bsdf, wiLocal, &walk);
+    if (weighted != nullptr) {
+        addScaled(*weighted, eval, glm::vec3(powerHeuristic(lightPdf, eval.pdf)), 0.0F);
+    }
     if (!revisit) {
         return eval;
     }
@@ -990,13 +996,31 @@ BsdfEval evaluateBsdfSplit(const NormalMappedBsdf& bsdf, const glm::vec3& wiLoca
     glm::vec3 direction = revisit->direction;
     while (true) {
         const BsdfClosure vertex = returnedTo(bsdf, direction);
-        addScaled(eval, exitsAt(bsdf, vertex, sigma, wiLocal, &walk), weight, 0.0F);
+        const BsdfEval exits = exitsAt(bsdf, vertex, sigma, wiLocal, &walk);
+        addScaled(eval, exits, weight, 0.0F);
+        if (weighted != nullptr) {
+            addScaled(*weighted, exits, weight * powerHeuristic(lightPdf, exits.pdf), 0.0F);
+        }
         const std::optional<Leg> leg = leave(bsdf, vertex, sigma, weight, walk, walk);
         if (!leg || leg->escaped || weight == glm::vec3(0.0F)) {
             return eval;
         }
         direction = leg->direction;
     }
+}
+
+}  // namespace
+
+BsdfEval evaluateBsdfSplit(const NormalMappedBsdf& bsdf, const glm::vec3& wiLocal, const std::optional<WalkVertex>& revisit,
+                           Sampler& walk) {
+    return walkedOrders(bsdf, wiLocal, revisit, walk, 0.0F, nullptr);
+}
+
+NeeEval evaluateForLight(const NormalMappedBsdf& bsdf, const glm::vec3& wiLocal, const std::optional<WalkVertex>& revisit, Sampler& walk,
+                         float lightPdf) {
+    NeeEval nee{};
+    nee.value = walkedOrders(bsdf, wiLocal, revisit, walk, lightPdf, &nee.weighted);
+    return nee;
 }
 
 // Algorithm 2: the first facet by lambda, then facet draws until the ray escapes the facet or the wall; weight is the walk's throughput.
@@ -1017,25 +1041,27 @@ std::optional<BsdfSample> sampleBsdf(const NormalMappedBsdf& bsdf, Sampler& samp
     if (leg && !leg->escaped && weight != glm::vec3(0.0F)) {
         revisit = WalkVertex{leg->direction, sigma, weight};
     }
-    bool delta = true;
+    std::optional<BsdfClosure> vertex;  // the facet vertex the exit leg left, past the first
+    float vertexSigma = sigma;
     while (leg && !leg->escaped && weight != glm::vec3(0.0F)) {
-        delta = delta && leg->drawn.delta;
-        leg = leave(bsdf, returnedTo(bsdf, leg->direction), sigma, weight, walk, walk);
+        vertex = returnedTo(bsdf, leg->direction);
+        vertexSigma = sigma;
+        leg = leave(bsdf, *vertex, sigma, weight, walk, walk);
     }
     if (!leg || weight == glm::vec3(0.0F)) {
         return std::nullopt;
     }
-    delta = delta && leg->drawn.delta;
     const glm::vec3 wi = leg->direction;
     const bool reflected = sigma == bsdf.side;
     const LobeType last = leg->drawn.type == LobeType::Transmission ? LobeType::SpecularReflection : leg->drawn.type;
     const LobeType type = reflected ? last : LobeType::Transmission;
     const glm::vec3 transmitted = reflected ? glm::vec3(0.0F) : weight;
-    if (delta) {
+    // NEE weighs each vertex's exits against that vertex's exit density, so a smooth exit leg has none to share whatever came before.
+    if (leg->drawn.delta) {
         return BsdfSample{wi, weight, transmitted, type, 0.0F, true, passesThrough};
     }
-    // The walk's own density has no closed form; MIS needs only a deterministic one that NEE shares, the first scattering's.
-    return BsdfSample{wi, weight, transmitted, type, evaluateFirstScattering(bsdf, wi, nullptr).pdf, false, false, leg->drawn.lobePdf};
+    const float pdf = vertex ? exitsAt(bsdf, *vertex, vertexSigma, wi, nullptr).pdf : evaluateFirstScattering(bsdf, wi, nullptr).pdf;
+    return BsdfSample{wi, weight, transmitted, type, pdf, false, false, leg->drawn.lobePdf};
 }
 
 glm::vec3 fresnelAtMicrofacet(const NormalMappedBsdf& bsdf, glm::vec2 u) {

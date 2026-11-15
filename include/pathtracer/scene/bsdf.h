@@ -23,7 +23,7 @@ struct BsdfSample {
     glm::vec3 throughputWeight;   // the drawn technique's estimate of f(wi)*|cosThetaI| / pdf(wi): a walk's is its exit throughput
     glm::vec3 transmitWeight;     // its transmission lobes' share: what a direction crossing the geometric surface carries
     LobeType type;
-    // The mixture density wiLocal was drawn from, equal to pdfBsdf's; zero for a delta branch.
+    // The density MIS weighs the draw by: pdfBsdf's for a closure, the exit vertex's for a normal-mapped walk; zero for a delta branch.
     float pdf;
     bool delta;  // a smooth reflection or refraction: no density for NEE to share, so MIS gives its continuation full weight
     bool passThrough = false;  // a smooth thin wall's undeviated transmission along -wo: a null vertex, the ray continues unchanged
@@ -40,6 +40,12 @@ struct BsdfEval {
     float pdf;
     [[nodiscard]] glm::vec3 total() const { return diffuse + specular + transmission; }
 };
+
+// Veach 1997 eq. 9.13, beta 2: the MIS weight of the strategy with density own against one with density other.
+[[nodiscard]] inline float powerHeuristic(float own, float other) {
+    const float own2 = own * own;
+    return own2 / (own2 + (other * other));
+}
 
 // The four (roughness, anisotropy) rows of the anisotropic tables about one slab, each row's node alphas setting its azimuth axis.
 struct AnisoRows {
@@ -285,7 +291,15 @@ struct WalkVertex {
 // The first scattering plus the later orders, resumed from a draw's revisit: unbiased, as the draw's first leg is the walk's own.
 [[nodiscard]] BsdfEval evaluateBsdfSplit(const NormalMappedBsdf& bsdf, const glm::vec3& wiLocal, const std::optional<WalkVertex>& revisit,
                                          Sampler& walk);
-// Algorithm 2 to termination, weighted by its throughput, pdf the first scattering's; revisit is its first return to the facet, if any.
+// NEE's evaluation toward a light of density lightPdf: the plain value, and each walk vertex's exits weighted against that vertex's draw.
+struct NeeEval {
+    BsdfEval value;
+    BsdfEval weighted;  // sum over vertices of powerHeuristic(lightPdf, p_k) * exits_k; pdf zero, the weights being applied
+};
+// Veach 1997 ch. 9 at every facet vertex: the light weighed against the exit density sampleBsdf reports for a walk leaving there.
+[[nodiscard]] NeeEval evaluateForLight(const NormalMappedBsdf& bsdf, const glm::vec3& wiLocal, const std::optional<WalkVertex>& revisit,
+                                       Sampler& walk, float lightPdf);
+// Algorithm 2 to termination, weighted by its throughput, pdf its exit vertex's, delta as its exit leg; revisit: its first facet return.
 [[nodiscard]] std::optional<BsdfSample> sampleBsdf(const NormalMappedBsdf& bsdf, Sampler& sampler, Sampler& walk,
                                                    std::optional<WalkVertex>& revisit);
 [[nodiscard]] glm::vec3 fresnelAtMicrofacet(const NormalMappedBsdf& bsdf, glm::vec2 u);

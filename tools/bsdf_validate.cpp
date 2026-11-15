@@ -3639,7 +3639,7 @@ PT_CHECK(normal_map_reciprocity, Fast, Exact) {
     finish(ctx, worst <= kRelativeTolerance, "the microsurface's first scattering is not reciprocal for a reciprocal facet BRDF");
 }
 
-// Draws and evaluation estimate one f to all orders: per direction bin, E[weight 1{bin}] against the bin's integrated E[value].
+// NEE's share of f per bin, a light of density 1/area: draws by the light's MIS weight at their exit pdf against NEE's per-vertex weights.
 PT_CHECK(normal_map_sampling_matches_evaluation, Slow, Statistical) {
     constexpr int kCosBins = 8;
     constexpr int kPhiBins = 8;
@@ -3652,7 +3652,7 @@ PT_CHECK(normal_map_sampling_matches_evaluation, Slow, Statistical) {
         float mu;
         float tilt;
     };
-    const std::array<Case, 7> cases{{
+    const std::array<Case, 8> cases{{
         {"rough metal, tilt 10", makeParams(0.4F, 1.0F, 0.0F), 0.7F, 0.17F},
         {"rough metal, tilt 60, grazing", makeParams(0.4F, 1.0F, 0.0F), 0.25F, 1.05F},
         {"glossy diffuse, tilt 30", makeParams(0.5F, 0.0F, 0.0F), 0.5F, 0.52F},
@@ -3660,9 +3660,14 @@ PT_CHECK(normal_map_sampling_matches_evaluation, Slow, Statistical) {
         {"rough glass, tilt 30", makeParams(0.3F, 0.0F, 1.0F), 0.6F, 0.52F},
         {"rough glass from inside, tilt 30", makeParams(0.3F, 0.0F, 1.0F), -0.6F, 0.52F},
         {"coated glossy diffuse, tilt 60", coated(makeParams(0.5F, 0.0F, 0.0F), 1.0F, glm::vec3(1.0F), 0.2F, 1.5F, 1.0F), 0.6F, 1.05F},
+        {"smooth-coated glossy diffuse, tilt 60", coated(makeParams(0.5F, 0.0F, 0.0F), 1.0F, glm::vec3(1.0F), 0.0F, 1.5F, 1.0F), 0.6F, 1.05F},
     }};
     ctx.plan(1);
-    const double perBin = tools::stats::sidak(ctx.alpha(), static_cast<int>(cases.size()) * kBins);
+    // Each case tests its bins and NEE's total share.
+    const double perBin = tools::stats::sidak(ctx.alpha(), static_cast<int>(cases.size()) * (kBins + 1));
+    // Uniform over a bin's solid angle, (dz, dphi) being area-preserving on the sphere; every bin has this area.
+    const double area = (2.0 / kCosBins) * (2.0 * kPiDouble / kPhiBins);
+    const auto lightPdf = static_cast<float>(1.0 / area);
     const auto binOf = [](const glm::vec3& w) {
         const int ci = std::min(static_cast<int>((w.z + 1.0F) * 0.5F * kCosBins), kCosBins - 1);
         float phi = std::atan2(w.y, w.x);
@@ -3673,64 +3678,78 @@ PT_CHECK(normal_map_sampling_matches_evaluation, Slow, Statistical) {
     for (const Case& c : cases) {
         const pathtracer::scene::NormalMappedBsdf bsdf = normalMapped(c.surface, directionAt(c.mu, 0.8F), geometricAt(c.tilt));
         std::vector<tools::stats::Welford> drawn(kBins);
+        tools::stats::Welford drawnTotal;
+        double maxShare = 0.0;
         std::mt19937 rng(static_cast<std::uint32_t>(ctx.subSeed("case " + std::to_string(&c - cases.data()))));
         bool pdfShared = true;
         for (int i = 0; i < kSampleCount; ++i) {
             pathtracer::scene::Sampler sampler(0, 0, 0, 1, rng());
             pathtracer::scene::Sampler walk(0, 0, 0, 1, rng());
-            const std::optional<pathtracer::scene::BsdfSample> sample = drawFrom(bsdf, sampler, walk);
-            const int hit = sample ? binOf(sample->wiLocal) : -1;
+            std::optional<pathtracer::scene::WalkVertex> revisit;
+            const std::optional<pathtracer::scene::BsdfSample> sample = pathtracer::scene::sampleBsdf(bsdf, sampler, walk, revisit);
+            // A delta exit has no density NEE could weigh it against: its light hit keeps full weight, NEE's share of it is zero.
+            const bool weighs = sample && !sample->delta;
+            const double share =
+                weighs ? static_cast<double>(sample->throughputWeight.x * pathtracer::scene::powerHeuristic(lightPdf, sample->pdf)) : 0.0;
+            const int hit = weighs ? binOf(sample->wiLocal) : -1;
+            drawnTotal.add(share);
+            maxShare = std::max(maxShare, share);
             for (int b = 0; b < kBins; ++b) {
-                drawn[static_cast<std::size_t>(b)].add(b == hit ? static_cast<double>(sample->throughputWeight.x) : 0.0);
+                drawn[static_cast<std::size_t>(b)].add(b == hit ? share : 0.0);
             }
-            // MIS holds only if a draw carries the very density NEE evaluates at its direction.
-            pdfShared = pdfShared && (!sample || sample->delta ||
+            // A first exit's density is the first scattering's, the one NEE weighs its first order by.
+            pdfShared = pdfShared && (!weighs || revisit ||
                                       sample->pdf == pathtracer::scene::evaluateFirstScattering(bsdf, sample->wiLocal, nullptr).pdf);
         }
-        int worstBin = 0;
-        double worstGap = 0.0;
-        double drawnTotal = 0.0;
-        double evaluatedTotal = 0.0;
-        for (int ci = 0; ci < kCosBins; ++ci) {
-            for (int pi = 0; pi < kPhiBins; ++pi) {
-                // Uniform over the bin's solid angle, (dz, dphi) being area-preserving on the sphere: value times the bin's area.
-                const double z0 = -1.0 + (2.0 * ci / kCosBins);
-                const double phi0 = 2.0 * kPiDouble * pi / kPhiBins;
-                const double area = (2.0 / kCosBins) * (2.0 * kPiDouble / kPhiBins);
-                tools::stats::Welford evaluated;
-                for (int i = 0; i < kEvaluationsPerBin; ++i) {
-                    const double z = z0 + ((2.0 / kCosBins) * std::uniform_real_distribution<double>()(rng));
-                    const double phi = phi0 + ((2.0 * kPiDouble / kPhiBins) * std::uniform_real_distribution<double>()(rng));
-                    const double sine = std::sqrt(std::max(0.0, 1.0 - (z * z)));
-                    const glm::vec3 wi(static_cast<float>(sine * std::cos(phi)), static_cast<float>(sine * std::sin(phi)),
-                                       static_cast<float>(z));
-                    evaluated.add(area * static_cast<double>(evaluateAfterDraw(bsdf, wi, rng).total().x));
-                }
-                const int b = (ci * kPhiBins) + pi;
-                const tools::stats::Welford& sampled = drawn[static_cast<std::size_t>(b)];
-                const double gap = sampled.mean() - evaluated.mean();
-                drawnTotal += sampled.mean();
-                evaluatedTotal += evaluated.mean();
-                const tools::stats::Band band = tools::stats::differenceBand(sampled, evaluated, perBin);
-                if (!band.contains(gap)) {
-                    std::cerr << "bsdf_validate: FAILED " << c.name << " bin " << b << ": drawn " << sampled.mean() << ", evaluated "
-                              << evaluated.mean() << ", band +-" << band.halfWidth() << '\n';
-                    ok = false;
-                }
-                if (std::abs(gap) > std::abs(worstGap)) {
-                    worstGap = gap;
-                    worstBin = b;
-                }
+        std::vector<tools::stats::Welford> evaluated(kBins);
+        double maxEvaluated = 0.0;
+        for (int b = 0; b < kBins; ++b) {
+            const double z0 = -1.0 + (2.0 * (b / kPhiBins) / kCosBins);
+            const double phi0 = 2.0 * kPiDouble * (b % kPhiBins) / kPhiBins;
+            for (int i = 0; i < kEvaluationsPerBin; ++i) {
+                const double z = z0 + ((2.0 / kCosBins) * std::uniform_real_distribution<double>()(rng));
+                const double phi = phi0 + ((2.0 * kPiDouble / kPhiBins) * std::uniform_real_distribution<double>()(rng));
+                const double sine = std::sqrt(std::max(0.0, 1.0 - (z * z)));
+                const glm::vec3 wi(static_cast<float>(sine * std::cos(phi)), static_cast<float>(sine * std::sin(phi)), static_cast<float>(z));
+                // NEE as the integrator makes it: the later orders resume from a fresh draw's revisit, on that draw's walk stream.
+                pathtracer::scene::Sampler sampler(0, 0, 0, 1, rng());
+                pathtracer::scene::Sampler walk(0, 0, 0, 1, rng());
+                std::optional<pathtracer::scene::WalkVertex> revisit;
+                static_cast<void>(pathtracer::scene::sampleBsdf(bsdf, sampler, walk, revisit));
+                const pathtracer::scene::NeeEval nee = pathtracer::scene::evaluateForLight(bsdf, wi, revisit, walk, lightPdf);
+                const double value = area * static_cast<double>(nee.weighted.total().x);
+                evaluated[static_cast<std::size_t>(b)].add(value);
+                maxEvaluated = std::max(maxEvaluated, value);
             }
         }
-        std::cout << "  " << c.name << ": albedo drawn " << drawnTotal << ", evaluated " << evaluatedTotal << ", worst bin " << worstBin
-                  << " gap " << worstGap << '\n';
-        if (!pdfShared) {
-            std::cerr << "bsdf_validate: FAILED " << c.name << ": a draw's pdf is not the first scattering's at its direction\n";
-            ok = false;
+        // The bins' evaluations are independent, so their total's variance is the sum of theirs.
+        double evaluatedTotal = 0.0;
+        double evaluatedVariance = 0.0;
+        for (int b = 0; b < kBins; ++b) {
+            const tools::stats::Welford& sampled = drawn[static_cast<std::size_t>(b)];
+            const tools::stats::Welford& estimate = evaluated[static_cast<std::size_t>(b)];
+            evaluatedTotal += estimate.mean();
+            evaluatedVariance += estimate.standardError() * estimate.standardError();
+            // Under H0 either side's X has E[X^2] <= max(X) E[X], E[X] the other's mean: rare spikes a bin's sample variance misses.
+            const double drawnVariance = std::max(sampled.sampleVariance(), maxShare * std::max(estimate.mean(), 0.0)) / kSampleCount;
+            const double evaluatedVarianceOfMean =
+                std::max(estimate.sampleVariance(), maxEvaluated * std::max(sampled.mean(), 0.0)) / kEvaluationsPerBin;
+            const double half =
+                tools::stats::studentTTwoSided(perBin, kEvaluationsPerBin - 1.0) * std::sqrt(drawnVariance + evaluatedVarianceOfMean);
+            if (!(std::abs(sampled.mean() - estimate.mean()) <= half)) {
+                std::cerr << "bsdf_validate: FAILED " << c.name << " bin " << b << ": drawn " << sampled.mean() << ", evaluated "
+                          << estimate.mean() << ", band +-" << half << '\n';
+                ok = false;
+            }
         }
+        const double totalError = std::sqrt((drawnTotal.standardError() * drawnTotal.standardError()) + evaluatedVariance);
+        const double totalHalf = tools::stats::studentTTwoSided(perBin, kEvaluationsPerBin - 1.0) * totalError;
+        const bool totalOk = std::abs(drawnTotal.mean() - evaluatedTotal) <= totalHalf;
+        ok = ok && totalOk && pdfShared;
+        std::cout << "  " << c.name << ": NEE's share drawn " << drawnTotal.mean() << ", evaluated " << evaluatedTotal << " +/- " << totalHalf
+                  << (totalOk ? "" : "  FAILED") << (pdfShared ? "" : "  FAILED: a first exit's pdf is not the first scattering's") << '\n';
     }
-    PT_EXPECT(ctx, ok, "the microsurface's walk and its evaluation disagree; see the rows above");
+    PT_EXPECT(ctx, ok, "the microsurface's walk and its per-vertex MIS evaluation disagree; see the rows above");
 }
 
 // The microsurface keeps each lobe in its medium: reflection only on wo's side of omega_g, transmission only across it.
