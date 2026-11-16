@@ -36,13 +36,17 @@ struct HomogeneousMedium {
 // Each channel's odds of driving the distance draw, throughput times albedo normalised; uniform where that product is zero.
 [[nodiscard]] SampledSpectrum channelOdds(const HomogeneousMedium& medium, const SampledSpectrum& throughput);
 
+// The lane whose cumulative odds first exceed u; past the float sum, the last with positive odds.
+[[nodiscard]] int sampleLane(const SampledSpectrum& odds, float u);
+
 // A collision distance from the odds' mixture of per-channel exponentials (Wilkie et al. 2014); infinite in a clear channel.
 [[nodiscard]] float sampleCollision(const HomogeneousMedium& medium, const SampledSpectrum& odds, glm::vec2 u);
 
-// A scattering at distance d weighs T sigma_s / sum_c p_c T_c sigma_t,c: the event's one-sample estimate over the mixture.
-[[nodiscard]] SampledSpectrum collisionWeight(const HomogeneousMedium& medium, const SampledSpectrum& odds, float distance);
+// A scattering where T survives weighs T sigma_s / sum_c p_c T_c sigma_t,c: the event's one-sample estimate over the mixture.
+[[nodiscard]] SampledSpectrum collisionWeight(const SampledSpectrum& odds, const SampledSpectrum& surviving,
+                                              const SampledSpectrum& scattering, const SampledSpectrum& extinction);
 
-// The flight passing distance d weighs T / sum_c p_c T_c, the mixture's odds of drawing beyond it.
-[[nodiscard]] SampledSpectrum passWeight(const HomogeneousMedium& medium, const SampledSpectrum& odds, float distance);
+// The flight passing with T surviving weighs T / sum_c p_c T_c, the mixture's odds of drawing beyond it.
+[[nodiscard]] SampledSpectrum passWeight(const SampledSpectrum& odds, const SampledSpectrum& surviving);
 
 }  // namespace pathtracer::scene

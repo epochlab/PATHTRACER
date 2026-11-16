@@ -3,6 +3,32 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Regular tracking
+
+VDB free flight drew collisions by spectral tracking (Kutz et al. 2017) against an 8^3 majorant grid, and shadow rays estimated
+transmittance by ratio tracking (Novak et al. 2014). Neither gives a distance pdf, so chromatic media could not join hero-wavelength
+MIS (Wilkie et al. 2014), nor a future bidirectional estimator. Rays now walk the voxels by regular tracking (Sutton et al. 1999),
+as Manuka does (Fascione et al. 2018, sec. 3.4), keeping transport per wavelength as the PhysLight pipeline asks (Langlands and
+Fascione 2020).
+
+- feat: **regular tracking** (`volume.cpp`). NanoVDB's hierarchical DDA visits each tile and voxel a ray pierces once, holding
+  its density constant (box reconstruction, as Manuka's voxels), so every lane's optical depth is exact and linear per span.
+  - Free flight draws a lane by the bounded walk's throughput-weighted odds and inverts that lane's optical depth exactly. A
+    scattering weighs T sigma_s / sum_c p_c T_c sigma_t,c and an escape T / sum_c p_c T_c, the lane mixture's own pdf.
+  - Absorption rides in the weight, so the `Absorbed` event is gone; Russian roulette ends paths, as in the bounded walk.
+  - Overlapping volumes sum their coefficients over merged spans. A scattering picks its volume by throughput-weighted share.
+- feat: **exact shadow transmittance.** Shadow rays take exp(-tau) per lane from the same walk, with no sampler and no noise. The
+  walk stops once every lane is exactly 0 in float.
+- refactor: `collisionWeight` and `passWeight` take the surviving transmittance and the event rates, shared by the bounded walk
+  and the VDB walk; `sampleLane` is split out of `sampleCollision`. Bounded media are bit-identical.
+- refactor: the majorant grid (`volume_majorant.h`, `buildMajorantGrid`), `extinctionBound` and `UnboundedSpectrum::maxValue`
+  are removed. Grids convert without stats, since a stats pass marks nodes with no active voxel as skippable and would hide
+  their inactive density. Load validates every value, inactive ones included, and records the non-zero support for clipping.
+- test: exact closed-form transmittance under placement, rotation and scale; the flight distance histogram against the lane
+  mixture pdf; overlapping volumes against per-volume scattering integrals; inactive leaves and tiles walked voxel by voxel. The
+  slab references move to the box profile.
+- docs: the Regular tracking roadmap row is removed; Bidirectional paths now waits only on the path vertex graph.
+
 ## Spectral transport
 
 Transport carried ACEScg RGB, so light bouncing between coloured surfaces multiplied RGB triples, not spectra. Dispersion bent

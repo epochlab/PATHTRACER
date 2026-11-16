@@ -55,6 +55,7 @@ struct SampledSpectrum {
 [[nodiscard]] inline float minChannel(const SampledSpectrum& c) { return glm::compMin(c.lanes); }
 [[nodiscard]] constexpr bool isBlack(const SampledSpectrum& c) { return c == SampledSpectrum(0.0F); }
 
+[[nodiscard]] inline SampledSpectrum exp(const SampledSpectrum& c) { return SampledSpectrum(glm::exp(c.lanes)); }
 [[nodiscard]] inline SampledSpectrum log(const SampledSpectrum& c) { return SampledSpectrum(glm::log(c.lanes)); }
 [[nodiscard]] inline SampledSpectrum abs(const SampledSpectrum& c) { return SampledSpectrum(glm::abs(c.lanes)); }
 [[nodiscard]] inline SampledSpectrum sqrt(const SampledSpectrum& c) { return SampledSpectrum(glm::sqrt(c.lanes)); }
@@ -107,8 +108,6 @@ struct UnboundedSpectrum {
     RgbSigmoid shape;  // grey is the flat 1, c2 = +inf
     float scale;
     [[nodiscard]] SampledSpectrum operator()(const SampledWavelengths& lambda) const { return scale * shape(lambda); }
-    // Its exact maximum over 360-830 nm: s is monotone in the quadratic, which peaks at its vertex or an end.
-    [[nodiscard]] float maxValue() const;
 };
 [[nodiscard]] UnboundedSpectrum fitUnbounded(const Rgb& rgb);
 [[nodiscard]] inline SampledSpectrum unboundedSpectrum(const Rgb& rgb, const SampledWavelengths& lambda) { return fitUnbounded(rgb)(lambda); }

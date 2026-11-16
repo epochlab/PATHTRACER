@@ -113,27 +113,30 @@ SampledSpectrum channelOdds(const HomogeneousMedium& medium, const SampledSpectr
     return total > 0.0F ? drive / total : SampledSpectrum(1.0F / kSpectrumSamples);
 }
 
-float sampleCollision(const HomogeneousMedium& medium, const SampledSpectrum& odds, glm::vec2 u) {
-    // The lane whose cumulative odds first exceed u.x; past the float sum, the last with positive odds.
-    int channel = 0;
+int sampleLane(const SampledSpectrum& odds, float u) {
+    int lane = 0;
     float below = 0.0F;
     for (int c = 0; c < kSpectrumSamples; ++c) {
         if (!(odds[c] > 0.0F)) {
             continue;
         }
-        channel = c;
-        if (u.x < below + odds[c]) {
+        lane = c;
+        if (u < below + odds[c]) {
             break;
         }
         below += odds[c];
     }
-    const float extinction = medium.absorption[channel] + medium.scattering[channel];
+    return lane;
+}
+
+float sampleCollision(const HomogeneousMedium& medium, const SampledSpectrum& odds, glm::vec2 u) {
+    const int lane = sampleLane(odds, u.x);
+    const float extinction = medium.absorption[lane] + medium.scattering[lane];
     return extinction > 0.0F ? -std::log1p(-u.y) / extinction : std::numeric_limits<float>::infinity();
 }
 
-SampledSpectrum collisionWeight(const HomogeneousMedium& medium, const SampledSpectrum& odds, float distance) {
-    const SampledSpectrum extinction = medium.absorption + medium.scattering;
-    const SampledSpectrum surviving = transmittance(medium, distance);
+SampledSpectrum collisionWeight(const SampledSpectrum& odds, const SampledSpectrum& surviving, const SampledSpectrum& scattering,
+                                const SampledSpectrum& extinction) {
     // Zero terms are skipped, not formed: 0 * inf reads NaN where T sigma_t's limit is 0 (an unchosen or opaque lane).
     float density = 0.0F;
     for (int c = 0; c < kSpectrumSamples; ++c) {
@@ -141,11 +144,10 @@ SampledSpectrum collisionWeight(const HomogeneousMedium& medium, const SampledSp
             density += odds[c] * surviving[c] * extinction[c];
         }
     }
-    return surviving * medium.scattering / density;
+    return surviving * scattering / density;
 }
 
-SampledSpectrum passWeight(const HomogeneousMedium& medium, const SampledSpectrum& odds, float distance) {
-    const SampledSpectrum surviving = transmittance(medium, distance);
+SampledSpectrum passWeight(const SampledSpectrum& odds, const SampledSpectrum& surviving) {
     return surviving / channelSum(odds * surviving);
 }
 
