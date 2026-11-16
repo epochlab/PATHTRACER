@@ -14,6 +14,7 @@
 
 #include "microfacet.h"
 #include "microfacet_quadrature.h"
+#include "fixtures.h"
 #include "parallel.h"
 #include "pathtracer/scene/bsdf.h"
 #include "pathtracer/scene/sampler.h"
@@ -180,7 +181,8 @@ void reportReflectedShare() {
         for (const int k : {8, 16, 24, 31}) {
             const auto eta = static_cast<float>(1.0 / adobeIor(i));
             const float roughness = static_cast<float>(k) / 31.0F;
-            const scene::InterfaceInputs interface{roughness, 0.0F, eta, 1.0F, eta, 1.0F, scene::Rgb(1.0F), 1.0F, scene::Rgb(1.0F), scene::FilmLayer{}, 1.0F, false};
+            const scene::InterfaceInputs interface{roughness, 0.0F, eta, 1.0F, eta, 1.0F, scene::SampledSpectrum(1.0F), 1.0F,
+                                                   scene::SampledSpectrum(1.0F), scene::FilmLayer{}, 1.0F, false};
             const scene::DielectricSlab slab = scene::makeDielectricSlab(interface, glm::vec3(std::sqrt(0.75F), 0.0F, 0.5F));
             const double share = slab.multiReflect / (slab.multiReflect + slab.multiTransmit);
             std::printf("| %.3f | %.3f | %.4f | %.4f |\n", adobeIor(i), static_cast<double>(roughness),
@@ -208,13 +210,13 @@ void reportThinWall() {
     std::printf("| ior | colour | mu | R' | Adobe R | T' | Adobe T |\n|---|---|---|---|---|---|---|\n");
     for (const float ior : {1.5F, 2.4F}) {
         for (const float color : {1.0F, 0.6F}) {
-            const scene::SheetInterfaces sheet{scene::Rgb(1.0F), scene::Rgb(color), ior, ior, scene::FilmLayer{}};
+            const scene::SheetInterfaces sheet{scene::SampledSpectrum(1.0F), scene::SampledSpectrum(color), ior, ior, scene::FilmLayer{}};
             for (const float mu : {1.0F, 0.8F, 0.5F, 0.2F, 0.05F}) {
                 const scene::SheetLadder ours = scene::sheetLadder(sheet, mu);
                 const double adobeReflect = openpbr_thin_wall_fresnel(ior, mu);
                 const double adobeTransmit = (1.0 - adobeReflect) * openpbr_compute_final_transmission_tint(vec3(color), true, mu, ior).x;
                 std::printf("| %.2f | %.2f | %.2f | %.4f | %.4f | %.4f | %.4f |\n", static_cast<double>(ior), static_cast<double>(color),
-                            static_cast<double>(mu), static_cast<double>(ours.reflect.r), adobeReflect, static_cast<double>(ours.transmit.r),
+                            static_cast<double>(mu), static_cast<double>(ours.reflect[0]), adobeReflect, static_cast<double>(ours.transmit[0]),
                             adobeTransmit);
             }
         }
@@ -353,11 +355,11 @@ void reportAlbedoSweep() {
                 const OpenPBR_PreparedBsdf prepared = openpbr_prepare(reference, vec3(1.0F), OpenPBR_BaseRgbWavelengths_nm, OpenPBR_VacuumIor, wo);
                 for (int s = 0; s < per; ++s) {
                     scene::Sampler sampler(0, 0, (batch * per) + s, kSamples, 0x5EEDU);
-                    if (const std::optional<scene::BsdfSample> sample = scene::sampleBsdf(scene::makeBsdfClosure(m.inputs, wo), sampler, sampler)) {
+                    if (const std::optional<scene::BsdfSample> sample = scene::sampleBsdf(tools::fixtures::closureOf(m.inputs, wo), sampler, sampler)) {
                         // Entering from the ambient the radiance compression is (1/specular_ior)^2; a thin wall returns to the ambient.
                         const float compression = m.inputs.geometryThinWalled ? 1.0F : m.inputs.specularIor * m.inputs.specularIor;
-                        const scene::Rgb energy = sample->throughputWeight + (sample->transmitWeight * (compression - 1.0F));
-                        sumOurs += (energy.r + energy.g + energy.b) / 3.0;
+                        const scene::SampledSpectrum energy = sample->throughputWeight + (sample->transmitWeight * (compression - 1.0F));
+                        sumOurs += scene::channelMean(energy);
                     }
                     vec3 direction;
                     OpenPBR_DiffuseSpecular weight;

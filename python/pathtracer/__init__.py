@@ -396,10 +396,10 @@ class Renderer:
         previous render's reloads the glTF and rebuilds the BVH, so batch renders by pose rather than alternating poses.
         ``env_rotation`` turns the environment map, background and lighting alike; zero is the map unrotated.
 
-        ``light_kelvins`` replaces each light's colour, one kelvin per light in scene order, with its illuminant's linear ACEScg
-        colour at unit luminance: a blackbody, or CIE daylight for a light authored ``"illuminant": "daylight"``. Each light keeps
-        its authored luminance. A kelvin outside the illuminant's domain or the scene gamut is refused rather than clamped.
-        ``None`` keeps the authored colours.
+        ``light_kelvins`` replaces each light's spectrum, one kelvin per light in scene order, with its illuminant's spectrum at
+        unit luminance: a blackbody, or CIE daylight for a light authored ``"illuminant": "daylight"``. Each light keeps its
+        authored luminance. A kelvin outside the illuminant's domain, or a blackbody too cold to radiate visible light, is refused.
+        ``None`` keeps the authored spectra.
         Only the lights' radiance changes, so it never rebuilds the BVH. The environment keeps its measured colour.
 
         ``bloom_strength`` and ``aberration`` are the viewer's lens optics, applied in scene-linear to

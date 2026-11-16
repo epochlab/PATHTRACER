@@ -41,6 +41,9 @@
 namespace {
 
 using pathtracer::scene::Rgb;
+using pathtracer::scene::SampledSpectrum;
+using tools::fixtures::flatEmission;
+using tools::fixtures::pinnedWavelengths;
 using pathtracer::scene::AreaLight;
 using pathtracer::scene::Constant;
 using pathtracer::scene::DiskLight;
@@ -200,7 +203,7 @@ PT_CHECK(environment_pdf_tracks_stored_luminance, Fast, Exact) {
 // MIS-combined NEE + BSDF estimator mirroring tracePath: power heuristic, and with no geometry both strategies reach the environment.
 float misCombinedLo(const OpenPbrInputs<Constant>& params, const glm::vec3& wo, const EnvironmentMap& env,
                      int sampleCount, std::uint32_t seed) {
-    Rgb accum(0.0F);
+    SampledSpectrum accum(0.0F);
     for (int i = 0; i < sampleCount; ++i) {
         Sampler sampler(0, 0, i, sampleCount, seed);
 
@@ -208,9 +211,9 @@ float misCombinedLo(const OpenPbrInputs<Constant>& params, const glm::vec3& wo, 
         const EnvironmentMap::EnvSample lightSample =
             env.importanceSampleDirection(sampler.next2D());
         if (lightSample.direction.z > 0.0F) {
-            const Rgb bsdfValue = tools::fixtures::evaluateBsdf(params, wo, lightSample.direction, sampler);
+            const SampledSpectrum bsdfValue = tools::fixtures::evaluateBsdf(params, wo, lightSample.direction, sampler);
             const float bsdfPdf = tools::fixtures::pdfBsdf(params, wo, lightSample.direction);
-            if (bsdfPdf > 0.0F && (bsdfValue.r > 0.0F || bsdfValue.g > 0.0F || bsdfValue.b > 0.0F)) {
+            if (bsdfPdf > 0.0F && pathtracer::scene::maxChannel(bsdfValue) > 0.0F) {
                 const float lightPdf2 = lightSample.pdf * lightSample.pdf;
                 const float bsdfPdf2 = bsdfPdf * bsdfPdf;
                 const float misWeight = lightPdf2 / (lightPdf2 + bsdfPdf2);
@@ -229,7 +232,7 @@ float misCombinedLo(const OpenPbrInputs<Constant>& params, const glm::vec3& wo, 
             accum += sample->throughputWeight * misWeight;  // L0=1 folded in via the uniform environment already
         }
     }
-    return std::max({accum.r, accum.g, accum.b}) / static_cast<float>(sampleCount);
+    return pathtracer::scene::maxChannel(accum) / static_cast<float>(sampleCount);
 }
 
 // An equirect map's v axis is polar, not periodic: the top and bottom rows are opposite poles, so wrapping v blends them together.
@@ -346,15 +349,15 @@ PT_CHECK(environment_nee_and_miss_share_one_radiance, Fast, Exact) {
     float worstRelative = 0.0F;
     for (int i = 0; i < kSamples; ++i) {
         Sampler sampler(i % 64, i / 64, i, kSamples, 0x9E3779B9U);
-        const std::optional<LightSample> sample = lights.sample(glm::vec3(0.0F), sampler);
+        const std::optional<LightSample> sample = lights.sample(glm::vec3(0.0F), sampler, pinnedWavelengths());
         if (!sample.has_value()) {
             continue;
         }
         ++drawn;
-        const Rgb miss = lights.environmentRadiance(sample->direction);
-        const Rgb difference = abs(miss - sample->radiance);
-        const float scale = std::max({std::fabs(miss.r), std::fabs(miss.g), std::fabs(miss.b), 1e-6F});
-        const float relative = std::max({difference.r, difference.g, difference.b}) / scale;
+        const SampledSpectrum miss = lights.environmentRadiance(sample->direction, pinnedWavelengths());
+        const SampledSpectrum difference = abs(miss - sample->radiance);
+        const float scale = std::max(pathtracer::scene::maxChannel(abs(miss)), 1e-6F);
+        const float relative = pathtracer::scene::maxChannel(difference) / scale;
         if (relative > 0.0F) {
             ++mismatches;
             worstRelative = std::max(worstRelative, relative);
@@ -520,14 +523,14 @@ std::optional<LightHit> hitLight(const AreaLight& light, const glm::vec3& p, con
 }
 
 // Le arriving along dir off a hit, re-derived: the front face only, unless two-sided; a sphere's outward face is all it shows.
-Rgb emittedAlong(const AreaLight& light, const glm::vec3& dir, const glm::vec3& normal) {
+SampledSpectrum emittedAlong(const AreaLight& light, const glm::vec3& dir, const glm::vec3& normal) {
     return std::visit(
         [&](const auto& shape) {
             bool twoSided = false;
             if constexpr (!std::is_same_v<std::decay_t<decltype(shape)>, SphereLight>) {
                 twoSided = shape.twoSided;
             }
-            return twoSided || glm::dot(dir, normal) < 0.0F ? shape.radiance : Rgb(0.0F);
+            return twoSided || glm::dot(dir, normal) < 0.0F ? shape.radiance(pinnedWavelengths()) : SampledSpectrum(0.0F);
         },
         light);
 }
@@ -535,7 +538,7 @@ Rgb emittedAlong(const AreaLight& light, const glm::vec3& dir, const glm::vec3& 
 // Girard solid angle against a uniform-sphere + hitQuad oracle sharing no code, and every sample() direction against it too.
 PT_CHECK(quad_light_solid_angle, Slow, Statistical) {
     const QuadLight quad{glm::vec3(-0.5F, 1.0F, -0.5F), glm::vec3(1.0F, 0.0F, 0.0F),
-                          glm::vec3(0.0F, 0.0F, 1.0F), Rgb(1.0F), false};
+                          glm::vec3(0.0F, 0.0F, 1.0F), flatEmission(1.0F), false};
     const glm::vec3 p(0.0F, 0.0F, 0.0F);
     const std::optional<pathtracer::scene::SphericalRectangle> rect =
         pathtracer::scene::buildSphericalRectangle(quad, p);
@@ -585,7 +588,7 @@ PT_CHECK(quad_light_solid_angle, Slow, Statistical) {
 // A disk light facing -z at `centre`, frame (+x, -y, -z) as buildLights places an unrotated one.
 DiskLight makeDisk(const glm::vec3& centre, float radius, bool twoSided = false) {
     return DiskLight{centre, glm::mat3(glm::vec3(1.0F, 0.0F, 0.0F), glm::vec3(0.0F, -1.0F, 0.0F), glm::vec3(0.0F, 0.0F, -1.0F)), radius,
-                     Rgb(3.0F), twoSided};
+                     flatEmission(3.0F), twoSided};
 }
 
 // A disk tilted 35 degrees about x, so no symmetry plane is a coordinate plane and the ellipse frame is fully exercised.
@@ -715,7 +718,7 @@ PT_CHECK(disk_light_sampling_is_uniform_in_solid_angle, Slow, Statistical) {
 
 // Cone sampling against g's average over the cap, integrated in the cone's own frame: the samples' law-of-cosines step is not reused.
 PT_CHECK(sphere_light_sampling_is_uniform_in_solid_angle, Slow, Statistical) {
-    const SphereLight sphere{glm::vec3(0.3F, -0.2F, 2.0F), glm::mat3(1.0F), 0.6F, Rgb(3.0F)};
+    const SphereLight sphere{glm::vec3(0.3F, -0.2F, 2.0F), glm::mat3(1.0F), 0.6F, flatEmission(3.0F)};
     const std::array<DiskPose, 3> poses = {{{"distant", {0.0F, 0.0F, -6.0F}}, {"near", {0.0F, 0.0F, 0.0F}}, {"grazing", {1.0F, -0.2F, 2.0F}}}};
     const std::vector<AreaLight> lights{sphere};
     const LightSet set(nullptr, glm::vec3(0.0F), 1.0F, lights);
@@ -736,12 +739,12 @@ PT_CHECK(sphere_light_sampling_is_uniform_in_solid_angle, Slow, Statistical) {
         const double oracle = boost::math::quadrature::gauss_kronrod<double, 61>::integrate(ring, 0.0, thetaMax, 20, 1e-12) / capArea;
         // The pdf is 1/Omega exactly: the cap's solid angle, here in double from the oracle's own angle.
         Sampler pdfSampler(0, 0, 0, 1, 1U);
-        const std::optional<LightSample> one = set.sample(pose.p, pdfSampler);
+        const std::optional<LightSample> one = set.sample(pose.p, pdfSampler, pinnedWavelengths());
         const double relative = one ? std::abs((1.0 / static_cast<double>(one->pdf)) - capArea) / capArea : 1.0;
         // Eight float roundings separate it from the exact cap: d^2 (3), r^2, the ratio, the root, the sum and the 2 pi product.
         PT_EXPECT(ctx, relative <= 8.0 * std::numeric_limits<float>::epsilon(),
                   std::string(pose.label) + ": pdf is not 1 / the cap's solid angle, relative error " + std::to_string(relative));
-        expectUniform(ctx, pose.label, oracle, [&](Sampler& sampler) { return set.sample(pose.p, sampler)->direction; });
+        expectUniform(ctx, pose.label, oracle, [&](Sampler& sampler) { return set.sample(pose.p, sampler, pinnedWavelengths())->direction; });
     }
 }
 
@@ -759,14 +762,14 @@ MeshLight makeTetrahedronLight() {
         }
         faces.push_back(face);
     }
-    return MeshLight(std::move(faces), Rgb(3.0F), false);
+    return MeshLight(std::move(faces), flatEmission(3.0F), false);
 }
 
 // One light of each shape above the origin, each subtending enough for BSDF sampling alone to converge: the MIS rows' fixtures.
 std::vector<std::pair<const char*, AreaLight>> areaLightCases() {
-    return {{"quad", QuadLight{glm::vec3(-0.5F, -0.5F, 2.0F), glm::vec3(0.0F, 1.0F, 0.0F), glm::vec3(1.0F, 0.0F, 0.0F), Rgb(3.0F), false}},
+    return {{"quad", QuadLight{glm::vec3(-0.5F, -0.5F, 2.0F), glm::vec3(0.0F, 1.0F, 0.0F), glm::vec3(1.0F, 0.0F, 0.0F), flatEmission(3.0F), false}},
             {"disk", makeTiltedDisk(glm::vec3(0.2F, -0.1F, 1.8F), 0.6F)},
-            {"sphere", SphereLight{glm::vec3(0.3F, 0.0F, 2.0F), glm::mat3(1.0F), 0.5F, Rgb(3.0F)}},
+            {"sphere", SphereLight{glm::vec3(0.3F, 0.0F, 2.0F), glm::mat3(1.0F), 0.5F, flatEmission(3.0F)}},
             {"mesh", makeTetrahedronLight()}};
 }
 
@@ -783,7 +786,7 @@ PT_CHECK(area_light_sample_and_hit_pdfs_agree, Fast, Exact) {
             int disagreements = 0;
             for (int i = 0; i < kDraws; ++i) {
                 Sampler sampler(0, 0, i, kDraws, static_cast<std::uint32_t>(ctx.subSeed(label)));
-                const std::optional<LightSample> drawn = set.sample(p, sampler);
+                const std::optional<LightSample> drawn = set.sample(p, sampler, pinnedWavelengths());
                 if (!drawn) {
                     continue;
                 }
@@ -809,7 +812,7 @@ PT_CHECK(area_light_sample_and_hit_pdfs_agree, Fast, Exact) {
 float referenceLoArea(const OpenPbrInputs<Constant>& params, const glm::vec3& wo, const AreaLight& light, const glm::vec3& p,
                       int sampleCount, std::mt19937& rng) {
     constexpr float kUniformPdf = 1.0F / (2.0F * kPi);
-    Rgb accum(0.0F);
+    SampledSpectrum accum(0.0F);
     for (int i = 0; i < sampleCount; ++i) {
         const glm::vec3 wi = sampleUniformHemisphere(rng);
         if (const std::optional<LightHit> hit = hitLight(light, p, wi)) {
@@ -817,7 +820,7 @@ float referenceLoArea(const OpenPbrInputs<Constant>& params, const glm::vec3& wo
             accum += tools::fixtures::evaluateBsdf(params, wo, wi, walk) * emittedAlong(light, wi, hit->normal) / kUniformPdf;
         }
     }
-    return std::max({accum.r, accum.g, accum.b}) / static_cast<float>(sampleCount);
+    return pathtracer::scene::maxChannel(accum) / static_cast<float>(sampleCount);
 }
 
 // Mirrors misCombinedLo with LightSet({light}) and hitLight for "always reaches it": a BSDF ray can miss a finite light.
@@ -825,16 +828,16 @@ float misCombinedLoArea(const OpenPbrInputs<Constant>& params, const glm::vec3& 
                         int sampleCount, std::uint32_t seed) {
     const std::vector<AreaLight> lights{light};
     const LightSet set(nullptr, glm::vec3(0.0F), 1.0F, lights);
-    Rgb accum(0.0F);
+    SampledSpectrum accum(0.0F);
     for (int i = 0; i < sampleCount; ++i) {
         Sampler sampler(0, 0, i, sampleCount, seed);
 
         // NEE.
-        const std::optional<LightSample> lightSample = set.sample(p, sampler);
+        const std::optional<LightSample> lightSample = set.sample(p, sampler, pinnedWavelengths());
         if (lightSample.has_value() && lightSample->direction.z > 0.0F) {
-            const Rgb bsdfValue = tools::fixtures::evaluateBsdf(params, wo, lightSample->direction, sampler);
+            const SampledSpectrum bsdfValue = tools::fixtures::evaluateBsdf(params, wo, lightSample->direction, sampler);
             const float bsdfPdf = tools::fixtures::pdfBsdf(params, wo, lightSample->direction);
-            if (bsdfPdf > 0.0F && (bsdfValue.r > 0.0F || bsdfValue.g > 0.0F || bsdfValue.b > 0.0F)) {
+            if (bsdfPdf > 0.0F && pathtracer::scene::maxChannel(bsdfValue) > 0.0F) {
                 const float lightPdf2 = lightSample->pdf * lightSample->pdf;
                 const float misWeight = lightPdf2 / (lightPdf2 + (bsdfPdf * bsdfPdf));
                 accum += bsdfValue * misWeight * lightSample->radiance / lightSample->pdf;
@@ -849,11 +852,11 @@ float misCombinedLoArea(const OpenPbrInputs<Constant>& params, const glm::vec3& 
                 const float lightPdf = set.pdfArea(0, p, hit->point, hit->normal);
                 const float bsdfPdf2 = bsdfPdf * bsdfPdf;
                 const float misWeight = bsdfPdf2 / (bsdfPdf2 + (lightPdf * lightPdf));
-                accum += sample->throughputWeight * set.radianceToward(0, sample->wiLocal, hit->normal) * misWeight;
+                accum += sample->throughputWeight * set.radianceToward(0, sample->wiLocal, hit->normal, pinnedWavelengths()) * misWeight;
             }
         }
     }
-    return std::max({accum.r, accum.g, accum.b}) / static_cast<float>(sampleCount);
+    return pathtracer::scene::maxChannel(accum) / static_cast<float>(sampleCount);
 }
 
 // mis_agreement_environment's identity against one area light, converted the same way and for the same reason: both sides are estimators.

@@ -2,6 +2,7 @@
 
 #include <array>
 #include <atomic>
+#include <cfloat>
 #include <cmath>
 #include <complex>
 #include <cstdint>
@@ -32,6 +33,7 @@
 namespace {
 
 using pathtracer::scene::Rgb;
+using pathtracer::scene::SampledSpectrum;
 using pathtracer::scene::Constant;
 using pathtracer::scene::OpenPbrInputs;
 using Surface = OpenPbrInputs<Constant>;
@@ -73,7 +75,7 @@ Surface paramsWith(Edit edit) {
 
 // The slabs' reflected Fresnel at a view cosine, through a closure facing the macro normal, as the Fresnel AOV reads it.
 glm::vec3 viewFresnel(const Surface& inputs, float cosTheta) {
-    return pathtracer::scene::fresnelAtViewAngle(pathtracer::scene::makeBsdfClosure(inputs, glm::vec3(0.0F, 0.0F, 1.0F)), cosTheta).vec3();
+    return tools::fixtures::channels(pathtracer::scene::fresnelAtViewAngle(tools::fixtures::closureOf(inputs, glm::vec3(0.0F, 0.0F, 1.0F)), cosTheta));
 }
 
 // OpenPBR's thin film over the inputs: thin_film_weight, thin_film_thickness in micrometres, thin_film_ior.
@@ -113,7 +115,7 @@ pathtracer::scene::BsdfEval evaluateSeeded(const pathtracer::scene::BsdfClosure&
 }
 
 pathtracer::scene::BsdfEval evaluateSeeded(const Surface& params, const glm::vec3& wo, const glm::vec3& wi) {
-    return evaluateSeeded(pathtracer::scene::makeBsdfClosure(params, wo), wi);
+    return evaluateSeeded(tools::fixtures::closureOf(params, wo), wi);
 }
 
 // One replicate of a density's integral over wo's hemisphere: `draws` uniform and `draws` of its own, balance-combined (Veach 1997 9.2).
@@ -258,7 +260,7 @@ glm::dvec3 furnaceLo(const Surface& params, const glm::vec3& wo, int draws, std:
         pathtracer::scene::Sampler sampler(0, 0, i, draws, seed);
         const std::optional<pathtracer::scene::BsdfSample> sample = tools::fixtures::sampleBsdf(params, wo, sampler);
         if (sample.has_value()) {
-            accum += glm::dvec3((sample->throughputWeight).vec3());
+            accum += glm::dvec3(tools::fixtures::channels(sample->throughputWeight));
         }
     }
     return accum / static_cast<double>(draws);
@@ -341,7 +343,7 @@ void expectFurnaceRows(tools::check::Context& ctx, const char* title, const std:
     std::cout << "bsdf_validate: " << title << " (1.0 = energy conserved)\n";
     for (const FurnaceRow& row : rows) {
         const ChannelEstimate lo = furnace(ctx, row.label, row.surface, row.wo, draws);
-        const double tableError = pathtracer::scene::walkTableError(pathtracer::scene::makeBsdfClosure(row.surface, row.wo));
+        const double tableError = pathtracer::scene::walkTableError(tools::fixtures::closureOf(row.surface, row.wo));
         const std::string detail = rowDetail(row.label, lo, 1.0, t, row.floor, tableError);
         std::cout << "  " << detail << '\n';
         PT_EXPECT(ctx, withinBand(lo, 1.0, t, row.floor, tableError), detail);
@@ -458,7 +460,7 @@ PT_CHECK(furnace_energy_bound, Slow, Statistical) {
         const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (row.ndotV * row.ndotV))), 0.0F, row.ndotV);
         const ChannelEstimate lo = furnace(ctx, row.label, row.surface, wo, kDraws);
         // The bound is physical; the tables' asserted error lets the expected energy sit that far above it.
-        const double tableError = pathtracer::scene::walkTableError(pathtracer::scene::makeBsdfClosure(row.surface, wo));
+        const double tableError = pathtracer::scene::walkTableError(tools::fixtures::closureOf(row.surface, wo));
         PT_EXPECT(ctx, belowBound(lo, row.bound + row.floor, rowAlpha, tableError),
                   rowDetail(row.label, lo, row.bound, 0.0, row.floor) + " (upper bound)");
     }
@@ -579,7 +581,7 @@ glm::dvec3 measureDiffuseAlbedo(const Surface& params, int draws, std::uint32_t 
     std::mt19937 rng(seed);
     glm::dvec3 sum(0.0);
     for (int i = 0; i < draws; ++i) {
-        sum += glm::dvec3((tools::fixtures::evaluateClosedForm(params, wo, sampleUniformHemisphere(rng)).diffuse).vec3()) * (2.0 * kPiDouble);
+        sum += glm::dvec3(tools::fixtures::channels(tools::fixtures::evaluateClosedForm(params, wo, sampleUniformHemisphere(rng)).diffuse)) * (2.0 * kPiDouble);
     }
     return sum / static_cast<double>(draws);
 }
@@ -677,9 +679,9 @@ PT_CHECK(index_matched_glossy_layer, Fast, Exact) {
                     const glm::vec3 wo(sinO, 0.0F, muO);
                     const glm::vec3 wi(sinI * std::cos(1.1F), sinI * std::sin(1.1F), muI);
                     const glm::vec3 reference =
-                        tools::fixtures::evaluateClosedForm(
+                        tools::fixtures::channels(tools::fixtures::evaluateClosedForm(
                             makeDiffuseParams(albedo, diffuseRoughness, roughnesses[0]), wo, wi)
-                            .diffuse.vec3();
+                            .diffuse);
                     const glm::vec3 analytic = referenceEon(albedo, diffuseRoughness, wi, wo) * muI;
                     const float scale = std::max(maxChannel(analytic), 1e-6F);
                     const float valueErr = maxChannel(glm::abs(reference - analytic)) / scale;
@@ -697,9 +699,9 @@ PT_CHECK(index_matched_glossy_layer, Fast, Exact) {
                     }
                     for (std::size_t i = 1; i < roughnesses.size(); ++i) {
                         const glm::vec3 value =
-                            tools::fixtures::evaluateClosedForm(
+                            tools::fixtures::channels(tools::fixtures::evaluateClosedForm(
                                 makeDiffuseParams(albedo, diffuseRoughness, roughnesses[i]), wo, wi)
-                                .diffuse.vec3();
+                                .diffuse);
                         const float delta = maxChannel(glm::abs(value - reference)) / scale;
                         ++rowsChecked;
                         if (delta > worst) {
@@ -751,7 +753,7 @@ glm::dvec3 transmissiveEnergyLo(const Surface& params, const glm::vec3& wo, int 
         if (!sample.has_value()) {
             continue;
         }
-        const glm::dvec3 weight(sample->throughputWeight.vec3());
+        const glm::dvec3 weight(tools::fixtures::channels(sample->throughputWeight));
         accum += sample->type == pathtracer::scene::LobeType::Transmission ? weight / etaSq : weight;
     }
     return accum / static_cast<double>(draws);
@@ -875,7 +877,7 @@ std::optional<glm::vec3> deltaTransmitThroughput(const Surface& params, const gl
             tools::fixtures::sampleBsdf(params, wo, sampler);
         if (sample.has_value() && sample->type == pathtracer::scene::LobeType::Transmission &&
             sample->pdf == 0.0F) {
-            return sample->throughputWeight.vec3();
+            return tools::fixtures::channels(sample->throughputWeight);
         }
     }
     return std::nullopt;
@@ -936,7 +938,7 @@ PT_CHECK(transmission_tint, Fast, Exact) {
         const glm::vec3 wi = refractAboutZ(wo, 1.0F / 1.5F);
         for (float roughness : roughnesses) {
             const auto rough = [&](const glm::vec3& bc, const glm::vec3& tn) {
-                return evaluateSeeded(makeTransmissiveTintParams(roughness, bc, tn), wo, wi).transmission.vec3();
+                return tools::fixtures::channels(evaluateSeeded(makeTransmissiveTintParams(roughness, bc, tn), wo, wi).transmission);
             };
             assertRow("rough ", roughness, ndotV, rough(white, white), rough(baseColour, white),
                        rough(white, tint), rough(baseColour, tint));
@@ -990,15 +992,15 @@ PT_CHECK(average_fresnel, Fast, Exact) {
         double worstTint = 0.0;
         for (double tint : tints) {
             const double truth = cosineAverageFresnel([&](double mu) { return std::max(referenceF82(reflectivity, tint, mu), 0.0); });
-            const Rgb rule = pathtracer::scene::metalFresnelAvg(Rgb(static_cast<float>(reflectivity)),
-                                                                      Rgb(static_cast<float>(tint)));
-            const double error = std::abs(static_cast<double>(rule.r) - truth);
+            const pathtracer::scene::SampledSpectrum rule = pathtracer::scene::metalFresnelAvg(
+                pathtracer::scene::SampledSpectrum(static_cast<float>(reflectivity)), pathtracer::scene::SampledSpectrum(static_cast<float>(tint)));
+            const double error = std::abs(static_cast<double>(rule[0]) - truth);
             if (error > worst) {
                 worst = error;
                 worstTint = tint;
             }
             if (!(error <= kMetalTolerance)) {
-                std::cerr << "bsdf_validate: FAILED metal F_avg at F0=" << reflectivity << " specular_color=" << tint << " rule=" << rule.r
+                std::cerr << "bsdf_validate: FAILED metal F_avg at F0=" << reflectivity << " specular_color=" << tint << " rule=" << rule[0]
                           << " vs quadrature " << truth << " (error " << error << ", tolerance " << kMetalTolerance << ")\n";
                 ok = false;
             }
@@ -1267,26 +1269,26 @@ PT_CHECK(glossy_diffuse_albedo_scaling, Slow, Exact) {
             for (double muO : cosines) {
                 const float sinO = std::sqrt(std::max(0.0F, 1.0F - static_cast<float>(muO * muO)));
                 const glm::vec3 wo(sinO, 0.0F, static_cast<float>(muO));
-                const pathtracer::scene::BsdfClosure closure = pathtracer::scene::makeBsdfClosure(params, wo);
+                const pathtracer::scene::BsdfClosure closure = tools::fixtures::closureOf(params, wo);
                 const pathtracer::scene::DielectricSlab& slab = closure.dielectric;
                 // The single-scattering albedo the scaling reads, against an exact-Fresnel quadrature of the same lobe.
-                worst.table = std::max(worst.table, std::abs(slab.reflectSingle.r - referenceDielectricReflectAlbedo(muO, alphaAt(roughness), ior)));
+                worst.table = std::max(worst.table, std::abs(slab.reflectSingle[0] - referenceDielectricReflectAlbedo(muO, alphaAt(roughness), ior)));
                 // Single scattering's reflection must carry the energy the table gives it; the walks' share is smith_walk_matches_tables'.
                 const double reflected = simpson(0.0, 1.0, kPanels, [&](double mu) {
                     const double sine = std::sqrt(std::max(0.0, 1.0 - (mu * mu)));
                     return simpson(0.0, 2.0 * kPiDouble, kPanels, [&](double phi) {
                         const glm::vec3 wi(static_cast<float>(sine * std::cos(phi)), static_cast<float>(sine * std::sin(phi)), static_cast<float>(mu));
-                        return static_cast<double>(pathtracer::scene::evaluateClosedForm(closure, wi).specular.r);
+                        return static_cast<double>(pathtracer::scene::evaluateClosedForm(closure, wi).specular[0]);
                     });
                 });
-                worst.closure = std::max(worst.closure, std::abs(reflected - slab.reflectSingle.r));
+                worst.closure = std::max(worst.closure, std::abs(reflected - slab.reflectSingle[0]));
                 // diffuse / (EON * mu_i) is the weight itself, the same at every wi; the reference EON is independent of the shipped one.
                 for (double muI : cosines) {
                     const float sinI = std::sqrt(std::max(0.0F, 1.0F - static_cast<float>(muI * muI)));
                     const glm::vec3 wi(sinI * std::cos(1.1F), sinI * std::sin(1.1F), static_cast<float>(muI));
-                    const double measured = pathtracer::scene::evaluateClosedForm(closure, wi).diffuse.r /
+                    const double measured = pathtracer::scene::evaluateClosedForm(closure, wi).diffuse[0] /
                                             (static_cast<double>(referenceEon(albedo, kDiffuseRoughness, wi, wo).x) * muI);
-                    const double expected = 1.0 - (slab.reflectSingle.r + slab.multiReflect);
+                    const double expected = 1.0 - (slab.reflectSingle[0] + slab.multiReflect);
                     worst.invariance = std::max(worst.invariance, std::abs(measured - expected) / expected);
                 }
             }
@@ -1327,6 +1329,10 @@ PT_CHECK(cauchy_dispersion, Fast, Exact) {
     constexpr float kLambdaDNm = 587.6F;
     constexpr float kLambdaFNm = 486.1F;
     constexpr float kLambdaCNm = 656.3F;
+    // The sampled range's long end, the photopic peak and the short end: every index a path's lanes can disperse to lies between.
+    constexpr auto kLongNm = static_cast<float>(pathtracer::scene::cie::kLambdaMaxNm);
+    constexpr float kPeakNm = 555.0F;
+    constexpr auto kShortNm = static_cast<float>(pathtracer::scene::cie::kLambdaMinNm);
 
     bool ok = true;
     std::cout << "bsdf_validate: Cauchy dispersion inverted from (ior, abbe)\n";
@@ -1338,19 +1344,16 @@ PT_CHECK(cauchy_dispersion, Fast, Exact) {
         // The Abbe number's definition, rearranged. Computed here from the authored inputs alone.
         const float expectedAbbeDifference = (glass.iorD - 1.0F) / glass.abbe;
 
-        const float nRed = pathtracer::scene::cauchyIor(glass.iorD, glass.abbe,
-                                                     pathtracer::scene::kRgbWavelengthsNm.r);
-        const float nGreen = pathtracer::scene::cauchyIor(glass.iorD, glass.abbe,
-                                                       pathtracer::scene::kRgbWavelengthsNm.g);
-        const float nBlue = pathtracer::scene::cauchyIor(glass.iorD, glass.abbe,
-                                                      pathtracer::scene::kRgbWavelengthsNm.b);
+        const float nRed = pathtracer::scene::cauchyIor(glass.iorD, glass.abbe, kLongNm);
+        const float nGreen = pathtracer::scene::cauchyIor(glass.iorD, glass.abbe, kPeakNm);
+        const float nBlue = pathtracer::scene::cauchyIor(glass.iorD, glass.abbe, kShortNm);
 
         std::cout << "  " << glass.name;
         for (std::size_t pad = std::string(glass.name).size(); pad < 28; ++pad) {
             std::cout << ' ';
         }
         std::cout << "n_d " << nD << "   n_F-n_C " << measuredAbbeDifference << " (expected "
-                  << expectedAbbeDifference << ")   RGB [" << nRed << ", " << nGreen << ", " << nBlue
+                  << expectedAbbeDifference << ")   830/555/360 nm [" << nRed << ", " << nGreen << ", " << nBlue
                   << "]   dn(B-R) " << (nBlue - nRed) << '\n';
 
         if (!(std::fabs(nD - glass.iorD) <= kDLineTolerance)) {
@@ -1368,11 +1371,11 @@ PT_CHECK(cauchy_dispersion, Fast, Exact) {
                          " authored abbe does not mean what it says.\n";
             ok = false;
         }
-        // Normal dispersion: index falls with wavelength, so blue bends most, pinning B's sign and kRgbWavelengthsNm's ordering together.
+        // Normal dispersion: index falls with wavelength, so the short end bends most, pinning B's sign.
         if (!(nBlue > nGreen && nGreen > nRed)) {
             std::cerr << "bsdf_validate: FAILED normal dispersion ordering for " << glass.name
-                      << " -- RGB indices [" << nRed << ", " << nGreen << ", " << nBlue
-                      << "] are not increasing toward blue. A transparent dielectric has no anomalous"
+                      << " -- indices at 830/555/360 nm [" << nRed << ", " << nGreen << ", " << nBlue
+                      << "] are not increasing toward short wavelengths. A transparent dielectric has no anomalous"
                          " dispersion in the visible band.\n";
             ok = false;
         }
@@ -1381,8 +1384,7 @@ PT_CHECK(cauchy_dispersion, Fast, Exact) {
     // V_d infinite, dispersion scale 0, is the off switch every non-dispersive material relies on: B = 0, so the ior returns bit-exact.
     std::cout << "  infinite V_d returns the authored ior unchanged at every wavelength\n";
     for (const Glass& glass : glasses) {
-        for (float lambda : {kLambdaFNm, pathtracer::scene::kRgbWavelengthsNm.b, kLambdaDNm,
-                             pathtracer::scene::kRgbWavelengthsNm.r, kLambdaCNm}) {
+        for (float lambda : {kShortNm, kLambdaFNm, kLambdaDNm, kLambdaCNm, kLongNm}) {
             const float n = pathtracer::scene::cauchyIor(glass.iorD, std::numeric_limits<float>::infinity(), lambda);
             if (n != glass.iorD) {
                 std::cerr << "bsdf_validate: FAILED infinite-V_d no-op at ior " << glass.iorD << " lambda "
@@ -1492,14 +1494,14 @@ PT_CHECK(fractional_metal_is_linear, Fast, Exact) {
                         const float sinB = std::sqrt(std::max(0.0F, 1.0F - (muB * muB)));
                         const glm::vec3 wo(sinA, 0.0F, muA);
                         const glm::vec3 wi(sinB * std::cos(1.1F), sinB * std::sin(1.1F), muB);
-                        const Rgb expected = ((1.0F - metalness) * evaluateSeeded(dielectric, wo, wi).total()) +
+                        const SampledSpectrum expected = ((1.0F - metalness) * evaluateSeeded(dielectric, wo, wi).total()) +
                                                    (metalness * evaluateSeeded(metal, wo, wi).total());
-                        const Rgb measured = evaluateSeeded(mixed, wo, wi).total();
+                        const SampledSpectrum measured = evaluateSeeded(mixed, wo, wi).total();
                         ++rowsChecked;
                         if (!(maxChannel(abs(measured - expected)) <= kRelativeTolerance * std::max(maxChannel(expected), 1e-4F))) {
                             std::cerr << "bsdf_validate: FAILED fractional metal linearity at roughness=" << roughness
                                       << " transmission=" << transmission << " metalness=" << metalness << " muO=" << muA << " muI=" << muB
-                                      << " f=" << measured.r << " vs mix " << expected.r << '\n';
+                                      << " f=" << measured[0] << " vs mix " << expected[0] << '\n';
                             ok = false;
                         }
                     }
@@ -1553,11 +1555,11 @@ PT_CHECK(specular_color_tints_reflection_only, Fast, Exact) {
         const glm::vec3 wo(0.6F, 0.0F, 0.8F);
         const glm::vec3 reflected(-0.6F, 0.0F, 0.8F);
         const glm::vec3 refracted = glm::refract(-wo, glm::vec3(0.0F, 0.0F, 1.0F), 1.0F / 1.5F);
-        const Rgb specularWhite = evaluateSeeded(white, wo, reflected).specular;
-        const Rgb specularTinted = evaluateSeeded(tinted, wo, reflected).specular;
-        const Rgb transmitWhite = evaluateSeeded(white, wo, refracted).transmission;
-        const Rgb transmitTinted = evaluateSeeded(tinted, wo, refracted).transmission;
-        if (!(maxChannel(abs(specularTinted - (Rgb(tint) * specularWhite))) <= kRelativeTolerance * maxChannel(specularWhite))) {
+        const SampledSpectrum specularWhite = evaluateSeeded(white, wo, reflected).specular;
+        const SampledSpectrum specularTinted = evaluateSeeded(tinted, wo, reflected).specular;
+        const SampledSpectrum transmitWhite = evaluateSeeded(white, wo, refracted).transmission;
+        const SampledSpectrum transmitTinted = evaluateSeeded(tinted, wo, refracted).transmission;
+        if (!(maxChannel(abs(specularTinted - (tools::fixtures::lanesOf(Rgb(tint)) * specularWhite))) <= kRelativeTolerance * maxChannel(specularWhite))) {
             std::cerr << "bsdf_validate: FAILED specular_color does not scale the reflection at roughness " << roughness << '\n';
             ok = false;
         }
@@ -1610,7 +1612,7 @@ PT_CHECK(dielectric_fresnel, Fast, Exact) {
                 const glm::vec3 wo(sine, 0.0F, cosine);
                 const glm::vec3 wi(-sine, 0.0F, cosine);
                 // The single-scattering lobe alone, the closed form: the walks' 2+ orders are not the Fresnel this checks.
-                const double measured = static_cast<double>(tools::fixtures::evaluateClosedForm(params, wo, wi).specular.r) /
+                const double measured = static_cast<double>(tools::fixtures::evaluateClosedForm(params, wo, wi).specular[0]) /
                                         (specularGeometry(alpha, cosine) * cosine);
                 const double expected = referenceDielectricFresnel(cosine, ior);
                 const double tolerance = cosine == 1.0F ? kNormalIncidenceTolerance : kFresnelTolerance * expected;
@@ -1691,16 +1693,16 @@ PT_CHECK(reciprocity, Fast, Exact) {
                         const float sinB = std::sqrt(std::max(0.0F, 1.0F - (muB * muB)));
                         const glm::vec3 wo(sinA, 0.0F, muA);
                         const glm::vec3 wi(sinB * std::cos(1.1F), sinB * std::sin(1.1F), muB);
-                        const pathtracer::scene::BsdfClosure out = pathtracer::scene::makeBsdfClosure(params, wo);
-                        const pathtracer::scene::BsdfClosure back = pathtracer::scene::makeBsdfClosure(params, wi);
+                        const pathtracer::scene::BsdfClosure out = tools::fixtures::closureOf(params, wo);
+                        const pathtracer::scene::BsdfClosure back = tools::fixtures::closureOf(params, wi);
                         const pathtracer::scene::BsdfEval forward = pathtracer::scene::evaluateClosedForm(out, wi);
                         const pathtracer::scene::BsdfEval reverse = pathtracer::scene::evaluateClosedForm(back, wo);
-                        const auto check = [&](const Rgb& f, const Rgb& g, const char* slab) {
+                        const auto check = [&](const SampledSpectrum& f, const SampledSpectrum& g, const char* slab) {
                             const float scale = std::max(maxChannel(f), maxChannel(g));
                             if (!(maxChannel(abs(f - g)) <= kRelativeTolerance * std::max(scale, 1e-4F))) {
                                 std::cerr << "bsdf_validate: FAILED " << slab << " reciprocity at roughness=" << roughness
                                           << " metallic=" << metallic << " diffuseRoughness=" << diffuseRoughness << " muO=" << muA
-                                          << " muI=" << muB << " f(wo->wi)=" << f.r << " f(wi->wo)=" << g.r << '\n';
+                                          << " muI=" << muB << " f(wo->wi)=" << f[0] << " f(wi->wo)=" << g[0] << '\n';
                                 ok = false;
                             }
                         };
@@ -1757,8 +1759,8 @@ PT_CHECK(transmission_reciprocity, Fast, Exact) {
                         const glm::vec3 wi = glm::normalize((std::cos(angle) * refracted) +
                                                              (std::sin(angle) * tangent));
                         // Bare f from the cosine-weighted values: each direction's own |cos| divides out.
-                        const Rgb forward = tools::fixtures::evaluateClosedForm(params, wo, wi).total() * ior * ior / std::abs(wi.z);
-                        const Rgb reverse = tools::fixtures::evaluateClosedForm(params, wi, wo).total() / std::abs(wo.z);
+                        const SampledSpectrum forward = tools::fixtures::evaluateClosedForm(params, wo, wi).total() * ior * ior / std::abs(wi.z);
+                        const SampledSpectrum reverse = tools::fixtures::evaluateClosedForm(params, wi, wo).total() / std::abs(wo.z);
                         const float scale = std::max(maxChannel(forward), maxChannel(reverse));
                         if (scale <= 0.0F) {
                             continue;
@@ -1826,7 +1828,7 @@ PT_CHECK(index_matched_transmission, Fast, Exact) {
             continue;
         }
         const float directionErr = maxChannel(glm::abs(smooth->wiLocal + wo));
-        const glm::vec3 ratio = smooth->throughputWeight.vec3() / tint;
+        const glm::vec3 ratio = tools::fixtures::channels(smooth->throughputWeight) / tint;
         const float chromaticityErr = maxChannel(ratio) - minChannel(ratio);
         worstDirection = std::max(worstDirection, directionErr);
         worstChromaticity = std::max(worstChromaticity, chromaticityErr);
@@ -1864,15 +1866,15 @@ PT_CHECK(index_matched_transmission, Fast, Exact) {
                 continue;
             }
             ++transmitted;
-            const Rgb weight = rough->throughputWeight;
-            if (!std::isfinite(weight.r) || !std::isfinite(weight.g) || !std::isfinite(weight.b)) {
+            const SampledSpectrum weight = rough->throughputWeight;
+            if (!std::isfinite(weight[0]) || !std::isfinite(weight[1]) || !std::isfinite(weight[2])) {
                 ++notFinite;
                 continue;
             }
             if (rough->pdf != 0.0F) {
                 ++notDelta;
             }
-            const glm::vec3 roughRatio = weight.vec3() / tint;
+            const glm::vec3 roughRatio = tools::fixtures::channels(weight) / tint;
             roughDirection = std::max(roughDirection, maxChannel(glm::abs(rough->wiLocal + wo)));
             roughChromaticity =
                 std::max(roughChromaticity, maxChannel(roughRatio) - minChannel(roughRatio));
@@ -1904,11 +1906,11 @@ PT_CHECK(index_matched_transmission, Fast, Exact) {
         // Nothing may reflect: exact dielectric Fresnel is identically zero at ior 1, so the reflection lobe has no value to carry.
         for (float wiZ : {0.9F, 0.5F, 0.15F}) {
             const glm::vec3 wi(std::sqrt(std::max(0.0F, 1.0F - (wiZ * wiZ))), 0.0F, wiZ);
-            const Rgb reflected = evaluateSeeded(roughParams, wo, wi).specular;
+            const SampledSpectrum reflected = evaluateSeeded(roughParams, wo, wi).specular;
             if (maxChannel(reflected) != 0.0F) {
                 std::cerr << "bsdf_validate: FAILED index-matched reflection at cos=" << cosine
-                          << " wi.z=" << wiZ << " -- reflected (" << reflected.r << ", " << reflected.g
-                          << ", " << reflected.b
+                          << " wi.z=" << wiZ << " -- reflected (" << reflected[0] << ", " << reflected[1]
+                          << ", " << reflected[2]
                           << "), expected exactly 0; an index-matched interface reflects nothing at any "
                              "angle, so this is multiple-scattering compensation returning a deficit that "
                              "does not exist\n";
@@ -2270,10 +2272,13 @@ PT_CHECK(smooth_reflection_is_a_delta, Fast, Exact) {
                     continue;
                 }
                 ++reflections;
-                const bool exactFresnel = !testCase.onlyStrategy || sample->throughputWeight.vec3() == fresnel;
+                // A lone strategy's mass is total * (1/total), 1 to an ulp or two, so the throughput is F to those roundings.
+                const bool exactFresnel =
+                    !testCase.onlyStrategy ||
+                    maxChannel(glm::abs(tools::fixtures::channels(sample->throughputWeight) - fresnel)) <= 4.0F * FLT_EPSILON * maxChannel(fresnel);
                 if (!sample->delta || sample->pdf != 0.0F || sample->wiLocal != mirror || !exactFresnel) {
                     std::cerr << "bsdf_validate: FAILED " << testCase.name << " at ndotV=" << ndotV << ": delta " << sample->delta << " pdf "
-                              << sample->pdf << " throughput " << sample->throughputWeight.r << " vs F " << fresnel.x << '\n';
+                              << sample->pdf << " throughput " << sample->throughputWeight[0] << " vs F " << fresnel.x << '\n';
                     ok = false;
                     break;
                 }
@@ -2295,11 +2300,11 @@ PT_CHECK(microfacet_fresnel, Slow, Statistical) {
     const double t = tools::stats::studentTTwoSided(2.0 * ctx.alpha(), tools::stats::kReplicates - 1);
     // One replicate's mean of F over D_vis at this roughness and view angle, by the same draws the renderer makes.
     const auto expectation = [](const Surface& params, float ndotV, std::uint32_t seed) {
-        const pathtracer::scene::BsdfClosure closure = pathtracer::scene::makeBsdfClosure(params, viewAt(ndotV));
+        const pathtracer::scene::BsdfClosure closure = tools::fixtures::closureOf(params, viewAt(ndotV));
         glm::dvec3 sum(0.0);
         for (int i = 0; i < kPerReplicate; ++i) {
             pathtracer::scene::Sampler sampler(0, 0, i, kPerReplicate, seed);
-            sum += glm::dvec3((pathtracer::scene::fresnelAtMicrofacet(closure, sampler.next2D())).vec3());
+            sum += glm::dvec3(tools::fixtures::channels(pathtracer::scene::fresnelAtMicrofacet(closure, sampler.next2D())));
         }
         return sum / static_cast<double>(kPerReplicate);
     };
@@ -2430,7 +2435,7 @@ PT_CHECK(bulk_subsurface_interface_is_transmissions, Fast, Exact) {
         });
         for (float muO : {1.0F, 0.5F, 0.1F, -0.1F, -0.5F, -1.0F}) {
             const glm::vec3 wo = pairAt(muO, 1.0F).first;
-            ok = ok && sameClosure(pathtracer::scene::makeBsdfClosure(glass, wo), pathtracer::scene::makeBsdfClosure(wax, wo), cosines);
+            ok = ok && sameClosure(tools::fixtures::closureOf(glass, wo), tools::fixtures::closureOf(wax, wo), cosines);
         }
     }
     finish(ctx, ok, "bulk subsurface's interface left transmission's: a value, density or draw differs");
@@ -2455,8 +2460,8 @@ PT_CHECK(zero_mfp_subsurface_is_its_glossy_diffuse_limit, Fast, Exact) {
         // From outside alone: from inside, a bulk is its interface, where a thin wall is the same either side.
         for (float muO : {1.0F, 0.5F, 0.1F}) {
             const glm::vec3 wo = pairAt(muO, 1.0F).first;
-            ok = ok && sameClosure(pathtracer::scene::makeBsdfClosure(subsurface(false), wo),
-                                   pathtracer::scene::makeBsdfClosure(subsurface(true), wo), cosines);
+            ok = ok && sameClosure(tools::fixtures::closureOf(subsurface(false), wo),
+                                   tools::fixtures::closureOf(subsurface(true), wo), cosines);
         }
     }
     finish(ctx, ok, "a zero-MFP bulk subsurface left the thin wall's all-reflected albedo-1 lobe");
@@ -2484,8 +2489,8 @@ PT_CHECK(ambient_index_is_a_ratio, Fast, Exact) {
     bool ok = true;
     for (float muO : {1.0F, 0.5F, 0.1F, -0.1F, -0.5F, -1.0F}) {
         const glm::vec3 wo = pairAt(muO, 1.0F).first;
-        ok = ok && sameClosure(pathtracer::scene::makeBsdfClosure(embedded, wo, std::nullopt, up, tangent, kAmbient),
-                               pathtracer::scene::makeBsdfClosure(relative, wo), cosines);
+        ok = ok && sameClosure(tools::fixtures::closureOf(embedded, wo, std::nullopt, up, tangent, kAmbient),
+                               tools::fixtures::closureOf(relative, wo), cosines);
     }
     finish(ctx, ok, "an ambient index differed from its ratios: base, coat or film read an absolute index");
 }
@@ -2504,13 +2509,13 @@ PT_CHECK(index_matched_coat_is_absorption, Fast, Exact) {
             for (float muO : cosines) {
                 for (float muI : cosines) {
                     const auto [wo, wi] = pairAt(muO, muI);
-                    const Rgb plain = evaluateSeeded(base, wo, wi).total();
-                    const Rgb measured = evaluateSeeded(coat, wo, wi).total();
+                    const SampledSpectrum plain = evaluateSeeded(base, wo, wi).total();
+                    const SampledSpectrum measured = evaluateSeeded(coat, wo, wi).total();
                     const glm::vec3 absorbed = glm::vec3(1.0F - weight) + (weight * glm::pow(color, glm::vec3((0.5F / muO) + (0.5F / muI))));
-                    const glm::vec3 expected = plain.vec3() * absorbed;
-                    if (!(maxChannel(glm::abs(measured.vec3() - expected)) <= kRelativeTolerance * maxChannel(expected))) {
+                    const glm::vec3 expected = tools::fixtures::channels(plain) * absorbed;
+                    if (!(maxChannel(glm::abs(tools::fixtures::channels(measured) - expected)) <= kRelativeTolerance * maxChannel(expected))) {
                         std::cerr << "bsdf_validate: FAILED index-matched coat at C=" << weight << " muO=" << muO << " muI=" << muI << " f "
-                                  << measured.r << " vs " << expected.x << '\n';
+                                  << measured[0] << " vs " << expected.x << '\n';
                         ok = false;
                     }
                 }
@@ -2557,13 +2562,13 @@ PT_CHECK(coat_reciprocity, Fast, Exact) {
             for (float muA : cosines) {
                 for (float muB : cosines) {
                     const auto [wo, wi] = pairAt(muA, muB);
-                    const Rgb f = tools::fixtures::evaluateClosedForm(coat, wo, wi).specular / muB;
-                    const Rgb g = tools::fixtures::evaluateClosedForm(coat, wi, wo).specular / muA;
+                    const SampledSpectrum f = tools::fixtures::evaluateClosedForm(coat, wo, wi).specular / muB;
+                    const SampledSpectrum g = tools::fixtures::evaluateClosedForm(coat, wi, wo).specular / muA;
                     const float scale = std::max(maxChannel(f), maxChannel(g));
                     rows += scale > 0.0F ? 1 : 0;
                     if (!(maxChannel(abs(f - g)) <= kRelativeTolerance * std::max(scale, 1e-4F))) {
                         std::cerr << "bsdf_validate: FAILED coat reciprocity at coat_roughness=" << coatRoughness << " ior=" << ior
-                                  << " muO=" << muA << " muI=" << muB << " f=" << f.r << " vs " << g.r << '\n';
+                                  << " muO=" << muA << " muI=" << muB << " f=" << f[0] << " vs " << g[0] << '\n';
                         ok = false;
                     }
                 }
@@ -2591,7 +2596,7 @@ PT_CHECK(tilted_coat_normal_sampling, Slow, Statistical) {
             for (const float ndotV : {0.9F, 0.5F}) {
                 const std::string label = "normal " + std::to_string(n) + " base " + std::to_string(b) + " ndotV " + std::to_string(ndotV);
                 const Surface coat = coated(bases[b], 0.8F, glm::vec3(0.9F, 0.8F, 0.7F), 0.3F, 1.5F, 1.0F);
-                const pathtracer::scene::BsdfClosure closure = pathtracer::scene::makeBsdfClosure(coat, viewAt(ndotV), std::nullopt, normals[n]);
+                const pathtracer::scene::BsdfClosure closure = tools::fixtures::closureOf(coat, viewAt(ndotV), std::nullopt, normals[n]);
                 const tools::stats::Welford integral = replicatedDensityIntegral(
                     ctx, label, kDraws, [&](const glm::vec3& wi) { return static_cast<double>(pathtracer::scene::pdfBsdf(closure, wi)); },
                     [&](pathtracer::scene::Sampler& sampler) -> std::optional<double> {
@@ -2629,7 +2634,7 @@ PT_CHECK(coat_darkening, Fast, Exact) {
                 Surface metal = coat;
                 metal.baseColor = Rgb(static_cast<float>(kF0));
                 const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (mu * mu))), 0.0F, mu);
-                const pathtracer::scene::BsdfClosure closure = pathtracer::scene::makeBsdfClosure(metal, wo);
+                const pathtracer::scene::BsdfClosure closure = tools::fixtures::closureOf(metal, wo);
                 const double fresnel = referenceDielectricFresnel(mu, kCoatIor);
                 const double delta = (1.0 - fresnel) / (1.0 - (kF0 * fresnel));
                 const double factor = 1.0 + (weight * darkening * (delta - 1.0));
@@ -2638,9 +2643,9 @@ PT_CHECK(coat_darkening, Fast, Exact) {
                 const auto close = [&](double measured, double expected) {
                     return std::abs(measured - expected) <= kRelativeTolerance * std::max(std::abs(expected), 1e-6);
                 };
-                if (!close(closure.baseBare.r, bare) || !close(closure.baseUnder.r, under)) {
+                if (!close(closure.baseBare[0], bare) || !close(closure.baseUnder[0], under)) {
                     std::cerr << "bsdf_validate: FAILED coat darkening at C=" << weight << " delta=" << darkening << " mu=" << mu << " bare "
-                              << closure.baseBare.r << " vs " << bare << ", under " << closure.baseUnder.r << " vs " << under << '\n';
+                              << closure.baseBare[0] << " vs " << bare << ", under " << closure.baseUnder[0] << " vs " << under << '\n';
                     ok = false;
                 }
             }
@@ -2655,11 +2660,11 @@ PT_CHECK(coat_transmittance, Fast, Exact) {
     bool ok = true;
     for (float ior : {1.0F, 1.5F, 2.5F}) {
         for (float mu : {1.0F, 0.5F, 0.1F}) {
-            ok = ok && pathtracer::scene::coatTransmittance(Rgb(1.0F), ior, mu) == Rgb(1.0F);
+            ok = ok && pathtracer::scene::coatTransmittance(SampledSpectrum(1.0F), ior, mu) == SampledSpectrum(1.0F);
         }
-        ok = ok && maxChannel(glm::abs(pathtracer::scene::coatTransmittance(Rgb(color), ior, 1.0F).vec3() - glm::sqrt(color))) <= 1e-6F;
-        ok = ok && glm::all(glm::lessThan(pathtracer::scene::coatTransmittance(Rgb(color), ior, 0.3F).vec3(),
-                                          pathtracer::scene::coatTransmittance(Rgb(color), ior, 0.9F).vec3()));
+        ok = ok && maxChannel(glm::abs(tools::fixtures::channels(pathtracer::scene::coatTransmittance(tools::fixtures::lanesOf(Rgb(color)), ior, 1.0F)) - glm::sqrt(color))) <= 1e-6F;
+        ok = ok && glm::all(glm::lessThan(tools::fixtures::channels(pathtracer::scene::coatTransmittance(tools::fixtures::lanesOf(Rgb(color)), ior, 0.3F)),
+                                          tools::fixtures::channels(pathtracer::scene::coatTransmittance(tools::fixtures::lanesOf(Rgb(color)), ior, 0.9F))));
     }
     finish(ctx, ok, "coat_transmittance broke an identity: white is clear, mu = 1 gives sqrt(coat_color), grazing absorbs more");
 }
@@ -2745,7 +2750,7 @@ PT_CHECK(fuzz_ltc_normalisation, Slow, Exact) {
         for (float mu : {1.0F, 0.6F, 0.2F}) {
             const Surface fuzz = fuzzed(black, 1.0F, glm::vec3(1.0F), roughness);
             const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (mu * mu))), 0.0F, mu);
-            const pathtracer::scene::BsdfClosure closure = pathtracer::scene::makeBsdfClosure(fuzz, wo);
+            const pathtracer::scene::BsdfClosure closure = tools::fixtures::closureOf(fuzz, wo);
             const auto integrate = [&](auto read) {
                 return simpson(0.0, 1.0, kPanels, [&](double z) {
                     const double sine = std::sqrt(std::max(0.0, 1.0 - (z * z)));
@@ -2756,7 +2761,7 @@ PT_CHECK(fuzz_ltc_normalisation, Slow, Exact) {
                 });
             };
             const double pdf = integrate([](const pathtracer::scene::BsdfEval& eval) { return eval.pdf; });
-            const double albedo = integrate([](const pathtracer::scene::BsdfEval& eval) { return eval.specular.r; });
+            const double albedo = integrate([](const pathtracer::scene::BsdfEval& eval) { return eval.specular[0]; });
             const double expected = pathtracer::scene::fuzzAlbedo(roughness, mu);
             worst = std::max({worst, std::abs(pdf - 1.0), std::abs(albedo - expected)});
             if (!(std::abs(pdf - 1.0) <= kFuzzTableBound && std::abs(albedo - expected) <= kFuzzTableBound)) {
@@ -2801,7 +2806,7 @@ std::complex<double> referenceConductorIor(double r, double g) {
     return {n, std::sqrt(std::max(((r * (n + 1.0) * (n + 1.0)) - ((n - 1.0) * (n - 1.0))) / (1.0 - r), 0.0))};
 }
 
-// The exact film: per wavelength the all-order Airy amplitude (r12 + r23 e^{i d}) / (1 + r12 r23 e^{i d}), integrated by CIE 015 in D65.
+// The exact film at lane c's wavelength: the all-order Airy amplitude (r12 + r23 e^{i d}) / (1 + r12 r23 e^{i d}), in complex double.
 glm::dvec3 referenceFilm(double cosTheta, double filmIor, double thicknessNm, const std::array<std::complex<double>, 3>& substrate) {
     using complex = std::complex<double>;
     const double sin2 = 1.0 - (cosTheta * cosTheta);
@@ -2815,23 +2820,20 @@ glm::dvec3 referenceFilm(double cosTheta, double filmIor, double thicknessNm, co
         };
         const auto [r12s, r12p] = amplitudes(1.0, cosTheta, filmIor, cosFilm);
         const auto [r23s, r23p] = amplitudes(filmIor, cosFilm, n3, cos3);
-        pathtracer::scene::cie::Spectrum reflectance{};
-        for (int i = 0; i < pathtracer::scene::cie::kSampleCount; ++i) {
-            const complex phase = std::exp(complex(0.0, 4.0 * kPiDouble * filmIor * thicknessNm / pathtracer::scene::cie::wavelengthNm(i)) * cosFilm);
-            const complex rs = (r12s + (r23s * phase)) / (1.0 + (r12s * r23s * phase));
-            const complex rp = (r12p + (r23p * phase)) / (1.0 + (r12p * r23p * phase));
-            reflectance[static_cast<std::size_t>(i)] = 0.5 * (std::norm(rs) + std::norm(rp));
-        }
-        scene[c] = pathtracer::scene::cie::reflectanceToScene(reflectance)[c];
+        const double lambda = tools::fixtures::pinnedWavelengths().nm[c];
+        const complex phase = std::exp(complex(0.0, 4.0 * kPiDouble * filmIor * thicknessNm / lambda) * cosFilm);
+        const complex rs = (r12s + (r23s * phase)) / (1.0 + (r12s * r23s * phase));
+        const complex rp = (r12p + (r23p * phase)) / (1.0 + (r12p * r23p * phase));
+        scene[c] = 0.5 * (std::norm(rs) + std::norm(rp));
     }
     return scene;
 }
 
-// The film's reflectance against the exact spectral reference: the converged series and the tabulated transforms against every order.
+// The film's reflectance per lane against the exact complex amplitude at that lane's wavelength: the closed-form series in float.
 PT_CHECK(thin_film_against_spectral_reference, Fast, Exact) {
-    // The series converges below float resolution; the 2 nm transform table's interpolation is what remains: measured 3.3e-6 and 1.7e-5.
-    constexpr double kDielectricTolerance = 1e-4;
-    constexpr double kConductorTolerance = 1e-4;
+    // Float closed form against double complex amplitudes: a handful of roundings through sqrt, cos and the series' quotient.
+    constexpr double kDielectricTolerance = 1e-5;
+    constexpr double kConductorTolerance = 1e-5;
     bool ok = true;
     double worstDielectric = 0.0;
     double worstConductor = 0.0;
@@ -2933,15 +2935,15 @@ PT_CHECK(filmed_albedo_matches_lobe, Slow, Exact) {
             for (float mu : {1.0F, 0.6F, 0.25F}) {
                 const Surface surface = filmed(makeParams(roughness, 0.0F, 0.0F), 1.0F, thickness, 1.33F);
                 const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (mu * mu))), 0.0F, mu);
-                const pathtracer::scene::BsdfClosure closure = pathtracer::scene::makeBsdfClosure(surface, wo);
+                const pathtracer::scene::BsdfClosure closure = tools::fixtures::closureOf(surface, wo);
                 const glm::dvec3 integral = simpson(0.0, 1.0, kPanels, [&](double z) {
                     const double sine = std::sqrt(std::max(0.0, 1.0 - (z * z)));
                     return simpson(0.0, 2.0 * kPiDouble, kPanels, [&](double phi) {
                         const glm::vec3 wi(static_cast<float>(sine * std::cos(phi)), static_cast<float>(sine * std::sin(phi)), static_cast<float>(z));
-                        return glm::dvec3((pathtracer::scene::evaluateClosedForm(closure, wi).specular).vec3());
+                        return glm::dvec3(tools::fixtures::channels(pathtracer::scene::evaluateClosedForm(closure, wi).specular));
                     });
                 });
-                const glm::dvec3 albedo(closure.dielectric.reflectSingle.vec3());
+                const glm::dvec3 albedo(tools::fixtures::channels(closure.dielectric.reflectSingle));
                 worst = std::max(worst, static_cast<double>(maxChannel(glm::vec3(glm::abs(integral - albedo)))));
             }
         }
@@ -3001,13 +3003,13 @@ PT_CHECK(anisotropic_reciprocity, Fast, Exact) {
                     for (float muB : {0.8F, 0.4F, 0.15F}) {
                         const glm::vec3 wo = directionAt(muA, 0.3F);
                         const glm::vec3 wi = directionAt(muB, 1.9F);
-                        const Rgb f = tools::fixtures::evaluateClosedForm(params, wo, wi).specular / muB;
-                        const Rgb g = tools::fixtures::evaluateClosedForm(params, wi, wo).specular / muA;
+                        const SampledSpectrum f = tools::fixtures::evaluateClosedForm(params, wo, wi).specular / muB;
+                        const SampledSpectrum g = tools::fixtures::evaluateClosedForm(params, wi, wo).specular / muA;
                         const float scale = std::max(maxChannel(f), maxChannel(g));
                         if (!(maxChannel(abs(f - g)) <= kRelativeTolerance * std::max(scale, 1e-4F))) {
                             std::cerr << "bsdf_validate: FAILED anisotropic reciprocity at roughness=" << roughness << " anisotropy=" << anisotropy
-                                      << " metallic=" << metallic << " muO=" << muA << " muI=" << muB << " f(wo->wi)=" << f.r
-                                      << " f(wi->wo)=" << g.r << '\n';
+                                      << " metallic=" << metallic << " muO=" << muA << " muI=" << muB << " f(wo->wi)=" << f[0]
+                                      << " f(wi->wo)=" << g[0] << '\n';
                             ok = false;
                         }
                     }
@@ -3068,17 +3070,17 @@ PT_CHECK(anisotropic_albedo_matches_lobe, Slow, Exact) {
                                                     anisotropy, 0.0F);
                 for (float phi : {0.0F, 0.25F * kPi, 0.5F * kPi}) {
                     for (float mu : {1.0F, 0.6F, 0.25F}) {
-                        const pathtracer::scene::BsdfClosure closure = pathtracer::scene::makeBsdfClosure(surface, directionAt(mu, phi));
+                        const pathtracer::scene::BsdfClosure closure = tools::fixtures::closureOf(surface, directionAt(mu, phi));
                         const glm::dvec3 integral = simpson(0.0, 1.0, kPanels, [&](double z) {
                             const double sine = std::sqrt(std::max(0.0, 1.0 - (z * z)));
                             return simpson(0.0, 2.0 * kPiDouble, kPanels, [&](double azimuth) {
                                 const glm::vec3 wi(static_cast<float>(sine * std::cos(azimuth)), static_cast<float>(sine * std::sin(azimuth)),
                                                    static_cast<float>(z));
-                                return glm::dvec3((pathtracer::scene::evaluateClosedForm(closure, wi).specular).vec3());
+                                return glm::dvec3(tools::fixtures::channels(pathtracer::scene::evaluateClosedForm(closure, wi).specular));
                             });
                         });
                         // The closed forms against their albedos: the metal's Kulla-Conty lobe in full, the interface's single scattering.
-                        const glm::dvec3 albedo((metallic > 0.0F ? closure.metal.albedo : closure.dielectric.reflectSingle).vec3());
+                        const glm::dvec3 albedo(tools::fixtures::channels(metallic > 0.0F ? closure.metal.albedo : closure.dielectric.reflectSingle));
                         const double delta = static_cast<double>(maxChannel(glm::vec3(glm::abs(integral - albedo))));
                         if (delta > worst) {
                             std::cout << "  roughness=" << roughness << " anisotropy=" << anisotropy << " metallic=" << metallic << " phi=" << phi
@@ -3148,7 +3150,7 @@ PT_CHECK(thin_wall_ladder_series, Fast, Exact) {
             Surface surface = thinWalled(makeParams(0.0F, 0.0F, 0.0F), 1.0F);
             surface.specularIor = ior;
             surface.transmissionColor = Rgb(color);
-            const pathtracer::scene::BsdfClosure closure = pathtracer::scene::makeBsdfClosure(surface, directionAt(mu, 0.0F));
+            const pathtracer::scene::BsdfClosure closure = tools::fixtures::closureOf(surface, directionAt(mu, 0.0F));
             const double cosT = std::sqrt(1.0 - ((1.0 - (static_cast<double>(mu) * mu)) / (static_cast<double>(ior) * ior)));
             const glm::dvec3 crossing = glm::pow(color, glm::dvec3(1.0 / cosT));
             const auto [rp, rs] = referencePolarisedFresnel(mu, ior);
@@ -3165,8 +3167,8 @@ PT_CHECK(thin_wall_ladder_series, Fast, Exact) {
                     inside *= r * crossing;
                 }
             }
-            const glm::dvec3 closureReflect(closure.sheet.reflect.vec3());
-            const glm::dvec3 closureTransmit(closure.sheet.transmit.vec3());
+            const glm::dvec3 closureReflect(tools::fixtures::channels(closure.sheet.reflect));
+            const glm::dvec3 closureTransmit(tools::fixtures::channels(closure.sheet.transmit));
             const double delta = std::max(static_cast<double>(maxChannel(glm::vec3(glm::abs(closureReflect - reflect)))),
                                           static_cast<double>(maxChannel(glm::vec3(glm::abs(closureTransmit - transmit)))));
             if (delta > kTolerance) {
@@ -3192,8 +3194,8 @@ PT_CHECK(thin_wall_two_sided, Fast, Exact) {
     for (std::size_t c = 0; c < surfaces.size(); ++c) {
         for (const float mu : {0.9F, 0.4F}) {
             const glm::vec3 wo = directionAt(mu, 0.3F);
-            const pathtracer::scene::BsdfClosure front = pathtracer::scene::makeBsdfClosure(surfaces[c], wo);
-            const pathtracer::scene::BsdfClosure back = pathtracer::scene::makeBsdfClosure(surfaces[c], mirrored(wo));
+            const pathtracer::scene::BsdfClosure front = tools::fixtures::closureOf(surfaces[c], wo);
+            const pathtracer::scene::BsdfClosure back = tools::fixtures::closureOf(surfaces[c], mirrored(wo));
             bool same = true;
             for (const float muI : {0.8F, 0.3F, -0.5F}) {
                 const glm::vec3 wi = directionAt(muI, 1.7F);
@@ -3229,8 +3231,8 @@ PT_CHECK(thin_wall_pass_through, Fast, Exact) {
     for (const Surface& surface : smooth) {
         for (const float mu : {0.9F, 0.4F, -0.7F}) {
             const glm::vec3 wo = directionAt(mu, 0.8F);
-            const pathtracer::scene::BsdfClosure closure = pathtracer::scene::makeBsdfClosure(surface, wo);
-            const Rgb through = pathtracer::scene::passThrough(closure);
+            const pathtracer::scene::BsdfClosure closure = tools::fixtures::closureOf(surface, wo);
+            const SampledSpectrum through = pathtracer::scene::passThrough(closure);
             const float drawn = closure.mass[static_cast<std::size_t>(pathtracer::scene::Technique::SheetSingle)] * (1.0F - closure.sheet.reflectShare);
             for (int i = 0; i < kDraws; ++i) {
                 pathtracer::scene::Sampler sampler(0, 0, i, kDraws, 72000U);
@@ -3239,14 +3241,14 @@ PT_CHECK(thin_wall_pass_through, Fast, Exact) {
                     continue;
                 }
                 ++passes;
-                const Rgb delta = abs((sample->throughputWeight * drawn) - through);
+                const SampledSpectrum delta = abs((sample->throughputWeight * drawn) - through);
                 ok = ok && sample->wiLocal == -wo && sample->delta && maxChannel(delta) <= 1e-6F * maxChannel(through);
             }
         }
     }
-    const pathtracer::scene::BsdfClosure rough = pathtracer::scene::makeBsdfClosure(thinWalled(makeParams(0.3F, 0.0F, 0.0F), 1.0F), directionAt(0.7F, 0.0F));
-    const pathtracer::scene::BsdfClosure glass = pathtracer::scene::makeBsdfClosure(makeParams(0.0F, 0.0F, 1.0F), directionAt(0.7F, 0.0F));
-    ok = ok && pathtracer::scene::passThrough(rough) == Rgb(0.0F) && pathtracer::scene::passThrough(glass) == Rgb(0.0F);
+    const pathtracer::scene::BsdfClosure rough = tools::fixtures::closureOf(thinWalled(makeParams(0.3F, 0.0F, 0.0F), 1.0F), directionAt(0.7F, 0.0F));
+    const pathtracer::scene::BsdfClosure glass = tools::fixtures::closureOf(makeParams(0.0F, 0.0F, 1.0F), directionAt(0.7F, 0.0F));
+    ok = ok && pathtracer::scene::passThrough(rough) == SampledSpectrum(0.0F) && pathtracer::scene::passThrough(glass) == SampledSpectrum(0.0F);
     std::cout << "bsdf_validate: thin-wall pass-through over " << passes << " undeviated draws\n";
     finish(ctx, ok && passes > 0, "a smooth sheet's pass-through differs from its delta, or a rough sheet or bulk glass passes light");
 }
@@ -3261,14 +3263,14 @@ pathtracer::scene::BsdfClosure drawingOnly(pathtracer::scene::BsdfClosure closur
 // The walks' 2+ orders alone at wi on a fresh stream: the full evaluation less the closed forms, which evaluate to the same arithmetic.
 glm::vec3 multipleAt(const pathtracer::scene::BsdfClosure& closure, const glm::vec3& wi, std::uint32_t seed) {
     pathtracer::scene::Sampler walk(0, 0, 0, 1, seed);
-    return (pathtracer::scene::evaluateBsdfSplit(closure, wi, walk).total() - pathtracer::scene::evaluateClosedForm(closure, wi).total()).vec3();
+    return tools::fixtures::channels(pathtracer::scene::evaluateBsdfSplit(closure, wi, walk).total() - pathtracer::scene::evaluateClosedForm(closure, wi).total());
 }
 
 // The walk-drawn interface's every order at wi on a fresh stream: a closure drawing that walk alone, with no metal beside it.
 glm::vec3 walkedAt(pathtracer::scene::BsdfClosure closure, const glm::vec3& wi, std::uint32_t seed) {
     closure.metalWeight = 0.0F;
     pathtracer::scene::Sampler walk(0, 0, 0, 1, seed);
-    return pathtracer::scene::evaluateBsdfSplit(closure, wi, walk).total().vec3();
+    return tools::fixtures::channels(pathtracer::scene::evaluateBsdfSplit(closure, wi, walk).total());
 }
 
 // Rough glass at specular_ior, transmission_weight 1 and white tints: each walk exit carries its untinted weight.
@@ -3313,14 +3315,14 @@ PT_CHECK(smith_walk_matches_tables, Slow, Statistical) {
     const double t = channelT(ctx.alpha());
     std::cout << "bsdf_validate: walk exits (reflected, transmitted) vs tables\n";
     for (const Row& row : rows) {
-        const pathtracer::scene::BsdfClosure closure = pathtracer::scene::makeBsdfClosure(row.surface, row.wo);
+        const pathtracer::scene::BsdfClosure closure = tools::fixtures::closureOf(row.surface, row.wo);
         const pathtracer::scene::BsdfClosure walkOnly = drawingOnly(closure, row.technique);
         const ChannelEstimate exits = channelEstimate(tools::fixtures::replicated(ctx.threads(), ctx.subSeed(row.label), [&](std::uint64_t seed) {
             glm::dvec3 sum(0.0);
             for (int i = 0; i < kDraws; ++i) {
                 pathtracer::scene::Sampler sampler(0, 0, i, kDraws, static_cast<std::uint32_t>(seed));
                 if (const std::optional<pathtracer::scene::BsdfSample> sample = pathtracer::scene::sampleBsdf(walkOnly, sampler, sampler)) {
-                    (sample->type == pathtracer::scene::LobeType::Transmission ? sum.y : sum.x) += sample->throughputWeight.r;
+                    (sample->type == pathtracer::scene::LobeType::Transmission ? sum.y : sum.x) += sample->throughputWeight[0];
                 }
             }
             return sum / static_cast<double>(kDraws);
@@ -3329,7 +3331,7 @@ PT_CHECK(smith_walk_matches_tables, Slow, Statistical) {
         const pathtracer::scene::DielectricSlab& slab = coatRow ? closure.coat : closure.dielectric;
         const glm::vec3 slabWo = coatRow ? closure.toCoat * closure.wo : closure.wo;
         const double crossed = slab.refractWeight * slab.etaSq;
-        const glm::dvec3 expected(slab.reflectSingle.r + slab.multiReflect, (slab.transmitSingle.r + slab.multiTransmit) * crossed, 0.0);
+        const glm::dvec3 expected(slab.reflectSingle[0] + slab.multiReflect, (slab.transmitSingle[0] + slab.multiTransmit) * crossed, 0.0);
         // The split's local walk error on both sides (deficit less multiReflect), and on nodes two quadrature residuals of 0.000316536.
         const double tableError = pathtracer::scene::multiReflectError(slab, slabWo);
         const glm::dvec3 tables(tableError, tableError * crossed, 0.0);
@@ -3378,7 +3380,7 @@ PT_CHECK(interface_walk_sampling_matches_evaluation, Slow, Statistical) {
     };
     bool ok = true;
     for (const Case& c : cases) {
-        const pathtracer::scene::BsdfClosure closure = pathtracer::scene::makeBsdfClosure(c.surface, directionAt(c.mu, 0.8F));
+        const pathtracer::scene::BsdfClosure closure = tools::fixtures::closureOf(c.surface, directionAt(c.mu, 0.8F));
         const pathtracer::scene::BsdfClosure walkOnly = drawingOnly(closure, c.technique);
         std::vector<tools::stats::Welford> drawn(kBins);
         tools::stats::Welford drawnTotal;
@@ -3388,10 +3390,10 @@ PT_CHECK(interface_walk_sampling_matches_evaluation, Slow, Statistical) {
             pathtracer::scene::Sampler sampler(0, 0, 0, 1, rng());
             const std::optional<pathtracer::scene::BsdfSample> sample = pathtracer::scene::sampleBsdf(walkOnly, sampler, sampler);
             const int hit = sample ? binOf(sample->wiLocal) : -1;
-            drawnTotal.add(sample ? static_cast<double>(sample->throughputWeight.r) : 0.0);
-            maxWeight = std::max(maxWeight, sample ? static_cast<double>(sample->throughputWeight.r) : 0.0);
+            drawnTotal.add(sample ? static_cast<double>(sample->throughputWeight[0]) : 0.0);
+            maxWeight = std::max(maxWeight, sample ? static_cast<double>(sample->throughputWeight[0]) : 0.0);
             for (int b = 0; b < kBins; ++b) {
-                drawn[static_cast<std::size_t>(b)].add(b == hit ? static_cast<double>(sample->throughputWeight.r) : 0.0);
+                drawn[static_cast<std::size_t>(b)].add(b == hit ? static_cast<double>(sample->throughputWeight[0]) : 0.0);
             }
         }
         // The bins' evaluations are independent, so their total's variance is the sum of theirs.
@@ -3453,8 +3455,8 @@ PT_CHECK(dielectric_multi_reciprocity, Slow, Statistical) {
             const glm::vec3 wo = directionAt(pair.muO, 0.0F);
             const glm::vec3 wi = directionAt(pair.muI, 2.1F);
             const auto index = [&](const glm::vec3& w) { return w.z > 0.0F ? 1.0 : static_cast<double>(kIor); };
-            const pathtracer::scene::BsdfClosure out = pathtracer::scene::makeBsdfClosure(glass, wo);
-            const pathtracer::scene::BsdfClosure back = pathtracer::scene::makeBsdfClosure(glass, wi);
+            const pathtracer::scene::BsdfClosure out = tools::fixtures::closureOf(glass, wo);
+            const pathtracer::scene::BsdfClosure back = tools::fixtures::closureOf(glass, wi);
             std::mt19937 rng(static_cast<std::uint32_t>(ctx.subSeed("roughness " + std::to_string(roughness) + " muO " + std::to_string(pair.muO))));
             tools::stats::Welford forward;
             tools::stats::Welford reverse;
@@ -3483,7 +3485,8 @@ glm::vec3 aboutGeometric(const glm::vec3& g, float mu, float phi) {
 }
 
 pathtracer::scene::NormalMappedBsdf normalMapped(const Surface& surface, const glm::vec3& wo, std::optional<glm::vec3> geometric) {
-    return pathtracer::scene::makeNormalMappedBsdf(surface, wo, geometric, std::nullopt, glm::vec3(0.0F, 0.0F, 1.0F), glm::vec3(1.0F, 0.0F, 0.0F));
+    return pathtracer::scene::makeNormalMappedBsdf(tools::fixtures::laneInputs(surface), wo, geometric, tools::fixtures::pinnedWavelengths().nm,
+                                                   std::nullopt, glm::vec3(0.0F, 0.0F, 1.0F), glm::vec3(1.0F, 0.0F, 0.0F));
 }
 
 // A white Lambertian facet: base colour 1 under an index-matched, so absent, specular layer; each draw weighs its albedo, 1.
@@ -3518,7 +3521,7 @@ PT_CHECK(normal_map_unperturbed_is_identity, Fast, Exact) {
     for (const Surface& surface : surfaces) {
         for (const float mu : {0.9F, 0.3F, -0.6F}) {
             const glm::vec3 wo = directionAt(mu, 0.5F);
-            const pathtracer::scene::BsdfClosure closure = pathtracer::scene::makeBsdfClosure(surface, wo);
+            const pathtracer::scene::BsdfClosure closure = tools::fixtures::closureOf(surface, wo);
             const pathtracer::scene::NormalMappedBsdf wrapped = normalMapped(surface, wo, std::nullopt);
             for (const float muI : {0.8F, 0.2F, -0.4F}) {
                 // Equal walk streams on both sides: the interface walks' 2+ orders must then agree to the bit as well.
@@ -3568,7 +3571,7 @@ PT_CHECK(normal_map_first_scattering_matches_paper, Fast, Exact) {
                     const pathtracer::scene::NormalMappedBsdf bsdf = normalMapped(surface, glm::vec3(wo), glm::vec3(g));
                     const double lambdaP = areaP(wo) / (areaP(wo) + areaT(wo));
                     const auto f = [&](const glm::dvec3& eye, const glm::dvec3& light) {
-                        return glm::dvec3((tools::fixtures::evaluateClosedForm(surface, glm::vec3(eye), glm::vec3(light)).total()).vec3());
+                        return glm::dvec3(tools::fixtures::channels(tools::fixtures::evaluateClosedForm(surface, glm::vec3(eye), glm::vec3(light)).total()));
                     };
                     for (const float muI : {0.8F, 0.3F}) {
                         for (const float phiI : {0.4F, 2.5F, 4.4F}) {
@@ -3581,7 +3584,7 @@ PT_CHECK(normal_map_first_scattering_matches_paper, Fast, Exact) {
                             if (lambdaP < 1.0) {
                                 reference += (1.0 - lambdaP) * exits(reflectT(wo));
                             }
-                            const glm::dvec3 ours(pathtracer::scene::evaluateFirstScattering(bsdf, glm::vec3(wi), nullptr).total().vec3());
+                            const glm::dvec3 ours(tools::fixtures::channels(pathtracer::scene::evaluateFirstScattering(bsdf, glm::vec3(wi), nullptr).total()));
                             const double scale = std::max(maxChannel(glm::vec3(reference)), 1e-3F);
                             worst = std::max(worst, static_cast<double>(maxChannel(glm::vec3(glm::abs(ours - reference)))) / scale);
                         }
@@ -3609,8 +3612,8 @@ PT_CHECK(normal_map_reciprocity, Fast, Exact) {
                 const auto value = [&](const glm::vec3& wo, const glm::vec3& wi) {
                     return pathtracer::scene::evaluateFirstScattering(normalMapped(surface, wo, g), wi, nullptr).total() / glm::dot(wi, g);
                 };
-                const Rgb forward = value(a, b);
-                const Rgb backward = value(b, a);
+                const SampledSpectrum forward = value(a, b);
+                const SampledSpectrum backward = value(b, a);
                 worst = std::max(worst, maxChannel(abs(forward - backward)) / std::max(maxChannel(forward), 1e-6F));
             }
         }
@@ -3670,7 +3673,7 @@ PT_CHECK(normal_map_sampling_matches_evaluation, Slow, Statistical) {
             // A delta exit has no density NEE could weigh it against: its light hit keeps full weight, NEE's share of it is zero.
             const bool weighs = sample && !sample->delta;
             const double share =
-                weighs ? static_cast<double>(sample->throughputWeight.r * pathtracer::scene::powerHeuristic(lightPdf, sample->pdf)) : 0.0;
+                weighs ? static_cast<double>(sample->throughputWeight[0] * pathtracer::scene::powerHeuristic(lightPdf, sample->pdf)) : 0.0;
             const int hit = weighs ? binOf(sample->wiLocal) : -1;
             drawnTotal.add(share);
             maxShare = std::max(maxShare, share);
@@ -3697,7 +3700,7 @@ PT_CHECK(normal_map_sampling_matches_evaluation, Slow, Statistical) {
                 std::optional<pathtracer::scene::WalkVertex> revisit;
                 static_cast<void>(pathtracer::scene::sampleBsdf(bsdf, sampler, walk, revisit));
                 const pathtracer::scene::NeeEval nee = pathtracer::scene::evaluateForLight(bsdf, wi, revisit, walk, lightPdf);
-                const double value = area * static_cast<double>(nee.weighted.total().r);
+                const double value = area * static_cast<double>(nee.weighted.total()[0]);
                 evaluated[static_cast<std::size_t>(b)].add(value);
                 maxEvaluated = std::max(maxEvaluated, value);
             }
@@ -3749,7 +3752,7 @@ PT_CHECK(normal_map_confines_lobes_to_their_side, Fast, Exact) {
                         const glm::vec3 wi = aboutGeometric(g, muI, phi);
                         const pathtracer::scene::BsdfEval eval = evaluateAfterDraw(bsdf, wi, rng);
                         const bool sameSide = (muI > 0.0F) == (muO > 0.0F);
-                        ok = ok && (sameSide ? eval.transmission == Rgb(0.0F) : eval.diffuse + eval.specular == Rgb(0.0F));
+                        ok = ok && (sameSide ? eval.transmission == SampledSpectrum(0.0F) : eval.diffuse + eval.specular == SampledSpectrum(0.0F));
                     }
                 }
                 // A walk exits on wo's side exactly when it reflected: its transmit share is the whole weight across, none on wo's side.
@@ -3759,7 +3762,7 @@ PT_CHECK(normal_map_confines_lobes_to_their_side, Fast, Exact) {
                         const bool sameSide = (glm::dot(sample->wiLocal, g) > 0.0F) == (muO > 0.0F);
                         const bool transmitted = sample->type == pathtracer::scene::LobeType::Transmission;
                         ok = ok && sameSide != transmitted &&
-                             sample->transmitWeight == (transmitted ? sample->throughputWeight : Rgb(0.0F));
+                             sample->transmitWeight == (transmitted ? sample->throughputWeight : SampledSpectrum(0.0F));
                     }
                 }
             }
@@ -3780,8 +3783,8 @@ PT_CHECK(normal_map_point_symmetry, Fast, Exact) {
             const pathtracer::scene::NormalMappedBsdf below = normalMapped(surface, -wo, g);
             for (const float muI : {0.7F, 0.2F, -0.3F, -0.8F}) {
                 const glm::vec3 wi = aboutGeometric(g, muI, 2.3F);
-                const Rgb a = pathtracer::scene::evaluateFirstScattering(above, wi, nullptr).total();
-                const Rgb b = pathtracer::scene::evaluateFirstScattering(below, -wi, nullptr).total();
+                const SampledSpectrum a = pathtracer::scene::evaluateFirstScattering(above, wi, nullptr).total();
+                const SampledSpectrum b = pathtracer::scene::evaluateFirstScattering(below, -wi, nullptr).total();
                 worst = std::max(worst, maxChannel(abs(a - b)) / std::max(maxChannel(a), 1e-6F));
             }
         }
@@ -3799,8 +3802,8 @@ PT_CHECK(normal_map_limits, Fast, Exact) {
     float worst = 0.0F;
     for (const float muI : {0.9F, 0.5F, 0.1F}) {
         const glm::vec3 wi = directionAt(muI, 2.0F);
-        const Rgb flat = evaluateAfterDraw(normalMapped(surface, wo, std::nullopt), wi, rng).total();
-        const Rgb nearly = evaluateAfterDraw(normalMapped(surface, wo, geometricAt(1e-4F)), wi, rng).total();
+        const SampledSpectrum flat = evaluateAfterDraw(normalMapped(surface, wo, std::nullopt), wi, rng).total();
+        const SampledSpectrum nearly = evaluateAfterDraw(normalMapped(surface, wo, geometricAt(1e-4F)), wi, rng).total();
         worst = std::max(worst, maxChannel(abs(flat - nearly)) / maxChannel(flat));
     }
     const pathtracer::scene::NormalMappedBsdf past = normalMapped(surface, wo, geometricAt(1.7F));
@@ -3808,7 +3811,7 @@ PT_CHECK(normal_map_limits, Fast, Exact) {
     ctx.plan(2);
     PT_EXPECT(ctx, worst <= 1e-3F, "a vanishing tilt moved the closure by more than first order");
     PT_EXPECT(ctx, !pathtracer::scene::scatters(past) && !drawFrom(past, sampler, walk) &&
-                       evaluateAfterDraw(past, directionAt(0.5F, 0.0F), rng).total() == Rgb(0.0F),
+                       evaluateAfterDraw(past, directionAt(0.5F, 0.0F), rng).total() == SampledSpectrum(0.0F),
               "a facet tilted past 90 degrees still scattered");
 }
 
@@ -3826,7 +3829,7 @@ PT_CHECK(normal_map_pass_through, Slow, Statistical) {
             const std::string label = "tilt " + std::to_string(tilt) + " mu " + std::to_string(muO);
             const glm::vec3 wo = aboutGeometric(g, muO, 2.6F);
             const pathtracer::scene::NormalMappedBsdf bsdf = normalMapped(window, wo, g);
-            const glm::dvec3 through(pathtracer::scene::passThrough(bsdf).vec3());
+            const glm::dvec3 through(tools::fixtures::channels(pathtracer::scene::passThrough(bsdf)));
             exact = exact && through.x > 0.0;
             const std::uint64_t rowSeed = ctx.subSeed(label);
             // The walk's stream sits a fixed offset from the draw's, so no replicate's walk reuses another replicate's draw seed.
@@ -3839,7 +3842,7 @@ PT_CHECK(normal_map_pass_through, Slow, Statistical) {
                     const std::optional<pathtracer::scene::BsdfSample> sample = drawFrom(bsdf, sampler, walk);
                     if (sample && sample->passThrough) {
                         exact = exact && sample->wiLocal == -wo;
-                        sum += glm::dvec3((sample->throughputWeight).vec3());
+                        sum += glm::dvec3(tools::fixtures::channels(sample->throughputWeight));
                     }
                 }
                 return sum / static_cast<double>(kPerReplicate);
@@ -3899,9 +3902,9 @@ PT_CHECK(normal_map_white_furnace, Slow, Statistical) {
                 for (int i = 0; i < kEvaluations; ++i) {
                     glm::vec3 wi = sampleUniformHemisphere(rng);
                     wi.z = (rng() & 1U) != 0U ? -wi.z : wi.z;  // the lower hemisphere's mirror at equal odds: uniform over the sphere
-                    all.add(4.0 * kPiDouble * static_cast<double>(evaluateAfterDraw(bsdf, wi, rng).total().r));
+                    all.add(4.0 * kPiDouble * static_cast<double>(evaluateAfterDraw(bsdf, wi, rng).total()[0]));
                     pathtracer::scene::Sampler walk(0, 0, 0, 1, rng());
-                    first.add(4.0 * kPiDouble * static_cast<double>(pathtracer::scene::evaluateFirstScattering(bsdf, wi, &walk).total().r));
+                    first.add(4.0 * kPiDouble * static_cast<double>(pathtracer::scene::evaluateFirstScattering(bsdf, wi, &walk).total()[0]));
                 }
                 const double half = tools::stats::studentTTwoSided(perRow, static_cast<double>(all.count() - 1)) * all.standardError();
                 std::cout << ", evaluated " << all.mean() << " +- " << half << ", first scattering " << first.mean() << '\n';
@@ -3963,7 +3966,7 @@ PT_CHECK(layer_branch_invariants, Fast, Exact) {
     long long draws = 0;
     for (const Case& c : cases) {
         const glm::vec3 wo(std::sqrt(1.0F - (c.mu * c.mu)), 0.0F, c.mu);
-        const pathtracer::scene::BsdfClosure closure = pathtracer::scene::makeBsdfClosure(c.surface, wo, c.hero, c.coatNormal);
+        const pathtracer::scene::BsdfClosure closure = tools::fixtures::closureOf(c.surface, wo, c.hero, c.coatNormal);
         bool caseOk = true;
         int caseDraws = 0;
         for (int i = 0; i < kDraws; ++i) {
@@ -3973,7 +3976,7 @@ PT_CHECK(layer_branch_invariants, Fast, Exact) {
                 continue;
             }
             ++caseDraws;
-            caseOk = caseOk && finiteNonNegative(sample->throughputWeight.vec3()) && finiteNonNegative(sample->transmitWeight.vec3());
+            caseOk = caseOk && finiteNonNegative(tools::fixtures::channels(sample->throughputWeight)) && finiteNonNegative(tools::fixtures::channels(sample->transmitWeight));
             // A closed-form draw weighs f over its techniques' density; a walk's carries its own estimate. Both share the MIS density.
             if (!sample->delta) {
                 caseOk = caseOk && pathtracer::scene::pdfBsdf(closure, sample->wiLocal) == sample->pdf;
@@ -4026,7 +4029,7 @@ PT_CHECK(lobe_pdf_is_the_drawn_technique_density, Fast, Exact) {
     bool ok = true;
     for (const Case& c : cases) {
         const glm::vec3 wo(std::sqrt(1.0F - (c.mu * c.mu)), 0.0F, c.mu);
-        const pathtracer::scene::BsdfClosure closure = pathtracer::scene::makeBsdfClosure(c.surface, wo);
+        const pathtracer::scene::BsdfClosure closure = tools::fixtures::closureOf(c.surface, wo);
         for (std::size_t t = 0; t < pathtracer::scene::kTechniqueCount; ++t) {
             if (!(closure.mass[t] > 0.0F)) {
                 continue;

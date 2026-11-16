@@ -12,6 +12,7 @@
 #include "pathtracer/scene/cie.h"
 #include "pathtracer/scene/material.h"
 #include "pathtracer/scene/rgb.h"
+#include "pathtracer/scene/spectrum.h"
 
 namespace pathtracer::config {
 
@@ -77,12 +78,12 @@ struct LuminousFlux {
     float lumens;
 };
 
-// An area light centred on its local origin, color * luminance leaving along local -Z (quad, disk), outward (sphere) or each face's front.
+// An area light about its local origin, spectrum * luminance leaving along local -Z (quad, disk), outward (sphere) or each face's front.
 struct LightConfig {
     glm::vec3 position;  // the shape's centre, before the model root transform
     glm::vec3 rotation;  // degrees; Rz*Ry*Rx as ModelConfig::rotation, so X applies first
     std::variant<QuadShape, DiskShape, SphereShape, MeshShape> shape;
-    pathtracer::scene::Rgb color;  // unit luminance: an authored colour over its own luminance, or the illuminant's colour at a kelvin
+    pathtracer::scene::EmissionSpectrum spectrum;  // at 1 cd/m^2: an authored colour's D65 upsampling, or the illuminant's at a kelvin
     std::variant<Luminance, LuminousFlux> emission;  // exactly one of scene.json's nits or lumens, positive
     bool twoSided = false;  // a sphere's stays false
     // The locus a kelvin override resolves on; an authored colour keeps the blackbody default.

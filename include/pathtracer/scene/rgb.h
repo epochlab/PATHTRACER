@@ -53,21 +53,10 @@ struct Rgb {
 // The equal-weight channel mean: selection masses and energies compare channels on one scale.
 [[nodiscard]] constexpr float channelMean(const Rgb& c) { return (c.r + c.g + c.b) / 3.0F; }
 
-// glm::dot and glm::compAdd order: (r + g) + b.
-[[nodiscard]] constexpr float channelSum(const Rgb& c) { return (c.r + c.g) + c.b; }
-
 [[nodiscard]] inline float maxChannel(const Rgb& c) { return glm::compMax(c.vec3()); }
 [[nodiscard]] inline float minChannel(const Rgb& c) { return glm::compMin(c.vec3()); }
-[[nodiscard]] constexpr bool isBlack(const Rgb& c) { return c == Rgb(0.0F); }
 
-[[nodiscard]] inline Rgb log(const Rgb& c) { return Rgb(glm::log(c.vec3())); }
-[[nodiscard]] inline Rgb abs(const Rgb& c) { return Rgb(glm::abs(c.vec3())); }
-[[nodiscard]] inline Rgb cos(const Rgb& c) { return Rgb(glm::cos(c.vec3())); }
-[[nodiscard]] inline Rgb sin(const Rgb& c) { return Rgb(glm::sin(c.vec3())); }
-[[nodiscard]] inline Rgb sqrt(const Rgb& c) { return Rgb(glm::sqrt(c.vec3())); }
-[[nodiscard]] inline Rgb pow(const Rgb& c, const Rgb& e) { return Rgb(glm::pow(c.vec3(), e.vec3())); }
 [[nodiscard]] inline Rgb max(const Rgb& a, const Rgb& o) { return Rgb(glm::max(a.vec3(), o.vec3())); }
 [[nodiscard]] inline Rgb clamp(const Rgb& c, float lo, float hi) { return Rgb(glm::clamp(c.vec3(), lo, hi)); }
-[[nodiscard]] inline Rgb mix(const Rgb& a, const Rgb& o, float t) { return Rgb(glm::mix(a.vec3(), o.vec3(), t)); }
 
 }  // namespace pathtracer::scene

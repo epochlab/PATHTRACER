@@ -12,7 +12,7 @@ namespace pathtracer::scene {
 // A walk's exit, untinted: its direction, the side it left on, its throughput, eta^2-compressed when it crossed.
 struct WalkExit {
     glm::vec3 direction;
-    Rgb weight;
+    SampledSpectrum weight;
     bool reflected;
 };
 
@@ -20,6 +20,6 @@ struct WalkExit {
 [[nodiscard]] std::optional<WalkExit> sampleInterfaceWalk(const DielectricSlab& slab, const glm::vec3& wo, Sampler& walk);
 
 // Untinted f_ms(wo, wi) |wi.z|: a walk from each end, every connection balance-weighted over both ends' path densities (Wang et al. 2022).
-[[nodiscard]] Rgb evaluateInterfaceMulti(const DielectricSlab& slab, const glm::vec3& wo, const glm::vec3& wi, Sampler& walk);
+[[nodiscard]] SampledSpectrum evaluateInterfaceMulti(const DielectricSlab& slab, const glm::vec3& wo, const glm::vec3& wi, Sampler& walk);
 
 }  // namespace pathtracer::scene

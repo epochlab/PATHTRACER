@@ -302,9 +302,9 @@ PT_CHECK(render_rejects_invalid_requests_without_writing, Slow, Exact) {
     // Static, so a captureless mutation can point the request at them; cornell has one light, so one triple is the full array.
     static const std::array<float, 3> kNanRotation{0.0F, std::numeric_limits<float>::quiet_NaN(), 0.0F};
     static const std::array<float, 3> kInfRotation{std::numeric_limits<float>::infinity(), 0.0F, 0.0F};
-    // The locus leaves BT.709 below 1900 K, so 1000 K has negative blue, which no clamp may hide.
+    // At 10 K Planck's law underflows at every visible wavelength: no luminance to normalise the light by.
     static const std::array<float, 1> kZeroKelvin{0.0F};
-    static const std::array<float, 1> kOutOfGamutKelvin{500.0F};
+    static const std::array<float, 1> kColdKelvin{10.0F};
     // Denoised in Beauty's three-channel slot, so the request's buffers fit it: refused for its square-trained network before any write.
     static const std::array<int, 2> kDenoisedAovs{pt_aov_id("denoised"), pt_aov_id("depth")};
     const std::array<Case, 18> cases{{
@@ -332,8 +332,8 @@ PT_CHECK(render_rejects_invalid_requests_without_writing, Slow, Exact) {
          [](PtRenderRequest& r, std::vector<float*>&) { r.light_rotation_degrees = kInfRotation.data(); }},
         {"zero light kelvin", "light kelvin",
          [](PtRenderRequest& r, std::vector<float*>&) { r.light_temperature_kelvin = kZeroKelvin.data(); }},
-        {"out-of-gamut light kelvin", "the scene gamut",
-         [](PtRenderRequest& r, std::vector<float*>&) { r.light_temperature_kelvin = kOutOfGamutKelvin.data(); }},
+        {"light kelvin without visible luminance", "radiates no luminance",
+         [](PtRenderRequest& r, std::vector<float*>&) { r.light_temperature_kelvin = kColdKelvin.data(); }},
         {"NaN environment rotation", "environment rotation",
          [](PtRenderRequest& r, std::vector<float*>&) { r.env_rotation_degrees[1] = std::numeric_limits<float>::quiet_NaN(); }},
     }};

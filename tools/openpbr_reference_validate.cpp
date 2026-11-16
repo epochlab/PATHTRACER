@@ -95,12 +95,13 @@ PT_CHECK(f82_tint_matches_reference, Fast, Exact) {
         for (const float tint : {0.0F, 0.3F, 0.8F, 1.0F}) {
             const scene::Rgb f0v(f0);
             const scene::Rgb tintv(tint);
-            const scene::ConductorSlab slab = scene::makeConductorSlab(0.0F, 0.0F, f0v, tintv, 1.0F, scene::FilmLayer{}, glm::vec3(0.0F, 0.0F, 1.0F));
+            const scene::ConductorSlab slab = scene::makeConductorSlab(0.0F, 0.0F, tools::fixtures::lanesOf(f0v), tools::fixtures::lanesOf(tintv), 1.0F, scene::FilmLayer{},
+                                                                       glm::vec3(0.0F, 0.0F, 1.0F));
             float rawMin = 1.0F;
             const float b = openpbr_compute_metal_schlick_b_factor(f0v.vec3(), tintv.vec3()).x;
             for (int i = 0; i <= 512; ++i) {
                 const float mu = static_cast<float>(i) / 512.0F;
-                const double gap = std::abs(scene::conductorFresnel(slab, mu).r - openpbr_metal_schlick_with_f82_tint(f0v.vec3(), tintv.vec3(), mu).x);
+                const double gap = std::abs(scene::conductorFresnel(slab, mu)[0] - openpbr_metal_schlick_with_f82_tint(f0v.vec3(), tintv.vec3(), mu).x);
                 if (gap > worstCurve) {
                     worstCurve = gap;
                     curveAt = format("f0 %.2f tint %.2f mu %.4f", f0, tint, mu);
@@ -108,7 +109,7 @@ PT_CHECK(f82_tint_matches_reference, Fast, Exact) {
                 const float c = 1.0F - mu;
                 rawMin = std::min(rawMin, f0 + (((1.0F - f0) - (b * mu * c)) * c * c * c * c * c));
             }
-            const double ours = scene::metalFresnelAvg(f0v, tintv).r;
+            const double ours = scene::metalFresnelAvg(tools::fixtures::lanesOf(f0v), tools::fixtures::lanesOf(tintv))[0];
             const double reference = openpbr_metal_average_fresnel_with_f82_tint(f0v.vec3(), tintv.vec3()).x;
             if (rawMin >= 0.0F) {
                 if (std::abs(ours - reference) > worstAverage) {
@@ -171,7 +172,8 @@ PT_CHECK(anisotropic_ggx_matches_reference, Fast, Exact) {
             for (int i = 0; i < 64; ++i) {
                 const glm::vec3 wo = glm::normalize(glm::vec3(uniformBelowOne(rng) - 0.5F, uniformBelowOne(rng) - 0.5F, uniformBelowOne(rng) + 0.05F));
                 const glm::vec3 wi = glm::normalize(glm::vec3(uniformBelowOne(rng) - 0.5F, uniformBelowOne(rng) - 0.5F, uniformBelowOne(rng) + 0.05F));
-                const scene::ConductorSlab slab = scene::makeConductorSlab(roughness, anisotropy, scene::Rgb(1.0F), scene::Rgb(1.0F), 1.0F, scene::FilmLayer{}, wo);
+                const scene::ConductorSlab slab = scene::makeConductorSlab(roughness, anisotropy, scene::SampledSpectrum(1.0F), scene::SampledSpectrum(1.0F), 1.0F,
+                                                                       scene::FilmLayer{}, wo);
                 const glm::vec3 h = glm::normalize(wo + wi);
                 const double expected = openpbr_eval_aniso_ggx(h, reference) * openpbr_eval_aniso_smith_g1(wo, reference) / (4.0 * wo.z);
                 const double density = relative(scene::evaluateConductor(slab, wo, wi).pdfSingle, expected);
@@ -187,7 +189,7 @@ PT_CHECK(anisotropic_ggx_matches_reference, Fast, Exact) {
     expectWithin(ctx, "VNDF density vs openpbr_eval_aniso_ggx * G1 / (4 mu_o)", worstDensity, 4.0 * kFloatAgreement, densityAt);
 }
 
-// Cauchy dispersion from (n_d, V_d), on either side of the surround, at the hero wavelengths.
+// Cauchy dispersion from (n_d, V_d), on either side of the surround, at every pinned lane wavelength a hero can take.
 PT_CHECK(dispersion_matches_reference, Fast, Exact) {
     ctx.plan(1);
     double worst = 0.0;
@@ -198,12 +200,13 @@ PT_CHECK(dispersion_matches_reference, Fast, Exact) {
             inputs.specularIor = ior;
             inputs.transmissionDispersionAbbeNumber = abbe;
             inputs.transmissionDispersionScale = 1.0F;
-            for (int channel = 0; channel < 3; ++channel) {
-                const double gap = relativeGap(scene::modulatedIor(inputs, channel),
-                                               openpbr_dispersion_adjusted_ior(ior, 20.0F / abbe, scene::kRgbWavelengthsNm[channel]));
+            for (int lane = 0; lane < scene::kSpectrumSamples; ++lane) {
+                const float lambda = tools::fixtures::pinnedWavelengths().nm[lane];
+                const double gap =
+                    relativeGap(scene::modulatedIor(inputs, lambda), openpbr_dispersion_adjusted_ior(ior, 20.0F / abbe, lambda));
                 if (gap > worst) {
                     worst = gap;
-                    where = format("ior %.2f abbe %.0f channel %.0f", ior, abbe, channel);
+                    where = format("ior %.2f abbe %.0f lambda %.1f nm", ior, abbe, lambda);
                 }
             }
         }
@@ -228,7 +231,7 @@ PT_CHECK(interior_medium_matches_reference, Fast, Exact) {
     std::string coefficientsAt;
     for (const float colour : {0.01F, 0.1F, 0.3F, 0.5F, 0.7F, 0.9F, 0.99F}) {
         for (const float g : {-0.9F, -0.3F, 0.0F, 0.5F, 0.9F}) {
-            const double albedo = scene::singleScatterAlbedo(scene::Rgb(colour), g).r;
+            const double albedo = scene::singleScatterAlbedo(scene::SampledSpectrum(colour), g)[0];
             const double exact = exactAlbedo(colour, g);
             if (relativeGap(albedo, exact) > worstExact) {
                 worstExact = relativeGap(albedo, exact);
@@ -276,12 +279,12 @@ PT_CHECK(interior_medium_matches_reference, Fast, Exact) {
         surface.transmissionWeight = row.transmission;
         surface.subsurfaceWeight = row.subsurface;
         surface.transmissionDepth = row.depth;
-        const scene::HomogeneousMedium medium = scene::interiorMedium(surface);
+        const scene::HomogeneousMedium medium = scene::interiorMedium(tools::fixtures::laneInputs(surface));
         const vec3 absorption = openpbr_calculate_absorption_coefficient(row.reference);
         const vec3 scattering = openpbr_calculate_scattering_coefficient(row.reference);
         for (int c = 0; c < 3; ++c) {
             // Adobe's albedo carries its six-digit constants, so the subsurface rows compare at their own rounding as above.
-            const double rounding = row.subsurface > 0.0F ? relativeGap(scene::singleScatterAlbedo(surface.subsurfaceColor, 0.3F)[c],
+            const double rounding = row.subsurface > 0.0F ? relativeGap(scene::singleScatterAlbedo(tools::fixtures::lanesOf(surface.subsurfaceColor), 0.3F)[c],
                                                                         subsurfaceReference.albedo[c]) : 0.0;
             const double gap = std::max(relativeGap(medium.absorption[c], absorption[c]), relativeGap(medium.scattering[c], scattering[c])) -
                                (std::max(medium.absorption[c] + medium.scattering[c], 1.0F) * rounding);
@@ -298,7 +301,7 @@ PT_CHECK(interior_medium_matches_reference, Fast, Exact) {
     // The blend's phase: OpenPBR leaves a mix undefined, so the oracle's share-weighted g is not asserted; a single medium's g is.
     surface.transmissionWeight = 0.0F;
     surface.subsurfaceWeight = 1.0F;
-    PT_EXPECT(ctx, scene::interiorMedium(surface).anisotropy == surface.subsurfaceScatterAnisotropy, "a lone subsurface medium's g moved");
+    PT_EXPECT(ctx, scene::interiorMedium(tools::fixtures::laneInputs(surface)).anisotropy == surface.subsurfaceScatterAnisotropy, "a lone subsurface medium's g moved");
 }
 
 // Gulbrandsen 2014's (n, k) against its formula in double, and against Adobe's, whose float k^2 cancels as r -> 1, to Adobe's own rounding.
@@ -313,15 +316,15 @@ PT_CHECK(gulbrandsen_matches_reference, Fast, Exact) {
             const double sqrtR = std::sqrt(static_cast<double>(r));
             const double n = (g * (1.0 - r) / (1.0 + r)) + ((1.0 - g) * (1.0 + sqrtR) / (1.0 - sqrtR));
             const double k = std::sqrt(std::max(((r * (n + 1.0) * (n + 1.0)) - ((n - 1.0) * (n - 1.0))) / (1.0 - r), 0.0));
-            const scene::ComplexIor ours = scene::conductorIor(scene::Rgb(r), scene::Rgb(g));
+            const scene::ComplexIor ours = scene::conductorIor(scene::SampledSpectrum(r), scene::SampledSpectrum(g));
             const vec2 reference = openpbr_compute_gulbrandsen_n_and_k(r, g);
-            const double exact = std::max(relativeGap(ours.eta.r, n), relativeGap(ours.kappa.r, k));
+            const double exact = std::max(relativeGap(ours.eta[0], n), relativeGap(ours.kappa[0], k));
             if (exact > worstExact) {
                 worstExact = exact;
                 exactAt = format("r %.3f g %.2f", r, g);
             }
-            const double excess = std::max(relativeGap(ours.eta.r, reference.x) - relativeGap(reference.x, n),
-                                           relativeGap(ours.kappa.r, reference.y) - relativeGap(reference.y, k));
+            const double excess = std::max(relativeGap(ours.eta[0], reference.x) - relativeGap(reference.x, n),
+                                           relativeGap(ours.kappa[0], reference.y) - relativeGap(reference.y, k));
             if (excess > worstReference) {
                 worstReference = excess;
                 referenceAt = format("r %.3f g %.2f", r, g);
@@ -344,7 +347,7 @@ PT_CHECK(eon_matches_reference, Fast, Exact) {
         for (int i = 0; i < 128; ++i) {
             const glm::vec3 wo = glm::normalize(glm::vec3(uniformBelowOne(rng) - 0.5F, uniformBelowOne(rng) - 0.5F, uniformBelowOne(rng) + 0.02F));
             const glm::vec3 wi = glm::normalize(glm::vec3(uniformBelowOne(rng) - 0.5F, uniformBelowOne(rng) - 0.5F, uniformBelowOne(rng) + 0.02F));
-            const glm::vec3 ours = scene::evaluateDiffuse(scene::makeDiffuseSlab(scene::Rgb(rho), roughness, wo), wo, wi).value.vec3();
+            const glm::vec3 ours = tools::fixtures::channels(scene::evaluateDiffuse(scene::makeDiffuseSlab(tools::fixtures::lanesOf(scene::Rgb(rho)), roughness, wo), wo, wi).value);
             const glm::vec3 reference = openpbr_f_EON(rho, roughness, wi, wo, false) * wi.z;
             for (int c = 0; c < 3; ++c) {
                 const double gap = relativeGap(ours[c], reference[c]);
@@ -368,7 +371,7 @@ PT_CHECK(fuzz_ltc_matches_reference, Fast, Exact) {
             const float roughness = static_cast<float>(row) / (OpenPBR_LTCTableSize - 1);
             const float mu = static_cast<float>(column) / (OpenPBR_LTCTableSize - 1);
             const vec3 reference = OpenPBR_LTC_Array[(row * OpenPBR_LTCTableSize) + column];
-            const scene::FuzzSlab slab = scene::makeFuzzSlab(scene::Rgb(1.0F), roughness, glm::vec3(std::sqrt(1.0F - (mu * mu)), 0.0F, mu));
+            const scene::FuzzSlab slab = scene::makeFuzzSlab(scene::SampledSpectrum(1.0F), roughness, glm::vec3(std::sqrt(1.0F - (mu * mu)), 0.0F, mu));
             const double gap = std::max({relativeGap(slab.aInv, reference.x), relativeGap(slab.bInv, reference.y), relativeGap(slab.albedo, reference.z)});
             if (gap > worst) {
                 worst = gap;
@@ -392,7 +395,7 @@ PT_CHECK(coat_transmittance_matches_reference, Fast, Exact) {
         lobe.coat_reflection_lobe.refl_trans_coeff.eta_t_over_eta_i = coatIor;
         for (int i = 1; i <= 64; ++i) {
             const float mu = static_cast<float>(i) / 64.0F;
-            const glm::vec3 ours = scene::coatTransmittance(scene::Rgb(lobe.tint), coatIor, mu).vec3();
+            const glm::vec3 ours = tools::fixtures::channels(scene::coatTransmittance(tools::fixtures::lanesOf(scene::Rgb(lobe.tint)), coatIor, mu));
             const vec3 reference = openpbr_coat_passage_color_multiplier(lobe, mu);
             for (int c = 0; c < 3; ++c) {
                 const double gap = relativeGap(ours[c], reference[c]);
@@ -414,10 +417,10 @@ PT_CHECK(thin_wall_tint_matches_reference, Fast, Exact) {
     std::string where;
     for (const float ior : {1.2F, 1.5F, 2.4F}) {
         // An index-matched facing face isolates the tint: T' = (1 - R_far) tau with nothing reflected back between the faces.
-        const scene::SheetInterfaces sheet{scene::Rgb(1.0F), scene::Rgb(color), 1.0F, ior, scene::FilmLayer{}};
+        const scene::SheetInterfaces sheet{scene::SampledSpectrum(1.0F), tools::fixtures::lanesOf(scene::Rgb(color)), 1.0F, ior, scene::FilmLayer{}};
         for (int i = 1; i <= 64; ++i) {
             const float mu = static_cast<float>(i) / 64.0F;
-            const scene::Rgb ours = scene::sheetLadder(sheet, mu).transmit / (1.0F - scene::fresnelDielectric(mu, 1.0F, ior));
+            const scene::SampledSpectrum ours = scene::sheetLadder(sheet, mu).transmit / (1.0F - scene::fresnelDielectric(mu, 1.0F, ior));
             const vec3 reference = openpbr_compute_final_transmission_tint(color, true, mu, ior);
             for (int c = 0; c < 3; ++c) {
                 const double gap = relativeGap(ours[c], reference[c]);
@@ -437,8 +440,8 @@ PT_CHECK(thin_wall_fresnel_matches_reference_at_normal, Fast, Exact) {
     double worst = 0.0;
     std::string where;
     for (const float ior : {0.5F, 0.8F, 1.1F, 1.33F, 1.5F, 2.0F, 2.5F}) {
-        const scene::SheetInterfaces sheet{scene::Rgb(1.0F), scene::Rgb(1.0F), ior, ior, scene::FilmLayer{}};
-        const double gap = relativeGap(scene::sheetLadder(sheet, 1.0F).reflect.r, openpbr_thin_wall_fresnel(ior, 1.0F));
+        const scene::SheetInterfaces sheet{scene::SampledSpectrum(1.0F), scene::SampledSpectrum(1.0F), ior, ior, scene::FilmLayer{}};
+        const double gap = relativeGap(scene::sheetLadder(sheet, 1.0F).reflect[0], openpbr_thin_wall_fresnel(ior, 1.0F));
         if (gap > worst) {
             worst = gap;
             where = format("ior %.2f", ior);
@@ -457,7 +460,7 @@ PT_CHECK(thin_wall_subsurface_split_matches_reference, Fast, Exact) {
         surface.geometryThinWalled = true;
         surface.subsurfaceWeight = 1.0F;
         surface.subsurfaceScatterAnisotropy = g;
-        const scene::BsdfClosure closure = scene::makeBsdfClosure(surface, glm::vec3(0.0F, 0.0F, 1.0F));
+        const scene::BsdfClosure closure = tools::fixtures::closureOf(surface, glm::vec3(0.0F, 0.0F, 1.0F));
         // Adobe's proportions, openpbr_prepare_lobes: transmission (g + 1)/2, reflection its complement.
         const double reference = 1.0 - ((g + 1.0) * 0.5);
         const double gap = std::abs(closure.subsurfaceReflectShare - reference);
@@ -494,64 +497,47 @@ PT_CHECK(fresnel_average_matches_reference, Fast, Exact) {
     expectWithin(ctx, "fresnelAverage vs 2 int openpbr_fresnel mu dmu", worst, 1e-5, where);
 }
 
-// Scene RGB of a reflectance spectrum under D65, normalised so a flat unit spectrum is white and clamped, as filmReflectance integrates.
-template <typename Reflectance>
-glm::vec3 spectralScene(Reflectance reflectance) {
-    glm::dvec3 xyz(0.0);
-    double whiteY = 0.0;
-    for (int i = 0; i < scene::cie::kSampleCount; ++i) {
-        const scene::cie::TableRow row = scene::cie::tableRow(i);
-        xyz += row.colourMatching * row.d65 * static_cast<double>(reflectance(static_cast<float>(scene::cie::wavelengthNm(i))));
-        whiteY += row.colourMatching.y * row.d65;
-    }
-    return glm::clamp(glm::vec3(scene::cie::xyzToScene() * (xyz / whiteY)), 0.0F, 1.0F);
-}
-
-// The thin film: Adobe's per-wavelength Airy reflectance integrated against CIE 1931 x D65, against filmReflectance's exact transform.
+// The thin film: Adobe's per-wavelength Airy reflectance against filmReflectance's closed form, lane by lane at the pinned wavelengths.
 PT_CHECK(thin_film_matches_reference, Fast, Exact) {
     ctx.plan(1);
+    const glm::vec4 lambdaNm = tools::fixtures::pinnedWavelengths().nm;
     const glm::vec3 metalF0(0.9F, 0.6F, 0.3F);
     const glm::vec3 metalTint(0.95F, 0.9F, 0.8F);
-    const scene::ComplexIor metal = scene::conductorIor(scene::Rgb(metalF0), scene::Rgb(metalTint));
+    const scene::SampledSpectrum f0 = tools::fixtures::lanesOf(scene::Rgb(metalF0));
+    const scene::SampledSpectrum tint = tools::fixtures::lanesOf(scene::Rgb(metalTint));
+    const scene::ComplexIor metal = scene::conductorIor(f0, tint);
     double worst = 0.0;
     std::string where;
     for (const float baseIor : {1.5F, 2.4F, 0.0F}) {
         for (const float filmIor : {1.3F, 1.8F}) {
             for (const float thickness : {120.0F, 400.0F, 900.0F}) {
                 for (const float mu : {1.0F, 0.7F, 0.3F}) {
-                    glm::vec3 reference;
-                    glm::vec3 ours;
-                    if (baseIor > 0.0F) {
-                        reference = spectralScene([&](float lambda) {
-                            return openpbr_thin_film_and_base_reflectance(mu, 1.0F, filmIor, vec3(baseIor), false, vec3(0.0F), vec3(1.0F), true,
-                                                                          false, thickness, vec3(lambda))
-                                .reflectance_dielectric.x;
-                        });
-                        ours = scene::filmReflectance({thickness, filmIor}, mu, 1.0F, scene::Rgb(baseIor), scene::Rgb(0.0F)).vec3();
-                    } else {
-                        // Per channel the conductor is grey across the spectrum: each Rec.709 channel integrates its own (F0, tint).
-                        for (int c = 0; c < 3; ++c) {
-                            reference[c] = spectralScene([&](float lambda) {
-                                return openpbr_thin_film_and_base_reflectance(mu, 1.0F, filmIor, vec3(1.0F), false, vec3(metalF0[c]),
-                                                                              vec3(metalTint[c]), false, true, thickness, vec3(lambda))
-                                    .reflectance_metal.x;
-                            })[c];
-                        }
-                        ours = scene::filmReflectance({thickness, filmIor}, mu, 1.0F, metal.eta, metal.kappa).vec3();
-                    }
-                    for (int c = 0; c < 3; ++c) {
-                        const double gap = std::abs(ours[c] - reference[c]);
+                    const scene::ThinFilm film{thickness, filmIor, lambdaNm};
+                    const scene::SampledSpectrum ours =
+                        baseIor > 0.0F ? scene::filmReflectance(film, mu, 1.0F, scene::SampledSpectrum(baseIor), scene::SampledSpectrum(0.0F))
+                                       : scene::filmReflectance(film, mu, 1.0F, metal.eta, metal.kappa);
+                    for (int lane = 0; lane < scene::kSpectrumSamples; ++lane) {
+                        const vec3 lambda(lambdaNm[lane]);
+                        const double reference =
+                            baseIor > 0.0F
+                                ? openpbr_thin_film_and_base_reflectance(mu, 1.0F, filmIor, vec3(baseIor), false, vec3(0.0F), vec3(1.0F), true,
+                                                                         false, thickness, lambda)
+                                      .reflectance_dielectric.x
+                                : openpbr_thin_film_and_base_reflectance(mu, 1.0F, filmIor, vec3(1.0F), false, vec3(f0[lane]), vec3(tint[lane]),
+                                                                         false, true, thickness, lambda)
+                                      .reflectance_metal.x;
+                        const double gap = std::abs(ours[lane] - reference);
                         if (gap > worst) {
                             worst = gap;
-                            where = format("base %.1f film %.1f thickness %.0f", baseIor, filmIor, thickness) + format(" mu %.2f channel %.0f", mu, c);
+                            where = format("base %.1f film %.1f thickness %.0f", baseIor, filmIor, thickness) +
+                                    format(" mu %.2f lambda %.1f nm", mu, lambdaNm[lane]);
                         }
                     }
                 }
             }
         }
     }
-    // filmReflectance lerps its CIE transforms at 2 nm of path: (h^2/8)(2 pi/380 nm)^2 = 1.4e-4 per term, twice that over 2|amplitude| < 2.
-    expectWithin(ctx, "filmReflectance vs spectrally integrated openpbr_thin_film_and_base_reflectance", worst, 3e-4, where);
+    expectWithin(ctx, "filmReflectance vs openpbr_thin_film_and_base_reflectance per wavelength", worst, kFloatAgreement, where);
 }
 
 // --- Energy integrals: the tables' quadrature, switched to Adobe's separable shadowing, against Monte Carlo through Adobe's own sampler.
@@ -667,11 +653,11 @@ PT_CHECK(height_correlated_integrator_matches_tables, Fast, Exact) {
                 const quadrature::EscapeSums sums =
                     quadrature::escapeAlbedo<quadrature::HeightCorrelated>(mu, roughness * roughness, eta, escapeRule);
                 const auto etaF = static_cast<float>(eta);
-                const scene::InterfaceInputs interface{static_cast<float>(roughness), 0.0F, etaF, 1.0F, etaF, 1.0F, scene::Rgb(1.0F), 1.0F,
-                                                       scene::Rgb(1.0F), scene::FilmLayer{}, 1.0F, false};
+                const scene::InterfaceInputs interface{static_cast<float>(roughness), 0.0F, etaF, 1.0F, etaF, 1.0F, scene::SampledSpectrum(1.0F), 1.0F,
+                                                       scene::SampledSpectrum(1.0F), scene::FilmLayer{}, 1.0F, false};
                 const auto muF = static_cast<float>(mu);
                 const scene::DielectricSlab slab = scene::makeDielectricSlab(interface, glm::vec3(std::sqrt(1.0F - (muF * muF)), 0.0F, muF));
-                const double gap = std::max(std::abs(slab.reflectSingle.r - sums.reflect), std::abs(slab.transmitSingle.r - sums.transmit));
+                const double gap = std::max(std::abs(slab.reflectSingle[0] - sums.reflect), std::abs(slab.transmitSingle[0] - sums.transmit));
                 if (gap > worstEscape) {
                     worstEscape = gap;
                     escapeAt = format("roughness %.3f eta %.3f mu %.4f", roughness, eta, mu);

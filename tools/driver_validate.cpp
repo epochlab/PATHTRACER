@@ -1154,7 +1154,7 @@ PathTraceResult sequentialAdaptiveFold(DriverFixture& fixture, const PathTraceDr
 // Stopped texels are carried bit-exact through the pool's rotation, so the driver equals the in-place sequential fold everywhere.
 PT_CHECK(adaptive_driver_matches_the_sequential_fold, Slow, Exact) {
     // Chosen on this fixture so texels stop at several checkpoints and some reach the cap; the last assertion holds it to that.
-    constexpr float kThreshold = 0.5F;
+    constexpr float kThreshold = 1.0F;
     // Uniform, then foveated steeply enough that the 8-texel frame's 3.4-degree texels pool off-centre.
     constexpr std::array<float, 2> kMarSlopes{0.0F, 1.0F};
     ctx.plan(static_cast<int>(kMarSlopes.size()) * 4 + 1);
@@ -1254,7 +1254,7 @@ PT_CHECK(adaptive_driver_idles_once_every_texel_stops, Slow, Exact) {
 // Offline changes when a frame is published, never what it holds: the finished frame equals progressive's bit for bit, stats included.
 PT_CHECK(offline_final_frame_is_bit_identical_to_progressive, Slow, Exact) {
     // The threshold the sequential-fold check uses, so texels stop at several checkpoints and the carry path is exercised.
-    constexpr float kThreshold = 0.5F;
+    constexpr float kThreshold = 1.0F;
     ctx.plan(2);
     std::unique_ptr<DriverFixture> progressive = makeFixture(ctx.threads());
     std::unique_ptr<DriverFixture> offline = makeFixture(ctx.threads());

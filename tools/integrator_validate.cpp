@@ -290,6 +290,20 @@ glm::vec3 centreMean(const pathtracer::gfx::HdrImage& image) {
                        (kImageSize / 2) + 2);
 }
 
+// The sensor's exact mean of prod_i rho_i(lambda)^e_i, each rho_i a colour's upsampling: a transmittance under the unit white sky.
+glm::dvec3 expectedTransmission(std::initializer_list<std::pair<glm::vec3, double>> factors) {
+    return tools::fixtures::expectedSceneRgb(
+        [&](const pathtracer::scene::SampledWavelengths& lambda) {
+            pathtracer::scene::SampledSpectrum product(1.0F);
+            for (const auto& [colour, exponent] : factors) {
+                product *= pow(pathtracer::scene::reflectanceSpectrum(Rgb(colour), lambda),
+                               pathtracer::scene::SampledSpectrum(static_cast<float>(exponent)));
+            }
+            return product;
+        },
+        true);
+}
+
 // Runs one renderPathTraced pass over the scene's own per-instance materials.
 pathtracer::scene::PathTraceResult renderPass(const TestScene& scene, const EnvironmentMap& env, const PathTraceSettings& settings,
                                               EmbreeAccel& accel, pathtracer::scene::ThreadPool& pool, bool showSky,
@@ -340,12 +354,12 @@ PathTraceSettings perReplicate(PathTraceSettings settings) {
     return settings;
 }
 
-// Centre-region brightest channel over replicate renders at this scramble's seed.
+// Centre-region luminance over replicate renders at this scramble's seed: linear, so unbiased where a sample's channels differ.
 tools::stats::Welford renderCentre(const TestScene& scene, const EnvironmentMap& env, const PathTraceSettings& settings, EmbreeAccel& accel,
                                    pathtracer::scene::ThreadPool& pool, std::uint64_t seed) {
     return replicatedScalar(seed, [&](std::uint32_t scramble) {
         const glm::vec3 mean = centreMean(renderPass(scene, env, perReplicate(settings), accel, pool, true, scramble).beauty);
-        return static_cast<double>(std::max({mean.x, mean.y, mean.z}));
+        return static_cast<double>(pathtracer::scene::luminance(Rgb(mean)));
     });
 }
 
@@ -447,7 +461,7 @@ PT_CHECK(transmissive_slab_energy, Slow, Statistical) {
             const auto seed = static_cast<std::uint32_t>(rowSeed + r);
             const glm::vec3 mean =
                 regionMean(renderPass(scene, env, settings, *accel, pool, true, seed).beauty, 0, 0, kImageSize, kImageSize);
-            render.add(std::max({mean.x, mean.y, mean.z}));
+            render.add(pathtracer::scene::luminance(Rgb(mean)));
             // Disjoint seeds keep them independent; the render scatters at bounces 0..maxBounces, its extra one only collects a miss.
             walk.add(tools::fixtures::slabWalkLo(inputs, kWalkPaths, seed + tools::stats::kReplicates, settings.maxBounces + 1).mean);
         }
@@ -509,7 +523,7 @@ PT_CHECK(transmissive_sphere_energy, Slow, Statistical) {
         }
         expectInvisible(label, replicatedScalar(ctx.subSeed(label), [&](std::uint32_t scramble) {
                             const glm::vec3 mean = centreMean(renderPass(scene, env, settings, *accel, pool, true, scramble).beauty);
-                            return static_cast<double>(std::max({mean.x, mean.y, mean.z}));
+                            return static_cast<double>(pathtracer::scene::luminance(Rgb(mean)));
                         }));
     }
     // Energy conservation does not depend on wavelength, so a failing channel is the estimator losing or gaining energy, not the optics.
@@ -583,7 +597,7 @@ RimEnergy rimEnergy(const TestScene& scene, const EnvironmentMap& env, const Pat
         for (std::size_t p = 0; p < binOf.size(); ++p) {
             if (binOf[p] >= 0) {
                 const glm::vec3 rgb = beauty.rgb(p);
-                sum[binOf[p]] += std::max({rgb.x, rgb.y, rgb.z});
+                sum[binOf[p]] += pathtracer::scene::luminance(Rgb(rgb));
                 ++count[binOf[p]];
             }
         }
@@ -748,9 +762,12 @@ PT_CHECK(beer_lambert_absorption, Slow, Statistical) {
                 readings[c].add(mean[c]);
             }
         }
+        // Each lane's own transmittance over the chord, projected: the spectral product, not the RGB channel's power.
+        const glm::dvec3 atLongest = expectedTransmission({{colour, longest / testCase.depth}});
+        const glm::dvec3 atShortest = expectedTransmission({{colour, shortest / testCase.depth}});
         for (int c = 0; c < 3; ++c) {
-            const double low = std::pow(colour[c], longest / testCase.depth);
-            const double high = std::pow(colour[c], shortest / testCase.depth);
+            const double low = std::min(atLongest[c], atShortest[c]);
+            const double high = std::max(atLongest[c], atShortest[c]);
             // The film's float32 mean resolves to one ulp, as in the radial check; the hero channel's draw is the only noise.
             const double half = (t * readings[c].standardError()) + (std::numeric_limits<float>::epsilon() * readings[c].mean());
             char detail[320];
@@ -919,10 +936,10 @@ PT_CHECK(nested_media_attenuate_in_turn, Slow, Statistical) {
     ctx.plan(3);
     const double t = tools::stats::studentTTwoSided(ctx.alpha(), tools::stats::kReplicates - 1);
     std::cout << "integrator_validate: nested index-matched absorbers\n";
+    const glm::dvec3 oblique = expectedTransmission({{outerColour, 2.0 / cosine}, {innerColour, 1.0 / cosine}});
+    const glm::dvec3 axial = expectedTransmission({{outerColour, 2.0}, {innerColour, 1.0}});
     for (int c = 0; c < 3; ++c) {
-        const auto through = [&](double length) {
-            return std::pow(outerColour[c], 2.0 * length) * std::pow(innerColour[c], length);
-        };
+        const auto through = [&](double length) { return length == 1.0 ? axial[c] : oblique[c]; };
         // Planes are exact, so only the off-axis rays lengthen a chord; the film's float mean resolves to one ulp.
         const double half = (t * readings[c].standardError()) + (std::numeric_limits<float>::epsilon() * readings[c].mean());
         char detail[256];
@@ -996,7 +1013,8 @@ PT_CHECK(on_surface_transmission_tint, Slow, Statistical) {
     constexpr int kBounces = 8;
     constexpr float kSlabThickness = 0.5F;
     const glm::vec3 colour(0.5F, 0.25F, 0.75F);
-    const glm::vec3 expected = colour * colour;   // two interfaces crossed, one factor each
+    // Two interfaces crossed, one factor each: the spectral square, projected.
+    const glm::dvec3 expected = expectedTransmission({{colour, 2.0}});
 
     struct TintCase {
         const char* name;
@@ -1100,13 +1118,15 @@ PT_CHECK(per_instance_materials, Slow, Statistical) {
 }
 
 // An emission-only surface returns emission_luminance x emission_color to a camera ray whatever lights the scene: the authored value.
-PT_CHECK(emission_returns_luminance_times_colour, Fast, Exact) {
-    constexpr int kTexelSamples = 16;
+PT_CHECK(emission_returns_luminance_times_colour, Slow, Statistical) {
     constexpr int kEnvWidth = 64;
     constexpr int kEnvHeight = 32;
     const glm::vec3 colour(0.2F, 0.5F, 0.8F);
     constexpr float kLuminance = 2.5F;
-    const glm::vec3 expected = kLuminance * colour;
+    // The emitter's exact mean read: luminance times its colour's D65 upsampling, through the sensor.
+    const glm::dvec3 expected = tools::fixtures::expectedSceneRgb(
+        [&](const pathtracer::scene::SampledWavelengths& lambda) { return kLuminance * pathtracer::scene::illuminantSpectrum(Rgb(colour), lambda); },
+        false);
 
     TestScene scene = makeTwoInstanceScene(1.0F);
     Material& emitter = scene.instances[0].material;
@@ -1120,57 +1140,70 @@ PT_CHECK(emission_returns_luminance_times_colour, Fast, Exact) {
         return;
     }
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
-    PathTraceSettings base = makeSettings(1, 999);
-    base.samplesPerPass = kTexelSamples;
-
+    const PathTraceSettings settings = perReplicate(makeSettings(1, 999));
     const EnvironmentMap black = tools::fixtures::makeEnvironment(
         kEnvWidth, kEnvHeight, std::vector<float>(static_cast<std::size_t>(kEnvWidth) * kEnvHeight * pathtracer::gfx::kRgbChannels, 0.0F));
     const EnvironmentMap uniform = makeUniformEnvironment();
-    // Identical samples average to themselves up to one rounding per accumulation: kTexelSamples per pixel, then the 16-pixel block.
-    const float tolerance = static_cast<float>(kTexelSamples + 16) * std::numeric_limits<float>::epsilon() *
-                            std::max({expected.x, expected.y, expected.z});
-
     ctx.plan(5);
+    const double t = tools::stats::studentTTwoSided(ctx.alpha(), tools::stats::kReplicates - 1);
+    const auto blockAt = [&](const TestScene& variant, const EnvironmentMap& env, std::uint32_t scramble) {
+        return glm::dvec3(regionMean(renderPass(variant, env, settings, *accel, pool, true, scramble).beauty, 2, 6, 6, 10));
+    };
+
     // A clear coat absorbs nothing and withholds its reflection, 1 - F(mu_o) when smooth; a tinted one also absorbs, never adds light.
     TestScene clear = scene;
     clear.instances[0].material.coatWeight = 1.0F;
     TestScene tinted = scene;
     tinted.instances[0].material.coatWeight = 0.5F;
     tinted.instances[0].material.coatColor = Rgb(0.25F, 0.5F, 0.81F);
-    const glm::vec3 open = regionMean(renderPass(scene, black, base, *accel, pool, true).beauty, 2, 6, 6, 10);
-    const glm::vec3 throughClear = regionMean(renderPass(clear, black, base, *accel, pool, true).beauty, 2, 6, 6, 10);
-    const glm::vec3 throughTint = regionMean(renderPass(tinted, black, base, *accel, pool, true).beauty, 2, 6, 6, 10);
+    TestScene fuzzy = scene;
+    fuzzy.instances[0].material.fuzzWeight = 1.0F;
+    // Paired at one scramble per replicate: each pair draws the same wavelengths, so its ratio isolates the layer's factor.
+    tools::stats::Welford clearRatio;
+    tools::stats::Welford clearTint;
+    tools::stats::Welford fuzzTint;
+    bool tintDims = true;
+    bool fuzzDims = true;
+    const std::uint64_t seed = ctx.subSeed("layers");
+    for (int r = 0; r < tools::stats::kReplicates; ++r) {
+        const auto scramble = static_cast<std::uint32_t>(seed + static_cast<std::uint64_t>(r));
+        const glm::dvec3 open = blockAt(scene, black, scramble);
+        const glm::dvec3 coated = blockAt(clear, black, scramble) / open;
+        const glm::dvec3 tint = blockAt(tinted, black, scramble) / open;
+        const glm::dvec3 fuzz = blockAt(fuzzy, black, scramble) / open;
+        clearRatio.add(coated.x);
+        clearTint.add(coated.x - coated.z);
+        fuzzTint.add(fuzz.x - fuzz.z);
+        tintDims = tintDims && glm::all(glm::lessThan(tint, glm::dvec3(1.0))) && glm::all(glm::greaterThan(tint, glm::dvec3(0.5)));
+        fuzzDims = fuzzDims && glm::all(glm::lessThan(fuzz, glm::dvec3(1.0))) && glm::all(glm::greaterThan(fuzz, glm::dvec3(0.0)));
+    }
     // One untinted factor between 1 - F at normal incidence and 1 - F at the 36x24 mm film corner's obliquity, which bounds every pixel.
     const float cornerMu = kFocalLengthMm / std::sqrt((kFocalLengthMm * kFocalLengthMm) + (18.0F * 18.0F) + (12.0F * 12.0F));
     const float coatIor = pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant>{}.coatIor;  // the clear coat keeps the default
-    const glm::vec3 clearRatio = throughClear / open;
-    // Each mean carries the tolerance's (kTexelSamples + 16) roundings, the quotient two of them plus its own.
-    const float ratioSlack = static_cast<float>((2 * (kTexelSamples + 16)) + 1) * std::numeric_limits<float>::epsilon();
-    PT_EXPECT(ctx, std::abs(clearRatio.x - clearRatio.z) <= 1e-6F &&
-                       clearRatio.x <= 1.0F - pathtracer::scene::fresnelDielectric(1.0F, 1.0F, coatIor) + ratioSlack &&
-                       clearRatio.x >= 1.0F - pathtracer::scene::fresnelDielectric(cornerMu, 1.0F, coatIor) - ratioSlack,
+    const double ratioHalf = t * clearRatio.standardError();
+    PT_EXPECT(ctx, std::abs(clearTint.mean()) <= t * clearTint.standardError() &&
+                       clearRatio.mean() <= 1.0 - pathtracer::scene::fresnelDielectric(1.0F, 1.0F, coatIor) + ratioHalf &&
+                       clearRatio.mean() >= 1.0 - pathtracer::scene::fresnelDielectric(cornerMu, 1.0F, coatIor) - ratioHalf,
               "a clear coat must dim emission by its own untinted reflection alone, 1 - F(mu_o)");
-    PT_EXPECT(ctx, glm::all(glm::lessThan(throughTint, open)) && glm::all(glm::greaterThan(throughTint, 0.5F * open)),
-              "a half-weight tinted coat must dim emission, by at most its weight: (1-C) + C*T with 0 < T < 1");
+    PT_EXPECT(ctx, tintDims, "a half-weight tinted coat must dim emission, by at most its weight: (1-C) + C*T with 0 < T < 1");
     // The fuzz withholds what it reflects, 1 - F E_fuzz, untinted: a white fuzz dims emission evenly and never to black.
-    TestScene fuzzy = scene;
-    fuzzy.instances[0].material.fuzzWeight = 1.0F;
-    const glm::vec3 throughFuzz = regionMean(renderPass(fuzzy, black, base, *accel, pool, true).beauty, 2, 6, 6, 10);
-    PT_EXPECT(ctx, glm::all(glm::lessThan(throughFuzz, open)) && glm::all(glm::greaterThan(throughFuzz, glm::vec3(0.0F))) &&
-                       std::abs((throughFuzz.x / open.x) - (throughFuzz.z / open.z)) <= 1e-6F,
+    PT_EXPECT(ctx, fuzzDims && std::abs(fuzzTint.mean()) <= t * fuzzTint.standardError(),
               "a white fuzz must dim emission by one untinted factor, 1 - F E_fuzz");
     for (const auto& [name, env] : {std::pair{"black", &black}, std::pair{"uniform L0=1", &uniform}}) {
-        const glm::vec3 mean =
-            regionMean(renderPass(scene, *env, base, *accel, pool, true).beauty, 2, 6, 6, 10);
-        const float maxError = std::max({std::fabs(mean.x - expected.x), std::fabs(mean.y - expected.y),
-                                         std::fabs(mean.z - expected.z)});
+        const std::array<tools::stats::Welford, 3> read = replicatedChannels(ctx.subSeed(name), [&](std::uint32_t scramble) {
+            return glm::vec3(blockAt(scene, *env, scramble));
+        });
+        bool within = true;
+        for (std::size_t c = 0; c < 3; ++c) {
+            within = within && std::abs(read[c].mean() - expected[c]) <= t * read[c].standardError();
+        }
         char detail[288];
         std::snprintf(detail, sizeof(detail),
-                      "%s environment: emitter read (%.7f, %.7f, %.7f), expected luminance x colour (%.7f, %.7f, %.7f), "
-                      "max error %.3e vs %.3e -- lighting reached a surface with no BSDF",
-                      name, mean.x, mean.y, mean.z, expected.x, expected.y, expected.z, maxError, tolerance);
+                      "%s environment: emitter read (%.5f, %.5f, %.5f), expected luminance x colour (%.5f, %.5f, %.5f) "
+                      "-- lighting reached a surface with no BSDF",
+                      name, read[0].mean(), read[1].mean(), read[2].mean(), expected.x, expected.y, expected.z);
         std::cout << "  " << detail << '\n';
-        PT_EXPECT(ctx, maxError <= tolerance, detail);
+        PT_EXPECT(ctx, within, detail);
     }
 }
 
@@ -1224,8 +1257,8 @@ PT_CHECK(emission_reaches_indirect, Slow, Statistical) {
         const glm::vec3 b = regionMean(renderPass(open, env, settings, *openAccel, pool, true,
                                                   seed + tools::stats::kReplicates).beauty,
                                        0, 0, kImageSize, kImageSize);
-        enclosedMean.add(std::max({a.x, a.y, a.z}));
-        openMean.add(std::max({b.x, b.y, b.z}));
+        enclosedMean.add(pathtracer::scene::luminance(Rgb(a)));
+        openMean.add(pathtracer::scene::luminance(Rgb(b)));
     }
     const double difference = enclosedMean.mean() - openMean.mean();
     ctx.plan(1);
@@ -1296,7 +1329,7 @@ PT_CHECK(quad_light_placement, Fast, Exact) {
         glm::vec3 expectedNormal;
     };
     const auto light = [](glm::vec3 position, glm::vec3 rotation, glm::vec2 size) {
-        return pathtracer::config::LightConfig{position, rotation, pathtracer::config::QuadShape{size}, Rgb(1.0F), pathtracer::config::Luminance{1.0F}};
+        return pathtracer::config::LightConfig{position, rotation, pathtracer::config::QuadShape{size}, pathtracer::scene::rgbEmission(Rgb(1.0F)), pathtracer::config::Luminance{1.0F}};
     };
     const glm::mat4 identity(1.0F);
     const glm::mat4 sceneMoved = glm::translate(identity, glm::vec3(1.0F, 2.0F, 3.0F)) *
@@ -1361,7 +1394,7 @@ PT_CHECK(lumens_resolve_over_the_placed_area, Fast, Exact) {
                                pathtracer::config::MeshShape>;
     const auto config = [](Shape shape, std::variant<pathtracer::config::Luminance, pathtracer::config::LuminousFlux> emission,
                            bool twoSided) {
-        return pathtracer::config::LightConfig{glm::vec3(0.5F, -0.25F, 2.0F), glm::vec3(-90.0F, 20.0F, 0.0F), shape, Rgb(1.0F), emission,
+        return pathtracer::config::LightConfig{glm::vec3(0.5F, -0.25F, 2.0F), glm::vec3(-90.0F, 20.0F, 0.0F), shape, pathtracer::scene::rgbEmission(Rgb(1.0F)), emission,
                                                twoSided};
     };
     struct Row {
@@ -1381,15 +1414,15 @@ PT_CHECK(lumens_resolve_over_the_placed_area, Fast, Exact) {
     ctx.plan(static_cast<int>(rows.size()) + 2);
     for (const Row& row : rows) {
         const std::optional<std::vector<pathtracer::scene::AreaLight>> placed = pathtracer::scene::buildLights({row.light}, sceneMoved, "");
-        const Rgb radiance = placed ? std::visit([](const auto& light) { return light.radiance; }, placed->front()) : Rgb(0.0F);
+        const float luminance = placed ? std::visit([](const auto& light) { return light.radiance.luminance(); }, placed->front()) : 0.0F;
         const double expected = kLumens / (std::numbers::pi * row.area * row.sides);
-        PT_EXPECT(ctx, std::abs(radiance.r - expected) <= kTolerance * expected && radiance.r == radiance.g && radiance.g == radiance.b,
-                  std::string(row.name) + ": " + std::to_string(radiance.r) + " cd/m^2 from 800 lm, expected " + std::to_string(expected));
+        PT_EXPECT(ctx, std::abs(luminance - expected) <= kTolerance * expected,
+                  std::string(row.name) + ": " + std::to_string(luminance) + " cd/m^2 from 800 lm, expected " + std::to_string(expected));
     }
     // A mesh's area is MeshLight's own sum: two triangles tiling a 2 x 3 rectangle.
     const std::vector<Triangle> rectangle{{glm::vec3(0.0F), glm::vec3(2.0F, 0.0F, 0.0F), glm::vec3(2.0F, 3.0F, 0.0F)},
                                           {glm::vec3(0.0F), glm::vec3(2.0F, 3.0F, 0.0F), glm::vec3(0.0F, 3.0F, 0.0F)}};
-    const pathtracer::scene::MeshLight mesh(rectangle, Rgb(1.0F), false);
+    const pathtracer::scene::MeshLight mesh(rectangle, tools::fixtures::greyEmission(1.0F), false);
     const float meshLuminance = pathtracer::scene::emittedLuminance(
         config(pathtracer::config::MeshShape{"m.gltf"}, pathtracer::config::LuminousFlux{kLumens}, false), mesh);
     const double meshExpected = kLumens / (std::numbers::pi * 6.0);
@@ -1398,8 +1431,8 @@ PT_CHECK(lumens_resolve_over_the_placed_area, Fast, Exact) {
     // A luminance passes through exactly, whatever the area.
     const std::optional<std::vector<pathtracer::scene::AreaLight>> direct = pathtracer::scene::buildLights(
         {config(pathtracer::config::QuadShape{{2.0F, 0.5F}}, pathtracer::config::Luminance{5.0F}, true)}, sceneMoved, "");
-    PT_EXPECT(ctx, direct && std::get<pathtracer::scene::QuadLight>(direct->front()).radiance == Rgb(5.0F),
-              "a 5 cd/m^2 light did not emit exactly 5 cd/m^2");
+    PT_EXPECT(ctx, direct && std::abs(std::get<pathtracer::scene::QuadLight>(direct->front()).radiance.luminance() - 5.0F) <= kTolerance * 5.0F,
+              "a 5 cd/m^2 light did not emit 5 cd/m^2");
 }
 
 // Disk and sphere centre on sceneTransform * position with the quad's frame: the disk emits along local -Z, its tangents +X and -Y.
@@ -1409,8 +1442,8 @@ PT_CHECK(disk_and_sphere_light_placement, Fast, Exact) {
     const glm::vec3 position(0.25F, -0.5F, 0.75F);
     const glm::vec3 rotation(-90.0F, 30.0F, 0.0F);
     const std::vector<pathtracer::config::LightConfig> configs = {
-        {position, rotation, pathtracer::config::DiskShape{0.4F}, Rgb(1.0F), pathtracer::config::Luminance{2.0F}, true},
-        {position, rotation, pathtracer::config::SphereShape{0.3F}, Rgb(1.0F), pathtracer::config::Luminance{2.0F}},
+        {position, rotation, pathtracer::config::DiskShape{0.4F}, pathtracer::scene::rgbEmission(Rgb(1.0F)), pathtracer::config::Luminance{2.0F}, true},
+        {position, rotation, pathtracer::config::SphereShape{0.3F}, pathtracer::scene::rgbEmission(Rgb(1.0F)), pathtracer::config::Luminance{2.0F}},
     };
     const std::optional<std::vector<pathtracer::scene::AreaLight>> lights = pathtracer::scene::buildLights(configs, sceneMoved, "");
     const glm::mat4 lightToWorld = sceneMoved * glm::translate(glm::mat4(1.0F), position) * glm::mat4(pathtracer::scene::rotationXyz(rotation));
@@ -1421,9 +1454,10 @@ PT_CHECK(disk_and_sphere_light_placement, Fast, Exact) {
     ctx.plan(2);
     const auto* disk = lights ? std::get_if<pathtracer::scene::DiskLight>(&(*lights)[0]) : nullptr;
     const auto* sphere = lights ? std::get_if<pathtracer::scene::SphereLight>(&(*lights)[1]) : nullptr;
-    PT_EXPECT(ctx, disk && disk->centre == centre && disk->frame == frame && disk->radius == 0.4F && disk->twoSided && disk->radiance == Rgb(2.0F),
+    PT_EXPECT(ctx, disk && disk->centre == centre && disk->frame == frame && disk->radius == 0.4F && disk->twoSided &&
+                       std::abs(disk->radiance.luminance() - 2.0F) <= 1e-5F * 2.0F,
               "the disk is not centred on its placed origin with frame (+X, -Y, -Z), its radius, side and radiance authored");
-    PT_EXPECT(ctx, sphere && sphere->centre == centre && sphere->radius == 0.3F && sphere->radiance == Rgb(2.0F),
+    PT_EXPECT(ctx, sphere && sphere->centre == centre && sphere->radius == 0.3F && std::abs(sphere->radiance.luminance() - 2.0F) <= 1e-5F * 2.0F,
               "the sphere is not centred on its placed origin with its authored radius and radiance");
 }
 
@@ -1931,7 +1965,7 @@ std::pair<TestScene, pathtracer::scene::QuadLight> makeGlassStage(float scale, s
     }
     // Above and behind the sphere, facing down, out of frame: refracted paths' exit vertices see it across the glass, NEE's far side.
     const pathtracer::scene::QuadLight light{glm::vec3(-1.5F, 2.5F, -3.0F) * scale, glm::vec3(3.0F, 0.0F, 0.0F) * scale,
-                                              glm::vec3(0.0F, 0.0F, 2.0F) * scale, Rgb(4.0F), false};
+                                              glm::vec3(0.0F, 0.0F, 2.0F) * scale, tools::fixtures::greyEmission(4.0F), false};
     appendQuadEmitter(scene, light, /*quadIndex=*/0, instanceLightIndex);
     return {scene, light};
 }
@@ -1992,12 +2026,13 @@ PT_CHECK(rough_transmission_tint, Slow, Exact) {
     constexpr int kBounces = 4;
     // Numerical, not physical: the paths are identical, so the only slack is fl(t*x) summed vs fl(t * sum(x)); measured worst 1.37e-06.
     constexpr float kUlpBand = 1e-5F;
-    const glm::vec3 tint(0.5F, 0.25F, 0.75F);
+    // Grey, so its upsampling is exactly flat and paired renders share every path and wavelength: linear in the tint to the ulp.
+    const glm::vec3 tint(0.5F);
     // Both far-hemisphere strategies at their split's ends: msTransmit takes 2.6e-5 of the selection mass at roughness 0.15, 0.0263 at 0.6.
     const std::array<float, 2> roughnesses = {0.15F, 0.6F};
     // Behind the interface, emitting face pointing back at it, so the only way to the camera is through; the quad hides it from the camera.
     const pathtracer::scene::QuadLight light{glm::vec3(-0.5F, -0.5F, -1.5F), glm::vec3(1.0F, 0.0F, 0.0F),
-                                          glm::vec3(0.0F, 1.0F, 0.0F), Rgb(3.0F)};
+                                          glm::vec3(0.0F, 1.0F, 0.0F), tools::fixtures::greyEmission(3.0F)};
     const std::vector<pathtracer::scene::AreaLight> quads{light};
 
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
@@ -2106,7 +2141,7 @@ TestScene makeLambertianFloor() { return withSurface(makeQuadScene(/*roughness=*
 // A one-sided quad light facing -Z at the receiver, offset in x so its non-emitting back face stays out of the camera's view cone.
 pathtracer::scene::QuadLight makeOverheadLight(bool twoSided = false) {
     return pathtracer::scene::QuadLight{glm::vec3(0.5F, -0.5F, 1.5F), glm::vec3(0.0F, 1.0F, 0.0F),
-                                     glm::vec3(1.0F, 0.0F, 0.0F), Rgb(3.0F), twoSided};
+                                     glm::vec3(1.0F, 0.0F, 0.0F), tools::fixtures::greyEmission(3.0F), twoSided};
 }
 
 // A wall at z = 1 sized to makeOverheadLight's projected footprint, not kQuadExtent, which would swallow the camera sightline.
@@ -2165,11 +2200,11 @@ PT_CHECK(quad_light_irradiance_and_occlusion, Slow, Statistical) {
         {"close, off to one side, unit quad", makeOverheadLight()},
         {"off-axis, unit quad",
          pathtracer::scene::QuadLight{glm::vec3(0.3F, 0.2F, 3.0F), glm::vec3(0.0F, 0.8F, 0.0F),
-                                   glm::vec3(0.8F, 0.0F, 0.0F), Rgb(5.0F), false}},
+                                   glm::vec3(0.8F, 0.0F, 0.0F), tools::fixtures::greyEmission(5.0F), false}},
         // Offset in x for the same camera-sightline reason, far enough that its near edge (x=0.5) clears the view cone at this depth.
         {"large, grazing", pathtracer::scene::QuadLight{glm::vec3(0.5F, -3.0F, 1.2F),
                                                       glm::vec3(0.0F, 6.0F, 0.0F),
-                                                      glm::vec3(6.0F, 0.0F, 0.0F), Rgb(2.0F), false}},
+                                                      glm::vec3(6.0F, 0.0F, 0.0F), tools::fixtures::greyEmission(2.0F), false}},
     }};
     // Each lit row against Lambert's polygon form factor; the back face and the occluded light are exactly 0, no sample reaching light.
     ctx.plan(static_cast<int>(cases.size()) + 2);
@@ -2188,7 +2223,7 @@ PT_CHECK(quad_light_irradiance_and_occlusion, Slow, Statistical) {
                                                testCase.light.origin + testCase.light.edge0 + testCase.light.edge1,
                                                testCase.light.origin + testCase.light.edge1};
         const double reference =
-            lambertPolygonIrradiance(corners, glm::vec3(0.0F), glm::vec3(0.0F, 0.0F, 1.0F), testCase.light.radiance.r) / std::numbers::pi;
+            lambertPolygonIrradiance(corners, glm::vec3(0.0F), glm::vec3(0.0F, 0.0F, 1.0F), testCase.light.radiance.luminance()) / std::numbers::pi;
         const tools::stats::Welford lo =
             renderLitCentre(scene, instanceLightIndex, {testCase.light}, makeSettings(0, 999), *accel, pool, ctx.subSeed(testCase.name));
         char detail[192];
@@ -2200,7 +2235,7 @@ PT_CHECK(quad_light_irradiance_and_occlusion, Slow, Statistical) {
 
     // The same position with edge0/edge1 swapped, so only radianceToward's front/back-face test stands between this and nonzero.
     const pathtracer::scene::QuadLight backFacing{glm::vec3(0.5F, -0.5F, 1.5F), glm::vec3(1.0F, 0.0F, 0.0F), glm::vec3(0.0F, 1.0F, 0.0F),
-                                                  Rgb(3.0F), false};
+                                                  tools::fixtures::greyEmission(3.0F), false};
     // The first case's light plus a wall over its footprint: an opaque blocker must stop NEE, kShadowDistanceEpsilon's back-off included.
     const std::array<std::tuple<const char*, pathtracer::scene::QuadLight, bool>, 2> dark{{
         {"one-sided light facing away", backFacing, false},
@@ -2232,7 +2267,7 @@ PT_CHECK(presence_and_window_transmission, Slow, Statistical) {
     const pathtracer::scene::QuadLight light = makeOverheadLight();
     const std::array<glm::vec3, 4> corners{light.origin, light.origin + light.edge0, light.origin + light.edge0 + light.edge1,
                                            light.origin + light.edge1};
-    const double open = lambertPolygonIrradiance(corners, glm::vec3(0.0F), glm::vec3(0.0F, 0.0F, 1.0F), light.radiance.r) / std::numbers::pi;
+    const double open = lambertPolygonIrradiance(corners, glm::vec3(0.0F), glm::vec3(0.0F, 0.0F, 1.0F), light.radiance.luminance()) / std::numbers::pi;
     Material window = makeLambertianFloor().instances[0].material;
     window.geometryThinWalled = true;
     window.transmissionWeight = 1.0F;
@@ -2254,8 +2289,8 @@ PT_CHECK(presence_and_window_transmission, Slow, Statistical) {
                 const double r = glm::length(point);
                 const double mu = point.z / r;
                 const glm::vec3 wo(static_cast<float>(std::sqrt(1.0 - (mu * mu))), 0.0F, static_cast<float>(mu));
-                const double through = pathtracer::scene::makeBsdfClosure(sheet, wo).sheet.transmit.r;
-                irradiance += light.radiance.r * through * mu * mu / (r * r);
+                const double through = tools::fixtures::closureOf(sheet, wo).sheet.transmit[0];
+                irradiance += light.radiance.luminance() * through * mu * mu / (r * r);
             }
         }
         return irradiance * area / (static_cast<double>(nodes) * nodes) / std::numbers::pi;
@@ -2408,18 +2443,22 @@ PT_CHECK(folded_shading_normal_is_lit, Slow, Statistical) {
 PT_CHECK(emission_sidedness, Fast, Exact) {
     constexpr int kEnvWidth = 64;
     constexpr int kEnvHeight = 32;
-    TestScene scene = makeTwoInstanceScene(1.0F);
-    Material& emitter = scene.instances[0].material;
+    TestScene facing = makeTwoInstanceScene(1.0F);
+    Material& emitter = facing.instances[0].material;
     emitter.baseWeight = 0.0F;
     emitter.specularWeight = 0.0F;
     emitter.emissionLuminance = 2.0F;
+    emitter.geometryThinWalled = true;
     // Instance 0 turned away from the camera: its geometric normal is -Z, its interpolated normals untouched.
+    TestScene scene = facing;
+    scene.instances[0].material.geometryThinWalled = false;
     for (std::size_t t = 0; t < 2; ++t) {
         std::swap(scene.shadingTriangles[t].v1, scene.shadingTriangles[t].v2);
         std::swap(scene.worldTriangles[t].v1, scene.worldTriangles[t].v2);
     }
     std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
-    if (!accel.has_value()) {
+    std::optional<EmbreeAccel> facingAccel = EmbreeAccel::build(facing.worldTriangles);
+    if (!accel.has_value() || !facingAccel.has_value()) {
         finish(ctx, false, "failed to build the Embree two-instance scene");
         return;
     }
@@ -2432,10 +2471,12 @@ PT_CHECK(emission_sidedness, Fast, Exact) {
     thin.instances[0].material.geometryThinWalled = true;
     const glm::vec3 bulk = regionMean(renderPass(scene, black, settings, *accel, pool, true).beauty, 2, 6, 6, 10);
     const glm::vec3 both = regionMean(renderPass(thin, black, settings, *accel, pool, true).beauty, 2, 6, 6, 10);
-    std::cout << "  back face: bulk " << bulk.x << ", thin-walled " << both.x << '\n';
+    // The same seed draws the same wavelengths, so the back face must read what the front face does, sample for sample.
+    const glm::vec3 front = regionMean(renderPass(facing, black, settings, *facingAccel, pool, true).beauty, 2, 6, 6, 10);
+    std::cout << "  back face: bulk " << bulk.x << ", thin-walled " << both.x << ", front face " << front.x << '\n';
     ctx.plan(2);
     PT_EXPECT(ctx, bulk == glm::vec3(0.0F), "a bulk emitter's back face must emit nothing");
-    PT_EXPECT(ctx, std::abs(both.x - 2.0F) <= 1e-5F, "a thin-walled emitter's back face must emit its luminance");
+    PT_EXPECT(ctx, both == front, "a thin-walled emitter's back face must emit what its front face does");
 }
 
 // `lights` added to `scene` by the library's own appendLightGeometry, so a check traces the surfaces, shapes and instances a scene does.
@@ -2456,7 +2497,7 @@ LitScene withLights(TestScene scene, const std::vector<pathtracer::scene::AreaLi
 // A disk of radius r about centre emitting along unit `normal`, any tangent: a disk's emission and hit are independent of its tangent.
 pathtracer::scene::DiskLight makeDiskLight(const glm::vec3& centre, const glm::vec3& normal, float radius, bool twoSided) {
     const glm::vec3 tangent = glm::normalize(glm::cross(std::abs(normal.x) < 0.9F ? glm::vec3(1.0F, 0.0F, 0.0F) : glm::vec3(0.0F, 1.0F, 0.0F), normal));
-    return pathtracer::scene::DiskLight{centre, glm::mat3(tangent, glm::cross(normal, tangent), normal), radius, Rgb(3.0F), twoSided};
+    return pathtracer::scene::DiskLight{centre, glm::mat3(tangent, glm::cross(normal, tangent), normal), radius, tools::fixtures::greyEmission(3.0F), twoSided};
 }
 
 // Two triangles spanning [-h, h]^2 at height z facing `normalZ` (+1 or -1) along z, wound so cross(e1, e2) is that normal.
@@ -2466,11 +2507,11 @@ pathtracer::scene::MeshLight makeSquareMeshLight(float h, float z, float normalZ
     const glm::vec3 c(h, h, z);
     const glm::vec3 d(-h, h, z);
     std::vector<Triangle> faces = normalZ > 0.0F ? std::vector<Triangle>{{a, b, c}, {a, c, d}} : std::vector<Triangle>{{a, c, b}, {a, d, c}};
-    return pathtracer::scene::MeshLight(std::move(faces), Rgb(3.0F), twoSided);
+    return pathtracer::scene::MeshLight(std::move(faces), tools::fixtures::greyEmission(3.0F), twoSided);
 }
 
 // A camera ray reaching a light returns its Le whole, delta-sampled so MIS-free; a one-sided back face returns 0, a two-sided one Le.
-PT_CHECK(area_lights_show_le_to_the_camera, Fast, Exact) {
+PT_CHECK(area_lights_show_le_to_the_camera, Fast, Statistical) {
     const glm::vec3 towardCamera(0.0F, 0.0F, 1.0F);
     struct Row {
         const char* name;
@@ -2481,7 +2522,7 @@ PT_CHECK(area_lights_show_le_to_the_camera, Fast, Exact) {
         {"disk front", makeDiskLight(glm::vec3(0.0F, 0.0F, 2.0F), towardCamera, 0.5F, false), 3.0F},
         {"disk back", makeDiskLight(glm::vec3(0.0F, 0.0F, 2.0F), -towardCamera, 0.5F, false), 0.0F},
         {"disk back, two-sided", makeDiskLight(glm::vec3(0.0F, 0.0F, 2.0F), -towardCamera, 0.5F, true), 3.0F},
-        {"sphere", pathtracer::scene::SphereLight{glm::vec3(0.0F, 0.0F, 2.0F), glm::mat3(1.0F), 0.5F, Rgb(3.0F)}, 3.0F},
+        {"sphere", pathtracer::scene::SphereLight{glm::vec3(0.0F, 0.0F, 2.0F), glm::mat3(1.0F), 0.5F, tools::fixtures::greyEmission(3.0F)}, 3.0F},
         {"mesh front", makeSquareMeshLight(0.5F, 2.0F, 1.0F, false), 3.0F},
         {"mesh back", makeSquareMeshLight(0.5F, 2.0F, -1.0F, false), 0.0F},
         {"mesh back, two-sided", makeSquareMeshLight(0.5F, 2.0F, -1.0F, true), 3.0F},
@@ -2490,18 +2531,36 @@ PT_CHECK(area_lights_show_le_to_the_camera, Fast, Exact) {
     PathTraceSettings settings = makeSettings(0, 999);
     settings.samplesPerPass = 4;
     ctx.plan(static_cast<int>(rows.size()));
+    // One seed draws the same wavelengths in every row, so every emitting face must read the first one's block exactly.
+    std::optional<glm::vec3> reference;
     for (const Row& row : rows) {
         const std::vector<pathtracer::scene::AreaLight> lights{row.light};
         const LitScene lit = withLights(TestScene{}, lights);
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(lit.scene.worldTriangles, lit.shapes);
-        const glm::vec3 seen = accel ? centreMean(renderPassWithLights(lit.scene, lit.instanceLightIndex, lights, nullptr, settings, *accel, pool,
-                                                                       /*showSky=*/false)
-                                                      .beauty)
-                                     : glm::vec3(-1.0F);
-        // A mean of identical samples rounds at most once per accumulation: a few float ulps of Le, 0 exactly where nothing emits.
-        const float bound = 8.0F * std::numeric_limits<float>::epsilon() * row.expected;
-        PT_EXPECT(ctx, std::abs(seen.x - row.expected) <= bound,
-                  std::string(row.name) + ": camera saw " + std::to_string(seen.x) + ", expected " + std::to_string(row.expected));
+        if (!accel) {
+            PT_EXPECT(ctx, false, std::string(row.name) + ": failed to build the light");
+            continue;
+        }
+        const pathtracer::gfx::HdrImage beauty =
+            renderPassWithLights(lit.scene, lit.instanceLightIndex, lights, nullptr, settings, *accel, pool, /*showSky=*/false).beauty;
+        const glm::vec3 seen = centreMean(beauty);
+        if (row.expected == 0.0F) {
+            PT_EXPECT(ctx, seen == glm::vec3(0.0F), std::string(row.name) + ": camera saw " + std::to_string(seen.x) + " from a dark face");
+        } else if (!reference) {
+            reference = seen;
+            // The first emitting face's luminance against its nits, banded by its own texels' spread.
+            tools::stats::Welford texels;
+            for (int y = (kImageSize / 2) - 2; y < (kImageSize / 2) + 2; ++y) {
+                for (int x = (kImageSize / 2) - 2; x < (kImageSize / 2) + 2; ++x) {
+                    texels.add(pathtracer::scene::luminance(Rgb(beauty.rgb((static_cast<std::size_t>(y) * kImageSize) + static_cast<std::size_t>(x)))));
+                }
+            }
+            const double half = tools::stats::studentTTwoSided(ctx.alpha(), static_cast<double>(texels.count() - 1)) * texels.standardError();
+            PT_EXPECT(ctx, std::abs(texels.mean() - row.expected) <= half,
+                      std::string(row.name) + ": camera saw luminance " + std::to_string(texels.mean()) + " +/- " + std::to_string(half));
+        } else {
+            PT_EXPECT(ctx, seen == *reference, std::string(row.name) + ": camera saw a different radiance from the same emitter");
+        }
     }
 }
 
@@ -2544,14 +2603,14 @@ PT_CHECK(area_light_irradiance, Slow, Statistical) {
     const auto fromLumens = [&](std::variant<pathtracer::config::QuadShape, pathtracer::config::DiskShape, pathtracer::config::SphereShape,
                                              pathtracer::config::MeshShape> shape, bool twoSided) {
         const std::vector<pathtracer::config::LightConfig> config{
-            {centre, glm::vec3(0.0F), shape, Rgb(1.0F), pathtracer::config::LuminousFlux{kLumens}, twoSided}};
+            {centre, glm::vec3(0.0F), shape, pathtracer::scene::rgbEmission(Rgb(1.0F)), pathtracer::config::LuminousFlux{kLumens}, twoSided}};
         return pathtracer::scene::buildLights(config, glm::mat4(1.0F), "").value().front();
     };
     const float diskLumensLuminance = kLumens / (kPi * kPi * r2);
     const std::vector<Row> rows = {
         {"disk", makeDiskLight(centre, -floorNormal, kRadius, false), kRadiance * diskFactor},
-        {"sphere", pathtracer::scene::SphereLight{centre, glm::mat3(1.0F), kRadius, Rgb(kRadiance)}, kRadiance * sphereFactor},
-        {"mesh", pathtracer::scene::MeshLight(faces, Rgb(kRadiance), false), meshIrradiance / kPi},
+        {"sphere", pathtracer::scene::SphereLight{centre, glm::mat3(1.0F), kRadius, tools::fixtures::greyEmission(kRadiance)}, kRadiance * sphereFactor},
+        {"mesh", pathtracer::scene::MeshLight(faces, tools::fixtures::greyEmission(kRadiance), false), meshIrradiance / kPi},
         {"disk at 100 lm", fromLumens(pathtracer::config::DiskShape{kRadius}, false), diskLumensLuminance * diskFactor},
         {"two-sided disk at 100 lm", fromLumens(pathtracer::config::DiskShape{kRadius}, true), 0.5F * diskLumensLuminance * diskFactor},
         {"sphere at 100 lm", fromLumens(pathtracer::config::SphereShape{kRadius}, false), kLumens / (4.0F * kPi * kPi * r2) * sphereFactor},
@@ -2618,7 +2677,7 @@ PT_CHECK(quad_light_visibility_on_curved_receiver, Slow, Exact) {
 
     // At z=3, offset in x: clear of the view cone (half-width 0.18 there), yet every visible fragment keeps geoCos > 0.44 -- no terminator.
     const pathtracer::scene::QuadLight light{glm::vec3(0.5F, -0.5F, 3.0F), glm::vec3(0.0F, 1.0F, 0.0F),
-                                              glm::vec3(1.0F, 0.0F, 0.0F), Rgb(3.0F), false};
+                                              glm::vec3(1.0F, 0.0F, 0.0F), tools::fixtures::greyEmission(3.0F), false};
 
     // Chiang's origin offset is a tangent-plane distance, ~e^2/2R, so refining the mesh shrinks it: both rows must read 0 regardless.
     struct Row {
@@ -2662,16 +2721,16 @@ PT_CHECK(quad_light_visibility_on_curved_receiver, Slow, Exact) {
 }
 
 // Shadow is 1 - direct / unoccluded direct luminance: 0 where no direct light can arrive, never the fully-shadowed 1.
-PT_CHECK(shadow_matte, Slow, Exact) {
-    // Numerical, not physical: the three windows draw identical paths, so only float summation order separates the two sides.
-    constexpr float kUlpBand = 1e-5F;
+PT_CHECK(shadow_matte, Slow, Statistical) {
+    // One verdict over every row, planned first: the tinted window's band reads the harness's alpha.
+    ctx.plan(1);
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     const pathtracer::scene::QuadLight overhead = makeOverheadLight();
     // makeOverheadLight's edges swapped and mirrored below the floor: it faces the floor's back, across an opaque surface.
     const pathtracer::scene::QuadLight below{glm::vec3(0.5F, -0.5F, -1.5F), glm::vec3(1.0F, 0.0F, 0.0F),
-                                             glm::vec3(0.0F, 1.0F, 0.0F), Rgb(3.0F), false};
+                                             glm::vec3(0.0F, 1.0F, 0.0F), tools::fixtures::greyEmission(3.0F), false};
     const Material opaque = makeLambertianFloor().instances[0].material;
-    // A smooth thin window tinted `tint`: its pass-through is nonlinear in the tint, but each channel depends on its own tint alone.
+    // A smooth thin window tinted `tint`: its pass-through is nonlinear in the tint, each lane depending on its own tint alone.
     const auto window = [&opaque](const glm::vec3& tint) {
         Material material = opaque;
         material.geometryThinWalled = true;
@@ -2684,13 +2743,14 @@ PT_CHECK(shadow_matte, Slow, Exact) {
     Material halfPresent = opaque;
     halfPresent.geometryOpacity = 0.5F;  // the shadow ray keeps (1 - alpha) + alpha * 0 = 0.5 exactly
 
-    // The centre block's Shadow and its unoccluded direct luminance, from one render of a floor under `quads` and an optional wall.
+    // The centre block's Shadow, unoccluded direct luminance and Beauty luminance, one render of a floor under `quads` and a wall.
     struct Reading {
         float shadow;
         float unoccluded;
+        float beauty;
     };
-    const auto read = [&](const TestScene& floor, const std::vector<pathtracer::scene::QuadLight>& quads,
-                          const Material* wall) -> std::optional<Reading> {
+    const auto read = [&](const TestScene& floor, const std::vector<pathtracer::scene::QuadLight>& quads, const Material* wall,
+                          std::uint32_t scramble = 7U) -> std::optional<Reading> {
         TestScene scene = floor;
         std::vector<int> instanceLightIndex(scene.instances.size(), -1);
         for (std::size_t i = 0; i < quads.size(); ++i) {
@@ -2706,12 +2766,12 @@ PT_CHECK(shadow_matte, Slow, Exact) {
         const pathtracer::scene::PathTraceResult result =
             renderPassWithLights(scene, instanceLightIndex, std::vector<pathtracer::scene::AreaLight>(quads.begin(), quads.end()),
                                  /*env=*/nullptr,
-                                 makeSettings(0, 999), *accel, pool, false);
+                                 makeSettings(0, 999), *accel, pool, false, scramble);
         pathtracer::debug::FilterInput input{result.beauty};
         input.shadowLost = &result.shadowLost;
         input.shadowUnoccluded = &result.shadowUnoccluded;
         const pathtracer::gfx::HdrImage shadow = pathtracer::debug::evaluateFilterAov(pathtracer::debug::AovId::Shadow, input, pool);
-        return Reading{centreMean(shadow).x, centreMean(result.shadowUnoccluded).x};
+        return Reading{centreMean(shadow).x, centreMean(result.shadowUnoccluded).x, pathtracer::scene::luminance(Rgb(centreMean(result.beauty)))};
     };
 
     const TestScene lambert = makeLambertianFloor();
@@ -2737,7 +2797,7 @@ PT_CHECK(shadow_matte, Slow, Exact) {
     for (const Row& row : rows) {
         const std::optional<Reading> reading = read(*row.floor, row.quads, row.wall);
         if (!reading.has_value()) {
-            finish(ctx, false, "failed to build the Embree shadow scene");
+            PT_EXPECT(ctx, false, "failed to build the Embree shadow scene");
             return;
         }
         std::cout << "  " << row.name << "   shadow " << reading->shadow << "   unoccluded " << reading->unoccluded << '\n';
@@ -2750,31 +2810,32 @@ PT_CHECK(shadow_matte, Slow, Exact) {
         }
     }
 
-    // Under a grey light the lit share 1 - Shadow of a (lo, hi, lo) window is the luminance-weighted mix of grey lo and grey hi windows.
-    constexpr float kLo = 0.1F;
-    constexpr float kHi = 0.9F;
-    const Material tinted = window(glm::vec3(kLo, kHi, kLo));
-    const Material greyLo = window(glm::vec3(kLo));
-    const Material greyHi = window(glm::vec3(kHi));
-    const std::optional<Reading> mixed = read(lambert, above, &tinted);
-    const std::optional<Reading> lo = read(lambert, above, &greyLo);
-    const std::optional<Reading> hi = read(lambert, above, &greyHi);
-    if (!mixed.has_value() || !lo.has_value() || !hi.has_value()) {
-        finish(ctx, false, "failed to build the Embree window scene");
-        return;
+    // A (lo, hi, lo) window's lit share, luminance-weighted, as Beauty's luminance ratio through and without it estimates independently.
+    const Material tinted = window(glm::vec3(0.1F, 0.9F, 0.1F));
+    tools::stats::Welford share;
+    tools::stats::Welford ratio;
+    const std::uint64_t seed = ctx.subSeed("tinted window");
+    for (int r = 0; r < tools::stats::kReplicates; ++r) {
+        const auto scramble = static_cast<std::uint32_t>(seed + (3 * static_cast<std::uint64_t>(r)));
+        const std::optional<Reading> matte = read(lambert, above, &tinted, scramble);
+        const std::optional<Reading> through = read(lambert, above, &tinted, scramble + 1);
+        const std::optional<Reading> open = read(lambert, above, nullptr, scramble + 1);
+        if (!matte || !through || !open) {
+            PT_EXPECT(ctx, false, "failed to build the Embree window scene");
+            return;
+        }
+        share.add(1.0 - matte->shadow);
+        // Paired at one scramble, so the ratio's spread is the window's alone.
+        ratio.add(through->beauty / open->beauty);
     }
-    const glm::vec3& weights = pathtracer::scene::cie::sceneLuminanceWeights();
-    const float expected = ((weights.r + weights.b) * (1.0F - lo->shadow)) + (weights.g * (1.0F - hi->shadow));
-    // What a per-sample channel mean of visibility would read instead: 2/3 of the low window's share and 1/3 of the high one's.
-    const float channelMean = ((2.0F * (1.0F - lo->shadow)) + (1.0F - hi->shadow)) / 3.0F;
-    std::cout << "  tinted window   lit share " << 1.0F - mixed->shadow << "   luminance-weighted " << expected << "   channel mean "
-              << channelMean << '\n';
-    if (std::fabs((1.0F - mixed->shadow) - expected) > kUlpBand) {
-        std::cerr << "integrator_validate: FAILED shadow matte, tinted window -- lit share " << 1.0F - mixed->shadow
-                  << ", luminance-weighted greys " << expected << '\n';
+    const double difference = share.mean() - ratio.mean();
+    std::cout << "  tinted window   lit share " << share.mean() << "   Beauty through over open " << ratio.mean() << '\n';
+    if (!tools::stats::differenceBand(share, ratio, ctx.alpha()).contains(difference)) {
+        std::cerr << "integrator_validate: FAILED shadow matte, tinted window -- lit share " << share.mean() << ", Beauty's luminance ratio "
+                  << ratio.mean() << '\n';
         ok = false;
     }
-    finish(ctx, ok, "shadow_matte failed; see the rows above");
+    PT_EXPECT(ctx, ok, "shadow_matte failed; see the rows above");
 }
 
 // A blocker hiding a light's near part: the penumbra reads 1 - E(visible part) / E(whole light) by the Lambert polygon form factor.
@@ -2791,7 +2852,7 @@ PT_CHECK(shadow_matte_penumbra, Slow, Statistical) {
     // A small far light and a large near one: the ratio holds whatever solid angle the light subtends.
     const std::array<Row, 2> rows{{
         {"small far light", makeOverheadLight(), 1.45F, 0.4F, 1.0F},
-        {"large near light", {glm::vec3(0.4F, -1.5F, 0.5F), glm::vec3(0.0F, 3.0F, 0.0F), glm::vec3(3.0F, 0.0F, 0.0F), Rgb(3.0F)},
+        {"large near light", {glm::vec3(0.4F, -1.5F, 0.5F), glm::vec3(0.0F, 3.0F, 0.0F), glm::vec3(3.0F, 0.0F, 0.0F), tools::fixtures::greyEmission(3.0F)},
          0.45F, 0.35F, 1.4F},
     }};
     const glm::vec3 normal(0.0F, 0.0F, 1.0F);
@@ -2872,8 +2933,8 @@ PT_CHECK(shadow_matte_penumbra, Slow, Statistical) {
                                              light.origin + light.edge1};
         const std::array<glm::vec3, 4> visible{glm::vec3(visibleFrom, nearY, lightZ), glm::vec3(visibleFrom, farY, lightZ),
                                                glm::vec3(far, farY, lightZ), glm::vec3(far, nearY, lightZ)};
-        const double expected = 1.0 - (lambertPolygonIrradiance(visible, glm::vec3(0.0F), normal, light.radiance.r) /
-                                       lambertPolygonIrradiance(whole, glm::vec3(0.0F), normal, light.radiance.r));
+        const double expected = 1.0 - (lambertPolygonIrradiance(visible, glm::vec3(0.0F), normal, light.radiance.luminance()) /
+                                       lambertPolygonIrradiance(whole, glm::vec3(0.0F), normal, light.radiance.luminance()));
         char detail[192];
         std::snprintf(detail, sizeof(detail), "%s: Shadow %.5f +/- %.1e vs 1 - E(visible) / E(whole) %.5f", row.name, shadow, half, expected);
         std::cout << "  " << detail << '\n';
@@ -2891,7 +2952,7 @@ PT_CHECK(quad_light_inverse_square, Slow, Statistical) {
     const auto makeLight = [](float centreX, float z, float side, float radiance) {
         return pathtracer::scene::QuadLight{glm::vec3(centreX - (side * 0.5F), -side * 0.5F, z),
                                          glm::vec3(0.0F, side, 0.0F), glm::vec3(side, 0.0F, 0.0F),
-                                         Rgb(radiance), false};
+                                         tools::fixtures::greyEmission(radiance), false};
     };
     struct Row {
         const char* name;
@@ -2926,13 +2987,13 @@ PT_CHECK(quad_light_inverse_square, Slow, Statistical) {
         const std::array<glm::vec3, 4> corners{row.light.origin, row.light.origin + row.light.edge0,
                                                row.light.origin + row.light.edge0 + row.light.edge1, row.light.origin + row.light.edge1};
         const glm::vec3 receiverNormal(0.0F, 0.0F, 1.0F);
-        const double exact = lambertPolygonIrradiance(corners, glm::vec3(0.0F), receiverNormal, row.light.radiance.r) / std::numbers::pi;
+        const double exact = lambertPolygonIrradiance(corners, glm::vec3(0.0F), receiverNormal, row.light.radiance.luminance()) / std::numbers::pi;
         // Point-source limit: E = L * A * cos(theta_r) * cos(theta_l) / d^2, evaluated at the light's centre.
         const glm::vec3 centre = row.light.origin + (row.light.edge0 * 0.5F) + (row.light.edge1 * 0.5F);
         const float distance = glm::length(centre);
         const glm::vec3 toLight = centre / distance;
         const float area = glm::length(row.light.edge0) * glm::length(row.light.edge1);
-        const double point = row.light.radiance.r * area * glm::dot(toLight, receiverNormal) * glm::dot(-toLight, row.light.normal) /
+        const double point = row.light.radiance.luminance() * area * glm::dot(toLight, receiverNormal) * glm::dot(-toLight, row.light.normal) /
                              (distance * distance) / std::numbers::pi;
         char detail[192];
         std::snprintf(detail, sizeof(detail), "%s: d %.3f, rendered %.9f (SE %.1e), exact %.9f, point model %.6f", row.name,
@@ -3362,19 +3423,23 @@ PT_CHECK(primary_hits_filter_minified_textures, Fast, Exact) {
     settings.samplesPerPass = 16;
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     const pathtracer::scene::PathTraceResult traced = renderPass(scene, env, settings, *accel, pool, /*showSky=*/false);
+    // The checker's mean as a constant, at the same seed and so wavelengths: what a filtered lookup must render, sample for sample.
+    TestScene grey = scene;
+    grey.instances[0].material.emissionColor = Rgb(0.5F);
+    const pathtracer::scene::PathTraceResult flat = renderPass(grey, env, settings, *accel, pool, /*showSky=*/false);
     pathtracer::scene::GBuffer gbuffer;
     pathtracer::scene::renderGBuffer(camera, camera, *accel, albedoScene.shadingTriangles, albedoScene.instances,
                                      pathtracer::scene::computeInstanceBounds(scene.shadingTriangles, 1), kImageSize, kImageSize, pool,
                                      gbuffer);
     // 16 texels per stratum select levels 3-4, every one exactly 0.5; the blend rounds a few ulp, the 16-sample mean adds one.
-    const float bound = 8.0F * std::numeric_limits<float>::epsilon() * 0.5F;
+    const float bound = 8.0F * std::numeric_limits<float>::epsilon();
     float worstBeauty = 0.0F;
     float worstAlbedo = 0.0F;
     int unfilteredRoughness = 0;
     for (std::size_t pixel = 0; pixel < static_cast<std::size_t>(kImageSize) * kImageSize; ++pixel) {
-        const glm::vec3 beauty = traced.beauty.rgb(pixel);
+        const glm::vec3 beauty = traced.beauty.rgb(pixel) / flat.beauty.rgb(pixel);
         const glm::vec3 albedo = gbuffer.albedo.rgb(pixel);
-        worstBeauty = std::max({worstBeauty, std::abs(beauty.r - 0.5F), std::abs(beauty.g - 0.5F), std::abs(beauty.b - 0.5F)});
+        worstBeauty = std::max({worstBeauty, std::abs(beauty.r - 1.0F), std::abs(beauty.g - 1.0F), std::abs(beauty.b - 1.0F)});
         worstAlbedo = std::max({worstAlbedo, std::abs(albedo.r - 0.5F), std::abs(albedo.g - 0.5F), std::abs(albedo.b - 0.5F)});
         // A point lookup near a texel centre reads within a sliver of 0 or 1; the footprint's mean is 0.5.
         unfilteredRoughness += std::abs(gbuffer.roughness.texels[pixel] - 0.5F) > 0.25F ? 1 : 0;
@@ -3382,12 +3447,12 @@ PT_CHECK(primary_hits_filter_minified_textures, Fast, Exact) {
     ctx.plan(3);
     char detail[160];
     // Point lookups of a 0/1 checker would leave 16 samples' mean about 1/8 from 0.5: these bounds hold only if bounce 0 filtered.
-    std::snprintf(detail, sizeof(detail), "Beauty is %.3g from the checker's mean 0.5, over %.3g", static_cast<double>(worstBeauty),
+    std::snprintf(detail, sizeof(detail), "Beauty is %.3g relative from a constant 0.5 emitter's, over %.3g", static_cast<double>(worstBeauty),
                   static_cast<double>(bound));
     PT_EXPECT(ctx, worstBeauty <= bound, detail);
     std::snprintf(detail, sizeof(detail), "Albedo is %.3g from the checker's mean 0.5, over %.3g", static_cast<double>(worstAlbedo),
-                  static_cast<double>(bound));
-    PT_EXPECT(ctx, worstAlbedo <= bound, detail);
+                  static_cast<double>(0.5F * bound));
+    PT_EXPECT(ctx, worstAlbedo <= 0.5F * bound, detail);
     std::snprintf(detail, sizeof(detail), "%d of %d pixels read specular_roughness as a single texel; a lobe-shaping input was filtered",
                   unfilteredRoughness, kImageSize * kImageSize);
     PT_EXPECT(ctx, unfilteredRoughness == kImageSize * kImageSize, detail);
@@ -3614,39 +3679,44 @@ bool blockEquals(const pathtracer::gfx::HdrImage& image, const glm::vec3& value,
     return true;
 }
 
-// Recursive summation's forward error bound (Higham 2002, eq. 4.4) on the plain mean of kSamplesPerPixel equal samples, each a few ulps.
-constexpr float kMeanOfEqualSamplesTolerance = static_cast<float>(kSamplesPerPixel) * 0x1p-23F;
-
-// A Lambertian plane is rough at the first vertex: cosine sampling makes f cos / pdf = rho per sample, and the normal is the plane's.
-PT_CHECK(denoise_features_of_a_lambertian_plane, Fast, Exact) {
+// A Lambertian plane is rough at the first vertex: f cos / pdf = rho(lambda) per lane, so the albedo lane converges to rho's projection.
+PT_CHECK(denoise_features_of_a_lambertian_plane, Slow, Statistical) {
     const glm::vec3 rho(0.8F, 0.5F, 0.2F);
     const TestScene scene = withSurface(makeQuadScene(1.0F), [&](Material& material) {
         indexMatched(material);
         material.baseColor = Rgb(rho);
     });
     std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
-    ctx.plan(2);
+    ctx.plan(4);
     if (!accel.has_value()) {
-        PT_EXPECT(ctx, false, "failed to build the plane");
-        PT_EXPECT(ctx, false, "failed to build the plane");
+        for (int i = 0; i < 4; ++i) {
+            PT_EXPECT(ctx, false, "failed to build the plane");
+        }
         return;
     }
     const EnvironmentMap env = makeUniformEnvironment();
-    const pathtracer::scene::PathTraceResult result = renderPass(scene, env, makeSettings(1, 999), *accel, sharedPool(ctx.threads()), true);
-    glm::vec3 worst(0.0F);
-    for (std::size_t texel = 0; texel < static_cast<std::size_t>(kImageSize) * kImageSize; ++texel) {
-        worst = glm::max(worst, glm::abs(result.denoiseAlbedo.rgb(texel) - rho) / rho);
+    const PathTraceSettings settings = perReplicate(makeSettings(1, 999));
+    bool normals = true;
+    const std::array<tools::stats::Welford, 3> albedo = replicatedChannels(ctx.subSeed("plane"), [&](std::uint32_t scramble) {
+        const pathtracer::scene::PathTraceResult result = renderPass(scene, env, settings, *accel, sharedPool(ctx.threads()), true, scramble);
+        normals = normals && blockEquals(result.denoiseNormal, glm::vec3(0.0F, 0.0F, 1.0F), 0, 0, kImageSize, kImageSize);
+        return regionMean(result.denoiseAlbedo, 0, 0, kImageSize, kImageSize);
+    });
+    // EON at zero diffuse roughness is Lambertian and cosine-sampled: each lane's weight is rho(lambda), its projection's mean exact.
+    const glm::dvec3 expected = tools::fixtures::expectedSceneRgb(
+        [&](const pathtracer::scene::SampledWavelengths& lambda) { return pathtracer::scene::reflectanceSpectrum(Rgb(rho), lambda); }, true);
+    const double t = tools::stats::studentTTwoSided(ctx.alpha(), tools::stats::kReplicates - 1);
+    for (std::size_t c = 0; c < 3; ++c) {
+        char detail[160];
+        std::snprintf(detail, sizeof(detail), "channel %zu: albedo lane %.5f vs rho's projection %.5f +/- %.2e", c, albedo[c].mean(), expected[c],
+                      t * albedo[c].standardError());
+        PT_EXPECT(ctx, std::abs(albedo[c].mean() - expected[c]) <= t * albedo[c].standardError(), detail);
     }
-    std::cout << "  albedo lane worst relative error " << worst.x << ", " << worst.y << ", " << worst.z << '\n';
-    // EON at zero diffuse roughness is Lambertian and cosine-sampled: each weight is rho to rounding, so only float error remains.
-    PT_EXPECT(ctx, glm::all(glm::lessThanEqual(worst, glm::vec3(kMeanOfEqualSamplesTolerance))),
-              "the albedo lane of a Lambertian plane is not its rho");
-    PT_EXPECT(ctx, blockEquals(result.denoiseNormal, glm::vec3(0.0F, 0.0F, 1.0F), 0, 0, kImageSize, kImageSize),
-              "the normal lane of a plane facing +z is not (0, 0, 1) in every texel");
+    PT_EXPECT(ctx, normals, "the normal lane of a plane facing +z is not (0, 0, 1) in every texel");
 }
 
 // A smooth mirror is followed to the wall it images: the albedo is the mirror's reflectance times the wall's rho, the normal the wall's.
-PT_CHECK(denoise_features_follow_a_mirror_to_the_wall, Fast, Exact) {
+PT_CHECK(denoise_features_follow_a_mirror_to_the_wall, Slow, Statistical) {
     constexpr float kCameraPitch = 70.0F;
     const glm::vec3 rho(0.3F, 0.5F, 0.7F);
     // F82 at F0 = 1 and a white specular_color is 1 at every angle, so specular_weight alone sets an angle-independent reflectance.
@@ -3670,29 +3740,34 @@ PT_CHECK(denoise_features_follow_a_mirror_to_the_wall, Fast, Exact) {
     const Camera camera(glm::vec3(0.0F, -5.0F * std::sin(pitch), 5.0F * std::cos(pitch)), glm::vec3(kCameraPitch, 0.0F, 0.0F),
                         Camera::FilmBack{36.0F, 24.0F}, kFocalLengthMm, 0.01F, 1000.0F, 2.8F, 1.0F / 125.0F, 100.0F);
     const EnvironmentMap env = makeUniformEnvironment();
-    const pathtracer::scene::PathTraceResult result =
-        renderPass(scene, env, makeSettings(2, 999), *accel, sharedPool(ctx.threads()), true, 7U, camera);
+    const int lo = (kImageSize / 2) - 2;
+    const int hi = (kImageSize / 2) + 2;
+    bool normals = true;
+    const std::array<tools::stats::Welford, 3> albedo = replicatedChannels(ctx.subSeed("mirror"), [&](std::uint32_t scramble) {
+        const pathtracer::scene::PathTraceResult result =
+            renderPass(scene, env, perReplicate(makeSettings(2, 999)), *accel, sharedPool(ctx.threads()), true, scramble, camera);
+        normals = normals && blockEquals(result.denoiseNormal, glm::vec3(0.0F, -1.0F, 0.0F), lo, lo, hi, hi);
+        return regionMean(result.denoiseAlbedo, lo, lo, hi, hi);
+    });
     // The mirror's weight from the closure the integrator draws, at the centre ray's wo: a delta, so one deterministic value.
     const OpenPbrInputs<Constant> inputs = resolveInputs(scene.instances[0].material, glm::vec2(0.5F), {}, Rgb(1.0F));
     pathtracer::scene::Sampler sampler(0, 0, 0, 1, 7U);
     const std::optional<pathtracer::scene::BsdfSample> mirror =
         tools::fixtures::sampleBsdf(inputs, glm::vec3(0.0F, -std::sin(pitch), std::cos(pitch)), sampler);
-    PT_EXPECT(ctx, mirror.has_value() && mirror->delta && mirror->throughputWeight == Rgb(0.5F),
+    PT_EXPECT(ctx, mirror.has_value() && mirror->delta && mirror->throughputWeight == pathtracer::scene::SampledSpectrum(0.5F),
               "the smooth metal at specular_weight 0.5 is not a 0.5 delta mirror");
-    const glm::vec3 expected = 0.5F * rho;
-    const int lo = (kImageSize / 2) - 2;
-    const int hi = (kImageSize / 2) + 2;
-    glm::vec3 worst(0.0F);
-    for (int y = lo; y < hi; ++y) {
-        for (int x = lo; x < hi; ++x) {
-            const std::size_t texel = (static_cast<std::size_t>(y) * kImageSize) + static_cast<std::size_t>(x);
-            worst = glm::max(worst, glm::abs(result.denoiseAlbedo.rgb(texel) - expected) / expected);
-        }
+    // The mirror's grey 0.5 times the wall's rho(lambda), whose projection is the albedo lane's exact mean.
+    const glm::dvec3 expected = tools::fixtures::expectedSceneRgb(
+        [&](const pathtracer::scene::SampledWavelengths& lambda) { return 0.5F * pathtracer::scene::reflectanceSpectrum(Rgb(rho), lambda); },
+        true);
+    const double t = tools::stats::studentTTwoSided(ctx.alpha(), tools::stats::kReplicates - 1);
+    bool within = true;
+    for (std::size_t c = 0; c < 3; ++c) {
+        std::cout << "  albedo lane past the mirror, channel " << c << ": " << albedo[c].mean() << " vs " << expected[c] << '\n';
+        within = within && std::abs(albedo[c].mean() - expected[c]) <= t * albedo[c].standardError();
     }
-    std::cout << "  albedo lane past the mirror, worst relative error " << worst.x << ", " << worst.y << ", " << worst.z << '\n';
-    PT_EXPECT(ctx, glm::all(glm::lessThanEqual(worst, glm::vec3(kMeanOfEqualSamplesTolerance))),
-              "the albedo lane past a mirror is not its reflectance times the wall's rho");
-    PT_EXPECT(ctx, blockEquals(result.denoiseNormal, glm::vec3(0.0F, -1.0F, 0.0F), lo, lo, hi, hi), "the normal lane past a mirror is not the wall's");
+    PT_EXPECT(ctx, within, "the albedo lane past a mirror does not converge to its reflectance times the wall's rho");
+    PT_EXPECT(ctx, normals, "the normal lane past a mirror is not the wall's");
 }
 
 // On the axis the VNDF draws at D(h)/4 and a GGX slope passes sqrt(k) alpha at odds 1/(1+k): 2 alpha sqrt(pi/Omega) are wider than a pixel.
@@ -3739,19 +3814,18 @@ PT_CHECK(denoise_features_follow_lobes_narrower_than_a_pixel, Slow, Statistical)
     PT_EXPECT(ctx, roughAlbedo, "a rough metal's albedo lane is zero");
 }
 
-// The hero draw's one-sample spectral estimator keeps each channel's albedo: channel c matches a non-dispersive render at c's own IOR.
+// The one-lane draw keeps every lane's expectation: at V_d effectively infinite the optics are the clear slab's, so its albedo must match.
 PT_CHECK(denoise_albedo_through_dispersive_glass, Slow, Statistical) {
     constexpr float kIor = 1.5F;
-    constexpr float kAbbe = 20.0F;
     const glm::vec3 rho(0.8F, 0.6F, 0.4F);
     Material floor = makeLambertianFloor().instances[0].material;
     floor.baseColor = Rgb(rho);
     // A smooth slab over a diffuse floor: the chain follows both deltas to the floor, the first rough vertex.
-    const auto sceneWith = [&](float ior, float dispersionScale) {
+    const auto sceneWith = [&](float dispersionScale) {
         TestScene scene = withSurface(makeSlabScene(0.0F, 0.5F), [&](Material& material) {
             transmissive(material);
-            material.specularIor = ior;
-            material.transmissionDispersionAbbeNumber = kAbbe;
+            material.specularIor = kIor;
+            material.transmissionDispersionAbbeNumber = std::numeric_limits<float>::max();
             material.transmissionDispersionScale = dispersionScale;
         });
         appendQuad(scene, glm::vec3(-kQuadExtent, -kQuadExtent, -1.0F), glm::vec3(2.0F * kQuadExtent, 0.0F, 0.0F),
@@ -3761,7 +3835,8 @@ PT_CHECK(denoise_albedo_through_dispersive_glass, Slow, Statistical) {
     const EnvironmentMap env = makeUniformEnvironment();
     const PathTraceSettings settings = perReplicate(makeSettings(16, 999));
     ctx.plan(3);
-    const TestScene dispersive = sceneWith(kIor, 1.0F);
+    const TestScene dispersive = sceneWith(1.0F);
+    const TestScene clear = sceneWith(0.0F);
     std::optional<EmbreeAccel> accel = EmbreeAccel::build(dispersive.worldTriangles);
     if (!accel.has_value()) {
         for (int i = 0; i < 3; ++i) {
@@ -3769,28 +3844,21 @@ PT_CHECK(denoise_albedo_through_dispersive_glass, Slow, Statistical) {
         }
         return;
     }
-    const std::array<tools::stats::Welford, 3> hero = replicatedChannels(ctx.subSeed("dispersive"), [&](std::uint32_t scramble) {
-        return regionMean(renderPass(dispersive, env, settings, *accel, sharedPool(ctx.threads()), true, scramble).denoiseAlbedo, 0, 0, kImageSize,
-                          kImageSize);
-    });
-    const OpenPbrInputs<Constant> inputs = resolveInputs(dispersive.instances[0].material, glm::vec2(0.5F), {}, Rgb(1.0F));
-    for (int c = 0; c < 3; ++c) {
-        // Its own seed, so the two estimates are independent as differenceBand assumes; the geometry, and so the accel, is shared.
-        const float ior = pathtracer::scene::modulatedIor(inputs, c);
-        const TestScene matched = sceneWith(ior, 0.0F);
-        const std::array<tools::stats::Welford, 3> reference =
-            replicatedChannels(ctx.subSeed("reference " + std::to_string(c)), [&](std::uint32_t scramble) {
-                return regionMean(renderPass(matched, env, settings, *accel, sharedPool(ctx.threads()), true, scramble).denoiseAlbedo, 0, 0,
-                                  kImageSize, kImageSize);
-            });
-        const tools::stats::Welford& heroChannel = hero[static_cast<std::size_t>(c)];
-        const tools::stats::Welford& referenceChannel = reference[static_cast<std::size_t>(c)];
-        const double difference = heroChannel.mean() - referenceChannel.mean();
+    // Their own seeds, so the two estimates are independent as differenceBand assumes; the geometry, and so the accel, is shared.
+    const auto albedo = [&](const TestScene& scene, const char* label) {
+        return replicatedChannels(ctx.subSeed(label), [&](std::uint32_t scramble) {
+            return regionMean(renderPass(scene, env, settings, *accel, sharedPool(ctx.threads()), true, scramble).denoiseAlbedo, 0, 0, kImageSize,
+                              kImageSize);
+        });
+    };
+    const std::array<tools::stats::Welford, 3> hero = albedo(dispersive, "dispersive");
+    const std::array<tools::stats::Welford, 3> reference = albedo(clear, "reference");
+    for (std::size_t c = 0; c < 3; ++c) {
+        const double difference = hero[c].mean() - reference[c].mean();
         char detail[192];
-        std::snprintf(detail, sizeof(detail), "channel %d at IOR %.5f: dispersive %.5f, reference %.5f", c, static_cast<double>(ior),
-                      heroChannel.mean(), referenceChannel.mean());
+        std::snprintf(detail, sizeof(detail), "channel %zu: one-lane draw %.5f, every lane %.5f", c, hero[c].mean(), reference[c].mean());
         std::cout << "  " << detail << '\n';
-        PT_EXPECT(ctx, tools::stats::differenceBand(heroChannel, referenceChannel, ctx.alpha()).contains(difference), detail);
+        PT_EXPECT(ctx, tools::stats::differenceBand(hero[c], reference[c], ctx.alpha()).contains(difference), detail);
     }
 }
 

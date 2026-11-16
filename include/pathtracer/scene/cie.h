@@ -32,7 +32,10 @@ inline constexpr int kDaylightKnotCount = ((kLambdaMaxNm - kLambdaMinNm) / kDayl
 // CIE daylight's (S0, S1, S2) at kLambdaMinNm + knot * kDaylightIntervalNm.
 [[nodiscard]] glm::dvec3 daylightComponents(int knot);
 
-// XYZ to linear AP1: Bradford-adapts the tabulated D65 white onto the ACES white (TB-2014-004), so the perfect reflector maps to (1, 1, 1).
+// XYZ to linear AP1 with Bradford adaptation of `white` (XYZ, Y = 1) onto the ACES white (TB-2014-004): that white maps to (1, 1, 1).
+[[nodiscard]] glm::dmat3 xyzToSceneFrom(const glm::dvec3& white);
+
+// xyzToSceneFrom the tabulated D65 white: the scene's own matrix, so the perfect reflector under D65 maps to (1, 1, 1).
 [[nodiscard]] const glm::dmat3& xyzToScene();
 
 // The luminance (Y of the D65-lit stimulus) of a scene RGB triple as a dot product: the Y row of xyzToScene's inverse, summing to 1.
@@ -51,7 +54,7 @@ enum class Illuminant { Blackbody, Daylight };
 inline constexpr double kDaylightMinKelvin = 4000.0;
 inline constexpr double kDaylightMaxKelvin = 25000.0;
 
-// Scene RGB of the illuminant at kelvin, unit luminance (Y = 1); nullopt outside its domain or the scene gamut.
-[[nodiscard]] std::optional<glm::dvec3> kelvinToScene(Illuminant illuminant, double kelvin);
+// The illuminant's relative spectral power at kelvin; nullopt outside its domain or where Planck's law underflows to no luminance.
+[[nodiscard]] std::optional<Spectrum> illuminantSpectrum(Illuminant illuminant, double kelvin);
 
 }  // namespace pathtracer::scene::cie

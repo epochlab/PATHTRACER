@@ -549,10 +549,10 @@ PT_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
          "{\"environment\":{\"hdriPath\":\"textures/republiqueHDR_2k.exr\",\"lux\":-1}}"},
         {"a string environment lux", "engine_io_scene_strlux.json",
          "{\"environment\":{\"hdriPath\":\"textures/republiqueHDR_2k.exr\",\"lux\":\"x\"}}"},
-        // The locus leaves AP1 below about 600 K: 500 K has negative green, which a clamp would hide as a hue shift.
-        {"a light kelvin outside the scene gamut", "engine_io_scene_gamuttemp.json",
+        // At 10 K Planck's law underflows at every visible wavelength: no luminance to normalise the light by.
+        {"a blackbody kelvin too cold for Planck's law to leave visible luminance", "engine_io_scene_coldtemp.json",
          scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
-               "\"kelvin\":500,\"nits\":5.0}]")},
+               "\"kelvin\":10,\"nits\":5.0}]")},
         // Renamed by unit to sit beside lux and lumens: the old names fail rather than load as a default.
         {"the retired temperature key", "engine_io_scene_oldtemp.json",
          scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
@@ -594,11 +594,13 @@ PT_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
     PT_EXPECT(ctx, baseLoads,
                   "the unmutated base scene must load, or every mutated row below passes vacuously");
     PT_EXPECT(ctx, tempScene && tempScene->lights.at(0).illuminant == Illuminant::Blackbody &&
-                       tempScene->lights.at(0).color == pathtracer::scene::Rgb(*pathtracer::scene::cie::kelvinToScene(Illuminant::Blackbody, 2856.0)),
-              "a 2856 K light did not load as the blackbody colour");
+                       tempScene->lights.at(0).spectrum ==
+                           pathtracer::scene::EmissionSpectrum(*pathtracer::scene::cie::illuminantSpectrum(Illuminant::Blackbody, 2856.0)),
+              "a 2856 K light did not load as the blackbody spectrum");
     PT_EXPECT(ctx, tempScene && tempScene->lights.at(1).illuminant == Illuminant::Daylight &&
-                       tempScene->lights.at(1).color == pathtracer::scene::Rgb(*pathtracer::scene::cie::kelvinToScene(Illuminant::Daylight, 6504.0)),
-              "a 6504 K daylight light did not load as the daylight colour");
+                       tempScene->lights.at(1).spectrum ==
+                           pathtracer::scene::EmissionSpectrum(*pathtracer::scene::cie::illuminantSpectrum(Illuminant::Daylight, 6504.0)),
+              "a 6504 K daylight light did not load as the daylight spectrum");
     for (const Case& testCase : cases) {
         const std::filesystem::path path = writeJson(testCase.file, testCase.text);
         const bool accepted = pathtracer::config::loadSceneConfig(path.string()).has_value();
@@ -627,18 +629,18 @@ PT_CHECK(scene_config_reads_every_light_shape, Fast, Exact) {
         return;
     }
     const auto* disk = std::get_if<pathtracer::config::DiskShape>(&scene->lights[0].shape);
-    // The authored colour at unit luminance, by the loader's own product, so luminance alone carries the cd/m^2.
-    const glm::vec3 authored(1.0F, 0.5F, 0.25F);
-    const glm::vec3 unitColor = authored / glm::dot(pathtracer::scene::cie::sceneLuminanceWeights(), authored);
+    // The authored colour's D65 upsampling at unit luminance, so luminance alone carries the cd/m^2.
+    const pathtracer::scene::EmissionSpectrum authored = pathtracer::scene::rgbEmission(pathtracer::scene::Rgb(1.0F, 0.5F, 0.25F));
     const auto* luminance = std::get_if<pathtracer::config::Luminance>(&scene->lights[0].emission);
     PT_EXPECT(ctx, disk && disk->radius == 0.25F && scene->lights[0].position == glm::vec3(1.0F, 2.0F, 3.0F) &&
                        scene->lights[0].rotation == glm::vec3(10.0F, 20.0F, 30.0F) && scene->lights[0].twoSided &&
-                       scene->lights[0].color.vec3() == unitColor && luminance && luminance->candelasPerSquareMetre == 4.0F,
+                       scene->lights[0].spectrum == authored && luminance && luminance->candelasPerSquareMetre == 4.0F,
               "the disk's radius, placement, side, unit-luminance colour or luminance did not read as authored");
     const auto* sphere = std::get_if<pathtracer::config::SphereShape>(&scene->lights[1].shape);
     using pathtracer::scene::cie::Illuminant;
     PT_EXPECT(ctx, sphere && sphere->radius == 0.5F && !scene->lights[1].twoSided && scene->lights[1].illuminant == Illuminant::Daylight &&
-                       scene->lights[1].color == pathtracer::scene::Rgb(*pathtracer::scene::cie::kelvinToScene(Illuminant::Daylight, 6504.0)),
+                       scene->lights[1].spectrum ==
+                           pathtracer::scene::EmissionSpectrum(*pathtracer::scene::cie::illuminantSpectrum(Illuminant::Daylight, 6504.0)),
               "the sphere's radius, kelvin or daylight illuminant did not read as authored");
     const auto* scaled = std::get_if<pathtracer::config::MeshShape>(&scene->lights[2].shape);
     const auto* unscaled = std::get_if<pathtracer::config::MeshShape>(&scene->lights[3].shape);
