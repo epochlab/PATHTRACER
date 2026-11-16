@@ -34,6 +34,8 @@ constexpr std::uint32_t kFresnelSeedOffset = 0x6A09E667U;
 constexpr std::uint32_t kVolumeSeedOffset = 0xBB67AE85U;
 // And for the microsurface walk, whose length varies per vertex: frac(sqrt 11)*2^32, the next odd one of the series.
 constexpr std::uint32_t kWalkSeedOffset = 0x510E527FU;
+// And for the path's hero wavelength, so spectral sampling shifts no dimension: frac(sqrt 5)*2^32, the series' unused member.
+constexpr std::uint32_t kWavelengthSeedOffset = 0x3C6EF372U;
 
 // pbrt's ShadowEpsilon (PBR 6.8.6): a relative back-off on tMax, or a light's own front face occludes it. A no-op for the environment.
 constexpr float kShadowDistanceEpsilon = 1e-3F;
@@ -282,9 +284,9 @@ const MediumEntry* enclosingMedium(const std::vector<MediumEntry>& stack, int in
     return nullptr;
 }
 
-// A medium's index at the path's hero band; vacuum's is 1.
-float indexOf(const MediumEntry* entry, std::optional<int> hero) {
-    return entry != nullptr ? dispersedIor(entry->ior, entry->abbeNumber, entry->dispersionScale, hero) : 1.0F;
+// A medium's index at the path's hero wavelength; vacuum's is 1.
+float indexOf(const MediumEntry* entry, std::optional<float> heroNm) {
+    return entry != nullptr ? dispersedIor(entry->ior, entry->abbeNumber, entry->dispersionScale, heroNm) : 1.0F;
 }
 
 // What a ray may cross without scattering: an instance whose opacity may fall below 1, or a thin wall that may transmit undeviated.
@@ -315,12 +317,12 @@ std::vector<std::uint8_t> passThroughInstances(const std::vector<MeshInstance>& 
 
 // The vertex's BSDF toward woWorld in its frame, Schussler's microsurface where a map bends it; the coat follows its own input.
 NormalMappedBsdf closureAt(const Material& material, const ShadingTriangle& triangle, const ShadingVertex& shading,
-                           const OpenPbrInputs<Constant>& inputs, const ShadingFrame& frame, const glm::vec3& woWorld, std::optional<int> hero,
-                           float ambientIor) {
+                           const OpenPbrInputs<Spectral>& inputs, const ShadingFrame& frame, const glm::vec3& woWorld,
+                           const SampledWavelengths& lambda, std::optional<int> heroLane, float ambientIor) {
     const ShadingFrame coatFrame = inputs.coatWeight > 0.0F ? buildShadingFrame(triangle, shading, material.geometryCoatNormal) : frame;
     const bool perturbed = material.geometryNormal.map || material.geometryNormal.height;
-    return makeNormalMappedBsdf(inputs, woWorld * frame, perturbed ? std::optional(glm::normalize(shading.normal) * frame) : std::nullopt, hero,
-                                coatFrame[2] * frame, coatFrame[0] * frame, ambientIor);
+    return makeNormalMappedBsdf(inputs, woWorld * frame, perturbed ? std::optional(glm::normalize(shading.normal) * frame) : std::nullopt,
+                                lambda.nm, heroLane, coatFrame[2] * frame, coatFrame[0] * frame, ambientIor);
 }
 
 // The medium a shadow ray travels in, and its index for the thin walls it may cross: no bulk surface lets it reach another.
@@ -330,42 +332,43 @@ struct ShadowMedium {
 };
 
 // The media's transmittance over the whole shadow ray: its interior's in closed form, the VDB media's by ratio tracking.
-Rgb mediaTransmittance(const Ray& ray, const PassThroughScene& scene, const ShadowMedium& in, Sampler& volumeSampler) {
-    const Rgb interior = in.medium != nullptr ? transmittance(*in.medium, ray.tMax - ray.tMin) : Rgb(1.0F);
+SampledSpectrum mediaTransmittance(const Ray& ray, const PassThroughScene& scene, const ShadowMedium& in, const SampledWavelengths& lambda,
+                                   Sampler& volumeSampler) {
+    const SampledSpectrum interior = in.medium != nullptr ? transmittance(*in.medium, ray.tMax - ray.tMin) : SampledSpectrum(1.0F);
     if (scene.volumes.empty()) {
         return interior;
     }
-    return interior * scene.volumes.transmittance(ray, ray.tMin, ray.tMax, volumeSampler);
+    return interior * scene.volumes.transmittance(ray, ray.tMin, ray.tMax, lambda, volumeSampler);
 }
 
 // The share of light a shadow ray carries to its end: (1 - alpha) + alpha * passThrough at each crossable surface, 0 at any other.
-Rgb transmittanceAlong(Ray ray, const PassThroughScene& scene, std::optional<int> hero, const ShadowMedium& in,
-                             std::uint64_t& shadowRays, Sampler& volumeSampler) {
+SampledSpectrum transmittanceAlong(Ray ray, const PassThroughScene& scene, const SampledWavelengths& lambda, std::optional<int> heroLane,
+                                   const ShadowMedium& in, std::uint64_t& shadowRays, Sampler& volumeSampler) {
     if (!scene.any) {
-        return scene.accel.occluded(ray) ? Rgb(0.0F) : mediaTransmittance(ray, scene, in, volumeSampler);
+        return scene.accel.occluded(ray) ? SampledSpectrum(0.0F) : mediaTransmittance(ray, scene, in, lambda, volumeSampler);
     }
     const Ray whole = ray;
-    Rgb transmittance(1.0F);
+    SampledSpectrum transmittance(1.0F);
     // Closest hit first, so each surface is met in order along the same ray: exact for presence and for an undeviated sheet.
     while (const std::optional<Hit> hit = scene.accel.intersect(ray)) {
         // A disk or sphere is a light's own surface, as opaque as any emitter.
         if (hit->shape >= 0) {
-            return Rgb(0.0F);
+            return SampledSpectrum(0.0F);
         }
         const ShadingTriangle& triangle = scene.shadingTriangles[static_cast<std::size_t>(hit->triangleIndex)];
         const auto instance = static_cast<std::size_t>(triangle.instanceIndex);
         if (!scene.mayPassThrough[instance]) {
-            return Rgb(0.0F);
+            return SampledSpectrum(0.0F);
         }
         const Material& material = scene.instances[instance].material;
         ShadingVertex shading = interpolateShading(triangle, hit->u, hit->v);
         shading.normal = viewAdaptedNormal(shading.normal, geometricNormalOf(triangle), -ray.dir);
         const float opacity = opacityAt(material, shading.uv, {});
-        Rgb crossing(1.0F - opacity);
+        SampledSpectrum crossing(1.0F - opacity);
         if (opacity > 0.0F) {
-            const OpenPbrInputs<Constant> inputs = resolveInputs(material, shading.uv, {}, shading.colour);
+            const OpenPbrInputs<Spectral> inputs = toSpectral(resolveInputs(material, shading.uv, {}, shading.colour), lambda);
             const ShadingFrame frame = buildShadingFrame(triangle, shading, material.geometryNormal);
-            crossing += opacity * passThrough(closureAt(material, triangle, shading, inputs, frame, -ray.dir, hero, in.ior));
+            crossing += opacity * passThrough(closureAt(material, triangle, shading, inputs, frame, -ray.dir, lambda, heroLane, in.ior));
         }
         transmittance *= crossing;
         if (isBlack(transmittance)) {
@@ -374,7 +377,7 @@ Rgb transmittanceAlong(Ray ray, const PassThroughScene& scene, std::optional<int
         ray.tMin = std::nextafter(hit->t, std::numeric_limits<float>::infinity());
         ++shadowRays;
     }
-    return transmittance * mediaTransmittance(whole, scene, in, volumeSampler);
+    return transmittance * mediaTransmittance(whole, scene, in, lambda, volumeSampler);
 }
 
 // Obscurance through cutouts, Sum T_i alpha_i rho(t_i) + T_end; closest-hit, as rho needs the distance (under 1.3% of frame time).
@@ -409,13 +412,14 @@ float obscuranceAlong(Ray ray, const PassThroughScene& scene, float maxDistance)
 // dirFootprint: the primary ray's direction offsets across its stratum, filtering bounce 0; a ray cone carries it on over N = 1/invSamples.
 TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, float invSamples, float pixelSolidAngle,
                        const PassThroughScene& scene, const std::vector<int>& instanceLightIndex, const LightSet& lights,
-                       bool showSky, const PathTraceSettings& settings,
+                       bool showSky, const PathTraceSettings& settings, const SampledWavelengths& lambda,
                        Sampler& sampler, Sampler& volumeSampler, Sampler& walkSampler, glm::vec2 aoSample, glm::vec2 fresnelSample,
                        std::vector<MediumEntry>& mediumStack, pathtracer::debug::RayCounts& __restrict rays) {
     const EmbreeAccel& accel = scene.accel;
     TraceResult result;
     result.ao = 1.0F;  // background is fully unoccluded, matching the polarity in PathTraceResult
-    Rgb throughput(1.0F);
+    // Radiance per lane at the path's wavelengths; every lane is projected onto scene RGB through the sensor as it is recorded.
+    SampledSpectrum throughput(1.0F);
     Ray ray = primaryRay;
     int bounce = 0;
     // The ray cone (Amanatides 1984): width at ray.origin, spread^2 one sample's solid angle; a pinhole's starts at width 0.
@@ -431,13 +435,14 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
     std::optional<PathBucket> pathBucket;  // unset until bounce 0 successfully samples a lobe
     // The interiors the path is inside, innermost last: a bulk crossing removes its instance if present, else pushes it.
     mediumStack.clear();
-    // The RGB channel this path committed to at a dispersive interface; unset means full RGB transport. See the selection block below.
-    std::optional<int> heroChannel;
+    // The lane this path committed to at a dispersive interface, and its wavelength; unset, every lane follows the path.
+    std::optional<int> heroLane;
+    std::optional<float> heroNm;
     // The instance whose walk bounce 0 entered, -1 once left: NEE at that walk's boundary is direct subsurface light.
     int primaryWalk = -1;
     // The ray leaving that walk, until its next vertex: its emitter or sky hit is direct subsurface light too.
     bool leftPrimaryWalk = false;
-    // Routes a contribution into the path's bucket; a no-op when unset, that background radiance being deliberately unbucketed.
+    // Routes a projected contribution into the path's bucket; a no-op when unset, that background radiance being deliberately unbucketed.
     const auto addToBucket = [&](const Rgb& contribution, bool isDirect) {
         if (!pathBucket.has_value()) {
             return;
@@ -463,9 +468,15 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
     // A hit ending a segment is direct when its segment leaves bounce 0's vertex, or for Subsurface the primary walk.
     const auto directHit = [&] { return pathBucket == PathBucket::Subsurface ? leftPrimaryWalk : bounce == 1; };
     // Shadow's lanes take a bounce-0 light estimator without its MIS weight: alone it estimates all direct light, occluded or not.
-    const auto recordShadow = [&](const Rgb& direct, const Rgb& visibility) {
-        result.shadowUnoccluded = luminance(direct);
-        result.shadowLost = luminance(direct * (1.0F - visibility));
+    const auto recordShadow = [&](const SampledSpectrum& direct, const SampledSpectrum& visibility) {
+        result.shadowUnoccluded = luminance(toScene(direct, lambda));
+        result.shadowLost = luminance(toScene(direct * (1.0F - visibility), lambda));
+    };
+    // A radiance reaching the camera: into Beauty and the path's bucket, as scene RGB.
+    const auto addRadiance = [&](const SampledSpectrum& radiance, bool isDirect) {
+        const Rgb rgb = toScene(radiance, lambda);
+        result.radiance += rgb;
+        addToBucket(rgb, isDirect);
     };
 
     // MIS state for the previous bounce's BSDF sample: reweights this bounce's miss against NEE's pdf so neither double-counts.
@@ -476,12 +487,12 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
     glm::vec3 lastShadingPosition(0.0F);
 
     // Denoiser features (OIDN): followed through deltas and sub-pixel lobes to the first rough vertex, apart from `throughput`.
-    Rgb featureWeight(1.0F);
+    SampledSpectrum featureWeight(1.0F);
     float featureSurvival = 1.0F;  // 1 / Russian roulette's continuation odds while the chain is open, so both features stay unbiased
     bool featurePending = settings.denoiseFeatures;
     // Closes the chain at a surface: no ray, no draw and no Beauty float changes, so the lanes ride along at no cost to the image.
-    const auto recordFeatures = [&](const Rgb& albedo, const glm::vec3& normal) {
-        result.denoiseAlbedo = featureSurvival * albedo;
+    const auto recordFeatures = [&](const SampledSpectrum& albedo, const glm::vec3& normal) {
+        result.denoiseAlbedo = featureSurvival * reflectanceToScene(albedo, lambda);
         result.denoiseNormal = featureSurvival * normal;
         featurePending = false;
     };
@@ -511,7 +522,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
         const HomogeneousMedium* medium = mediumStack.empty() ? nullptr : &mediumStack.back().medium;
         const bool inWalk = medium != nullptr && scatters(*medium);
         const float segmentEnd = hit.has_value() ? hit->t : ray.tMax;
-        Rgb odds(0.0F);
+        SampledSpectrum odds(0.0F);
         std::optional<float> walkCollision;
         if (inWalk) {
             odds = channelOdds(*medium, throughput);
@@ -524,7 +535,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
         // Free flight through the VDB media to that collision or the segment's end: the earlier of two independent processes wins.
         std::optional<FreeFlight> flight;
         if (!scene.volumes.empty()) {
-            flight = scene.volumes.sampleFreeFlight(ray, segmentStart, walkCollision.value_or(segmentEnd), throughput, volumeSampler);
+            flight = scene.volumes.sampleFreeFlight(ray, segmentStart, walkCollision.value_or(segmentEnd), throughput, lambda, volumeSampler);
             throughput *= flight->weight;
             if (featurePending) {
                 featureWeight *= flight->weight;
@@ -534,8 +545,9 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
         const bool absorbed = flight.has_value() && flight->event == FreeFlightEvent::Absorbed;
         const bool walkScattered = walkCollision.has_value() && !scattered && !absorbed;
         if (bounce == 0) {
-            // E[1 - mean(w) 1{escape}] = 1 - mean(T): unbiased, though one sample may read below 0 where spectral weights exceed 1.
-            result.alpha = hit.has_value() || showSky || scattered || absorbed ? 1.0F : 1.0F - channelMean(throughput);
+            // E[mean(1 - w) 1{escape}] = 1 - mean(T): opacity projected, white's E[projection] = 1 a control variate; 0 exactly when clear.
+            result.alpha = hit.has_value() || showSky || scattered || absorbed ? 1.0F
+                                                                               : channelMean(reflectanceToScene(1.0F - throughput, lambda));
         }
 
         // The interior's weight to the event that ended the flight, or its own collision's; a miss is unbounded, t = inf.
@@ -545,7 +557,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
                                      : hit.has_value() ? hit->t
                                                        : std::numeric_limits<float>::infinity()) -
                                     segmentStart;
-            const Rgb weight = !inWalk         ? transmittance(*medium, travelled)
+            const SampledSpectrum weight = !inWalk ? transmittance(*medium, travelled)
                                      : walkScattered ? collisionWeight(*medium, odds, travelled)
                                                      : passWeight(*medium, odds, travelled);
             throughput *= weight;
@@ -558,7 +570,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
         // Absorbed carries nothing onward, emission being out of scope: the feature chain closes on a zero albedo and no normal.
         if (absorbed) {
             if (featurePending) {
-                recordFeatures(Rgb(0.0F), glm::vec3(0.0F));
+                recordFeatures(SampledSpectrum(0.0F), glm::vec3(0.0F));
             }
             break;
         }
@@ -578,19 +590,19 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
                 recordFeatures(featureWeight, glm::vec3(0.0F));
             }
             // NEE from the scattering point, against the phase-sampled continuation by the power heuristic on directional pdfs.
-            if (const std::optional<LightSample> lightSample = lights.sample(position, sampler)) {
+            if (const std::optional<LightSample> lightSample = lights.sample(position, sampler, lambda)) {
                 const float phase = henyeyGreenstein(glm::dot(dir, lightSample->direction), flight->g);
                 const Ray shadowRay{position, lightSample->direction, 0.0F, lightSample->distance * (1.0F - kShadowDistanceEpsilon)};
                 ++rays.shadow;
-                const ShadowMedium in{medium, indexOf(mediumStack.empty() ? nullptr : &mediumStack.back(), heroChannel)};
-                const Rgb visibility = transmittanceAlong(shadowRay, scene, heroChannel, in, rays.shadow, volumeSampler);
+                const ShadowMedium in{medium, indexOf(mediumStack.empty() ? nullptr : &mediumStack.back(), heroNm)};
+                const SampledSpectrum visibility = transmittanceAlong(shadowRay, scene, lambda, heroLane, in, rays.shadow, volumeSampler);
                 if (bounce == 0) {
                     recordShadow(throughput * lightSample->radiance * (phase / lightSample->pdf), visibility);
                 }
                 if (!isBlack(visibility)) {
                     const float misWeightLight = powerHeuristic(lightSample->pdf, phase);
                     const Rgb neeContribution =
-                        visibility * throughput * lightSample->radiance * (phase * misWeightLight / lightSample->pdf);
+                        toScene(visibility * throughput * lightSample->radiance * (phase * misWeightLight / lightSample->pdf), lambda);
                     result.radiance += neeContribution;
                     if (bounce == 0) {
                         result.directVolume += neeContribution;
@@ -645,18 +657,16 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
                 break;
             }
             // Filtered only at full MIS weight: NEE reads the sky at a point, and the strategies MIS blends must estimate one integrand.
-            const Rgb envRadiance =
-                bounce == 0          ? lights.environmentRadiance(ray.dir, dirFootprint)
-                : lastSampleWasDelta ? lights.environmentRadiance(ray.dir, spreadAcross(glm::normalize(ray.dir), coneSpread))
-                                     : lights.environmentRadiance(ray.dir);
+            const SampledSpectrum envRadiance =
+                bounce == 0          ? lights.environmentRadiance(ray.dir, dirFootprint, lambda)
+                : lastSampleWasDelta ? lights.environmentRadiance(ray.dir, spreadAcross(glm::normalize(ray.dir), coneSpread), lambda)
+                                     : lights.environmentRadiance(ray.dir, lambda);
             // Power heuristic (Veach 1997): full weight after the camera or a delta sample, neither having a density to balance.
             float misWeight = 1.0F;
             if (!lastSampleWasDelta) {
                 misWeight = powerHeuristic(lastBsdfPdf, lights.pdfEnvironment(ray.dir));
             }
-            const Rgb missRadiance = throughput * envRadiance * misWeight;
-            result.radiance += missRadiance;
-            addToBucket(missRadiance, directHit());
+            addRadiance(throughput * envRadiance * misWeight, directHit());
             break;
         }
 
@@ -670,16 +680,14 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
                                                           : geometricNormalOf(scene.shadingTriangles[static_cast<std::size_t>(hit->triangleIndex)]);
             // An emitter is a surface with no BSDF: its normal, and no albedo.
             if (featurePending) {
-                recordFeatures(Rgb(0.0F), lightNormal);
+                recordFeatures(SampledSpectrum(0.0F), lightNormal);
             }
-            const Rgb emitted = lights.radianceToward(lightIndex, ray.dir, lightNormal);
+            const SampledSpectrum emitted = lights.radianceToward(lightIndex, ray.dir, lightNormal, lambda);
             float misWeight = 1.0F;
             if (!lastSampleWasDelta) {
                 misWeight = powerHeuristic(lastBsdfPdf, lights.pdfArea(lightIndex, lastShadingPosition, point, lightNormal));
             }
-            const Rgb hitRadiance = throughput * emitted * misWeight;
-            result.radiance += hitRadiance;
-            addToBucket(hitRadiance, directHit());
+            addRadiance(throughput * emitted * misWeight, directHit());
             break;
         }
 
@@ -706,11 +714,9 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
         }
 
         // Surface emission, absent from LightSet, so the hit takes MIS weight 1. Before the depth cap, as an emitter hit.
-        const Rgb emitted = emittedRadiance(material, triangle, shading, -ray.dir, footprint);
+        const SampledSpectrum emitted = emittedRadiance(material, triangle, shading, -ray.dir, footprint, lambda);
         if (!isBlack(emitted)) {
-            const Rgb hitRadiance = throughput * emitted;
-            result.radiance += hitRadiance;
-            addToBucket(hitRadiance, directHit());
+            addRadiance(throughput * emitted, directHit());
         }
 
         // Depth cap. The extra iteration exists only so the final BSDF ray can collect its MIS-weighted miss or emitter hit.
@@ -719,24 +725,28 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
             break;
         }
 
-        const OpenPbrInputs<Constant> inputs = resolveInputs(material, shading.uv, footprint, shading.colour);
+        const OpenPbrInputs<Constant> authored = resolveInputs(material, shading.uv, footprint, shading.colour);
+        const OpenPbrInputs<Spectral> inputs = toSpectral(authored, lambda);
         // The medium beyond this boundary as seen from its inside: its index is the ambient one this interface refracts against.
         const MediumEntry* ambient = enclosingMedium(mediumStack, triangle.instanceIndex);
-        // Commit to one RGB channel at the first dispersive interface; sum == 0 is reachable, rrMinProb keeps zero-throughput paths alive.
-        if (!heroChannel.has_value() && isDispersive(inputs, ambient != nullptr && ambient->dispersionScale > 0.0F)) {
-            const float sum = throughput.r + throughput.g + throughput.b;
+        // Commit to one lane at the first dispersive interface (Wilkie et al. 2014's limit at a delta); rrMinProb keeps zero sums alive.
+        if (!heroLane.has_value() && isDispersive(authored, ambient != nullptr && ambient->dispersionScale > 0.0F)) {
+            const float sum = channelSum(throughput);
             if (sum > 0.0F) {
                 const float u = sampler.next1D() * sum;
-                const int channel = u < throughput.r ? 0 : (u < throughput.r + throughput.g ? 1 : 2);
-                // The same one-sample spectral estimator: the drawn channel over its selection odds throughput[c] / sum.
-                if (featurePending) {
-                    const float feature = featureWeight[channel] * sum / throughput[channel];
-                    featureWeight = Rgb(0.0F);
-                    featureWeight[channel] = feature;
+                int lane = 0;
+                for (float below = throughput[0]; lane < kSpectrumSamples - 1 && u >= below; below += throughput[++lane]) {
                 }
-                throughput = Rgb(0.0F);
-                throughput[channel] = sum;
-                heroChannel = channel;
+                // The one-sample spectral estimator: the drawn lane over its selection odds throughput[lane] / sum.
+                if (featurePending) {
+                    const float feature = featureWeight[lane] * sum / throughput[lane];
+                    featureWeight = SampledSpectrum(0.0F);
+                    featureWeight[lane] = feature;
+                }
+                throughput = SampledSpectrum(0.0F);
+                throughput[lane] = sum;
+                heroLane = lane;
+                heroNm = lambda.nm[lane];
             }
         }
 
@@ -744,12 +754,12 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
         const glm::vec3 woWorld = -ray.dir;
 
         // Built once for both estimators below: the continuation draw and NEE's evaluation share every wo-side lookup it holds.
-        const float ambientIor = indexOf(ambient, heroChannel);
-        const NormalMappedBsdf closure = closureAt(material, triangle, shading, inputs, frame, woWorld, heroChannel, ambientIor);
+        const float ambientIor = indexOf(ambient, heroNm);
+        const NormalMappedBsdf closure = closureAt(material, triangle, shading, inputs, frame, woWorld, lambda, heroLane, ambientIor);
 
         // Past the cap a window still passes the final ray on to its emitter, by its expected undeviated share, as NEE's shadow rays do.
         if (capped) {
-            const Rgb through = passThrough(closure);
+            const SampledSpectrum through = passThrough(closure);
             if (isBlack(through)) {
                 break;
             }
@@ -762,7 +772,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
 
         if (bounce == 0) {
             // The Fresnel the microfacet lobe evaluates here, one VNDF draw per sample, on its own stream. No ray and no BVH query.
-            result.fresnel = fresnelAtMicrofacet(closure, fresnelSample);
+            result.fresnel = reflectanceToScene(fresnelAtMicrofacet(closure, fresnelSample), lambda);
             // Obscurance (Zhukov 1998; Iones 2003): sampling at pdf = cos/pi cancels both factors, so the estimator is the mean of rho.
             const bool frontSide = glm::dot(geoNormal, woWorld) > 0.0F;
             const glm::vec3 aoDir =
@@ -775,7 +785,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
         // A zero BSDF, emission alone, carries no light onward: the path ends here, its AO and Fresnel lanes already written.
         if (!scatters(closure)) {
             if (featurePending) {
-                recordFeatures(Rgb(0.0F), frame[2]);
+                recordFeatures(SampledSpectrum(0.0F), frame[2]);
             }
             break;
         }
@@ -812,7 +822,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
         }
 
         // NEE: sample a light, evaluate the BSDF toward it, add it MIS-weighted if unoccluded. Fired whatever lobe `sample` drew.
-        const std::optional<LightSample> lightSample = lights.sample(shading.position, sampler);
+        const std::optional<LightSample> lightSample = lights.sample(shading.position, sampler, lambda);
         if (lightSample.has_value()) {
             const float geoCos = glm::dot(lightSample->direction, geoNormal);
             // A light across the surface reaches wo only through a refracting interface: only then is the far side worth a shadow ray.
@@ -821,8 +831,8 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
                 const glm::vec3 wiLocalLight = lightSample->direction * frame;
                 // One evaluation for the value and per-lobe split, each lobe cosine-weighted about its own normal, MIS-weighted per vertex.
                 const NeeEval nee = evaluateForLight(closure, wiLocalLight, revisit, walkSampler, lightSample->pdf);
-                const Rgb bsdfValue = farSide ? nee.value.transmission : nee.value.diffuse + nee.value.specular;
-                if (bsdfValue.r > 0.0F || bsdfValue.g > 0.0F || bsdfValue.b > 0.0F) {
+                const SampledSpectrum bsdfValue = farSide ? nee.value.transmission : nee.value.diffuse + nee.value.specular;
+                if (maxChannel(bsdfValue) > 0.0F) {
                     const glm::vec3 shadowOrigin = spawnOrigin(triangle, hit->u, hit->v, geoNormal, geoCos > 0.0F);
                     // pbrt's SpawnRayTo: re-formed from the offset origin to the sampled point, which a back-off along wi cannot reach.
                     const bool finiteLight = lightSample->distance < std::numeric_limits<float>::max();
@@ -836,28 +846,28 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
                     ++rays.shadow;
                     // Across a bulk boundary the shadow ray is in the interior it enters or the one enclosing it; else in this side's.
                     const MediumEntry* here = mediumStack.empty() ? nullptr : &mediumStack.back();
-                    const ShadowMedium in = !farSide || !bulk ? ShadowMedium{medium, indexOf(here, heroChannel)}
+                    const ShadowMedium in = !farSide || !bulk ? ShadowMedium{medium, indexOf(here, heroNm)}
                                             : inside          ? ShadowMedium{ambient != nullptr ? &ambient->medium : nullptr, ambientIor}
                                                               : ShadowMedium{&*interior, dispersedIor(inputs.specularIor,
                                                                                                       inputs.transmissionDispersionAbbeNumber,
                                                                                                       inputs.transmissionDispersionScale,
-                                                                                                      heroChannel)};
-                    const Rgb visibility = transmittanceAlong(shadowRay, scene, heroChannel, in, rays.shadow, volumeSampler);
+                                                                                                      heroNm)};
+                    const SampledSpectrum visibility = transmittanceAlong(shadowRay, scene, lambda, heroLane, in, rays.shadow, volumeSampler);
                     if (bounce == 0) {
                         recordShadow(bsdfValue * throughput * lightSample->radiance / lightSample->pdf, visibility);
                     }
                     if (!isBlack(visibility)) {
-                        const Rgb common = visibility * throughput * lightSample->radiance / lightSample->pdf;
+                        const SampledSpectrum common = visibility * throughput * lightSample->radiance / lightSample->pdf;
                         const BsdfEval& weighted = nee.weighted;
-                        const Rgb neeContribution = (farSide ? weighted.transmission : weighted.diffuse + weighted.specular) * common;
+                        const Rgb neeContribution = toScene((farSide ? weighted.transmission : weighted.diffuse + weighted.specular) * common, lambda);
                         result.radiance += neeContribution;
                         if (bounce == 0) {
                             // Bounce 0 splits NEE by the lobe that carried it, not sample->type, which names the continuation.
                             if (farSide) {
-                                result.refraction += weighted.transmission * common;
+                                result.refraction += neeContribution;
                             } else {
-                                result.directDiffuse += weighted.diffuse * common;
-                                result.directSpecular += weighted.specular * common;
+                                result.directDiffuse += toScene(weighted.diffuse * common, lambda);
+                                result.directSpecular += toScene(weighted.specular * common, lambda);
                             }
                         } else {
                             // Deeper bounces keep the sticky bucket; only the primary walk's boundary takes direct light past bounce 0.
@@ -872,7 +882,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
         if (!sample.has_value()) {
             // A failed draw is the albedo estimator's zero, not a skipped sample; the surface's normal stands.
             if (featurePending) {
-                recordFeatures(Rgb(0.0F), frame[2]);
+                recordFeatures(SampledSpectrum(0.0F), frame[2]);
             }
             break;
         }
@@ -884,7 +894,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
             lastShadingPosition = shading.position;
         }
 
-        const Rgb weight = crosses ? sample->transmitWeight : sample->throughputWeight - sample->transmitWeight;
+        const SampledSpectrum weight = crosses ? sample->transmitWeight : sample->throughputWeight - sample->transmitWeight;
         // E[f cos / pdf] is the albedo; a lobe denser than 1/pixel solid angle stays open as a delta, as does a walk until its exit.
         if (featurePending) {
             if (sample->delta || sample->lobePdf * pixelSolidAngle >= 1.0F || entersWalk || walkReflects) {
@@ -1065,6 +1075,9 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                 const glm::vec2 fresnelSample = fresnelSampler.next2D();
                 Sampler volumeSampler(x, y, sampleIndex, replicateCount, seed ^ kVolumeSeedOffset, lattice);
                 Sampler walkSampler(x, y, sampleIndex, replicateCount, seed ^ kWalkSeedOffset, lattice);
+                // The hero's CDF position, stratified across the pixel's samples like any first dimension of a stream.
+                Sampler wavelengthSampler(x, y, sampleIndex, replicateCount, seed ^ kWavelengthSeedOffset, lattice);
+                const SampledWavelengths lambda = sampleWavelengths(wavelengthSampler.next1D());
                 // The pixel's footprint on the unit sphere, read only by the feature chain where a ray exists; a facet's is its lobe's.
                 const auto footprintSolidAngle = [&] {
                     return kappa > 0.0F ? lobeSolidAngle : pixelSolidAngle(primary->dirPerNdc, ndcPerPixel);
@@ -1073,7 +1086,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                 const TraceResult trace =
                     primary ? tracePath(primary->ray, dirFootprint, 1.0F / estimateSamples,
                                         settings.denoiseFeatures ? footprintSolidAngle() : 0.0F, scene, instanceLightIndex, lights,
-                                        showSky, settings, sampler, volumeSampler, walkSampler, aoSample, fresnelSample, mediumStack,
+                                        showSky, settings, lambda, sampler, volumeSampler, walkSampler, aoSample, fresnelSample, mediumStack,
                                         chunkRays)
                             : TraceResult{};
                 std::apply([&](const auto&... lane) { ((sum.*lane.first += trace.*lane.first), ...); }, kTraceLanes);

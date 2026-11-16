@@ -9,7 +9,7 @@
 
 #include "pathtracer/config/scene_config.h"
 #include "pathtracer/scene/ray_types.h"
-#include "pathtracer/scene/rgb.h"
+#include "pathtracer/scene/spectrum.h"
 #include "pathtracer/scene/sampler.h"
 
 namespace pathtracer::scene {
@@ -28,7 +28,7 @@ struct FreeFlight {
     float t;  // the scattering's ray parameter; unset otherwise
     float g;  // the scattering volume's asymmetry
     // Spectral tracking's weight (Kutz et al. 2017) for throughput and the feature chain alike: 1 for a grey medium.
-    Rgb weight;
+    SampledSpectrum weight;
 };
 
 // VDB density grids as heterogeneous media, read with OpenVDB and traced as NanoVDB. Empty by default; copies share the grids.
@@ -43,10 +43,11 @@ public:
     [[nodiscard]] bool empty() const;
 
     // The first real collision along ray over [t0, t1) by spectral tracking with history-aware probabilities, `throughput` the history.
-    [[nodiscard]] FreeFlight sampleFreeFlight(const Ray& ray, float t0, float t1, const Rgb& throughput, Sampler& sampler) const;
+    [[nodiscard]] FreeFlight sampleFreeFlight(const Ray& ray, float t0, float t1, const SampledSpectrum& throughput,
+                                              const SampledWavelengths& lambda, Sampler& sampler) const;
 
     // Unbiased transmittance over [t0, t1) by ratio tracking (Novak et al. 2014), the product of every volume's estimate.
-    [[nodiscard]] Rgb transmittance(const Ray& ray, float t0, float t1, Sampler& sampler) const;
+    [[nodiscard]] SampledSpectrum transmittance(const Ray& ray, float t0, float t1, const SampledWavelengths& lambda, Sampler& sampler) const;
 
     struct Volume;  // one grid's NanoVDB handles, placement and coefficients, defined in volume.cpp
 

@@ -25,18 +25,18 @@ float evalFonAlbedoApprox(float mu, float r) {
 }
 
 // EON value (paper eq. 16-19): FON single scatter plus the analytic multiple-scattering lobe, identically zero at r = 0 (Lambertian).
-Rgb evaluateEon(const Rgb& rho, float r, const glm::vec3& wi, const glm::vec3& wo) {
+SampledSpectrum evaluateEon(const SampledSpectrum& rho, float r, const glm::vec3& wi, const glm::vec3& wo) {
     const float muI = wi.z;
     const float muO = wo.z;
     const float s = glm::dot(wi, wo) - (muI * muO);
     const float sOverT = s > 0.0F ? s / std::max(muI, muO) : s;
     const float af = 1.0F / (1.0F + (kConstant1Fon * r));
-    const Rgb singleScatter = (rho / kPi) * af * (1.0F + (r * sOverT));
+    const SampledSpectrum singleScatter = (rho / kPi) * af * (1.0F + (r * sOverT));
     if (r == 0.0F) {
         return singleScatter;
     }
     const float avgEFon = af * (1.0F + (kConstant2Fon * r));
-    const Rgb rhoMs = (rho * rho) * avgEFon / (Rgb(1.0F) - (rho * (1.0F - avgEFon)));
+    const SampledSpectrum rhoMs = (rho * rho) * avgEFon / (SampledSpectrum(1.0F) - (rho * (1.0F - avgEFon)));
     // The paper GLSL's eps floor on each 1 - E_FON: its quartic fit overshoots 1 at mu = 0, by 3.6e-4 at r = 1.
     constexpr float kEps = 1e-7F;
     return singleScatter + ((rhoMs / kPi) * std::max(kEps, 1.0F - evalFonAlbedoApprox(muO, r)) *
@@ -95,7 +95,7 @@ glm::mat3 toAzimuthFrame(const glm::vec3& w) {
     return glm::transpose(glm::mat3(x, glm::vec3(-x.y, x.x, 0.0F), glm::vec3(0.0F, 0.0F, 1.0F)));
 }
 
-DiffuseSlab makeDiffuseSlab(const Rgb& rho, float r, const glm::vec3& wo) {
+DiffuseSlab makeDiffuseSlab(const SampledSpectrum& rho, float r, const glm::vec3& wo) {
     const glm::vec4 m = eonLtcCoeffs(wo.z, r);
     return {rho,
             r,
@@ -107,7 +107,7 @@ DiffuseSlab makeDiffuseSlab(const Rgb& rho, float r, const glm::vec3& wo) {
 
 DiffuseEval evaluateDiffuse(const DiffuseSlab& slab, const glm::vec3& wo, const glm::vec3& wi) {
     if (wi.z <= 0.0F) {
-        return {Rgb(0.0F), 0.0F};
+        return {SampledSpectrum(0.0F), 0.0F};
     }
     constexpr float kUniformHemispherePdf = 1.0F / (2.0F * kPi);
     return {evaluateEon(slab.rho, slab.roughness, wi, wo) * wi.z,

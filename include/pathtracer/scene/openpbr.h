@@ -8,6 +8,7 @@
 
 #include "pathtracer/gfx/hdr_image.h"
 #include "pathtracer/scene/rgb.h"
+#include "pathtracer/scene/spectrum.h"
 
 namespace pathtracer::scene {
 
@@ -30,6 +31,18 @@ struct InputSpec {
 // The identity wrapper: OpenPbrInputs<Constant> holds plain values, as a material file and a resolved shading point do.
 template <typename T>
 using Constant = T;
+
+// Colours at a path's wavelengths, everything else as authored: OpenPbrInputs<Spectral> is what the BSDF and the interior media read.
+template <typename T>
+struct SpectralOf {
+    using type = T;
+};
+template <>
+struct SpectralOf<Rgb> {
+    using type = SampledSpectrum;
+};
+template <typename T>
+using Spectral = typename SpectralOf<T>::type;
 
 // OpenPBR Surface v1.1.1 inputs at their specification defaults; In<T> is T for constants or a constant-or-texture for a bound material.
 template <template <typename> typename In>
@@ -73,6 +86,9 @@ struct OpenPbrInputs {
     // Uniform in MaterialX, so never textured and outside forEachInput: a bound material reads it before its textures bind.
     bool geometryThinWalled = false;
 };
+
+// A shading point's inputs at the path's wavelengths, each colour upsampled by its physical kind (Jakob & Hanika 2019).
+[[nodiscard]] OpenPbrInputs<Spectral> toSpectral(const OpenPbrInputs<Constant>& inputs, const SampledWavelengths& lambda);
 
 // Visits every input of one or more OpenPbrInputs in specification order, zipped: visit(spec, a.member, b.member, ...).
 template <typename Visit, typename... Inputs>

@@ -1,6 +1,6 @@
 # PBR Pathtracer
 
-*A physically-based unidirectional Monte Carlo path tracer with progressive sampling: Embree-accelerated, stochastic BSDF combined with environment and area-light NEE via MIS, behind a thin OpenGL display/HUD layer.*
+*A physically-based spectral, unidirectional Monte Carlo path tracer with progressive sampling: hero-wavelength transport projected to ACEScg, Embree-accelerated, stochastic BSDF combined with environment and area-light NEE via MIS, behind a thin OpenGL display/HUD layer.*
 
 ![Sample](sample.png)
 
@@ -95,15 +95,14 @@ frame["depth"]    # (64, 128, 1) float32, camera-space Z
 
 | Area | Item | Detail | Complexity | ETA | Status |
 | --- | --- | --- | --- | --- | --- |
-| Colour | Spectral transport | Per-path wavelength sampling (Wilkie et al. 2014) by channel sensitivity; spectral upsampling of textures and the HDRI (Jakob and Hanika 2019); kelvin lights emit their blackbody or CIE daylight spectra. | high | 6 h | ready |
 | Volume | Regular tracking | VDB free flight uses spectral tracking, which has no distance pdf for MIS. Regular tracking by OpenVDB's DDA (Sutton et al. 1999) with per-lane distance pdfs, for chromatic media under hero MIS and for bidirectional MIS (Fascione et al. 2018). | medium | 2 h | ready |
 | Sampling | Manifold next event estimation | Caustics through glass converge slowly. Manifold NEE (Hanika et al. 2015) connects shading points to lights through specular chains, Weta's production caustic method (Fascione et al. 2018). | high | 4 h | ready |
-| Sampling | Bidirectional paths | Light and eye subpaths joined by MIS (Veach and Guibas 1995) so caustics converge. Waits for spectral transport and regular tracking. | high | 8 h | blocked |
-| Light | Emission spectra | Lights are a kelvin or an RGB colour. Measured spectral power distributions (spectroradiometer CSV) and CIE F-series and LED illuminants (CIE 015:2018) per light, and gel tint functions per light (Langlands and Fascione 2020). Waits for spectral transport. | medium | 3 h | blocked |
-| Camera | Camera spectral sensitivity | Renders are ACEScg, not camera RGB. Measured camera sensitivities give camera-native RGB, then the camera's IDT to ACEScg, so CG matches the plate (Langlands and Fascione 2020). RGB upsampling refit to the camera's responsivities; HDRIs reconstructed with the capture camera's sensitivities (Fascione et al. 2018). Waits for spectral transport. | high | 3 h | blocked |
+| Sampling | Bidirectional paths | Light and eye subpaths joined by MIS (Veach and Guibas 1995) so caustics converge. Waits for regular tracking. | high | 8 h | blocked |
+| Light | Emission spectra | Lights are a kelvin or an RGB colour. Measured spectral power distributions (spectroradiometer CSV) and CIE F-series and LED illuminants (CIE 015:2018) per light, and gel tint functions per light (Langlands and Fascione 2020). | medium | 3 h | ready |
+| Camera | Camera spectral sensitivity | Renders are ACEScg, not camera RGB. Measured camera sensitivities give camera-native RGB, then the camera's IDT to ACEScg, so CG matches the plate (Langlands and Fascione 2020). RGB upsampling refit to the camera's responsivities; HDRIs reconstructed with the capture camera's sensitivities (Fascione et al. 2018). | high | 3 h | ready |
 | Camera | White balance | No white balance: lights and the HDRI show their true cast. Per-channel gains on the camera-native response so a chosen kelvin (blackbody or daylight) or grey card reads neutral, before the IDT, as in camera. Never edits lights. Waits for camera spectral sensitivity. | medium | 1 h | blocked |
-| Colour | Infrared and ultraviolet | Visible wavelengths only. Transport over 300-1000 nm, IR and UV sensor and false-colour film sensitivities, measured IR reflectance (Gates et al. 1965). Waits for spectral transport. | high | 3 h | blocked |
-| Colour | Fluorescence | Light keeps its wavelength. Re-emission at longer wavelengths from excitation-emission spectra (Wilkie et al. 2006). Waits for spectral transport. | high | 3 h | blocked |
+| Colour | Infrared and ultraviolet | Visible wavelengths only. Transport over 300-1000 nm, IR and UV sensor and false-colour film sensitivities, measured IR reflectance (Gates et al. 1965). | high | 3 h | ready |
+| Colour | Fluorescence | Light keeps its wavelength. Re-emission at longer wavelengths from excitation-emission spectra (Wilkie et al. 2006). | high | 3 h | ready |
 | Sampling | Adaptive sampling refinements | Every texel's relative error weighs alike. A luminance range of interest, relative variance smoothly reduced in dark regions and above the clip point, and variance pooled over 1-32 px circles to catch low-frequency noise (Fascione et al. 2018). | medium | 2 h | ready |
 | Performance | A/B tuning | Small local speed-ups, kept only on a significant paired-run gain on the proxy profile with output inside calibrated bands. | medium | 3 h | ready |
 
@@ -113,7 +112,7 @@ frame["depth"]    # (64, 128, 1) float32, camera-space Z
 | --- | --- | --- | --- | --- | --- |
 | Camera | Sensor noise model | Images are noise-free. Shot, read and dark noise and quantisation per EMVA 1288, from the calibrated luminance. | medium | 2 h | ready |
 | Camera | Lens model | Renders cannot match a calibrated camera. Principal point and pixel aspect on the Kannala and Brandt (2006) model; a measured-lens preset. | medium | 1 h | ready |
-| Colour | Spectral data | Metals are RGB fits. Measured conductor eta/k, and reflectance and illuminant databases as material and light inputs. Waits for spectral transport. | medium | 2 h | blocked |
+| Colour | Spectral data | Metals are RGB fits. Measured conductor eta/k, and reflectance and illuminant databases as material and light inputs. | medium | 2 h | ready |
 | Texture | Metameric pairs | Patches differ in RGB or not at all. Pairs with different spectra but one RGB under a chosen illuminant, for colour constancy and spectral validation. Waits for spectral data. | medium | 1 h | blocked |
 | Light | IES profiles | Lights emit uniformly. Measured distributions (IES LM-63), importance-sampled from the table and scaled by the existing lumens. | medium | 1 h | ready |
 | Texture | Procedural stimuli | Patterns need image files. Sine and square gratings (orientation, spatial frequency, phase, contrast), Gabor patches, plaids, radial, concentric and log-polar gratings, bars, step edges, checkerboards and Mondrians (Land and McCann 1971), box-filtered by the ray footprint. | medium | 3 h | ready |
@@ -122,10 +121,10 @@ frame["depth"]    # (64, 128, 1) float32, camera-space Z
 | Light | Image-textured area lights | Area lights emit one colour. An emission texture over the light, importance-sampled by its luminance, for screens and stimulus displays. | medium | 2 h | ready |
 | Camera | Multi-viewpoint compound eyes | Facets share one viewpoint and angle. Per-facet position, axis and acceptance from measured eye data (Millward et al. 2022). | high | 3 h | ready |
 | Camera | Event camera output | Log-contrast events for neuromorphic sensors, timed by interpolating between rendered frames (Rebecq et al. 2018). | medium | 3 h | ready |
-| Light | Physical sky | Daylight is an HDRI. Sun and sky from time of day and location, with Rayleigh and Mie scattering, spectral (Wilkie et al. 2021). Waits for spectral transport. | high | 4 h | blocked |
+| Light | Physical sky | Daylight is an HDRI. Sun and sky from time of day and location, with Rayleigh and Mie scattering, spectral (Wilkie et al. 2021). | high | 4 h | ready |
 | Camera | Anamorphic and distortion | Anamorphic squeeze and Brown-Conrady distortion (Brown 1966), Newton-inverted for motion vectors and texture filtering. | high | 2 h | ready |
 | Texture | Procedural noise | No noise inputs. White, pink (1/f) and band-pass noise, Perlin (2002), Worley (1996) and fBm, band-limited to the ray footprint. | medium | 2 h | ready |
-| Material | Measured BRDFs | Materials are analytic. Tabulated measured BRDFs (Dupuy and Jakob 2018), spectral, importance-sampled from the table. Waits for spectral transport. | medium | 2 h | blocked |
+| Material | Measured BRDFs | Materials are analytic. Tabulated measured BRDFs (Dupuy and Jakob 2018), spectral, importance-sampled from the table. | medium | 2 h | ready |
 | Sampling | Blue noise beyond one dimension | The mask spreads error in one dimension only. Blue-noise-distributed Sobol scrambling and ranking (Heitz et al. 2019). | medium | 2 h | ready |
 | Output | Geometry AOVs | No material, facing or curvature channels. Material ID beside objectID, facing ratio (N.V) and mean curvature (Meyer et al. 2003), with curvature as a shading input. | medium | 2 h | ready |
 | Sampling | Many-light sampling | Lights are picked uniformly. Light tree by power and orientation (Conty Estevez and Kulla 2018), every emissive surface in it so emission_color gets NEE; BSDF-aware selection at the first vertex and a screen-space visibility correction cache (Fascione et al. 2018). | high | 6 h | ready |
@@ -135,7 +134,7 @@ frame["depth"]    # (64, 128, 1) float32, camera-space Z
 | Camera | Film halation | Highlights have no film halo. Light reflected off the film base re-exposes the red-sensitive layer; a red-weighted glare from the bloom pyramid, picture AOVs only. | medium | 1 h | ready |
 | Texture | UDIM and Ptex | One image per input. UDIM tiles and per-face Ptex (Burley and Lacewell 2008) through the OIIO texture system. | medium | 2 h | ready |
 | Material | Dwivedi subsurface walks | Subsurface walks follow the phase function alone. Dwivedi-guided walks (Křivánek and d'Eon 2014), preferred over diffusion profiles in production (Fascione et al. 2018). | medium | 2 h | ready |
-| Material | Measured skin | Skin is RGB subsurface. Spectral layered skin from melanin and haemoglobin (Donner and Jensen 2006) and measured skin spectra. Waits for spectral transport. | high | 3 h | blocked |
+| Material | Measured skin | Skin is RGB subsurface. Spectral layered skin from melanin and haemoglobin (Donner and Jensen 2006) and measured skin spectra. | high | 3 h | ready |
 | Colour | Film grading | No looks. Bleach bypass (retained silver as added neutral density) and three-strip Technicolor dye transfer (Kalmus 1938) in print density, before the view transform. | medium | 2 h | ready |
 | Output | Upscaling | Spatial or temporal (Xiao et al. 2020); temporal reads motionVector. Never replaces the converged Beauty. | medium | 3 h | ready |
 | Output | Generative channel | Diffusion refinement AOV and latents (Ho et al. 2020; Rombach et al. 2022) from the Denoised AOV. Never replaces Beauty. | high | 6 h | ready |

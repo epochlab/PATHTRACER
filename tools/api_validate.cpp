@@ -1139,10 +1139,10 @@ PT_CHECK(turning_the_world_with_the_camera_leaves_the_image, Slow, Exact) {
             worstDepth = std::max(worstDepth, std::fabs(turnedDepth[pixel] - depth[pixel]) / depth[pixel]);
             continue;
         }
-        // A primary miss reads the environment alone, so the background pixels compare the environment's turn with the camera's.
+        // A miss reads the environment alone, against the pixel's mean channel level: one sample's projection can leave a channel near 0.
+        const float level = (beauty[3 * pixel] + beauty[(3 * pixel) + 1] + beauty[(3 * pixel) + 2]) / 3.0F;
         for (std::size_t c = 0; c < 3; ++c) {
-            const float sky = beauty[(3 * pixel) + c];
-            worstSky = std::max(worstSky, std::fabs(turnedBeauty[(3 * pixel) + c] - sky) / std::max(sky, 1e-6F));
+            worstSky = std::max(worstSky, std::fabs(turnedBeauty[(3 * pixel) + c] - beauty[(3 * pixel) + c]) / std::max(level, 1e-6F));
         }
     }
     PT_EXPECT(ctx, coverageAgrees && worstDepth <= kDepthTolerance,

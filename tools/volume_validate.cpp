@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <functional>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -40,6 +41,9 @@ namespace {
 
 using pathtracer::config::VolumeConfig;
 using pathtracer::scene::Rgb;
+using pathtracer::scene::SampledSpectrum;
+using pathtracer::scene::SampledWavelengths;
+using pathtracer::scene::kSpectrumSamples;
 using pathtracer::scene::FreeFlightEvent;
 using pathtracer::scene::Ray;
 using pathtracer::scene::Sampler;
@@ -202,7 +206,7 @@ PT_CHECK(transmittance_matches_closed_form, Slow, Statistical) {
     const std::array<Row, 3> rows{{{"density", material, 64.0}, {"ramp", material, 32.0}, {"density", halved, 64.0}}};
 
     constexpr int kTrials = 4096;
-    ctx.plan(9);
+    ctx.plan(3 * kSpectrumSamples);
     for (const auto& [name, materialPath, voxels] : rows) {
         VolumeConfig config = volumeConfig(vdb, materialPath);
         config.grid = name;
@@ -218,24 +222,28 @@ PT_CHECK(transmittance_matches_closed_form, Slow, Statistical) {
         const glm::vec3 dir = 3.0F * glm::normalize(end - start);
         const Ray ray{start, dir, 0.0F, std::numeric_limits<float>::infinity()};
         const double depth = voxels * kVoxelSize;
-        std::array<tools::stats::Welford, 3> estimate;
+        // Every lane's closed form at its own upsampled coefficients: tracking is checked, not the fit that set them.
+        const SampledWavelengths& lambda = tools::fixtures::pinnedWavelengths();
+        const SampledSpectrum extinction = pathtracer::scene::unboundedSpectrum(Rgb(absorption), lambda) +
+                                           pathtracer::scene::unboundedSpectrum(Rgb(scattering), lambda);
+        std::array<tools::stats::Welford, kSpectrumSamples> estimate;
         for (int i = 0; i < kTrials; ++i) {
             Sampler sampler(0, 0, i, kTrials, static_cast<std::uint32_t>(ctx.subSeed(name + materialPath)));
-            const Rgb t = set.transmittance(ray, 0.0F, std::numeric_limits<float>::infinity(), sampler);
-            for (int c = 0; c < 3; ++c) {
+            const SampledSpectrum t = set.transmittance(ray, 0.0F, std::numeric_limits<float>::infinity(), lambda, sampler);
+            for (int c = 0; c < kSpectrumSamples; ++c) {
                 estimate[c].add(t[c]);
             }
         }
-        for (int c = 0; c < 3; ++c) {
-            const double expected = std::exp(-static_cast<double>(absorption[c] + scattering[c]) * depth);
+        for (int c = 0; c < kSpectrumSamples; ++c) {
+            const double expected = std::exp(-static_cast<double>(extinction[c]) * depth);
             const double half = tools::stats::studentTTwoSided(ctx.alpha(), static_cast<double>(kTrials - 1)) * estimate[c].standardError();
             PT_EXPECT(ctx, std::abs(estimate[c].mean() - expected) <= half,
-                      name + " " + materialPath + " channel " + std::to_string(c) + ": " + std::to_string(estimate[c].mean()) + " vs " + std::to_string(expected));
+                      name + " " + materialPath + " lane " + std::to_string(c) + ": " + std::to_string(estimate[c].mean()) + " vs " + std::to_string(expected));
         }
     }
 }
 
-// Spectral tracking from inside a chromatic box: E[w 1{escape}] = T and E[w 1{scatter}] = (sigma_s/sigma_t)(1 - T) per channel.
+// Spectral tracking from inside a chromatic box: E[w 1{escape}] = T and E[w 1{scatter}] = (sigma_s/sigma_t)(1 - T) per lane.
 PT_CHECK(spectral_tracking_is_unbiased, Slow, Statistical) {
     const Scratch scratch(ctx);
     const std::string vdb = scratch.writeGrids("box", {makeBox(64, 1.0)});
@@ -245,31 +253,35 @@ PT_CHECK(spectral_tracking_is_unbiased, Slow, Statistical) {
     // Starts and ends inside, where the density is exactly 1, as a camera inside the medium and a surface hit within it.
     constexpr float kLength = 40.0F;
     const Ray ray{glm::vec3(10.0F, 31.0F, 31.0F), glm::vec3(1.0F, 0.0F, 0.0F), 0.0F, kLength};
-    const Rgb throughput(0.7F, 1.0F, 0.4F);  // a coloured history, which the probabilities follow and the weights undo
+    // A coloured history, which the probabilities follow and the weights undo.
+    const SampledSpectrum throughput(glm::vec4(0.7F, 1.0F, 0.4F, 0.85F));
+    const SampledWavelengths& lambda = tools::fixtures::pinnedWavelengths();
+    const SampledSpectrum sigmaA = pathtracer::scene::unboundedSpectrum(Rgb(absorption), lambda);
+    const SampledSpectrum sigmaS = pathtracer::scene::unboundedSpectrum(Rgb(scattering), lambda);
 
     constexpr int kTrials = 1 << 15;
-    std::array<tools::stats::Welford, 3> escaped;
-    std::array<tools::stats::Welford, 3> scattered;
+    std::array<tools::stats::Welford, kSpectrumSamples> escaped;
+    std::array<tools::stats::Welford, kSpectrumSamples> scattered;
     tools::stats::Welford inside;
     for (int i = 0; i < kTrials; ++i) {
         Sampler sampler(0, 0, i, kTrials, static_cast<std::uint32_t>(ctx.seed()));
-        const pathtracer::scene::FreeFlight flight = set.sampleFreeFlight(ray, 0.0F, kLength, throughput, sampler);
-        for (int c = 0; c < 3; ++c) {
+        const pathtracer::scene::FreeFlight flight = set.sampleFreeFlight(ray, 0.0F, kLength, throughput, lambda, sampler);
+        for (int c = 0; c < kSpectrumSamples; ++c) {
             escaped[c].add(flight.event == FreeFlightEvent::Escaped ? flight.weight[c] : 0.0F);
             scattered[c].add(flight.event == FreeFlightEvent::Scattered ? flight.weight[c] : 0.0F);
         }
         inside.add(flight.event != FreeFlightEvent::Scattered || (flight.t >= 0.0F && flight.t < kLength) ? 1.0 : 0.0);
     }
-    ctx.plan(7);
+    ctx.plan((2 * kSpectrumSamples) + 1);
     const double t = tools::stats::studentTTwoSided(ctx.alpha(), static_cast<double>(kTrials - 1));
-    for (int c = 0; c < 3; ++c) {
-        const double extinction = static_cast<double>(absorption[c] + scattering[c]);
+    for (int c = 0; c < kSpectrumSamples; ++c) {
+        const double extinction = static_cast<double>(sigmaA[c] + sigmaS[c]);
         const double transmittance = std::exp(-extinction * kLength);
-        const double scatter = (static_cast<double>(scattering[c]) / extinction) * (1.0 - transmittance);
+        const double scatter = (static_cast<double>(sigmaS[c]) / extinction) * (1.0 - transmittance);
         PT_EXPECT(ctx, std::abs(escaped[c].mean() - transmittance) <= t * escaped[c].standardError(),
-                  "escape channel " + std::to_string(c) + ": " + std::to_string(escaped[c].mean()) + " vs " + std::to_string(transmittance));
+                  "escape lane " + std::to_string(c) + ": " + std::to_string(escaped[c].mean()) + " vs " + std::to_string(transmittance));
         PT_EXPECT(ctx, std::abs(scattered[c].mean() - scatter) <= t * scattered[c].standardError(),
-                  "scatter channel " + std::to_string(c) + ": " + std::to_string(scattered[c].mean()) + " vs " + std::to_string(scatter));
+                  "scatter lane " + std::to_string(c) + ": " + std::to_string(scattered[c].mean()) + " vs " + std::to_string(scatter));
     }
     PT_EXPECT(ctx, inside.mean() == 1.0, "a scattering fell outside [t0, t1)");
 }
@@ -280,36 +292,36 @@ PT_CHECK(bounded_medium_free_flight_is_unbiased, Slow, Statistical) {
         const char* name;
         pathtracer::scene::HomogeneousMedium medium;
     };
-    // The second leaves blue clear, so its odds are 0 and its escape weight must still read exactly T = 1.
+    // The second leaves lane 2 clear, so its odds are 0 and its escape weight must still read exactly T = 1.
     const std::array<Case, 2> cases{{
-        {"chromatic", {Rgb(0.01F, 0.05F, 0.02F), Rgb(0.06F, 0.01F, 0.03F), 0.0F}},
-        {"clear blue", {Rgb(0.02F, 0.0F, 0.0F), Rgb(0.05F, 0.08F, 0.0F), 0.0F}},
+        {"chromatic", {SampledSpectrum(glm::vec4(0.01F, 0.05F, 0.02F, 0.03F)), SampledSpectrum(glm::vec4(0.06F, 0.01F, 0.03F, 0.02F)), 0.0F}},
+        {"clear lane", {SampledSpectrum(glm::vec4(0.02F, 0.0F, 0.0F, 0.01F)), SampledSpectrum(glm::vec4(0.05F, 0.08F, 0.0F, 0.04F)), 0.0F}},
     }};
     constexpr float kLength = 40.0F;
-    const Rgb throughput(0.7F, 1.0F, 0.4F);  // a coloured history, which the odds follow and the weights undo
+    const SampledSpectrum throughput(glm::vec4(0.7F, 1.0F, 0.4F, 0.85F));  // a coloured history, which the odds follow and the weights undo
     constexpr int kTrials = 1 << 15;
-    ctx.plan(static_cast<int>(cases.size()) * 6);
+    ctx.plan(static_cast<int>(cases.size()) * 2 * kSpectrumSamples);
     const double t = tools::stats::studentTTwoSided(ctx.alpha(), static_cast<double>(kTrials - 1));
     for (const Case& testCase : cases) {
         const pathtracer::scene::HomogeneousMedium& medium = testCase.medium;
-        const Rgb odds = pathtracer::scene::channelOdds(medium, throughput);
-        std::array<tools::stats::Welford, 3> escaped;
-        std::array<tools::stats::Welford, 3> scattered;
+        const SampledSpectrum odds = pathtracer::scene::channelOdds(medium, throughput);
+        std::array<tools::stats::Welford, kSpectrumSamples> escaped;
+        std::array<tools::stats::Welford, kSpectrumSamples> scattered;
         for (int i = 0; i < kTrials; ++i) {
             Sampler sampler(0, 0, i, kTrials, static_cast<std::uint32_t>(ctx.subSeed(testCase.name)));
             const float d = pathtracer::scene::sampleCollision(medium, odds, sampler.next2D());
-            const Rgb escape = d < kLength ? Rgb(0.0F) : pathtracer::scene::passWeight(medium, odds, kLength);
-            const Rgb scatter = d < kLength ? pathtracer::scene::collisionWeight(medium, odds, d) : Rgb(0.0F);
-            for (int c = 0; c < 3; ++c) {
+            const SampledSpectrum escape = d < kLength ? SampledSpectrum(0.0F) : pathtracer::scene::passWeight(medium, odds, kLength);
+            const SampledSpectrum scatter = d < kLength ? pathtracer::scene::collisionWeight(medium, odds, d) : SampledSpectrum(0.0F);
+            for (int c = 0; c < kSpectrumSamples; ++c) {
                 escaped[c].add(escape[c]);
                 scattered[c].add(scatter[c]);
             }
         }
-        for (int c = 0; c < 3; ++c) {
+        for (int c = 0; c < kSpectrumSamples; ++c) {
             const double extinction = static_cast<double>(medium.absorption[c] + medium.scattering[c]);
             const double transmittance = std::exp(-extinction * kLength);
             const double scatter = extinction > 0.0 ? (static_cast<double>(medium.scattering[c]) / extinction) * (1.0 - transmittance) : 0.0;
-            const std::string where = std::string(testCase.name) + " channel " + std::to_string(c) + ": ";
+            const std::string where = std::string(testCase.name) + " lane " + std::to_string(c) + ": ";
             PT_EXPECT(ctx, std::abs(escaped[c].mean() - transmittance) <= t * escaped[c].standardError(),
                       where + "escape " + std::to_string(escaped[c].mean()) + " vs " + std::to_string(transmittance));
             PT_EXPECT(ctx, std::abs(scattered[c].mean() - scatter) <= t * scattered[c].standardError(),
@@ -322,7 +334,7 @@ PT_CHECK(bounded_medium_free_flight_is_unbiased, Slow, Statistical) {
 PT_CHECK(bounded_medium_limits, Fast, Exact) {
     using pathtracer::scene::HomogeneousMedium;
     constexpr float kInf = std::numeric_limits<float>::infinity();
-    const HomogeneousMedium opaque{Rgb(kInf, 0.0F, 0.5F), Rgb(0.0F), 0.0F};
+    const HomogeneousMedium opaque{SampledSpectrum(glm::vec4(kInf, 0.0F, 0.5F, 0.5F)), SampledSpectrum(0.0F), 0.0F};
     pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant> glass;
     glass.transmissionWeight = 1.0F;
     glass.transmissionColor = Rgb(0.0F, 0.5F, 1.0F);
@@ -332,17 +344,32 @@ PT_CHECK(bounded_medium_limits, Fast, Exact) {
     fog.transmissionScatterAnisotropy = 1.0F;
     pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant> wax;
     wax.subsurfaceWeight = 1.0F;
-    wax.subsurfaceRadiusScale = Rgb(1.0F, 0.5F, 0.0F);
-    const HomogeneousMedium waxMedium = pathtracer::scene::interiorMedium(wax);
-    ctx.plan(6);
-    PT_EXPECT(ctx, pathtracer::scene::transmittance(opaque, 0.0F) == Rgb(1.0F), "T(0) must be 1 at infinite extinction");
-    PT_EXPECT(ctx, pathtracer::scene::transmittance(opaque, kInf) == Rgb(0.0F, 1.0F, 0.0F), "T(inf) must be 0 or, clear, 1");
-    PT_EXPECT(ctx, pathtracer::scene::transmittance(opaque, 2.0F) == Rgb(0.0F, 1.0F, std::exp(-1.0F)), "T(2) off the closed form");
-    PT_EXPECT(ctx, !pathtracer::scene::scatters(pathtracer::scene::interiorMedium(glass)), "an absorbing interior scattered");
-    PT_EXPECT(ctx, !pathtracer::scene::scatters(pathtracer::scene::interiorMedium(fog)), "a g = 1 interior's forward delta scattered");
-    // A zero-MFP channel takes the glossy-diffuse limit: no medium there, finite coefficients elsewhere.
-    PT_EXPECT(ctx, waxMedium.scattering.b == 0.0F && waxMedium.absorption.b == 0.0F && waxMedium.scattering.g == 2.0F * waxMedium.scattering.r,
-              "a zero-MFP channel entered the medium, or 1/MFP left the open ones");
+    wax.subsurfaceColor = pathtracer::scene::Rgb(0.8F);
+    pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant> limit = wax;
+    limit.subsurfaceRadiusScale = Rgb(0.0F);
+    const SampledWavelengths& lambda = tools::fixtures::pinnedWavelengths();
+    const HomogeneousMedium waxMedium = pathtracer::scene::interiorMedium(pathtracer::scene::toSpectral(wax, lambda));
+    const SampledSpectrum scale = pathtracer::scene::reflectanceSpectrum(wax.subsurfaceRadiusScale, lambda);
+    ctx.plan(7);
+    PT_EXPECT(ctx, pathtracer::scene::transmittance(opaque, 0.0F) == SampledSpectrum(1.0F), "T(0) must be 1 at infinite extinction");
+    PT_EXPECT(ctx, pathtracer::scene::transmittance(opaque, kInf) == SampledSpectrum(glm::vec4(0.0F, 1.0F, 0.0F, 0.0F)),
+              "T(inf) must be 0 or, clear, 1");
+    PT_EXPECT(ctx, pathtracer::scene::transmittance(opaque, 2.0F) == SampledSpectrum(glm::vec4(0.0F, 1.0F, std::exp(-1.0F), std::exp(-1.0F))),
+              "T(2) off the closed form");
+    PT_EXPECT(ctx, !pathtracer::scene::scatters(pathtracer::scene::interiorMedium(pathtracer::scene::toSpectral(glass, lambda))),
+              "an absorbing interior scattered");
+    PT_EXPECT(ctx, !pathtracer::scene::scatters(pathtracer::scene::interiorMedium(pathtracer::scene::toSpectral(fog, lambda))),
+              "a g = 1 interior's forward delta scattered");
+    // The radius scale is a spectrum: each lane's 1/MFP over its own scale, so scattering times scale is one constant across lanes.
+    bool inverse = true;
+    for (int c = 1; c < kSpectrumSamples; ++c) {
+        inverse = inverse && std::abs((waxMedium.scattering[c] * scale[c]) - (waxMedium.scattering[0] * scale[0])) <=
+                                 4.0F * std::numeric_limits<float>::epsilon() * waxMedium.scattering[0] * scale[0];
+    }
+    PT_EXPECT(ctx, inverse, "a lane's coefficients are not 1/MFP of its own radius scale");
+    // A zero radius scale is the zero-MFP limit in every lane: OpenPBR's glossy-diffuse lobe, no medium.
+    PT_EXPECT(ctx, !pathtracer::scene::scatters(pathtracer::scene::interiorMedium(pathtracer::scene::toSpectral(limit, lambda))),
+              "a zero-MFP subsurface entered a medium");
 }
 
 // A grey scattering-only medium's free-flight distances binned against 1 - exp(-sigma t): the exponential law itself, not its mean.
@@ -360,8 +387,9 @@ PT_CHECK(free_flight_distance_distribution, Slow, Statistical) {
     bool unitWeights = true;
     for (int i = 0; i < kTrials; ++i) {
         Sampler sampler(0, 0, i, kTrials, static_cast<std::uint32_t>(ctx.seed()));
-        const pathtracer::scene::FreeFlight flight = set.sampleFreeFlight(ray, 0.0F, kLength, Rgb(1.0F), sampler);
-        unitWeights = unitWeights && flight.weight == Rgb(1.0F);
+        const pathtracer::scene::FreeFlight flight =
+            set.sampleFreeFlight(ray, 0.0F, kLength, SampledSpectrum(1.0F), tools::fixtures::pinnedWavelengths(), sampler);
+        unitWeights = unitWeights && flight.weight == SampledSpectrum(1.0F);
         const int bin = flight.event == FreeFlightEvent::Scattered
                             ? std::min(static_cast<int>(flight.t / kLength * static_cast<float>(kBins)), kBins - 1)
                             : kBins;
@@ -442,12 +470,13 @@ PT_CHECK(empty_space_draws_nothing, Fast, Exact) {
     // From the first blob's far side to the second's near side, one cell of margin clear of each majorant's dilated support.
     const Ray ray{glm::vec3(8.0F, 8.0F, 40.0F), glm::vec3(0.0F, 0.0F, 1.0F), 0.0F, 140.0F};
     Sampler used(0, 0, 0, 1, 7U);
-    const Rgb transmittance = set.transmittance(ray, 0.0F, 140.0F, used);
-    const pathtracer::scene::FreeFlight flight = set.sampleFreeFlight(ray, 0.0F, 140.0F, Rgb(1.0F), used);
+    const SampledWavelengths& lambda = tools::fixtures::pinnedWavelengths();
+    const SampledSpectrum transmittance = set.transmittance(ray, 0.0F, 140.0F, lambda, used);
+    const pathtracer::scene::FreeFlight flight = set.sampleFreeFlight(ray, 0.0F, 140.0F, SampledSpectrum(1.0F), lambda, used);
     Sampler fresh(0, 0, 0, 1, 7U);
     ctx.plan(3);
-    PT_EXPECT(ctx, transmittance == Rgb(1.0F), "transmittance through empty cells left 1");
-    PT_EXPECT(ctx, flight.event == FreeFlightEvent::Escaped && flight.weight == Rgb(1.0F), "the flight did not escape at weight 1");
+    PT_EXPECT(ctx, transmittance == SampledSpectrum(1.0F), "transmittance through empty cells left 1");
+    PT_EXPECT(ctx, flight.event == FreeFlightEvent::Escaped && flight.weight == SampledSpectrum(1.0F), "the flight did not escape at weight 1");
     PT_EXPECT(ctx, used.next2D() == fresh.next2D(), "empty space consumed sampler dimensions");
 }
 
@@ -628,6 +657,25 @@ PT_CHECK(white_furnace_with_chromatic_extinction, Slow, Statistical) {
     }
 }
 
+// Scene RGB of a per-wavelength quantity under the unit white sky, CIE 015:2018's 1 nm summation of the sensor the renderer samples.
+glm::dvec3 underWhiteSky(const std::function<double(double nm)>& quantity) {
+    namespace cie = pathtracer::scene::cie;
+    glm::dvec3 xyz(0.0);
+    double whiteY = 0.0;
+    for (int i = 0; i < cie::kSampleCount; ++i) {
+        const cie::TableRow row = cie::tableRow(i);
+        xyz += quantity(cie::wavelengthNm(i)) * row.d65 * row.colourMatching;
+        whiteY += row.d65 * row.colourMatching.y;
+    }
+    return cie::xyzToScene() * (xyz / whiteY);
+}
+
+// A volume coefficient's fitted spectrum at nm, as the renderer upsamples the material's RGB.
+double coefficientAt(const glm::vec3& rgb, double nm) {
+    const pathtracer::scene::UnboundedSpectrum spectrum = pathtracer::scene::fitUnbounded(Rgb(rgb));
+    return static_cast<double>(spectrum.scale * spectrum.shape(static_cast<float>(nm)));
+}
+
 // Direct light through a slab at maxBounces 0: the sky seen through it plus single scattering, against a quadrature over depth and angle.
 PT_CHECK(single_scattering_matches_slab_quadrature, Slow, Statistical) {
     const Scratch scratch(ctx);
@@ -644,8 +692,10 @@ PT_CHECK(single_scattering_matches_slab_quadrature, Slow, Statistical) {
                    static_cast<std::uint32_t>(ctx.subSeed(std::to_string(g))));
         const std::array<tools::stats::Welford, 3> means = pixelMeans(result.beauty);
         const double t = tools::stats::studentTTwoSided(ctx.alpha(), kImage * kImage - 1);
-        for (int c = 0; c < 3; ++c) {
-            const double sigmaT = static_cast<double>(absorption[c] + scattering[c]);
+        // One wavelength's closed form at its own fitted coefficients; smooth in lambda, so 5 nm knots interpolated serve the 1 nm sum.
+        const auto atWavelength = [&](double nm) {
+            const double sigmaS = coefficientAt(scattering, nm);
+            const double sigmaT = coefficientAt(absorption, nm) + sigmaS;
             // Turning by mu = cos from the camera's -z: forward leaves through the depth below z, backward through the depth above it.
             const auto exitTransmittance = [&](double z, double mu) {
                 const double depth = mu > 0.0 ? slabDepthBelow(z) : 8.0 - slabDepthBelow(z);
@@ -656,16 +706,29 @@ PT_CHECK(single_scattering_matches_slab_quadrature, Slow, Statistical) {
                     return 2.0 * kPi * pathtracer::scene::henyeyGreenstein(static_cast<float>(mu), g) * exitTransmittance(z, mu);
                 };
                 const double sky = tools::stats::simpson(-1.0, 0.0, 4096, phase) + tools::stats::simpson(0.0, 1.0, 4096, phase);
-                return std::exp(-sigmaT * (8.0 - slabDepthBelow(z))) * scattering[c] * slabDensity(z) * sky;
+                return std::exp(-sigmaT * (8.0 - slabDepthBelow(z))) * sigmaS * slabDensity(z) * sky;
             };
             double reference = std::exp(-sigmaT * 8.0);
             for (const auto& [a, b] : {std::pair{-1.0, 0.0}, std::pair{0.0, 7.0}, std::pair{7.0, 8.0}}) {
                 // Simpson is exact on cubics, so on the slab's piecewise-quadratic depths between its knots.
                 reference += tools::stats::simpson(a, b, 256, inScatter);
             }
-            PT_EXPECT(ctx, std::abs(means[c].mean() - reference) <= t * means[c].standardError(),
+            return reference;
+        };
+        namespace cie = pathtracer::scene::cie;
+        std::vector<double> knots;
+        for (int nm = cie::kLambdaMinNm; nm <= cie::kLambdaMaxNm; nm += cie::kDaylightIntervalNm) {
+            knots.push_back(atWavelength(nm));
+        }
+        const glm::dvec3 reference = underWhiteSky([&](double nm) {
+            const double position = (nm - cie::kLambdaMinNm) / cie::kDaylightIntervalNm;
+            const auto knot = std::min(static_cast<std::size_t>(position), knots.size() - 2);
+            return std::lerp(knots[knot], knots[knot + 1], position - static_cast<double>(knot));
+        });
+        for (int c = 0; c < 3; ++c) {
+            PT_EXPECT(ctx, std::abs(means[c].mean() - reference[c]) <= t * means[c].standardError(),
                       "g " + std::to_string(g) + " channel " + std::to_string(c) + ": " + std::to_string(means[c].mean()) + " vs " +
-                          std::to_string(reference));
+                          std::to_string(reference[c]));
         }
     }
 }
@@ -680,7 +743,8 @@ PT_CHECK(absorbing_slab_alpha_and_beauty, Slow, Statistical) {
     const Camera camera = downCamera(glm::vec3(255.5F, 255.5F, 40.0F));
     const PathTraceResult hidden = render(Surfaces{}, set, camera, settingsOf(4, 1024), false, ctx);
     const PathTraceResult shown = render(Surfaces{}, set, camera, settingsOf(4, 1024), true, ctx);
-    const glm::dvec3 transmittance = glm::exp(-8.0 * glm::dvec3(absorption));
+    // Each wavelength's exp(-8 sigma_a(lambda)) at the fitted coefficient, projected under the shown white sky.
+    const glm::dvec3 transmittance = underWhiteSky([&](double nm) { return std::exp(-8.0 * coefficientAt(absorption, nm)); });
     tools::stats::Welford alpha;
     bool hiddenBlack = true;
     bool shownOpaque = true;

@@ -3,6 +3,47 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Spectral transport
+
+Transport carried ACEScg RGB, so light bouncing between coloured surfaces multiplied RGB triples, not spectra. Dispersion bent
+three fixed bands, and the thin film was integrated into RGB once and clipped. Each path now carries four wavelengths, and every
+colour that enters the scene becomes a spectrum, following Weta's Manuka and PhysLight (Fascione et al. 2018; Langlands and
+Fascione 2020). Output, AOVs and APIs stay ACEScg in cd/m^2.
+
+- feat: **hero-wavelength sampling** (`spectrum.h`). Four lanes per path, a hero and its CDF-space rotations u + j/4 (Wilkie et
+  al. 2014), drawn from their own sampler stream.
+  - The pdf is the sensor's channel sensitivity, p ~ sum_c |s_c| over 360-830 nm. That bounds every channel's per-sample weight.
+  - Each contribution is projected through s = K_m xyzToScene cmf / (4 p) as it is recorded. Radiance is spectral radiometric
+    (W/(sr m^2 nm)), with K_m = 683.002 lm/W in the sensor.
+- feat: **RGB to spectrum** (Jakob and Hanika 2019). `rgb_spectrum_table` fits the paper's sigmoid-polynomial table at build time
+  against this renderer's own CIE colorimetry, at resolution 64, and the library `#embed`s it (9.4 MB).
+  - One table, fitted under D65, the scene white: an authored albedo renders as authored under white light, and equal RGB is a
+    flat spectrum. Manuka fits reflectances under Illuminant E, in each texture's own space. Here, under the D65 scene white, an
+    E fit renders the ColorChecker up to dE00 1.24 off (mean 0.62); the D65 fit holds all 24 patches within dE00 0.08.
+  - Emission is that fit times D65, so RGB (1, 1, 1) is D65 exactly. Unbounded colours (emission, media coefficients) put their
+    peak at the table's mid-scale 1/2, where grey's fit is the flat spectrum. At scale 1 a saturated colour fits only as a box with
+    sub-nm edges, which no real absorber or emitter has.
+- feat: **lights emit spectra.** A kelvin light emits its Planck or CIE daylight spectrum, and an RGB light its D65 upsampling.
+  Both are tabulated at 1 nm and scaled by nits or lumens, as before. `cie::kelvinToScene` becomes `cie::illuminantSpectrum`.
+  - The out-of-gamut refusal is gone: a physical spectrum needs no clamp. Only a blackbody whose visible luminance underflows is
+    refused.
+- feat: **wavelength-exact optics.** Dispersion bends each path by Cauchy at its hero wavelength, not three RGB bands.
+  - The thin film is Belcour and Barla's Airy series in closed form at each lane, replacing the 20001 x 471 CIE transform table and
+    its clip.
+  - Media, OpenVDB tracking and the medium walks run per lane. A VDB majorant is the exact spectral maximum of its fitted
+    coefficients.
+- refactor: `OpenPbrInputs<Spectral>` carries a vertex's colours at the path's lanes, upsampled once by `toSpectral`. The BSDF reads
+  the same field names, and `Rgb` stays the type of inputs and outputs.
+- fix: **alpha** projects the opacity 1 - T. The white's projection has expectation 1, a control variate: unbiased, and exactly 0
+  on a clear escape, where 1 - proj(T) would carry wavelength noise.
+- test: table round trip, flat grey and D65 white, sensor projection of the scene white and of kelvin lights, wavelength CDF order,
+  and Adobe's per-wavelength thin film at each lane. The BSDF validators map colours onto lanes, so their per-channel oracles hold
+  exactly.
+  - Render checks that read one sample as exact now pair renders at one seed, so the wavelengths match, or band the replicates
+    against the sensor's exact expectation.
+  - Coloured references take the spectral product (rho(lambda)^2, not rgb^2), and energy checks read luminance, not the max
+    channel, whose E[max] biases up under sampled wavelengths.
+
 ## Colour-aware adaptive convergence
 
 Adaptive sampling stopped a texel once its luminance was known to the threshold, so noise that changes hue but not brightness went

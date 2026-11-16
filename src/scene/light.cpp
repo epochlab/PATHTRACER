@@ -255,13 +255,13 @@ std::optional<EllipseCone> ellipseCone(const DiskLight& disk, const glm::vec3& r
 
 // Le toward `direction` off a surface of normal `normal`: a ray toward the light opposes the front face's normal; a sphere has no back.
 template <typename Light>
-Rgb emittedToward(const Light& light, const glm::vec3& direction, const glm::vec3& normal) {
+SampledSpectrum emittedToward(const Light& light, const glm::vec3& direction, const glm::vec3& normal, const SampledWavelengths& lambda) {
     if constexpr (!std::is_same_v<Light, SphereLight>) {
         if (light.twoSided) {
-            return light.radiance;
+            return light.radiance(lambda);
         }
     }
-    return glm::dot(direction, normal) < 0.0F ? light.radiance : Rgb(0.0F);
+    return glm::dot(direction, normal) < 0.0F ? light.radiance(lambda) : SampledSpectrum(0.0F);
 }
 
 }  // namespace
@@ -352,7 +352,7 @@ glm::vec3 SphericalEllipse::sample(glm::vec2 u) const {
     return referencePoint + ((planeDistance / glm::dot(direction, planeNormal)) * direction);
 }
 
-MeshLight::MeshLight(std::vector<Triangle> triangles, Rgb radiance, bool twoSided)
+MeshLight::MeshLight(std::vector<Triangle> triangles, EmissionSpectrum radiance, bool twoSided)
     : triangles(std::move(triangles)), areaCdf(this->triangles.size() + 1, 0.0F), area(0.0F), radiance(radiance), twoSided(twoSided) {
     normals.reserve(this->triangles.size());
     // Summed in double so the running total does not swamp a small face's area in a large mesh.
@@ -382,18 +382,20 @@ int LightSet::count() const {
     return (environment_ != nullptr ? 1 : 0) + static_cast<int>(lights_.size());
 }
 
-Rgb LightSet::environmentRadiance(const glm::vec3& direction) const {
+// The map's scene RGB in cd/m^2 is an emitter's colour, upsampled against D65 so a neutral texel radiates the scene white.
+SampledSpectrum LightSet::environmentRadiance(const glm::vec3& direction, const SampledWavelengths& lambda) const {
     if (environment_ == nullptr) {
-        return Rgb(0.0F);
+        return SampledSpectrum(0.0F);
     }
-    return environment_->sampleDirection(direction, envRotation_) * envExposure_;
+    return illuminantSpectrum(environment_->sampleDirection(direction, envRotation_) * envExposure_, lambda);
 }
 
-Rgb LightSet::environmentRadiance(const glm::vec3& direction, const glm::mat2x3& dirFootprint) const {
+SampledSpectrum LightSet::environmentRadiance(const glm::vec3& direction, const glm::mat2x3& dirFootprint,
+                                              const SampledWavelengths& lambda) const {
     if (environment_ == nullptr) {
-        return Rgb(0.0F);
+        return SampledSpectrum(0.0F);
     }
-    return environment_->sampleDirection(direction, dirFootprint, envRotation_) * envExposure_;
+    return illuminantSpectrum(environment_->sampleDirection(direction, dirFootprint, envRotation_) * envExposure_, lambda);
 }
 
 float LightSet::pdfEnvironment(const glm::vec3& dir) const {
@@ -403,8 +405,10 @@ float LightSet::pdfEnvironment(const glm::vec3& dir) const {
     return environment_->pdf(dir, envRotation_) / static_cast<float>(count());
 }
 
-Rgb LightSet::radianceToward(int lightIndex, const glm::vec3& direction, const glm::vec3& normal) const {
-    return std::visit([&](const auto& light) { return emittedToward(light, direction, normal); }, lights_[static_cast<std::size_t>(lightIndex)]);
+SampledSpectrum LightSet::radianceToward(int lightIndex, const glm::vec3& direction, const glm::vec3& normal,
+                                         const SampledWavelengths& lambda) const {
+    return std::visit([&](const auto& light) { return emittedToward(light, direction, normal, lambda); },
+                      lights_[static_cast<std::size_t>(lightIndex)]);
 }
 
 float LightSet::pdfArea(int lightIndex, const glm::vec3& p, const glm::vec3& point, const glm::vec3& normal) const {
@@ -429,7 +433,7 @@ float LightSet::pdfArea(int lightIndex, const glm::vec3& p, const glm::vec3& poi
     return inversePdf > 0.0F ? 1.0F / (inversePdf * static_cast<float>(count())) : 0.0F;
 }
 
-std::optional<LightSample> LightSet::sample(const glm::vec3& p, Sampler& sampler) const {
+std::optional<LightSample> LightSet::sample(const glm::vec3& p, Sampler& sampler, const SampledWavelengths& lambda) const {
     const int n = count();
     if (n == 0) {
         return std::nullopt;
@@ -448,7 +452,7 @@ std::optional<LightSample> LightSet::sample(const glm::vec3& p, Sampler& sampler
         const EnvironmentMap::EnvSample envSample =
             environment_->importanceSampleDirection(sampler.next2D(), envRotation_);
         // The miss path's lookup, not the nearest texel: MIS weights sum to 1 across strategies, so both must evaluate one Le.
-        return LightSample{envSample.direction, environmentRadiance(envSample.direction),
+        return LightSample{envSample.direction, environmentRadiance(envSample.direction, lambda),
                             envSample.pdf * selectionPdf, std::numeric_limits<float>::max()};
     }
 
@@ -472,7 +476,7 @@ std::optional<LightSample> LightSet::sample(const glm::vec3& p, Sampler& sampler
                 return std::nullopt;
             }
             const glm::vec3 direction = toLight / distance;
-            return LightSample{direction, emittedToward(light, direction, area->normal), selectionPdf / area->inversePdf, distance};
+            return LightSample{direction, emittedToward(light, direction, area->normal, lambda), selectionPdf / area->inversePdf, distance};
         },
         lights_[static_cast<std::size_t>(index - (envPresent ? 1 : 0))]);
 }

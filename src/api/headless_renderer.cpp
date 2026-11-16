@@ -104,27 +104,26 @@ struct SceneInputs {
     return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
 }
 
-// Each light's colour for this request: its kelvin override resolved on the light's own illuminant locus, else the authored colour.
-[[nodiscard]] std::optional<std::vector<pathtracer::scene::Rgb>> lightColours(const HeadlessRenderer::Request& request,
-                                                                 const std::vector<pathtracer::config::LightConfig>& lights,
-                                                                 std::string& error) {
-    std::vector<pathtracer::scene::Rgb> colours;
-    colours.reserve(lights.size());
+// Each light's unit-luminance spectrum for this request: its kelvin override on the light's own illuminant locus, else the authored one.
+[[nodiscard]] std::optional<std::vector<pathtracer::scene::EmissionSpectrum>> lightSpectra(
+    const HeadlessRenderer::Request& request, const std::vector<pathtracer::config::LightConfig>& lights, std::string& error) {
+    std::vector<pathtracer::scene::EmissionSpectrum> spectra;
+    spectra.reserve(lights.size());
     for (std::size_t i = 0; i < lights.size(); ++i) {
         if (!request.lightKelvins.has_value()) {
-            colours.push_back(lights[i].color);
+            spectra.push_back(lights[i].spectrum);
             continue;
         }
         const float kelvin = (*request.lightKelvins)[i];
-        const std::optional<glm::dvec3> rgb = pathtracer::scene::cie::kelvinToScene(lights[i].illuminant, kelvin);
-        if (!rgb) {
+        const std::optional<pathtracer::scene::cie::Spectrum> power = pathtracer::scene::cie::illuminantSpectrum(lights[i].illuminant, kelvin);
+        if (!power) {
             error = "light kelvin " + std::to_string(kelvin) + " for light " + std::to_string(i) +
-                    " lies outside its illuminant's domain or the scene gamut";
+                    " lies outside its illuminant's domain or radiates no luminance";
             return std::nullopt;
         }
-        colours.emplace_back(glm::vec3(*rgb));
+        spectra.emplace_back(*power);
     }
-    return colours;
+    return spectra;
 }
 
 // Bloom is an energy fraction, so [0, 1]; the fringe keeps R's magnification 1 - a positive, so [0, 1). NaN fails every comparison.
@@ -378,14 +377,14 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
     if (!validRequest(request, scene_.lights.size(), profile_.denoiser.enabled, error)) {
         return false;
     }
-    const std::optional<std::vector<pathtracer::scene::Rgb>> colours = lightColours(request, scene_.lights, error);
-    if (!colours || !applyPose(request, error)) {
+    std::optional<std::vector<pathtracer::scene::EmissionSpectrum>> spectra = lightSpectra(request, scene_.lights, error);
+    if (!spectra || !applyPose(request, error)) {
         return false;
     }
-    // Radiance is all a light's colour reaches and selection is uniform, so a new colour rewrites it here and never the BVH.
-    for (std::size_t i = 0; i < colours->size(); ++i) {
-        const float luminance = pathtracer::scene::emittedLuminance(scene_.lights[i], geometry_.lights[i]);
-        std::visit([&](auto& light) { light.radiance = (*colours)[i] * luminance; }, geometry_.lights[i]);
+    // Radiance is all a light's spectrum reaches and selection is uniform, so a new spectrum rewrites it here and never the BVH.
+    for (std::size_t i = 0; i < spectra->size(); ++i) {
+        (*spectra)[i] *= pathtracer::scene::emittedLuminance(scene_.lights[i], geometry_.lights[i]);
+        std::visit([&](auto& light) { light.radiance = (*spectra)[i]; }, geometry_.lights[i]);
     }
     const bool wantsFilter = requestsSource(request.aovs, AovSource::BeautyFilter);
     resizeBuffers(request.width, pathtracer::gfx::latticeRows(request.camera.pixelLattice(), request.height));

@@ -18,7 +18,7 @@ struct Walker {
     glm::vec3 ray;
     float logCdf;
     bool upper;  // wo's medium; the far side's walk is the near side's under the point reflection through the mean plane
-    Rgb weight;
+    SampledSpectrum weight;
 };
 
 // A side's own frame: GGX and the uniform heights are centrally symmetric, so the far side is the near side point-reflected.
@@ -58,7 +58,7 @@ float bendRatio(const DielectricSlab& slab, bool upper) { return upper ? slab.et
 
 // One collision's scattering from toward t to o, both in the side's own frame: its value per channel and its sampling density.
 struct Phase {
-    Rgb value{0.0F};
+    SampledSpectrum value{0.0F};
     float pdf = 0.0F;
 };
 
@@ -80,13 +80,13 @@ Phase phase(const DielectricSlab& slab, const glm::vec3& t, const glm::vec3& o, 
     }
     const float denom = (eta * tm) + om;
     const float density = (tm * distributionGGX(m, slab.alpha) / projected) * (refracted ? -om / (denom * denom) : 0.25F / tm);
-    const Rgb fresnel = interfaceFresnel(slab, tm, !upper);
+    const SampledSpectrum fresnel = interfaceFresnel(slab, tm, !upper);
     const float reflectOdds = channelMean(fresnel);
     return refracted ? Phase{density * (1.0F - fresnel), density * (1.0F - reflectOdds)} : Phase{density * fresnel, density * reflectOdds};
 }
 
 // First-collision odds: glass by tinted Fresnel; where only wo's side counts (opaque, coat) a/(a+b), a = F, b = (1-F) sqrt(rho).
-float firstReflectOdds(const DielectricSlab& slab, const Rgb& fresnel) {
+float firstReflectOdds(const DielectricSlab& slab, const SampledSpectrum& fresnel) {
     if (slab.refractWeight > 0.0F) {
         return facetReflectProbability(slab, fresnel);
     }
@@ -108,7 +108,7 @@ bool scatter(const DielectricSlab& slab, Walker& walker, Sampler& walk, bool& re
     if (!(tm > 0.0F && m.z > 0.0F)) {
         return false;
     }
-    const Rgb fresnel = interfaceFresnel(slab, tm, !walker.upper);
+    const SampledSpectrum fresnel = interfaceFresnel(slab, tm, !walker.upper);
     const float reflectOdds = first ? firstReflectOdds(slab, fresnel) : channelMean(fresnel);
     refracted = walk.next1D() >= reflectOdds;
     if (!refracted) {
@@ -141,16 +141,16 @@ bool forceCollision(const DielectricSlab& slab, Walker& walker, float u) {
 
 // A walk entering from direction from at the top of its side, to its first collision: a falling ray never escapes.
 Walker enter(const DielectricSlab& slab, const glm::vec3& from, Sampler& walk) {
-    Walker walker{-from, 0.0F, from.z >= 0.0F, Rgb(1.0F)};
+    Walker walker{-from, 0.0F, from.z >= 0.0F, SampledSpectrum(1.0F)};
     static_cast<void>(collides(slab.alpha, walker, walk.next1D()));
     return walker;
 }
 
 // One walk's connections toward `to` from orders >= 2, each weighted P_this / (P_this + P_other) where weighed (Wang et al. 2022 eq. 15).
-Rgb connections(const DielectricSlab& slab, const glm::vec3& from, const glm::vec3& to, Sampler& walk, bool weighed) {
+SampledSpectrum connections(const DielectricSlab& slab, const glm::vec3& from, const glm::vec3& to, Sampler& walk, bool weighed) {
     const bool toUpper = to.z >= 0.0F;
     Walker walker = enter(slab, from, walk);
-    Rgb sum(0.0F);
+    SampledSpectrum sum(0.0F);
     // The other end's density of the interior directions over this walk's, in double: products of peaked densities overrun float.
     double ratio = 1.0;
     for (int order = 1;; ++order) {
@@ -204,10 +204,10 @@ std::optional<WalkExit> sampleInterfaceWalk(const DielectricSlab& slab, const gl
     return WalkExit{walker.ray, walker.upper ? walker.weight : walker.weight * slab.etaSq, walker.upper};
 }
 
-Rgb evaluateInterfaceMulti(const DielectricSlab& slab, const glm::vec3& wo, const glm::vec3& wi, Sampler& walk) {
+SampledSpectrum evaluateInterfaceMulti(const DielectricSlab& slab, const glm::vec3& wo, const glm::vec3& wi, Sampler& walk) {
     // Exit densities are f |cos| up to eta^2 across: from wo the radiance compression, from wi f(wo, wi) eta_wi^2 = f(wi, wo) eta_wo^2.
     const bool twoEnded = wo.z > 0.0F;
-    const Rgb forward = connections(slab, wo, wi, walk, twoEnded) * (wi.z < 0.0F ? slab.etaSq : 1.0F);
+    const SampledSpectrum forward = connections(slab, wo, wi, walk, twoEnded) * (wi.z < 0.0F ? slab.etaSq : 1.0F);
     // A level wo is met only at the top, where no walk from wi can leave toward it: the walk from wo carries the whole value alone.
     if (!twoEnded) {
         return forward;

@@ -140,6 +140,18 @@ target_include_directories(pathtracer_cie PUBLIC include)
 pathtracer_target_defaults(pathtracer_cie)
 target_link_libraries(pathtracer_cie PRIVATE glm::glm)
 
+# Jakob & Hanika 2019's RGB-to-spectrum table, fitted to this colorimetry at build time: 9.4 MB of floats, #embed-ed, not committed.
+add_executable(rgb_spectrum_table tools/rgb_spectrum_table.cpp $<TARGET_OBJECTS:pathtracer_cie>)
+target_include_directories(rgb_spectrum_table PRIVATE include tools)
+pathtracer_target_defaults(rgb_spectrum_table)
+target_link_libraries(rgb_spectrum_table PRIVATE glm::glm)
+set(PATHTRACER_RGB_SPECTRUM_TABLE ${PATHTRACER_GENERATED_DIR}/rgb_spectrum.bin)
+add_custom_command(OUTPUT ${PATHTRACER_RGB_SPECTRUM_TABLE} COMMAND rgb_spectrum_table ${PATHTRACER_RGB_SPECTRUM_TABLE}
+                   DEPENDS rgb_spectrum_table VERBATIM)
+# #embed searches --embed-dir, not -I (Clang 19+).
+set_source_files_properties(src/scene/rgb_spectrum_data.cpp PROPERTIES OBJECT_DEPENDS "${PATHTRACER_RGB_SPECTRUM_TABLE}"
+                            COMPILE_OPTIONS "--embed-dir=${PATHTRACER_GENERATED_DIR}")
+
 # The renderer proper: every source that includes no GL, GLFW or imgui header, which is what lets tools/ and the C ABI link it.
 add_library(pathtracer_core STATIC
     src/config/profile_config.cpp
@@ -175,9 +187,11 @@ add_library(pathtracer_core STATIC
     src/scene/path_tracer.cpp
     src/scene/gbuffer.cpp
     src/scene/ray_types.cpp
+    src/scene/rgb_spectrum_data.cpp
     src/scene/sampler.cpp
     src/scene/shading_scene.cpp
     src/scene/smith_walk.cpp
+    src/scene/spectrum.cpp
     src/scene/thin_film.cpp
     src/scene/thread_pool.cpp
     src/scene/volume.cpp

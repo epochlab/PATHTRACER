@@ -8,7 +8,7 @@
 #include <glm/glm.hpp>
 
 #include "pathtracer/scene/openpbr.h"
-#include "pathtracer/scene/rgb.h"
+#include "pathtracer/scene/spectrum.h"
 #include "pathtracer/scene/sampler.h"
 
 namespace pathtracer::scene {
@@ -21,8 +21,8 @@ enum class LobeType { Diffuse, SpecularReflection, Transmission };
 
 struct BsdfSample {
     glm::vec3 wiLocal;            // sampled direction, local shading frame
-    Rgb throughputWeight;         // the drawn technique's estimate of f(wi)*|cosThetaI| / pdf(wi): a walk's is its exit throughput
-    Rgb transmitWeight;           // its transmission lobes' share: what a direction crossing the geometric surface carries
+    SampledSpectrum throughputWeight;  // the drawn technique's estimate of f(wi)*|cosThetaI| / pdf(wi): a walk's is its exit throughput
+    SampledSpectrum transmitWeight;    // its transmission lobes' share: what a direction crossing the geometric surface carries
     LobeType type;
     // The density MIS weighs the draw by: pdfBsdf's for a closure, the exit vertex's for a normal-mapped walk; zero for a delta branch.
     float pdf;
@@ -35,11 +35,11 @@ struct BsdfSample {
 
 // The BSDF's continuous lobes at one wi, cosine-weighted, f*|cos| about each lobe's own normal (Mitsuba 3's convention), by type.
 struct BsdfEval {
-    Rgb diffuse;
-    Rgb specular;
-    Rgb transmission;
+    SampledSpectrum diffuse;
+    SampledSpectrum specular;
+    SampledSpectrum transmission;
     float pdf;
-    [[nodiscard]] Rgb total() const { return diffuse + specular + transmission; }
+    [[nodiscard]] SampledSpectrum total() const { return diffuse + specular + transmission; }
 };
 
 // Veach 1997 eq. 9.13, beta 2: the MIS weight of the strategy with density own against one with density other.
@@ -62,6 +62,7 @@ struct FilmLayer {
     float ior;             // thin_film_ior
     float coatWeight;      // the medium on the film's ambient side is a statistical mix of the ambient and the coat
     float coatIor;
+    glm::vec4 wavelengthNm;  // the path's lanes, at which the film interferes
 };
 
 // OpenPBR's metal slab at one wo: GGX with the F82-tint Fresnel (Hoffman 2023) and its Kulla-Conty lobe (Kulla & Conty 2017).
@@ -70,17 +71,17 @@ struct ConductorSlab {
     float anisotropy;      // specular_roughness_anisotropy, selecting the 4D tables over the isotropic ones
     AnisoRows rows;        // where anisotropy > 0, the tables' rows about (roughness, anisotropy), for the deficit at wi
     glm::vec2 alpha;       // (alpha_t, alpha_b) along the frame's tangent and bitangent
-    Rgb f0;                // base_weight * base_color
-    Rgb k;                 // F82's correction weight, fit so F(1/7) = specular_color * Schlick(1/7)
+    SampledSpectrum f0;                // base_weight * base_color
+    SampledSpectrum k;                 // F82's correction weight, fit so F(1/7) = specular_color * Schlick(1/7)
     float scale;           // specular_weight
-    Rgb msTint;            // Kulla-Conty Fms per channel, the share of the single-scattering deficit surviving repeated bounces
+    SampledSpectrum msTint;            // Kulla-Conty Fms per lane, the share of the single-scattering deficit surviving repeated bounces
     float msScaleWo;       // (1 - E(mu_o)) / (pi * (1 - Eavg)), the wo half of the Kulla-Conty lobe
     float singleEnergy;    // single-scattering albedo at wo, channel mean, the selection mass before weighting
     float multiEnergy;
-    Rgb albedo;            // E(mu_o) per channel, single plus multiple scattering
+    SampledSpectrum albedo;            // E(mu_o) per lane, single plus multiple scattering
     FilmLayer film;
-    Rgb filmEta;           // the conductor's complex index under the film, Gulbrandsen 2014 from base_color and specular_color
-    Rgb filmKappa;
+    SampledSpectrum filmEta;           // the conductor's complex index under the film, Gulbrandsen 2014 from base_color and specular_color
+    SampledSpectrum filmKappa;
 };
 
 // A GGX dielectric interface at one wo (OpenPBR's specular slab): reflection, refraction, and the Smith walk's 2+ orders.
@@ -91,13 +92,13 @@ struct DielectricSlab {
     float fresnelEtaI;     // the ratio Fresnel and the escape tables read; OpenPBR's coat moves it toward n_b/n_c, not the bend
     float fresnelEtaT;
     bool deltaRefraction;  // smooth, or index-matched media: refraction is undeviated or Snell's, never a lobe
-    Rgb tint;                // specular_color on reflection from above, white from inside
+    SampledSpectrum tint;                // specular_color on reflection from above, white from inside
     float tintMean;
     // Of the light the interface transmits, the share leaving refracted: transmission_weight from above, 1 from inside, the rest diffuse.
     float refractWeight;
-    Rgb transmitTint;        // transmission_color on the surface when transmission_depth is 0; white when the medium carries it
-    Rgb reflectSingle;         // R_ss(mu_o), the film's through the kernel rule; F(mu_o) when smooth
-    Rgb transmitSingle;        // T_ss(mu_o), a selection mass: 1 - F(mu_o) when smooth; undeviated, plus transmitted multiple scattering
+    SampledSpectrum transmitTint;        // transmission_color on the surface when transmission_depth is 0; white when the medium carries it
+    SampledSpectrum reflectSingle;         // R_ss(mu_o), the film's through the kernel rule; F(mu_o) when smooth
+    SampledSpectrum transmitSingle;  // T_ss(mu_o), a selection mass: 1 - F(mu_o) when smooth; undeviated, plus transmitted 2+ orders
     float multiReflect;      // the walk's 2+ order energy at mu_o leaving on wo's side, untinted (Heitz et al. 2016)
     float multiTransmit;     // the same leaving across the interface, before eta^2 and the transmission weights
     float roughness;         // the escape tables' coordinates: specular roughness and anisotropy, for their per-node errors
@@ -110,7 +111,7 @@ struct DielectricSlab {
 
 // OpenPBR's diffuse slab at one wo: EON (Portsmouth, Kutz, Hill 2025) with its clipped-LTC/uniform sampling state.
 struct DiffuseSlab {
-    Rgb rho;             // base_weight * base_color: in albedo scaling OpenPBR states rho = C, no inversion to an observed albedo
+    SampledSpectrum rho;  // base_weight * base_color: in albedo scaling OpenPBR states rho = C, no inversion to an observed albedo
     float roughness;     // base_diffuse_roughness
     float uniformMix;    // the uniform hemisphere's share of the one-sample MIS, a function of mu_o and roughness alone
     glm::vec4 ltcM;      // clipped-LTC coefficients (a,b,c,d)
@@ -120,8 +121,8 @@ struct DiffuseSlab {
 
 // A thin wall's two parallel faces (OpenPBR's thin-walled translucent base): what its ladder of internal reflections depends on.
 struct SheetInterfaces {
-    Rgb tint;          // specular_color, on reflection from the wall
-    Rgb color;         // transmission_color, one crossing at normal incidence; transmission_depth has no meaning without an interior
+    SampledSpectrum tint;          // specular_color, on reflection from the wall
+    SampledSpectrum color;  // transmission_color, one crossing at normal incidence; transmission_depth has no meaning without an interior
     float fresnelIor;  // the facing face's Fresnel ratio, the coat's shift included
     float ior;         // the far face's ratio and the bend, specular_ior modulated by specular_weight
     FilmLayer film;    // on the facing face
@@ -132,14 +133,14 @@ struct SheetSlab {
     SheetInterfaces interfaces;
     float weight;          // (1 - base_metalness) * transmission_weight
     ConductorSlab lobe;    // f0 = tint = 1: single plus Kulla-Conty scattering integrate to 1 at every mu_o
-    Rgb reflect;           // weight * specular_color * R'(mu_o)
-    Rgb transmit;          // weight * T'(mu_o)
+    SampledSpectrum reflect;           // weight * specular_color * R'(mu_o)
+    SampledSpectrum transmit;          // weight * T'(mu_o)
     float reflectShare;    // mean(reflect) / mean(reflect + transmit): the side a draw from the lobe takes
 };
 
 // OpenPBR's fuzz slab at one wo: the volumetric SGGX sheen's LTC fit (Zeltner, Burley, Chiang 2022), in the fuzz frame.
 struct FuzzSlab {
-    Rgb color;           // fuzz_color, tinting the fuzz's own reflection alone
+    SampledSpectrum color;           // fuzz_color, tinting the fuzz's own reflection alone
     float aInv;          // the LTC's inverse-matrix coefficients at (fuzz_roughness, mu_o)
     float bInv;
     float albedo;        // E_fuzz(mu_o), the sheen's directional albedo
@@ -181,33 +182,33 @@ struct BsdfClosure {
     float coatWeight = 0.0F;
     glm::mat3 toCoat;
     DielectricSlab coat;       // built where coatWeight > 0 and wo is outside
-    Rgb coatColor;             // coat_color, the coat's squared normal-incidence transmittance
+    SampledSpectrum coatColor;             // coat_color, the coat's squared normal-incidence transmittance
     float coatIor;
     float coatRoughness;
     float coatAnisotropy;
     // The base under the coat: reflection weighs baseBare + baseUnder * T(mu_i) under Delta, refraction transmitUnder under 1/(1 - E_b K).
-    Rgb baseBare;
-    Rgb baseUnder;
-    Rgb transmitUnder;
+    SampledSpectrum baseBare;
+    SampledSpectrum baseUnder;
+    SampledSpectrum transmitUnder;
     float metalWeight;        // base_metalness
     float dielectricWeight;   // the dielectric interface's share: 1 - base_metalness, times 1 - transmission_weight when thin-walled
     // OpenPBR's albedo scaling of the diffuse under the interface: (1 - M)(1 - T)(1 - S)(1 - E_spec(mu_o)), zero from inside.
-    Rgb diffuseWeight{0.0F};
+    SampledSpectrum diffuseWeight{0.0F};
     ConductorSlab metal;        // built where metalWeight > 0
     DielectricSlab dielectric;  // built where dielectricWeight > 0
     DiffuseSlab diffuse;        // built where its selection mass is positive
     SheetSlab sheet;            // built where the thin wall's translucent share is positive
     // Subsurface as a surface lobe, (1 - M)(1 - T) S (1 - E_spec(mu_o)) subsurface_color: a thin wall's, or a bulk's gated channels.
-    Rgb subsurfaceWeight{0.0F};
+    SampledSpectrum subsurfaceWeight{0.0F};
     float subsurfaceReflectShare;  // (1 - g)/2 on a thin wall, 1 for a bulk's limit
     DiffuseSlab subsurface;     // rho = 1, built where its selection mass is positive
     bool thinTransmission = false;  // a thin wall's sheet or subsurface transmits: light behind it reaches wo
     std::array<float, kTechniqueCount> mass{};  // selection probabilities: each technique's energy at wo over the total, or all zero
 };
 
-// Resolved inputs, wo, a hero band, the coat frame and the embedding medium's index (1 in vacuum) build it. No draws.
-[[nodiscard]] BsdfClosure makeBsdfClosure(const OpenPbrInputs<Constant>& inputs, const glm::vec3& woLocal,
-                                          std::optional<int> heroChannel = std::nullopt,
+// Inputs at the lanes' wavelengths, wo, the lane dispersion committed to, the coat frame and the ambient index build it. No draws.
+[[nodiscard]] BsdfClosure makeBsdfClosure(const OpenPbrInputs<Spectral>& inputs, const glm::vec3& woLocal, const glm::vec4& wavelengthNm,
+                                          std::optional<int> heroLane = std::nullopt,
                                           const glm::vec3& coatNormalLocal = glm::vec3(0.0F, 0.0F, 1.0F),
                                           const glm::vec3& coatTangentLocal = glm::vec3(1.0F, 0.0F, 0.0F), float ambientIor = 1.0F);
 
@@ -227,7 +228,7 @@ struct BsdfClosure {
 }
 
 // A smooth thin wall's undeviated transmission toward -wo, through fuzz, coat and sheet; zero for any other closure.
-[[nodiscard]] Rgb passThrough(const BsdfClosure& closure);
+[[nodiscard]] SampledSpectrum passThrough(const BsdfClosure& closure);
 
 // Schussler et al. 2017 to all orders (Algorithm 2) in the perturbed frame: facet +z and a mirror wall over the interpolated normal.
 struct NormalMappedBsdf {
@@ -242,8 +243,9 @@ struct NormalMappedBsdf {
     float lambdaP = 0.0F;    // the facets' shares of wo's projected area (eq. 9)
     float lambdaT = 0.0F;
     // What the walk builds each later facet vertex from, at the direction the wall returns it along; set where perturbed.
-    OpenPbrInputs<Constant> inputs;
-    std::optional<int> heroChannel;
+    std::optional<OpenPbrInputs<Spectral>> inputs;
+    glm::vec4 wavelengthNm{0.0F};
+    std::optional<int> heroLane;
     glm::vec3 coatNormal;
     glm::vec3 coatTangent;
     float ambientIor = 1.0F;
@@ -253,12 +255,13 @@ struct NormalMappedBsdf {
 struct WalkVertex {
     glm::vec3 direction;  // the ray the wall sends back to the facet
     float sigma;          // the medium it travels in, as mediumOf names it
-    Rgb weight;           // the walk's throughput on arrival
+    SampledSpectrum weight;           // the walk's throughput on arrival
 };
 
 // The closure at wo with geometricLocal, the interpolated normal in the perturbed frame, where a normal or bump input bends it.
-[[nodiscard]] NormalMappedBsdf makeNormalMappedBsdf(const OpenPbrInputs<Constant>& inputs, const glm::vec3& woLocal,
-                                                    std::optional<glm::vec3> geometricLocal, std::optional<int> heroChannel,
+[[nodiscard]] NormalMappedBsdf makeNormalMappedBsdf(const OpenPbrInputs<Spectral>& inputs, const glm::vec3& woLocal,
+                                                    std::optional<glm::vec3> geometricLocal, const glm::vec4& wavelengthNm,
+                                                    std::optional<int> heroLane,
                                                     const glm::vec3& coatNormalLocal, const glm::vec3& coatTangentLocal,
                                                     float ambientIor = 1.0F);
 
@@ -286,7 +289,7 @@ struct WalkVertex {
 // The microsurface's forms, components by omega_g's side; walk draws the escapes, later vertices and the evaluation's higher orders.
 [[nodiscard]] bool scatters(const NormalMappedBsdf& bsdf);
 [[nodiscard]] bool transmits(const NormalMappedBsdf& bsdf);
-[[nodiscard]] Rgb passThrough(const NormalMappedBsdf& bsdf);
+[[nodiscard]] SampledSpectrum passThrough(const NormalMappedBsdf& bsdf);
 // Eq. 23 and the t-p-t exit, facets' walks on walk or closed forms without; its pdf, the same either way, is the MIS density (sec. 7.3).
 [[nodiscard]] BsdfEval evaluateFirstScattering(const NormalMappedBsdf& bsdf, const glm::vec3& wiLocal, Sampler* walk);
 // The first scattering plus the later orders, resumed from a draw's revisit: unbiased, as the draw's first leg is the walk's own.
@@ -303,31 +306,31 @@ struct NeeEval {
 // Algorithm 2 to termination, weighted by its throughput, pdf its exit vertex's, delta as its exit leg; revisit: its first facet return.
 [[nodiscard]] std::optional<BsdfSample> sampleBsdf(const NormalMappedBsdf& bsdf, Sampler& sampler, Sampler& walk,
                                                    std::optional<WalkVertex>& revisit);
-[[nodiscard]] Rgb fresnelAtMicrofacet(const NormalMappedBsdf& bsdf, glm::vec2 u);
+[[nodiscard]] SampledSpectrum fresnelAtMicrofacet(const NormalMappedBsdf& bsdf, glm::vec2 u);
 
 // The slabs' reflected Fresnel at cosTheta = dot(h, wo), each at its layer and mix weight: coat, metal F82, tinted dielectric.
-[[nodiscard]] Rgb fresnelAtViewAngle(const BsdfClosure& closure, float cosTheta);
+[[nodiscard]] SampledSpectrum fresnelAtViewAngle(const BsdfClosure& closure, float cosTheta);
 
 // fresnelAtViewAngle at one VNDF half-vector (Dupuy & Benyoub 2023), per Walter 2007. One sample of E[F]: THE CALLER MUST AVERAGE.
-[[nodiscard]] Rgb fresnelAtMicrofacet(const BsdfClosure& closure, glm::vec2 u);
+[[nodiscard]] SampledSpectrum fresnelAtMicrofacet(const BsdfClosure& closure, glm::vec2 u);
 
-// An index n_d at the hero band by Cauchy from V_d = abbe / scale; unset or zero scale, n_d itself. Bulks and their ambient alike.
-[[nodiscard]] float dispersedIor(float ior, float abbeNumber, float dispersionScale, std::optional<int> heroChannel);
+// An index n_d at the hero wavelength by Cauchy from V_d = abbe / scale; unset or zero scale, n_d itself. Bulks and their ambient alike.
+[[nodiscard]] float dispersedIor(float ior, float abbeNumber, float dispersionScale, std::optional<float> heroNm);
 
-// The dielectric's index ratio: heroChannel disperses specular_ior, specular_weight modulates it (OpenPBR's epsilon, eta').
-[[nodiscard]] float modulatedIor(const OpenPbrInputs<Constant>& inputs, std::optional<int> heroChannel);
+// The dielectric's index ratio: the hero wavelength disperses specular_ior, specular_weight modulates it (OpenPBR's epsilon, eta').
+[[nodiscard]] float modulatedIor(const OpenPbrInputs<Constant>& inputs, std::optional<float> heroNm);
 
 // E_fuzz(mu) at fuzz_roughness, the sheen's directional albedo: what the fuzz reflects and so withholds from the layers beneath.
 [[nodiscard]] float fuzzAlbedo(float roughness, float mu);
 
 // The coat's one-pass transmittance at coat cosine mu: coat_color^(1/(2 mu_t)), mu_t refracted into the coat (OpenPBR).
-[[nodiscard]] Rgb coatTransmittance(const Rgb& coatColor, float coatIor, float mu);
+[[nodiscard]] SampledSpectrum coatTransmittance(const SampledSpectrum& coatColor, float coatIor, float mu);
 
 // Cosine-weighted hemisphere direction about +z, pdf = cos(theta)/pi. The AO lane relies on the pdf cancelling the cosine (Miller 1994).
 [[nodiscard]] glm::vec3 sampleCosineHemisphere(glm::vec2 u);
 
 // The metal's cosine-weighted average Fresnel 2*int_0^1 F82(mu)*mu dmu of the clamped F82, the Kulla-Conty tint input.
-[[nodiscard]] Rgb metalFresnelAvg(const Rgb& f0, const Rgb& tint);
+[[nodiscard]] SampledSpectrum metalFresnelAvg(const SampledSpectrum& f0, const SampledSpectrum& tint);
 
 // The dielectric's 2*int_0^1 F(mu) mu dmu entering a medium of relative index eta, in closed form; 0 at eta = 1. The coat's E_F.
 [[nodiscard]] float fresnelAverage(float eta);
@@ -340,9 +343,6 @@ struct NeeEval {
 [[nodiscard]] glm::ivec2 albedoGridRes();
 [[nodiscard]] float albedoGridRoughness(float index);
 [[nodiscard]] float albedoGridMu(float index);
-
-// Representative wavelength per RGB channel (Adobe's OpenPBR reference); three discrete bands, so dispersion shows RGB banding.
-inline constexpr Rgb kRgbWavelengthsNm(620.0F, 540.0F, 450.0F);
 
 // Cauchy n(lambda) from (n_d, V_d) per OpenPBR's dispersion; V_d = transmission_dispersion_abbe_number / transmission_dispersion_scale.
 [[nodiscard]] float cauchyIor(float iorD, float abbe, float lambdaNm);

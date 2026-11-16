@@ -100,9 +100,9 @@ std::optional<std::map<std::string, std::map<std::string, TextureConfig>>> parse
     return textures;
 }
 
-// A light's unit-luminance colour and the locus a kelvin override resolves on.
+// A light's unit-luminance spectrum and the locus a kelvin override resolves on.
 struct LightColor {
-    pathtracer::scene::Rgb rgb;
+    pathtracer::scene::EmissionSpectrum spectrum;
     pathtracer::scene::cie::Illuminant illuminant;
 };
 
@@ -128,7 +128,7 @@ std::optional<LightColor> lightColor(const nlohmann::json& light, const std::str
             std::cerr << "loadSceneConfig: " << path << ": lights[" << index << "] color is negative or black\n";
             return std::nullopt;
         }
-        return LightColor{rgb / luminance, Illuminant::Blackbody};
+        return LightColor{pathtracer::scene::rgbEmission(rgb), Illuminant::Blackbody};
     }
     Illuminant illuminant = Illuminant::Blackbody;
     if (illuminantKey != light.end()) {
@@ -141,18 +141,18 @@ std::optional<LightColor> lightColor(const nlohmann::json& light, const std::str
         illuminant = name == "daylight" ? Illuminant::Daylight : Illuminant::Blackbody;
     }
     const double value = kelvin->get<double>();
-    const std::optional<glm::dvec3> rgb = pathtracer::scene::cie::kelvinToScene(illuminant, value);
-    if (!rgb) {
+    const std::optional<pathtracer::scene::cie::Spectrum> power = pathtracer::scene::cie::illuminantSpectrum(illuminant, value);
+    if (!power) {
         std::cerr << "loadSceneConfig: " << path << ": lights[" << index << "] " << value << " K ";
         if (illuminant == Illuminant::Daylight) {
             std::cerr << "lies outside CIE daylight's " << pathtracer::scene::cie::kDaylightMinKelvin << "-"
                       << pathtracer::scene::cie::kDaylightMaxKelvin << " K\n";
         } else {
-            std::cerr << "is not positive or lies outside the scene gamut\n";
+            std::cerr << "is not positive or radiates no luminance\n";
         }
         return std::nullopt;
     }
-    return LightColor{pathtracer::scene::Rgb(glm::vec3(*rgb)), illuminant};
+    return LightColor{pathtracer::scene::EmissionSpectrum(*power), illuminant};
 }
 
 // Exactly one of nits (luminance, cd/m^2) or lumens (luminous flux), positive: a zero light is an authoring error, not a dark one.
@@ -262,7 +262,7 @@ std::optional<std::vector<LightConfig>> parseLights(const nlohmann::json& j, con
             light.at("position").get<glm::vec3>(),
             light.at("rotation").get<glm::vec3>(),
             *shape,
-            color->rgb,
+            color->spectrum,
             *emission,
             light.value("twoSided", false),
             color->illuminant,

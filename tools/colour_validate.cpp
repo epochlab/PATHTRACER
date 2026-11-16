@@ -19,6 +19,7 @@
 #include "pathtracer/gfx/ocio_display_transform.h"
 #include "pathtracer/scene/bsdf.h"
 #include "pathtracer/scene/cie.h"
+#include "pathtracer/scene/spectrum.h"
 #include "colorchecker.h"
 #include "metal_fit.h"
 
@@ -108,13 +109,22 @@ PT_CHECK(scene_matrix_matches_the_ocio_config_and_maps_white, Fast, Exact) {
     PT_EXPECT(ctx, tagged == published, "tagged chromaticities are not AP1's primaries and the ACES white");
 }
 
+// XYZ of a relative spectral power on the CIE 1 nm grid, CIE 015:2018's summation.
+glm::dvec3 spectrumXyz(const cie::Spectrum& power) {
+    glm::dvec3 xyz(0.0);
+    for (int i = 0; i < cie::kSampleCount; ++i) {
+        xyz += power[static_cast<std::size_t>(i)] * cie::tableRow(i).colourMatching;
+    }
+    return xyz;
+}
+
 // CIE A is Planck at c2/T = 1.435e-2/2848 (CIE 015:2018); the summation interval moves its 5th decimal, so 4 are asserted.
 PT_CHECK(blackbody_reproduces_illuminant_a, Fast, Exact) {
     ctx.plan(1);
     constexpr double kKelvin = 2848.0 * 1.4388e-2 / 1.435e-2;
     constexpr glm::dvec2 kPublished(0.44757, 0.40745);
-    const std::optional<glm::dvec3> rgb = cie::kelvinToScene(cie::Illuminant::Blackbody, kKelvin);
-    const glm::dvec2 xy = rgb ? chromaticity(glm::inverse(cie::xyzToScene()) * *rgb) : glm::dvec2(0.0);
+    const std::optional<cie::Spectrum> power = cie::illuminantSpectrum(cie::Illuminant::Blackbody, kKelvin);
+    const glm::dvec2 xy = power ? chromaticity(spectrumXyz(*power)) : glm::dvec2(0.0);
     const double error = std::max(std::abs(xy.x - kPublished.x), std::abs(xy.y - kPublished.y));
     char detail[160];
     std::snprintf(detail, sizeof(detail), "Planck at CIE A's exponent gives xy (%.6f, %.6f), %.3e from (0.44757, 0.40745)", xy.x, xy.y,
@@ -122,23 +132,23 @@ PT_CHECK(blackbody_reproduces_illuminant_a, Fast, Exact) {
     PT_EXPECT(ctx, error <= 5e-5, detail);
 }
 
-// Unit luminance makes a light's luminance its meter reading whatever its temperature; outside the gamut or domain is refused.
-PT_CHECK(blackbody_has_unit_luminance_and_refuses_outside_the_scene_gamut, Fast, Exact) {
-    constexpr std::array<double, 7> kInGamut{1000.0, 2000.0, 2856.0, 4000.0, 6504.0, 10000.0, 1e6};
-    constexpr std::array<double, 5> kRefused{0.0, -2856.0, 500.0, std::numeric_limits<double>::infinity(),
+// Any temperature with visible luminance resolves, out of AP1 or not; outside the domain, or underflowed at every sample, is refused.
+PT_CHECK(blackbody_resolves_and_refuses_outside_its_domain, Fast, Exact) {
+    constexpr std::array<double, 8> kResolved{500.0, 1000.0, 2000.0, 2856.0, 4000.0, 6504.0, 10000.0, 1e6};
+    constexpr std::array<double, 5> kRefused{0.0, -2856.0, 10.0, std::numeric_limits<double>::infinity(),
                                              std::numeric_limits<double>::quiet_NaN()};
-    ctx.plan(static_cast<int>(kInGamut.size() + kRefused.size()));
-    const glm::dmat3 rgbToXyz = glm::inverse(cie::xyzToScene());
+    ctx.plan(static_cast<int>(kResolved.size() + kRefused.size()));
     char detail[160];
-    for (const double kelvin : kInGamut) {
-        const std::optional<glm::dvec3> rgb = cie::kelvinToScene(cie::Illuminant::Blackbody, kelvin);
-        const double luminanceError = rgb ? std::abs((rgbToXyz * *rgb).y - 1.0) : 1.0;
-        std::snprintf(detail, sizeof(detail), "%g K: %s, luminance off 1 by %.3e", kelvin, rgb ? "resolved" : "refused", luminanceError);
-        PT_EXPECT(ctx, rgb && luminanceError <= kDoubleRoundoff, detail);
+    for (const double kelvin : kResolved) {
+        const std::optional<cie::Spectrum> power = cie::illuminantSpectrum(cie::Illuminant::Blackbody, kelvin);
+        const double luminanceError = power ? std::abs(pathtracer::scene::EmissionSpectrum(*power).luminance() - 1.0) : 1.0;
+        std::snprintf(detail, sizeof(detail), "%g K: %s, unit-luminance light off 1 by %.3e", kelvin, power ? "resolved" : "refused",
+                      luminanceError);
+        PT_EXPECT(ctx, power && luminanceError <= kFloatResolution, detail);
     }
     for (const double kelvin : kRefused) {
-        std::snprintf(detail, sizeof(detail), "%g K resolved to a colour; it is outside the domain or the scene gamut", kelvin);
-        PT_EXPECT(ctx, !cie::kelvinToScene(cie::Illuminant::Blackbody, kelvin), detail);
+        std::snprintf(detail, sizeof(detail), "%g K resolved to a spectrum; it is outside the domain or has no visible luminance", kelvin);
+        PT_EXPECT(ctx, !cie::illuminantSpectrum(cie::Illuminant::Blackbody, kelvin), detail);
     }
 }
 
@@ -168,8 +178,8 @@ PT_CHECK(daylight_reproduces_d65, Fast, Exact) {
             bound = std::max(bound, std::max(std::abs(corner.x - tabulated.x), std::abs(corner.y - tabulated.y)));
         }
     }
-    const std::optional<glm::dvec3> rgb = cie::kelvinToScene(cie::Illuminant::Daylight, kKelvin);
-    const glm::dvec2 xy = rgb ? chromaticity(glm::inverse(cie::xyzToScene()) * *rgb) : glm::dvec2(0.0);
+    const std::optional<cie::Spectrum> power = cie::illuminantSpectrum(cie::Illuminant::Daylight, kKelvin);
+    const glm::dvec2 xy = power ? chromaticity(spectrumXyz(*power)) : glm::dvec2(0.0);
     const double error = std::max(std::abs(xy.x - tabulated.x), std::abs(xy.y - tabulated.y));
     char detail[192];
     std::snprintf(detail, sizeof(detail), "daylight at %.2f K gives xy (%.6f, %.6f), %.3e from D65's (%.6f, %.6f); rounding bounds %.3e",
@@ -177,31 +187,220 @@ PT_CHECK(daylight_reproduces_d65, Fast, Exact) {
     PT_EXPECT(ctx, error <= bound, detail);
 }
 
-// Daylight resolves at unit luminance across CIE's defined 4000-25000 K, both locus branches; outside it is refused.
-PT_CHECK(daylight_has_unit_luminance_and_refuses_outside_its_range, Fast, Exact) {
+// Daylight resolves across CIE's defined 4000-25000 K, both locus branches; outside it is refused.
+PT_CHECK(daylight_resolves_and_refuses_outside_its_range, Fast, Exact) {
     constexpr std::array<double, 6> kInRange{cie::kDaylightMinKelvin, 5003.0, 6504.0, 7000.0, 7001.0, cie::kDaylightMaxKelvin};
     const std::array<double, 6> kRefused{std::nextafter(cie::kDaylightMinKelvin, 0.0), std::nextafter(cie::kDaylightMaxKelvin, 1e9),
                                              0.0, -6504.0, std::numeric_limits<double>::infinity(),
                                              std::numeric_limits<double>::quiet_NaN()};
     ctx.plan(static_cast<int>(kInRange.size() + kRefused.size()));
-    const glm::dmat3 rgbToXyz = glm::inverse(cie::xyzToScene());
     char detail[160];
     for (const double kelvin : kInRange) {
-        const std::optional<glm::dvec3> rgb = cie::kelvinToScene(cie::Illuminant::Daylight, kelvin);
-        const double luminanceError = rgb ? std::abs((rgbToXyz * *rgb).y - 1.0) : 1.0;
-        std::snprintf(detail, sizeof(detail), "%g K daylight: %s, luminance off 1 by %.3e", kelvin, rgb ? "resolved" : "refused",
+        const std::optional<cie::Spectrum> power = cie::illuminantSpectrum(cie::Illuminant::Daylight, kelvin);
+        const double luminanceError = power ? std::abs(pathtracer::scene::EmissionSpectrum(*power).luminance() - 1.0) : 1.0;
+        std::snprintf(detail, sizeof(detail), "%g K daylight: %s, unit-luminance light off 1 by %.3e", kelvin, power ? "resolved" : "refused",
                       luminanceError);
-        PT_EXPECT(ctx, rgb && luminanceError <= kDoubleRoundoff, detail);
+        PT_EXPECT(ctx, power && luminanceError <= kFloatResolution, detail);
     }
     for (const double kelvin : kRefused) {
         std::snprintf(detail, sizeof(detail), "%.17g K resolved as daylight; CIE defines it over 4000-25000 K only", kelvin);
-        PT_EXPECT(ctx, !cie::kelvinToScene(cie::Illuminant::Daylight, kelvin), detail);
+        PT_EXPECT(ctx, !cie::illuminantSpectrum(cie::Illuminant::Daylight, kelvin), detail);
     }
+}
+
+// The sensor's estimate of a kelvin light's spectrum is xyzToScene XYZ / Y: the scene RGB it emitted before transport was spectral.
+PT_CHECK(sensor_reads_kelvin_lights_as_their_tristimulus_colour, Fast, Exact) {
+    constexpr int kStrata = 1 << 16;
+    const std::array<std::pair<cie::Illuminant, double>, 3> kLights{
+        {{cie::Illuminant::Blackbody, 2856.0}, {cie::Illuminant::Blackbody, 4000.0}, {cie::Illuminant::Daylight, 6504.0}}};
+    ctx.plan(static_cast<int>(kLights.size()));
+    for (const auto& [illuminant, kelvin] : kLights) {
+        const cie::Spectrum power = *cie::illuminantSpectrum(illuminant, kelvin);
+        const glm::dvec3 xyz = spectrumXyz(power);
+        const glm::dvec3 expected = cie::xyzToScene() * (xyz / xyz.y);
+        const pathtracer::scene::EmissionSpectrum light(power);
+        glm::dvec3 projected(0.0);
+        for (int k = 0; k < kStrata; ++k) {
+            const pathtracer::scene::SampledWavelengths lambda = pathtracer::scene::sampleWavelengths((static_cast<float>(k) + 0.5F) / kStrata);
+            projected += glm::dvec3(pathtracer::scene::toScene(light(lambda), lambda).vec3());
+        }
+        projected /= kStrata;
+        char detail[192];
+        std::snprintf(detail, sizeof(detail), "%g K reads (%.5f, %.5f, %.5f), its tristimulus colour is (%.5f, %.5f, %.5f)", kelvin, projected.x,
+                      projected.y, projected.z, expected.x, expected.y, expected.z);
+        PT_EXPECT(ctx, maxAbs(projected - expected) <= 1e-4, detail);
+    }
+}
+
+// CIELAB of XYZ against a white, CIE 015:2018.
+glm::dvec3 lab(const glm::dvec3& xyz, const glm::dvec3& white) {
+    constexpr double kDelta = 6.0 / 29.0;
+    const auto f = [](double t) { return t > kDelta * kDelta * kDelta ? std::cbrt(t) : (t / (3.0 * kDelta * kDelta)) + (4.0 / 29.0); };
+    const glm::dvec3 t = xyz / white;
+    return {(116.0 * f(t.y)) - 16.0, 500.0 * (f(t.x) - f(t.y)), 200.0 * (f(t.y) - f(t.z))};
+}
+
+// CIEDE2000 (CIE 142:2001), in Sharma, Wu and Dalal's (2005) tested formulation.
+double deltaE2000(const glm::dvec3& lab1, const glm::dvec3& lab2) {
+    constexpr double kPi = 3.14159265358979323846;
+    const auto degrees = [&](double r) { return r * 180.0 / kPi; };
+    const auto radians = [&](double d) { return d * kPi / 180.0; };
+    const double cBar = 0.5 * (std::hypot(lab1.y, lab1.z) + std::hypot(lab2.y, lab2.z));
+    const double g = 0.5 * (1.0 - std::sqrt(std::pow(cBar, 7.0) / (std::pow(cBar, 7.0) + std::pow(25.0, 7.0))));
+    const double a1 = (1.0 + g) * lab1.y;
+    const double a2 = (1.0 + g) * lab2.y;
+    const double c1 = std::hypot(a1, lab1.z);
+    const double c2 = std::hypot(a2, lab2.z);
+    const auto hue = [&](double a, double b) { return a == 0.0 && b == 0.0 ? 0.0 : std::fmod(degrees(std::atan2(b, a)) + 360.0, 360.0); };
+    const double h1 = hue(a1, lab1.z);
+    const double h2 = hue(a2, lab2.z);
+    double dh = 0.0;
+    if (c1 * c2 != 0.0) {
+        dh = h2 - h1;
+        dh = dh > 180.0 ? dh - 360.0 : (dh < -180.0 ? dh + 360.0 : dh);
+    }
+    const double dL = lab2.x - lab1.x;
+    const double dC = c2 - c1;
+    const double dH = 2.0 * std::sqrt(c1 * c2) * std::sin(radians(dh / 2.0));
+    const double lBar = 0.5 * (lab1.x + lab2.x);
+    const double cBarPrime = 0.5 * (c1 + c2);
+    double hBar = h1 + h2;
+    if (c1 * c2 != 0.0) {
+        hBar = std::abs(h1 - h2) <= 180.0 ? 0.5 * (h1 + h2) : (h1 + h2 < 360.0 ? 0.5 * (h1 + h2 + 360.0) : 0.5 * (h1 + h2 - 360.0));
+    }
+    const double t = 1.0 - (0.17 * std::cos(radians(hBar - 30.0))) + (0.24 * std::cos(radians(2.0 * hBar))) +
+                     (0.32 * std::cos(radians((3.0 * hBar) + 6.0))) - (0.20 * std::cos(radians((4.0 * hBar) - 63.0)));
+    const double dTheta = 30.0 * std::exp(-std::pow((hBar - 275.0) / 25.0, 2.0));
+    const double rc = 2.0 * std::sqrt(std::pow(cBarPrime, 7.0) / (std::pow(cBarPrime, 7.0) + std::pow(25.0, 7.0)));
+    const double sl = 1.0 + (0.015 * (lBar - 50.0) * (lBar - 50.0) / std::sqrt(20.0 + ((lBar - 50.0) * (lBar - 50.0))));
+    const double sc = 1.0 + (0.045 * cBarPrime);
+    const double sh = 1.0 + (0.015 * cBarPrime * t);
+    const double rt = -std::sin(radians(2.0 * dTheta)) * rc;
+    return std::sqrt(std::pow(dL / sl, 2.0) + std::pow(dC / sc, 2.0) + std::pow(dH / sh, 2.0) + (rt * (dC / sc) * (dH / sh)));
+}
+
+// Sharma et al. 2005's published pairs 1, 7, 17 and 25: the formula's hue rotation, near-neutral and large-difference branches.
+PT_CHECK(ciede2000_matches_sharmas_test_data, Fast, Exact) {
+    struct Pair {
+        glm::dvec3 a;
+        glm::dvec3 b;
+        double expected;
+    };
+    const std::array<Pair, 4> kPairs{{{{50.0, 2.6772, -79.7751}, {50.0, 0.0, -82.7485}, 2.0425},
+                                      {{50.0, 0.0, 0.0}, {50.0, -1.0, 2.0}, 2.3669},
+                                      {{50.0, 2.5, 0.0}, {73.0, 25.0, -18.0}, 27.1492},
+                                      {{60.2574, -34.0099, 36.2677}, {60.4626, -34.1751, 39.4387}, 1.2644}}};
+    ctx.plan(static_cast<int>(kPairs.size()));
+    for (const Pair& pair : kPairs) {
+        const double got = deltaE2000(pair.a, pair.b);
+        PT_EXPECT(ctx, std::abs(got - pair.expected) <= 5e-5, "dE00 " + std::to_string(got) + " against " + std::to_string(pair.expected));
+    }
+}
+
+// Scene RGB of the table's fit through the renderer's own sigmoid on the CIE 1 nm grid, under D65 as the fit was made.
+glm::dvec3 sigmoidToScene(const pathtracer::scene::RgbSigmoid& sigmoid) {
+    cie::Spectrum reflectance{};
+    for (int i = 0; i < cie::kSampleCount; ++i) {
+        reflectance[static_cast<std::size_t>(i)] = sigmoid(static_cast<float>(cie::wavelengthNm(i)));
+    }
+    return cie::reflectanceToScene(reflectance);
+}
+
+// Measured ColorChecker reflectances' scene RGB under D65 round-trip through the table within a tenth of a JND.
+PT_CHECK(rgb_spectrum_table_round_trips_measured_reflectances, Fast, Exact) {
+    const std::optional<std::vector<Patch>> patches = tools::colorchecker::loadColorChecker(kColorCheckerTable);
+    ctx.plan(1);
+    if (!patches) {
+        PT_EXPECT(ctx, false, "ColorChecker table unavailable");
+        return;
+    }
+    glm::dvec3 white(0.0);
+    double whiteY = 0.0;
+    for (int i = 0; i < cie::kSampleCount; ++i) {
+        white += cie::tableRow(i).d65 * cie::tableRow(i).colourMatching;
+        whiteY += cie::tableRow(i).d65 * cie::tableRow(i).colourMatching.y;
+    }
+    white /= whiteY;
+    const glm::dmat3 toXyz = glm::inverse(cie::xyzToScene());
+    double worst = 0.0;
+    std::string worstName;
+    for (const Patch& patch : *patches) {
+        const glm::dvec3 rendered = sigmoidToScene(pathtracer::scene::rgbSigmoid(pathtracer::scene::Rgb(glm::vec3(patch.scene))));
+        const double error = deltaE2000(lab(toXyz * patch.scene, white), lab(toXyz * rendered, white));
+        if (error > worst) {
+            worst = error;
+            worstName = patch.name;
+        }
+    }
+    std::printf("    worst ColorChecker round trip dE00 %.5f (%s)\n", worst, worstName.c_str());
+    PT_EXPECT(ctx, worst <= 0.1, "table round trip dE00 " + std::to_string(worst) + " at " + worstName);
+}
+
+// Equal RGB is a flat reflectance with no lookup; an RGB (1, 1, 1) emitter is D65 at unit luminance, every lane.
+PT_CHECK(grey_upsamples_flat_and_white_emits_d65, Fast, Exact) {
+    using pathtracer::scene::Rgb;
+    using pathtracer::scene::SampledSpectrum;
+    ctx.plan(3);
+    const pathtracer::scene::SampledWavelengths lambda = pathtracer::scene::sampleWavelengths(0.3F);
+    PT_EXPECT(ctx, pathtracer::scene::reflectanceSpectrum(Rgb(0.37F), lambda) == SampledSpectrum(0.37F), "grey 0.37 was not flat");
+    PT_EXPECT(ctx, pathtracer::scene::reflectanceSpectrum(Rgb(1.0F), lambda) == SampledSpectrum(1.0F), "white was not flat 1");
+    PT_EXPECT(ctx, pathtracer::scene::illuminantSpectrum(Rgb(2.0F), lambda) == 2.0F * lambda.white,
+              "a grey emitter was not the scene white's D65");
+}
+
+// Every lane's density is positive and finite, so no wavelength the sensor sees is unreachable; lanes along the CDF are in order.
+PT_CHECK(wavelength_lanes_stratify_the_sensitivity_cdf, Fast, Exact) {
+    ctx.plan(2);
+    constexpr int kStrata = 1 << 16;
+    int unbounded = 0;
+    for (int k = 0; k < kStrata; ++k) {
+        const pathtracer::scene::SampledWavelengths lambda = pathtracer::scene::sampleWavelengths((static_cast<float>(k) + 0.5F) / kStrata);
+        for (int j = 0; j < pathtracer::scene::kSpectrumSamples; ++j) {
+            unbounded += lambda.pdf[j] > 0.0F && std::isfinite(lambda.pdf[j]) ? 0 : 1;
+        }
+    }
+    PT_EXPECT(ctx, unbounded == 0, std::to_string(unbounded) + " lanes drew a zero or non-finite density");
+    // Lane j sits at CDF position u + j/n mod 1, one per quarter; the inverse CDF is monotone, so that order is the wavelength order.
+    constexpr int kSpectrumSamples = pathtracer::scene::kSpectrumSamples;
+    int misplaced = 0;
+    for (int k = 0; k < 4096; ++k) {
+        const float u = (static_cast<float>(k) + 0.5F) / 4096.0F;
+        const pathtracer::scene::SampledWavelengths lambda = pathtracer::scene::sampleWavelengths(u);
+        for (int j = 0; j < kSpectrumSamples; ++j) {
+            const float uj = std::fmod(u + (static_cast<float>(j) / kSpectrumSamples), 1.0F);
+            for (int i = 0; i < kSpectrumSamples; ++i) {
+                const float ui = std::fmod(u + (static_cast<float>(i) / kSpectrumSamples), 1.0F);
+                misplaced += ui < uj && !(lambda.nm[i] <= lambda.nm[j]) ? 1 : 0;
+            }
+        }
+    }
+    PT_EXPECT(ctx, misplaced == 0, std::to_string(misplaced) + " lanes out of CDF order");
+}
+
+// The sensor's estimator: stratified over u, the scene white at 1 cd/m^2 projects to (1, 1, 1) and a flat reflectance under it too.
+PT_CHECK(sensor_projects_the_scene_white_to_one, Fast, Exact) {
+    ctx.plan(2);
+    constexpr int kStrata = 1 << 16;
+    glm::dvec3 radiance(0.0);
+    glm::dvec3 reflectance(0.0);
+    for (int k = 0; k < kStrata; ++k) {
+        const pathtracer::scene::SampledWavelengths lambda = pathtracer::scene::sampleWavelengths((static_cast<float>(k) + 0.5F) / kStrata);
+        radiance += glm::dvec3(pathtracer::scene::toScene(lambda.white, lambda).vec3());
+        reflectance += glm::dvec3(pathtracer::scene::reflectanceToScene(pathtracer::scene::SampledSpectrum(1.0F), lambda).vec3());
+    }
+    radiance /= kStrata;
+    reflectance /= kStrata;
+    char detail[160];
+    std::snprintf(detail, sizeof(detail), "white radiance reads (%.6f, %.6f, %.6f)", radiance.x, radiance.y, radiance.z);
+    PT_EXPECT(ctx, maxAbs(radiance - glm::dvec3(1.0)) <= 1e-4, detail);
+    std::snprintf(detail, sizeof(detail), "flat reflectance reads (%.6f, %.6f, %.6f)", reflectance.x, reflectance.y, reflectance.z);
+    PT_EXPECT(ctx, maxAbs(reflectance - glm::dvec3(1.0)) <= 1e-4, detail);
 }
 
 // A material must be metal_fit's exact output; shading it must meet CIE-projected measurement at mu = 1 and, uncapped, mu-bar = 1/7.
 void expectMeasuredMetal(tools::check::Context& ctx, const std::string& table, const char* materialFile) {
-    constexpr int kExpectations = 15;
+    // Per channel the material against the fit and the fit's misfit; per lane the shading Fresnel against F82 of the upsampled colours.
+    constexpr int kExpectations = (3 * 3) + (2 * pathtracer::scene::kSpectrumSamples);
     ctx.plan(kExpectations);
     const auto nk = tools::metal_fit::loadNkTable(table);
     const auto material =
@@ -213,10 +412,24 @@ void expectMeasuredMetal(tools::check::Context& ctx, const std::string& table, c
         }
         return;
     }
-    const pathtracer::scene::BsdfClosure closure = pathtracer::scene::makeBsdfClosure(*material, glm::vec3(0.0F, 0.0F, 1.0F));
-    const pathtracer::scene::Rgb normal = pathtracer::scene::fresnelAtViewAngle(closure, 1.0F);
-    const pathtracer::scene::Rgb grazing = pathtracer::scene::fresnelAtViewAngle(closure, static_cast<float>(tools::reference::kMuBar));
+    const pathtracer::scene::SampledWavelengths lambda = pathtracer::scene::sampleWavelengths(0.5F);
+    const pathtracer::scene::BsdfClosure closure =
+        pathtracer::scene::makeBsdfClosure(pathtracer::scene::toSpectral(*material, lambda), glm::vec3(0.0F, 0.0F, 1.0F), lambda.nm);
+    const pathtracer::scene::SampledSpectrum normal = pathtracer::scene::fresnelAtViewAngle(closure, 1.0F);
+    const pathtracer::scene::SampledSpectrum grazing =
+        pathtracer::scene::fresnelAtViewAngle(closure, static_cast<float>(tools::reference::kMuBar));
+    const pathtracer::scene::SampledSpectrum base = pathtracer::scene::reflectanceSpectrum(material->baseColor, lambda);
+    const pathtracer::scene::SampledSpectrum edge = pathtracer::scene::reflectanceSpectrum(material->specularColor, lambda);
     char detail[200];
+    for (int lane = 0; lane < pathtracer::scene::kSpectrumSamples; ++lane) {
+        const double normalError = std::abs(normal[lane] - base[lane]);
+        std::snprintf(detail, sizeof(detail), "lane %d renderer R(mu=1) off the upsampled base_color by %.3e", lane, normalError);
+        PT_EXPECT(ctx, normalError <= kFloatResolution, detail);
+        const double model = tools::reference::referenceF82(base[lane], edge[lane], tools::reference::kMuBar);
+        const double grazingError = std::abs(grazing[lane] - model);
+        std::snprintf(detail, sizeof(detail), "lane %d renderer R(mu=1/7) off the F82 model by %.3e", lane, grazingError);
+        PT_EXPECT(ctx, grazingError <= kFloatResolution, detail);
+    }
     for (int c = 0; c < 3; ++c) {
         std::snprintf(detail, sizeof(detail), "%s base_color[%d] %.9g != metal_fit %.9g; re-run metal_fit", materialFile, c,
                       material->baseColor[c], static_cast<float>(fit->baseColor[c]));
@@ -224,13 +437,7 @@ void expectMeasuredMetal(tools::check::Context& ctx, const std::string& table, c
         std::snprintf(detail, sizeof(detail), "%s specular_color[%d] %.9g != metal_fit %.9g; re-run metal_fit", materialFile, c,
                       material->specularColor[c], static_cast<float>(fit->specularColor[c]));
         PT_EXPECT(ctx, material->specularColor[c] == static_cast<float>(fit->specularColor[c]), detail);
-        const double normalError = std::abs(normal[c] - fit->baseColor[c]);
-        std::snprintf(detail, sizeof(detail), "channel %d renderer R(mu=1) off the CIE target by %.3e", c, normalError);
-        PT_EXPECT(ctx, normalError <= kFloatResolution, detail);
         const double model = tools::reference::referenceF82(fit->baseColor[c], fit->specularColor[c], tools::reference::kMuBar);
-        const double grazingError = std::abs(grazing[c] - model);
-        std::snprintf(detail, sizeof(detail), "channel %d renderer R(mu=1/7) off the F82 model by %.3e", c, grazingError);
-        PT_EXPECT(ctx, grazingError <= kFloatResolution, detail);
         const double misfit = std::abs(model - fit->atMuBar[c]);
         std::snprintf(detail, sizeof(detail), "channel %d F82 misses the CIE target at mu-bar by %.3e", c, misfit);
         PT_EXPECT(ctx, !fit->specularCapped[c] && misfit <= kFloatResolution, detail);

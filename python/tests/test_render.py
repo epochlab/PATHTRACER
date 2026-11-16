@@ -641,24 +641,21 @@ def test_env_rotation_turns_the_sky(renderer: Renderer) -> None:
     assert not np.array_equal(renderer.render(**common)["beauty"], renderer.render(**common, env_rotation=(0, 180, 0))["beauty"])
 
 
-def test_light_kelvin_scales_each_channel_of_the_light(renderer: Renderer) -> None:
-    """With the environment off, paths do not depend on the light's colour, so a kelvin rescales each channel uniformly.
+def test_light_kelvin_recolours_the_light(renderer: Renderer) -> None:
+    """With the environment off, paths do not depend on the light's spectrum, so a kelvin changes only what they carry.
 
-    The per-channel ratio to the authored render recovers the light's new colour: warmer is redder, and returning to
-    None restores the authored floats exactly.
+    A kelvin replaces the light's spectrum, rescaling each wavelength, not each RGB channel: the lit pixels stay lit, warmer
+    is redder over the frame, and returning to None restores the authored floats exactly.
     """
     common = {"aovs": ("beauty",), "width": 32, "height": 18, "samples": 2, "seed": 1, "env_light_enabled": False}
     authored = renderer.render(**common)["beauty"].astype(np.float64)
-    lit = authored.min(axis=-1) > 0.0
-    profile = _profile(PRESET)
-    # Both renders round the same float sums: samples x (maxBounces + 1) terms per pixel, each half an ulp, bound the gap.
-    tolerance = common["samples"] * (profile["pathTracer"]["maxBounces"] + 1) * np.finfo(np.float32).eps
+    lit = authored.sum(axis=-1) > 0.0
     red_over_blue = []
     for kelvin in (2856.0, 6504.0):
-        ratio = renderer.render(**common, light_kelvins=(kelvin,))["beauty"][lit] / authored[lit]
-        spread = (ratio.max(axis=0) - ratio.min(axis=0)) / ratio.mean(axis=0)
-        assert np.all(spread <= tolerance), f"{kelvin} K: per-channel spread {spread} exceeds {tolerance:.2e}"
-        red_over_blue.append(ratio.mean(axis=0)[0] / ratio.mean(axis=0)[2])
+        recoloured = renderer.render(**common, light_kelvins=(kelvin,))["beauty"].astype(np.float64)
+        assert np.array_equal(recoloured.sum(axis=-1) > 0.0, lit), f"{kelvin} K: the light's colour changed which pixels it reaches"
+        mean = recoloured[lit].mean(axis=0)
+        red_over_blue.append(mean[0] / mean[2])
     assert red_over_blue[0] > red_over_blue[1]
     assert np.array_equal(renderer.render(**common)["beauty"], authored.astype(np.float32))
 
@@ -667,9 +664,9 @@ def test_light_kelvin_scales_each_channel_of_the_light(renderer: Renderer) -> No
     ("kelvin", "message"),
     [
         ((2856.0, 2856.0), "light_kelvins must have shape"),
-        ((0.0,), "outside its illuminant's domain or the scene gamut"),
-        ((math.inf,), "outside its illuminant's domain or the scene gamut"),
-        ((500.0,), "outside its illuminant's domain or the scene gamut"),
+        ((0.0,), "outside its illuminant's domain or radiates no luminance"),
+        ((math.inf,), "outside its illuminant's domain or radiates no luminance"),
+        ((10.0,), "outside its illuminant's domain or radiates no luminance"),
     ],
 )
 def test_invalid_light_kelvin_is_rejected_by_name(renderer: Renderer, kelvin: tuple, message: str) -> None:

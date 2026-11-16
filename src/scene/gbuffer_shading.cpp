@@ -112,6 +112,50 @@ OpenPbrInputs<Constant> resolveInputs(const Material& material, glm::vec2 uv, co
     return inputs;
 }
 
+OpenPbrInputs<Spectral> toSpectral(const OpenPbrInputs<Constant>& inputs, const SampledWavelengths& lambda) {
+    const auto reflectance = [&](const Rgb& rgb) { return reflectanceSpectrum(rgb, lambda); };
+    // The radius scale shapes only a bulk subsurface interior: elsewhere zero, which subsurfaceGate reads as no interior, unlooked-up.
+    const bool subsurfaceInterior = inputs.subsurfaceWeight > 0.0F && !inputs.geometryThinWalled;
+    return {.baseWeight = inputs.baseWeight,
+            .baseColor = reflectance(inputs.baseColor),
+            .baseMetalness = inputs.baseMetalness,
+            .baseDiffuseRoughness = inputs.baseDiffuseRoughness,
+            .specularWeight = inputs.specularWeight,
+            .specularColor = reflectance(inputs.specularColor),
+            .specularRoughness = inputs.specularRoughness,
+            .specularRoughnessAnisotropy = inputs.specularRoughnessAnisotropy,
+            .specularIor = inputs.specularIor,
+            .transmissionWeight = inputs.transmissionWeight,
+            .transmissionColor = reflectance(inputs.transmissionColor),
+            .transmissionDepth = inputs.transmissionDepth,
+            .transmissionScatter = unboundedSpectrum(inputs.transmissionScatter, lambda),
+            .transmissionScatterAnisotropy = inputs.transmissionScatterAnisotropy,
+            .transmissionDispersionScale = inputs.transmissionDispersionScale,
+            .transmissionDispersionAbbeNumber = inputs.transmissionDispersionAbbeNumber,
+            .subsurfaceWeight = inputs.subsurfaceWeight,
+            .subsurfaceColor = reflectance(inputs.subsurfaceColor),
+            .subsurfaceRadius = inputs.subsurfaceRadius,
+            .subsurfaceRadiusScale = subsurfaceInterior ? reflectance(inputs.subsurfaceRadiusScale) : SampledSpectrum(0.0F),
+            .subsurfaceScatterAnisotropy = inputs.subsurfaceScatterAnisotropy,
+            .coatWeight = inputs.coatWeight,
+            .coatColor = reflectance(inputs.coatColor),
+            .coatRoughness = inputs.coatRoughness,
+            .coatRoughnessAnisotropy = inputs.coatRoughnessAnisotropy,
+            .coatIor = inputs.coatIor,
+            .coatDarkening = inputs.coatDarkening,
+            .fuzzWeight = inputs.fuzzWeight,
+            .fuzzColor = reflectance(inputs.fuzzColor),
+            .fuzzRoughness = inputs.fuzzRoughness,
+            .emissionLuminance = inputs.emissionLuminance,
+            // emittedRadiance radiates emission from the material itself; no BSDF or medium reads it here.
+            .emissionColor = SampledSpectrum(0.0F),
+            .thinFilmWeight = inputs.thinFilmWeight,
+            .thinFilmThickness = inputs.thinFilmThickness,
+            .thinFilmIor = inputs.thinFilmIor,
+            .geometryOpacity = inputs.geometryOpacity,
+            .geometryThinWalled = inputs.geometryThinWalled};
+}
+
 float opacityAt(const Material& material, glm::vec2 uv, const pathtracer::gfx::TextureFootprint& footprint) {
     return evaluate(material.geometryOpacity, uv, footprint, InputRange::Unit);
 }
@@ -122,15 +166,15 @@ bool isDispersive(const OpenPbrInputs<Constant>& inputs, bool ambientDisperses) 
            (inputs.transmissionWeight > 0.0F || inputs.subsurfaceWeight > 0.0F) && inputs.baseMetalness < 1.0F;
 }
 
-Rgb emittedRadiance(const Material& material, const ShadingTriangle& triangle, const ShadingVertex& shading, const glm::vec3& wo,
-                    const pathtracer::gfx::TextureFootprint& footprint) {
+SampledSpectrum emittedRadiance(const Material& material, const ShadingTriangle& triangle, const ShadingVertex& shading, const glm::vec3& wo,
+                                const pathtracer::gfx::TextureFootprint& footprint, const SampledWavelengths& lambda) {
     // Most surfaces emit nothing: a zero luminance needs no colour lookup.
     const float luminance = evaluate(material.emissionLuminance, shading.uv, footprint, InputRange::NonNegative);
     // A bulk surface bounds an interior, so it emits outward alone; a thin wall has no interior and emits from both faces.
     if (!(luminance > 0.0F) || (!material.geometryThinWalled && !(glm::dot(wo, geometricNormalOf(triangle)) > 0.0F))) {
-        return Rgb(0.0F);
+        return SampledSpectrum(0.0F);
     }
-    Rgb emitted = luminance * evaluate(material.emissionColor, shading.uv, footprint, InputRange::NonNegative);
+    SampledSpectrum emitted = luminance * illuminantSpectrum(evaluate(material.emissionColor, shading.uv, footprint, InputRange::NonNegative), lambda);
     // OpenPBR's layers over the emitter, their inputs as a vertex reads them, the coat's lerp(1, T_coat (1 - E_coat(wo)), C) along wo.
     const float coatWeight = evaluate(material.coatWeight, shading.uv, {}, InputRange::Unit);
     const auto normalOf = [&](const NormalInput& input) { return buildShadingFrame(triangle, shading, input)[2]; };
@@ -145,8 +189,8 @@ Rgb emittedRadiance(const Material& material, const ShadingTriangle& triangle, c
         const float coatAlbedo = reflectionAlbedo(evaluate(material.coatRoughness, shading.uv, {}, InputRange::Unit),
                                                   evaluate(material.coatRoughnessAnisotropy, shading.uv, {}, InputRange::Unit), 1.0F, coatIor,
                                                   coatWo);
-        const Rgb transmittance = coatTransmittance(evaluate(material.coatColor, shading.uv, {}, InputRange::Unit), coatIor, coatWo.z);
-        emitted *= Rgb(1.0F - coatWeight) + (coatWeight * (1.0F - coatAlbedo) * transmittance);
+        const SampledSpectrum coatColor = reflectanceSpectrum(evaluate(material.coatColor, shading.uv, {}, InputRange::Unit), lambda);
+        emitted *= SampledSpectrum(1.0F - coatWeight) + (coatWeight * (1.0F - coatAlbedo) * coatTransmittance(coatColor, coatIor, coatWo.z));
     }
     // The fuzz withholds what it reflects, 1 - F E_fuzz, its normal lerp(base, coat, C) as at a vertex: emission is "further reduced".
     const float fuzzWeight = evaluate(material.fuzzWeight, shading.uv, footprint, InputRange::Unit);

@@ -38,9 +38,10 @@ struct LineProximity {
 // A bulk base refracting into its interior where it or its ambient medium disperses: the path must commit to one wavelength there.
 [[nodiscard]] bool isDispersive(const OpenPbrInputs<Constant>& inputs, bool ambientDisperses);
 
-// emission_luminance * emission_color toward wo through the coat and fuzz above it, a bulk surface's front alone; 1 cd/m^2 a unit.
-[[nodiscard]] Rgb emittedRadiance(const Material& material, const ShadingTriangle& triangle, const ShadingVertex& shading,
-                                        const glm::vec3& wo, const pathtracer::gfx::TextureFootprint& footprint);
+// emission_luminance * emission_color toward wo through the coat and fuzz above it, a bulk surface's front alone, at the lanes.
+[[nodiscard]] SampledSpectrum emittedRadiance(const Material& material, const ShadingTriangle& triangle, const ShadingVertex& shading,
+                                              const glm::vec3& wo, const pathtracer::gfx::TextureFootprint& footprint,
+                                              const SampledWavelengths& lambda);
 
 // Gram-Schmidt re-orthogonalized tangent frame: normal map, bump, then tangent map from one input; triangle's edges carry dP/duv.
 [[nodiscard]] ShadingFrame buildShadingFrame(const ShadingTriangle& triangle, const ShadingVertex& shading, const NormalInput& geometryNormal);

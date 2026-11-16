@@ -295,7 +295,7 @@ std::optional<std::vector<AreaLight>> buildLights(const std::vector<pathtracer::
         const glm::vec3 centre(lightToWorld * glm::vec4(0.0F, 0.0F, 0.0F, 1.0F));
         const glm::mat3 axes(lightToWorld);
         // Placed at unit-luminance colour first: a lumens light's luminance needs the placed area, a mesh's known only once loaded.
-        const Rgb& radiance = light.color;
+        const EmissionSpectrum& radiance = light.spectrum;
         if (const auto* quad = std::get_if<pathtracer::config::QuadShape>(&light.shape)) {
             const glm::vec2 halfSize = 0.5F * quad->size;
             // edge0 = +X, edge1 = -Y: cross(edge0, edge1) is local -Z, the emitting side, from the (-x, +y) corner.

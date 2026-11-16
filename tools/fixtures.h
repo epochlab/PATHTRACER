@@ -49,38 +49,110 @@ inline pathtracer::scene::ThreadPool& sharedPool(int threads) {
     return pool;
 }
 
+// The lanes every BSDF check shades at: the hero at u = 1/2, one fixed set of wavelengths for films, dispersion and upsampling.
+inline const pathtracer::scene::SampledWavelengths& pinnedWavelengths() {
+    static const pathtracer::scene::SampledWavelengths kLambda = pathtracer::scene::sampleWavelengths(0.5F);
+    return kLambda;
+}
+
+// A colour's channels as lanes 0-2, lane 3 repeating green: per-lane BSDF math meets the per-channel oracles exactly, unupsampled.
+inline pathtracer::scene::SampledSpectrum lanesOf(const pathtracer::scene::Rgb& c) {
+    return pathtracer::scene::SampledSpectrum(glm::vec4(c.r, c.g, c.b, c.g));
+}
+
+// lanesOf's inverse: the three channel lanes as a vec3, for the oracles written per channel.
+inline glm::vec3 channels(const pathtracer::scene::SampledSpectrum& s) { return glm::vec3(s.lanes); }
+
+// Authored inputs with every colour mapped by lanesOf: the BSDF checks test the closure's math, colour_validate the upsampling.
+inline pathtracer::scene::OpenPbrInputs<pathtracer::scene::Spectral> laneInputs(
+    const pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant>& inputs) {
+    pathtracer::scene::OpenPbrInputs<pathtracer::scene::Spectral> lanes = pathtracer::scene::toSpectral(inputs, pinnedWavelengths());
+    lanes.baseColor = lanesOf(inputs.baseColor);
+    lanes.specularColor = lanesOf(inputs.specularColor);
+    lanes.transmissionColor = lanesOf(inputs.transmissionColor);
+    lanes.transmissionScatter = lanesOf(inputs.transmissionScatter);
+    lanes.subsurfaceColor = lanesOf(inputs.subsurfaceColor);
+    lanes.subsurfaceRadiusScale = lanesOf(inputs.subsurfaceRadiusScale);
+    lanes.coatColor = lanesOf(inputs.coatColor);
+    lanes.fuzzColor = lanesOf(inputs.fuzzColor);
+    return lanes;
+}
+
+// The closure of authored inputs, colours as lanes, at the pinned wavelengths a thin film interferes at.
+inline pathtracer::scene::BsdfClosure closureOf(const pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant>& inputs,
+                                                const glm::vec3& woLocal, std::optional<int> heroLane = std::nullopt,
+                                                const glm::vec3& coatNormalLocal = glm::vec3(0.0F, 0.0F, 1.0F),
+                                                const glm::vec3& coatTangentLocal = glm::vec3(1.0F, 0.0F, 0.0F), float ambientIor = 1.0F) {
+    return pathtracer::scene::makeBsdfClosure(laneInputs(inputs), woLocal, pinnedWavelengths().nm, heroLane, coatNormalLocal, coatTangentLocal,
+                                              ambientIor);
+}
+
 // One closure at woLocal, used once: the validators' single-direction forms of the closure API; a draw walks on its own sampler.
 inline pathtracer::scene::BsdfEval evaluateBsdfSplit(const pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant>& inputs,
                                                      const glm::vec3& woLocal, const glm::vec3& wiLocal, pathtracer::scene::Sampler& walk) {
-    return pathtracer::scene::evaluateBsdfSplit(pathtracer::scene::makeBsdfClosure(inputs, woLocal), wiLocal, walk);
+    return pathtracer::scene::evaluateBsdfSplit(closureOf(inputs, woLocal), wiLocal, walk);
 }
 inline pathtracer::scene::BsdfEval evaluateClosedForm(const pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant>& inputs,
                                                       const glm::vec3& woLocal, const glm::vec3& wiLocal) {
-    return pathtracer::scene::evaluateClosedForm(pathtracer::scene::makeBsdfClosure(inputs, woLocal), wiLocal);
+    return pathtracer::scene::evaluateClosedForm(closureOf(inputs, woLocal), wiLocal);
 }
 inline float pdfBsdf(const pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant>& inputs, const glm::vec3& woLocal,
                      const glm::vec3& wiLocal) {
-    return pathtracer::scene::pdfBsdf(pathtracer::scene::makeBsdfClosure(inputs, woLocal), wiLocal);
+    return pathtracer::scene::pdfBsdf(closureOf(inputs, woLocal), wiLocal);
 }
-inline pathtracer::scene::Rgb evaluateBsdf(const pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant>& inputs,
-                                           const glm::vec3& woLocal, const glm::vec3& wiLocal, pathtracer::scene::Sampler& walk) {
+inline pathtracer::scene::SampledSpectrum evaluateBsdf(const pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant>& inputs,
+                                                       const glm::vec3& woLocal, const glm::vec3& wiLocal, pathtracer::scene::Sampler& walk) {
     return evaluateBsdfSplit(inputs, woLocal, wiLocal, walk).total();
 }
 inline std::optional<pathtracer::scene::BsdfSample> sampleBsdf(const pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant>& inputs,
                                                                const glm::vec3& woLocal, pathtracer::scene::Sampler& sampler) {
-    return pathtracer::scene::sampleBsdf(pathtracer::scene::makeBsdfClosure(inputs, woLocal), sampler, sampler);
+    return pathtracer::scene::sampleBsdf(closureOf(inputs, woLocal), sampler, sampler);
+}
+
+// The sensor's exact expectation of a spectrum's per-sample scene RGB, stratified over 2^16 heroes: what a render converges to.
+template <typename SpectrumAt>
+glm::dvec3 expectedSceneRgb(SpectrumAt spectrumAt, bool reflectance) {
+    constexpr int kStrata = 1 << 16;
+    glm::dvec3 sum(0.0);
+    for (int k = 0; k < kStrata; ++k) {
+        const pathtracer::scene::SampledWavelengths lambda = pathtracer::scene::sampleWavelengths((static_cast<float>(k) + 0.5F) / kStrata);
+        const pathtracer::scene::SampledSpectrum value = spectrumAt(lambda);
+        sum += glm::dvec3((reflectance ? pathtracer::scene::reflectanceToScene(value, lambda) : pathtracer::scene::toScene(value, lambda)).vec3());
+    }
+    return sum / static_cast<double>(kStrata);
+}
+
+// A grey light of `luminance` cd/m^2: the scene white (D65), which the sensor reads as luminance * (1, 1, 1) in expectation.
+inline pathtracer::scene::EmissionSpectrum greyEmission(float luminance) {
+    pathtracer::scene::EmissionSpectrum spectrum = pathtracer::scene::rgbEmission(pathtracer::scene::Rgb(1.0F));
+    spectrum *= luminance;
+    return spectrum;
+}
+
+// An emitter of `value` W/(sr m^2 nm) at every wavelength (Illuminant E): a light-geometry check reads one known radiance in each lane.
+inline pathtracer::scene::EmissionSpectrum flatEmission(float value) {
+    pathtracer::scene::cie::Spectrum flat;
+    flat.fill(1.0);
+    double yBarSum = 0.0;
+    for (int i = 0; i < pathtracer::scene::cie::kSampleCount; ++i) {
+        yBarSum += pathtracer::scene::cie::tableRow(i).colourMatching.y;
+    }
+    // Unit luminance puts 1 / (K_m sum yBar) at each sample; this scale lifts it to value.
+    pathtracer::scene::EmissionSpectrum spectrum(flat);
+    spectrum *= static_cast<float>(static_cast<double>(value) * static_cast<double>(pathtracer::scene::kLuminousEfficacy) * yBarSum);
+    return spectrum;
 }
 
 // Independent ground truth: Lo(wo) = int evaluateBsdf(wo,wi) dwi at L0 = 1, cosine-weighted. Uniform MC: under-samples a sharp GGX peak.
 inline double referenceLo(const pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant>& inputs, const glm::vec3& wo,
                           int sampleCount, std::mt19937& rng) {
     // Summed in double: a float sum's ulp at 1e4 draws rivals the standard error the callers' bands are built from.
-    glm::dvec3 accum(0.0);
+    glm::dvec4 accum(0.0);
     pathtracer::scene::Sampler walk(0, 0, 0, 1, rng());
     for (int i = 0; i < sampleCount; ++i) {
-        accum += glm::dvec3((evaluateBsdf(inputs, wo, sampleUniformHemisphere(rng), walk)).vec3());
+        accum += glm::dvec4((evaluateBsdf(inputs, wo, sampleUniformHemisphere(rng), walk)).lanes);
     }
-    return 2.0 * std::numbers::pi * std::max({accum.x, accum.y, accum.z}) / static_cast<double>(sampleCount);
+    return 2.0 * std::numbers::pi * std::max({accum.x, accum.y, accum.z, accum.w}) / static_cast<double>(sampleCount);
 }
 
 // A white infinite slab under uniform L0 = 1 by BSDF sampling alone, to maxVertices scatterings: the BSDF's own round-trip energy closure.
@@ -98,7 +170,7 @@ inline SlabWalk slabWalkLo(const pathtracer::scene::OpenPbrInputs<pathtracer::sc
     for (int i = 0; i < paths; ++i) {
         pathtracer::scene::Sampler sampler(0, 0, i, paths, seed);
         glm::vec3 direction(0.0F, 0.0F, -1.0F);
-        pathtracer::scene::Rgb throughput(1.0F);
+        pathtracer::scene::SampledSpectrum throughput(1.0F);
         bool top = true;
         int vertex = 0;
         for (; vertex < maxVertices; ++vertex) {

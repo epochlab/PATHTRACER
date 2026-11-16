@@ -66,19 +66,17 @@ glm::dmat3 bradfordAdaptation(const glm::dvec3& from, const glm::dvec3& to) {
     return glm::inverse(kBradford) * glm::dmat3(gain.x, 0.0, 0.0, 0.0, gain.y, 0.0, 0.0, 0.0, gain.z) * kBradford;
 }
 
-// SMPTE RP 177 eq 1-4: scale each primary's unit-luminance column so the three sum to the scene white, then invert; D65 adapts first.
-glm::dmat3 deriveXyzToScene() {
+}  // namespace
+
+// SMPTE RP 177 eq 1-4: scale each primary's unit-luminance column so the three sum to the scene white, then invert; white adapts first.
+glm::dmat3 xyzToSceneFrom(const glm::dvec3& white) {
     const glm::dmat3 primaries(xyzAtUnitLuminance(kScenePrimaryRed), xyzAtUnitLuminance(kScenePrimaryGreen),
                                xyzAtUnitLuminance(kScenePrimaryBlue));
     const glm::dvec3 sceneWhite = xyzAtUnitLuminance(kSceneWhite);
     const glm::dvec3 scale = glm::inverse(primaries) * sceneWhite;
     const glm::dmat3 rgbToXyz = primaries * glm::dmat3(scale.x, 0.0, 0.0, 0.0, scale.y, 0.0, 0.0, 0.0, scale.z);
-    Spectrum perfectReflector;
-    perfectReflector.fill(1.0);
-    return glm::inverse(rgbToXyz) * bradfordAdaptation(reflectanceToXyz(perfectReflector), sceneWhite);
+    return glm::inverse(rgbToXyz) * bradfordAdaptation(white, sceneWhite);
 }
-
-}  // namespace
 
 TableRow tableRow(int index) {
     const Sample& s = kTable[index];
@@ -91,7 +89,11 @@ glm::dvec3 daylightComponents(int knot) {
 }
 
 const glm::dmat3& xyzToScene() {
-    static const glm::dmat3 kMatrix = deriveXyzToScene();
+    static const glm::dmat3 kMatrix = [] {
+        Spectrum perfectReflector;
+        perfectReflector.fill(1.0);
+        return xyzToSceneFrom(reflectanceToXyz(perfectReflector));
+    }();
     return kMatrix;
 }
 
@@ -113,7 +115,7 @@ glm::dvec3 reflectanceToScene(const Spectrum& reflectance) { return xyzToScene()
 
 namespace {
 
-// Planck's law at each tabulated wavelength; c1 and the 1 nm interval cancel in emissionToScene's Y = 1 normalisation.
+// Planck's law at each tabulated wavelength; c1 and the 1 nm interval cancel in a light's unit-luminance normalisation.
 Spectrum blackbodySpectrum(double kelvin) {
     // Planck's second radiation constant, CIE 015:2018's ITS-90 value.
     constexpr double kC2 = 1.4388e-2;
@@ -145,34 +147,25 @@ Spectrum daylightSpectrum(double kelvin) {
     return power;
 }
 
-// Scene RGB of an emission spectrum at Y = 1; nullopt where a channel is negative (outside the gamut) or the spectrum underflowed.
-std::optional<glm::dvec3> emissionToScene(const Spectrum& power) {
-    glm::dvec3 xyz(0.0);
-    for (int i = 0; i < kSampleCount; ++i) {
-        const Sample& s = kTable[i];
-        xyz += power[i] * glm::dvec3(s.xBar, s.yBar, s.zBar);
-    }
-    const glm::dvec3 rgb = xyzToScene() * (xyz / xyz.y);
-    // A clamp would shift hue, so refuse; an underflowed spectrum is NaN, which fails the comparison too.
-    if (!glm::all(glm::greaterThanEqual(rgb, glm::dvec3(0.0)))) {
-        return std::nullopt;
-    }
-    return rgb;
-}
-
 }  // namespace
 
-std::optional<glm::dvec3> kelvinToScene(Illuminant illuminant, double kelvin) {
+std::optional<Spectrum> illuminantSpectrum(Illuminant illuminant, double kelvin) {
     if (!(kelvin > 0.0) || !std::isfinite(kelvin)) {
         return std::nullopt;
     }
-    if (illuminant == Illuminant::Blackbody) {
-        return emissionToScene(blackbodySpectrum(kelvin));
-    }
-    if (kelvin < kDaylightMinKelvin || kelvin > kDaylightMaxKelvin) {
+    if (illuminant == Illuminant::Daylight && (kelvin < kDaylightMinKelvin || kelvin > kDaylightMaxKelvin)) {
         return std::nullopt;
     }
-    return emissionToScene(daylightSpectrum(kelvin));
+    const Spectrum power = illuminant == Illuminant::Blackbody ? blackbodySpectrum(kelvin) : daylightSpectrum(kelvin);
+    double luminance = 0.0;
+    for (int i = 0; i < kSampleCount; ++i) {
+        luminance += power[static_cast<std::size_t>(i)] * kTable[static_cast<std::size_t>(i)].yBar;
+    }
+    // A blackbody cold enough that Planck's law underflows at every sample has no luminance to normalise a light by.
+    if (!(luminance > 0.0) || !std::isfinite(luminance)) {
+        return std::nullopt;
+    }
+    return power;
 }
 
 }  // namespace pathtracer::scene::cie

@@ -33,10 +33,9 @@ struct VolumeSet::Volume {
     glm::mat3 indexFromWorld;
     glm::vec3 indexOffset;
     float gridUnitsPerWorldUnit;  // 1/scale: the coefficients are per grid unit, so a world ray parameter covers this many
-    Rgb absorption;
-    Rgb scattering;
-    Rgb extinction;         // absorption + scattering, read per ratio-tracking step
-    float extinctionBound;  // max channel of absorption + scattering: the majorant density's scalar spectral bound
+    UnboundedSpectrum absorption;  // per grid unit at density 1, the material's density folded in
+    UnboundedSpectrum scattering;
+    float extinctionBound;  // max over 360-830 nm of absorption plus that of scattering: the majorant density's spectral bound
     float anisotropy;
 };
 
@@ -210,13 +209,12 @@ std::optional<VolumeSet::Volume> loadVolume(const pathtracer::config::VolumeConf
         glm::mat3(glm::dmat3(indexFromWorld)),
         glm::vec3(indexFromWorld[3]),
         1.0F / config.scale,
-        material->density * material->absorption,
-        material->density * material->scattering,
-        Rgb(0.0F),
-        material->density * maxChannel(material->absorption + material->scattering),
+        fitUnbounded(material->density * material->absorption),
+        fitUnbounded(material->density * material->scattering),
+        0.0F,
         material->anisotropy,
     };
-    volume.extinction = volume.absorption + volume.scattering;
+    volume.extinctionBound = volume.absorption.maxValue() + volume.scattering.maxValue();
     volume.density = volume.densityHandle.grid<float>();
     volume.majorant = volume.majorantHandle.grid<float>();
     return volume;
@@ -304,7 +302,8 @@ std::optional<VolumeSet> VolumeSet::load(const std::vector<pathtracer::config::V
 
 bool VolumeSet::empty() const { return volumes_ == nullptr || volumes_->empty(); }
 
-FreeFlight VolumeSet::sampleFreeFlight(const Ray& ray, float t0, float t1, const Rgb& throughput, Sampler& sampler) const {
+FreeFlight VolumeSet::sampleFreeFlight(const Ray& ray, float t0, float t1, const SampledSpectrum& throughput, const SampledWavelengths& lambda,
+                                        Sampler& sampler) const {
     // Overlapping volumes are independent Poisson processes of tentative collisions; their union is met in t order, earliest first.
     std::vector<std::pair<Tracker, glm::vec2>>& pending = pendingCollisions;
     pending.clear();
@@ -316,18 +315,18 @@ FreeFlight VolumeSet::sampleFreeFlight(const Ray& ray, float t0, float t1, const
             }
         }
     }
-    FreeFlight flight{FreeFlightEvent::Escaped, t1, 0.0F, Rgb(1.0F)};
+    FreeFlight flight{FreeFlightEvent::Escaped, t1, 0.0F, SampledSpectrum(1.0F)};
     while (!pending.empty()) {
         const auto earliest = std::min_element(pending.begin(), pending.end(), [](const auto& a, const auto& b) { return a.second.x < b.second.x; });
         Tracker& tracker = earliest->first;
         const Volume& volume = tracker.volume();
         const float density = tracker.density();
         const float bound = tracker.majorant() * volume.extinctionBound;
-        const Rgb absorption = density * volume.absorption;
-        const Rgb scattering = density * volume.scattering;
-        const Rgb null = max(Rgb(bound) - absorption - scattering, Rgb(0.0F));
+        const SampledSpectrum absorption = density * volume.absorption(lambda);
+        const SampledSpectrum scattering = density * volume.scattering(lambda);
+        const SampledSpectrum null = max(SampledSpectrum(bound) - absorption - scattering, SampledSpectrum(0.0F));
         // History-aware probabilities (Kutz et al. 2017 sec. 5.1): each event's share of the throughput-weighted collision rate.
-        const Rgb history = throughput * flight.weight;
+        const SampledSpectrum history = throughput * flight.weight;
         const float pa = channelMean(history * absorption);
         const float ps = channelMean(history * scattering);
         const float pn = channelMean(history * null);
@@ -338,7 +337,7 @@ FreeFlight VolumeSet::sampleFreeFlight(const Ray& ray, float t0, float t1, const
             flight.event = FreeFlightEvent::Absorbed;
             return flight;
         }
-        // Each kept event weighs (sigma_x/bound)/P_x, so the expectation over events sums sigma_x/bound, 1 per channel; 1 when grey.
+        // Each kept event weighs (sigma_x/bound)/P_x, so the expectation over events sums sigma_x/bound, 1 per lane; 1 when grey.
         if (pick < pa + ps) {
             flight.event = FreeFlightEvent::Scattered;
             flight.t = earliest->second.x;
@@ -357,17 +356,18 @@ FreeFlight VolumeSet::sampleFreeFlight(const Ray& ray, float t0, float t1, const
     return flight;
 }
 
-Rgb VolumeSet::transmittance(const Ray& ray, float t0, float t1, Sampler& sampler) const {
-    Rgb transmittance(1.0F);
+SampledSpectrum VolumeSet::transmittance(const Ray& ray, float t0, float t1, const SampledWavelengths& lambda, Sampler& sampler) const {
+    SampledSpectrum transmittance(1.0F);
     // Independent media multiply: each volume's ratio-tracking estimate is unbiased on its own, and so is their product.
     for (const Volume& volume : *volumes_) {
         Tracker tracker(volume);
         if (!tracker.start(ray, t0, t1)) {
             continue;
         }
+        const SampledSpectrum extinction = volume.absorption(lambda) + volume.scattering(lambda);
         while (tracker.next(sampler)) {
             const float bound = tracker.majorant() * volume.extinctionBound;
-            transmittance *= max(Rgb(1.0F) - (tracker.density() * volume.extinction / bound), Rgb(0.0F));
+            transmittance *= max(SampledSpectrum(1.0F) - (tracker.density() * extinction / bound), SampledSpectrum(0.0F));
             if (isBlack(transmittance)) {
                 return transmittance;
             }
