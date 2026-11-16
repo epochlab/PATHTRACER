@@ -959,9 +959,7 @@ PathTraceResult makePathTraceResult(int width, int height, int replicates) {
     for (const pathtracer::debug::PathTracedLane lane : pathtracer::debug::kShadowLanes) {
         result.*lane = pathtracer::gfx::makeImage(width, height, pathtracer::gfx::kScalarChannels);
     }
-    result.replicateLuminance.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) *
-                                         static_cast<std::size_t>(replicates),
-                                     0.0F);
+    result.replicateColour.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * replicateStride(replicates), 0.0F);
     result.replicates = replicates;
     result.texelSamples.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height), 0);
     return result;

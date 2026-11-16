@@ -148,7 +148,7 @@ private:
     pathtracer::scene::Camera defaultCamera_;
     pathtracer::scene::ThreadPool threadPool_;
 
-    // Reused across render() calls, reallocated only when the resolution changes; its replicateLuminance is the running replicate means.
+    // Reused across render() calls, reallocated only when the resolution changes; its replicateColour is the running replicate means.
     pathtracer::scene::PathTraceResult pathTraced_;
     // Ascending texels the next pass traces, every one at a render's first pass, as the driver's list.
     std::vector<std::uint32_t> activeTexels_;

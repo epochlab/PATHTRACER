@@ -64,7 +64,7 @@ struct AcceptanceSample {
 
 // Per-texel stopping on the replicate standard error, read by the driver and headless folds; renderPathTraced traces what they list.
 struct AdaptiveSampling {
-    float threshold = 0.0F;  // relative standard error of scene luminance a texel stops at, 1/SNR; 0 traces every texel every pass
+    float threshold = 0.0F;  // each channel's standard error over the mean channel level a texel stops at, 1/SNR; 0 traces every pass
     float confidence = 0.0F;  // 1 - the false discovery rate: the expected share of stopped texels whose error is within threshold
     int minSamples = 0;  // first checkpoint, replicates times a power of two
     float marSlope = 0.0F;  // foveation: MAR growth per degree of eccentricity (Guenter et al. 2012 measured 0.022-0.0275); 0 is off
@@ -117,6 +117,12 @@ struct OverRangeStats {
     std::array<std::uint32_t, kOverRangeBinCount + 1> aboveBin{};
 };
 
+// Replicate means per texel, channel-major: each scene RGB channel's `replicates` means contiguous, so one channel reads as one run.
+inline constexpr int kReplicateChannels = 3;
+[[nodiscard]] constexpr std::size_t replicateStride(int replicates) {
+    return static_cast<std::size_t>(kReplicateChannels) * static_cast<std::size_t>(replicates);
+}
+
 // One renderPathTraced() call's output, republished in full each pass. Per-sample quantities, each lane at its aovChannels count.
 struct PathTraceResult {
     pathtracer::gfx::HdrImage beauty;
@@ -150,8 +156,8 @@ struct PathTraceResult {
     pathtracer::gfx::HdrImage denoiseAlbedo;
     pathtracer::gfx::HdrImage denoiseNormal;
 
-    // Running mean of each replicate's per-pass scene luminance, `replicates` floats per texel, pixel-major: the SNR's error estimate.
-    std::vector<float> replicateLuminance;
+    // Running mean of each replicate's per-pass scene RGB, replicateStride floats per texel, pixel-major: the SNR's error estimate.
+    std::vector<float> replicateColour;
     int replicates = 1;
     // Passes folded into each texel, `samples` wherever every pass traced it; the driver and headless fold write it, not renderPathTraced.
     std::vector<int> texelSamples;

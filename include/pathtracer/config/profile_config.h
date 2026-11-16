@@ -66,7 +66,7 @@ struct PathTracerConfig {
     int russianRouletteStartBounce;  // 0-based bounce index RR kicks in from
     float aoMaxDistance;  // ray-traced AO occlusion range, scene units; occluders beyond it don't darken
     int replicates;  // independent scrambles interleaved by sample, whose spread is the SNR's standard error; divides samplesPerPixel
-    // pathTracer.adaptive: texels stop once their relative luminance error is within threshold, at this false-discovery confidence.
+    // pathTracer.adaptive: texels stop once each channel's error is within threshold of the mean channel level, at this FDR confidence.
     float adaptiveThreshold;
     float adaptiveConfidence;
     int adaptiveMinSamples;  // the first checkpoint, replicates times a power of two

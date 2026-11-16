@@ -639,7 +639,7 @@ const pathtracer::gfx::HdrImage* ensureFilterImage(
     }
     cache.image = pathtracer::debug::evaluateFilterAov(
         aov,
-        pathtracer::debug::FilterInput{snapshot->beauty, snapshot->replicateLuminance.data(), snapshot->replicates, snapshot->samples,
+        pathtracer::debug::FilterInput{snapshot->beauty, snapshot->replicateColour.data(), snapshot->replicates, snapshot->samples,
                                        snapshot->texelSamples.data(), &snapshot->denoiseAlbedo, &snapshot->denoiseNormal,
                                        app.denoiser.get(), &snapshot->shadowLost, &snapshot->shadowUnoccluded},
         *app.gbufferThreadPool);
