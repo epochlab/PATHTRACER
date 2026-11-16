@@ -331,21 +331,20 @@ struct ShadowMedium {
     float ior;
 };
 
-// The media's transmittance over the whole shadow ray: its interior's in closed form, the VDB media's by ratio tracking.
-SampledSpectrum mediaTransmittance(const Ray& ray, const PassThroughScene& scene, const ShadowMedium& in, const SampledWavelengths& lambda,
-                                   Sampler& volumeSampler) {
+// The media's transmittance over the whole shadow ray, exact: its interior's in closed form, the VDB media's by regular tracking.
+SampledSpectrum mediaTransmittance(const Ray& ray, const PassThroughScene& scene, const ShadowMedium& in, const SampledWavelengths& lambda) {
     const SampledSpectrum interior = in.medium != nullptr ? transmittance(*in.medium, ray.tMax - ray.tMin) : SampledSpectrum(1.0F);
     if (scene.volumes.empty()) {
         return interior;
     }
-    return interior * scene.volumes.transmittance(ray, ray.tMin, ray.tMax, lambda, volumeSampler);
+    return interior * scene.volumes.transmittance(ray, ray.tMin, ray.tMax, lambda);
 }
 
 // The share of light a shadow ray carries to its end: (1 - alpha) + alpha * passThrough at each crossable surface, 0 at any other.
 SampledSpectrum transmittanceAlong(Ray ray, const PassThroughScene& scene, const SampledWavelengths& lambda, std::optional<int> heroLane,
-                                   const ShadowMedium& in, std::uint64_t& shadowRays, Sampler& volumeSampler) {
+                                   const ShadowMedium& in, std::uint64_t& shadowRays) {
     if (!scene.any) {
-        return scene.accel.occluded(ray) ? SampledSpectrum(0.0F) : mediaTransmittance(ray, scene, in, lambda, volumeSampler);
+        return scene.accel.occluded(ray) ? SampledSpectrum(0.0F) : mediaTransmittance(ray, scene, in, lambda);
     }
     const Ray whole = ray;
     SampledSpectrum transmittance(1.0F);
@@ -377,7 +376,7 @@ SampledSpectrum transmittanceAlong(Ray ray, const PassThroughScene& scene, const
         ray.tMin = std::nextafter(hit->t, std::numeric_limits<float>::infinity());
         ++shadowRays;
     }
-    return transmittance * mediaTransmittance(whole, scene, in, lambda, volumeSampler);
+    return transmittance * mediaTransmittance(whole, scene, in, lambda);
 }
 
 // Obscurance through cutouts, Sum T_i alpha_i rho(t_i) + T_end; closest-hit, as rho needs the distance (under 1.3% of frame time).
@@ -542,37 +541,30 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
             }
         }
         const bool scattered = flight.has_value() && flight->event == FreeFlightEvent::Scattered;
-        const bool absorbed = flight.has_value() && flight->event == FreeFlightEvent::Absorbed;
-        const bool walkScattered = walkCollision.has_value() && !scattered && !absorbed;
+        const bool walkScattered = walkCollision.has_value() && !scattered;
         if (bounce == 0) {
             // E[mean(1 - w) 1{escape}] = 1 - mean(T): opacity projected, white's E[projection] = 1 a control variate; 0 exactly when clear.
-            result.alpha = hit.has_value() || showSky || scattered || absorbed ? 1.0F
-                                                                               : channelMean(reflectanceToScene(1.0F - throughput, lambda));
+            result.alpha =
+                hit.has_value() || showSky || scattered ? 1.0F : channelMean(reflectanceToScene(1.0F - throughput, lambda));
         }
 
         // The interior's weight to the event that ended the flight, or its own collision's; a miss is unbounded, t = inf.
-        if (medium != nullptr && !absorbed) {
+        if (medium != nullptr) {
             const float travelled = (scattered       ? flight->t
                                      : walkScattered ? *walkCollision
                                      : hit.has_value() ? hit->t
                                                        : std::numeric_limits<float>::infinity()) -
                                     segmentStart;
-            const SampledSpectrum weight = !inWalk ? transmittance(*medium, travelled)
-                                     : walkScattered ? collisionWeight(*medium, odds, travelled)
-                                                     : passWeight(*medium, odds, travelled);
+            const SampledSpectrum surviving = transmittance(*medium, travelled);
+            const SampledSpectrum weight =
+                !inWalk         ? surviving
+                : walkScattered ? collisionWeight(odds, surviving, medium->scattering, medium->absorption + medium->scattering)
+                                : passWeight(odds, surviving);
             throughput *= weight;
             // A walk's weights are its albedo estimate, so the feature chain carries them; a clear interior's colour it never did.
             if (featurePending && inWalk) {
                 featureWeight *= weight;
             }
-        }
-
-        // Absorbed carries nothing onward, emission being out of scope: the feature chain closes on a zero albedo and no normal.
-        if (absorbed) {
-            if (featurePending) {
-                recordFeatures(SampledSpectrum(0.0F), glm::vec3(0.0F));
-            }
-            break;
         }
 
         if (scattered) {
@@ -595,7 +587,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
                 const Ray shadowRay{position, lightSample->direction, 0.0F, lightSample->distance * (1.0F - kShadowDistanceEpsilon)};
                 ++rays.shadow;
                 const ShadowMedium in{medium, indexOf(mediumStack.empty() ? nullptr : &mediumStack.back(), heroNm)};
-                const SampledSpectrum visibility = transmittanceAlong(shadowRay, scene, lambda, heroLane, in, rays.shadow, volumeSampler);
+                const SampledSpectrum visibility = transmittanceAlong(shadowRay, scene, lambda, heroLane, in, rays.shadow);
                 if (bounce == 0) {
                     recordShadow(throughput * lightSample->radiance * (phase / lightSample->pdf), visibility);
                 }
@@ -852,7 +844,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
                                                                                                       inputs.transmissionDispersionAbbeNumber,
                                                                                                       inputs.transmissionDispersionScale,
                                                                                                       heroNm)};
-                    const SampledSpectrum visibility = transmittanceAlong(shadowRay, scene, lambda, heroLane, in, rays.shadow, volumeSampler);
+                    const SampledSpectrum visibility = transmittanceAlong(shadowRay, scene, lambda, heroLane, in, rays.shadow);
                     if (bounce == 0) {
                         recordShadow(bsdfValue * throughput * lightSample->radiance / lightSample->pdf, visibility);
                     }

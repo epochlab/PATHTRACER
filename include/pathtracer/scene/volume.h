@@ -20,14 +20,14 @@ namespace pathtracer::scene {
 // A unit wi about unit `dir` with density henyeyGreenstein(dot(dir, wi), g): the exact inverse CDF, in a form free of 1/g.
 [[nodiscard]] glm::vec3 sampleHenyeyGreenstein(const glm::vec3& dir, float g, glm::vec2 u);
 
-// How a free flight ended: at the segment's end, absorbed (the path carries nothing further), or at a real scattering.
-enum class FreeFlightEvent { Escaped, Absorbed, Scattered };
+// How a free flight ended: at the segment's end or at a real scattering; absorption rides in the weight.
+enum class FreeFlightEvent { Escaped, Scattered };
 
 struct FreeFlight {
     FreeFlightEvent event;
     float t;  // the scattering's ray parameter; unset otherwise
     float g;  // the scattering volume's asymmetry
-    // Spectral tracking's weight (Kutz et al. 2017) for throughput and the feature chain alike: 1 for a grey medium.
+    // The lane mixture's one-sample weight (Wilkie et al. 2014) for throughput and the feature chain alike: the albedo in a grey medium.
     SampledSpectrum weight;
 };
 
@@ -42,12 +42,12 @@ public:
 
     [[nodiscard]] bool empty() const;
 
-    // The first real collision along ray over [t0, t1) by spectral tracking with history-aware probabilities, `throughput` the history.
+    // The first scattering along ray over [t0, t1) by regular tracking (Sutton et al. 1999), its lane drawn by throughput-weighted odds.
     [[nodiscard]] FreeFlight sampleFreeFlight(const Ray& ray, float t0, float t1, const SampledSpectrum& throughput,
                                               const SampledWavelengths& lambda, Sampler& sampler) const;
 
-    // Unbiased transmittance over [t0, t1) by ratio tracking (Novak et al. 2014), the product of every volume's estimate.
-    [[nodiscard]] SampledSpectrum transmittance(const Ray& ray, float t0, float t1, const SampledWavelengths& lambda, Sampler& sampler) const;
+    // Exact transmittance over [t0, t1): exp of each lane's optical depth, summed voxel by voxel over every volume.
+    [[nodiscard]] SampledSpectrum transmittance(const Ray& ray, float t0, float t1, const SampledWavelengths& lambda) const;
 
     struct Volume;  // one grid's NanoVDB handles, placement and coefficients, defined in volume.cpp
 

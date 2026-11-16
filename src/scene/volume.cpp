@@ -2,22 +2,20 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <optional>
 #include <utility>
 
 #include <glm/gtc/matrix_transform.hpp>
-#include <glm/gtx/component_wise.hpp>
 #include <nanovdb/NanoVDB.h>
 #include <nanovdb/math/HDDA.h>
 #include <nanovdb/math/Ray.h>
-#include <nanovdb/math/SampleFromVoxels.h>
 #include <nanovdb/tools/CreateNanoGrid.h>
 #include <openvdb/io/File.h>
-#include <openvdb/tools/Prune.h>
 
+#include "medium.h"
 #include "pathtracer/scene/rotation.h"
 #include "shading_math.h"
-#include "volume_majorant.h"
 
 namespace pathtracer::scene {
 
@@ -25,107 +23,169 @@ using NanoRay = nanovdb::math::Ray<float>;
 using NanoAccessor = nanovdb::DefaultReadAccessor<float>;
 
 struct VolumeSet::Volume {
-    nanovdb::GridHandle<nanovdb::HostBuffer> densityHandle;
-    nanovdb::GridHandle<nanovdb::HostBuffer> majorantHandle;
+    nanovdb::GridHandle<nanovdb::HostBuffer> handle;
     const nanovdb::FloatGrid* density;
-    const nanovdb::FloatGrid* majorant;
-    // World to the density grid's index space, voxel centres at integers; the majorant's index space is that divided by 8.
+    // World to the grid's index space shifted by 1/2, so voxel i holds its value over [i, i+1) per axis: box reconstruction.
     glm::mat3 indexFromWorld;
     glm::vec3 indexOffset;
+    nanovdb::CoordBBox support;  // every voxel and tile of non-zero density, inactive ones included
     float gridUnitsPerWorldUnit;  // 1/scale: the coefficients are per grid unit, so a world ray parameter covers this many
     UnboundedSpectrum absorption;  // per grid unit at density 1, the material's density folded in
     UnboundedSpectrum scattering;
-    float extinctionBound;  // max over 360-830 nm of absorption plus that of scattering: the majorant density's spectral bound
     float anisotropy;
 };
 
 namespace {
 
-// floor(a / b) for b > 0: C++ division truncates toward zero, which misplaces every negative index coordinate.
-int floorDiv(int a, int b) { return (a >= 0 ? a : a - b + 1) / b; }
-
-openvdb::Coord floorDiv(const openvdb::Coord& a, int b) {
-    return {floorDiv(a.x(), b), floorDiv(a.y(), b), floorDiv(a.z(), b)};
-}
-
-// One volume's tentative collisions in increasing t: exponential flights against its majorant, span by span along a DDA.
-class Tracker {
+// One volume's density along a ray as spans of constant value: tiles and voxels by hierarchical DDA, 0 off its support.
+class VoxelSpans {
 public:
-    explicit Tracker(const VolumeSet::Volume& volume)
-        : volume_(&volume), majorantAccessor_(volume.majorant->getAccessor()), densityAccessor_(volume.density->getAccessor()) {}
+    explicit VoxelSpans(const VolumeSet::Volume& volume) : volume_(&volume), accessor_(volume.density->getAccessor()) {}
 
-    // False when [t0, t1) misses every majorant cell, so the volume is skipped without a single draw.
+    // False when [t0, t1) misses the support; else the current span is the empty space from t0 to the support.
     bool start(const Ray& ray, float t0, float t1) {
         const VolumeSet::Volume& volume = *volume_;
         const glm::vec3 origin = (volume.indexFromWorld * ray.origin) + volume.indexOffset;
         const glm::vec3 dir = volume.indexFromWorld * ray.dir;
-        indexOrigin_ = nanovdb::math::Vec3f(origin.x, origin.y, origin.z);
-        indexDir_ = nanovdb::math::Vec3f(dir.x, dir.y, dir.z);
-        // An affine map keeps the ray parameter, so the majorant's ray is the index ray scaled by 1/8 with the same [t0, t1).
-        const float toCells = 1.0F / static_cast<float>(kMajorantCellVoxels);
-        NanoRay cellRay(indexOrigin_ * toCells, indexDir_ * toCells, t0, t1);
-        if (!cellRay.clip(volume.majorant->tree().bbox())) {
+        // An affine map keeps the ray parameter, so the index ray spans the same [t0, t1); clip pads the support's max by one voxel.
+        ray_ = NanoRay(nanovdb::Vec3f(origin.x, origin.y, origin.z), nanovdb::Vec3f(dir.x, dir.y, dir.z), t0, t1);
+        if (!ray_.clip(volume.support)) {
             return false;
         }
-        sigmaPerT_ = volume.extinctionBound * volume.gridUnitsPerWorldUnit * glm::length(ray.dir);
-        dda_.init(cellRay);
-        t_ = dda_.time();
-        enterSpan();
+        gridUnitsPerT_ = volume.gridUnitsPerWorldUnit * glm::length(ray.dir);
+        t1_ = t1;
+        end_ = ray_.t0();
         return true;
     }
 
-    // The next tentative collision's t and the event variate drawn with it; nullopt past the segment. Empty spans draw nothing.
-    std::optional<glm::vec2> next(Sampler& sampler) {
-        float opticalDepth = -1.0F;  // undrawn until a span with a non-zero majorant is reached
-        float eventVariate = 0.0F;
-        for (;;) {
-            const float sigma = spanMajorant_ * sigmaPerT_;
-            if (sigma > 0.0F) {
-                if (opticalDepth < 0.0F) {
-                    const glm::vec2 u = sampler.next2D();
-                    opticalDepth = -std::log1p(-u.x);
-                    eventVariate = u.y;
-                }
-                const float spanDepth = sigma * (spanEnd_ - t_);
-                if (opticalDepth < spanDepth) {
-                    t_ += opticalDepth / sigma;
-                    return glm::vec2(t_, eventVariate);
-                }
-                opticalDepth -= spanDepth;
-            }
-            if (!dda_.step()) {
-                return std::nullopt;
-            }
-            t_ = dda_.time();
-            enterSpan();
+    [[nodiscard]] float end() const { return end_; }
+    [[nodiscard]] bool past() const { return phase_ == Phase::After; }
+    // The span's density per ray parameter: times a coefficient per grid unit, its collision rate.
+    [[nodiscard]] float rate() const { return density_ * gridUnitsPerT_; }
+
+    // On to the span starting at end(): the support's next tile or voxel, else past it, empty to t1.
+    void advance() {
+        if (phase_ == Phase::Before) {
+            hdda_.init(ray_, ray_.t0(), ray_.t1(), 1);
+            phase_ = Phase::Inside;
+            enterCell();
+        } else if (phase_ == Phase::Inside && hdda_.step()) {
+            enterCell();
+        } else {
+            phase_ = Phase::After;
+            end_ = t1_;
+            density_ = 0.0F;
         }
     }
 
-    // Trilinear density at the collision just returned; at most the span's majorant, up to one rounding of the interpolation.
-    [[nodiscard]] float density() const {
-        return nanovdb::math::createSampler<1, NanoAccessor, false>(densityAccessor_)(indexOrigin_ + (indexDir_ * t_));
-    }
-
-    [[nodiscard]] float majorant() const { return spanMajorant_; }
-    [[nodiscard]] const VolumeSet::Volume& volume() const { return *volume_; }
-
 private:
-    void enterSpan() {
-        spanEnd_ = dda_.next();
-        spanMajorant_ = majorantAccessor_.getValue(dda_.voxel());
+    enum class Phase { Before, Inside, After };
+
+    // Resizes the DDA to the constant region holding its voxel; each resize clamps to the previous cell, so it never skips one.
+    void enterCell() {
+        while (hdda_.update(ray_, static_cast<int>(accessor_.getDim(hdda_.voxel(), ray_)))) {
+        }
+        density_ = accessor_.getValue(hdda_.voxel());
+        end_ = hdda_.next();
     }
 
     const VolumeSet::Volume* volume_;
-    NanoAccessor majorantAccessor_;
-    NanoAccessor densityAccessor_;
-    nanovdb::math::Vec3f indexOrigin_;
-    nanovdb::math::Vec3f indexDir_;
-    nanovdb::math::DDA<NanoRay> dda_;
-    float sigmaPerT_ = 0.0F;  // extinctionBound per ray parameter: majorant density times this is the span's collision rate
-    float t_ = 0.0F;
-    float spanEnd_ = 0.0F;
-    float spanMajorant_ = 0.0F;
+    NanoAccessor accessor_;
+    NanoRay ray_;
+    nanovdb::math::HDDA<NanoRay> hdda_;
+    Phase phase_ = Phase::Before;
+    float gridUnitsPerT_ = 0.0F;
+    float t1_ = 0.0F;
+    float end_ = 0.0F;
+    float density_ = 0.0F;
 };
+
+// A volume's spans with its coefficients per grid unit at the path's wavelengths.
+struct Walker {
+    VoxelSpans spans;
+    SampledSpectrum scattering;
+    SampledSpectrum extinction;
+    float anisotropy;
+};
+
+// Each volume meeting the segment, reused per thread so a walk allocates nothing per segment.
+thread_local std::vector<Walker> walkers;
+
+std::vector<Walker>& startWalkers(const std::vector<VolumeSet::Volume>& volumes, const Ray& ray, float t0, float t1,
+                                  const SampledWavelengths& lambda) {
+    std::vector<Walker>& active = walkers;
+    active.clear();
+    for (const VolumeSet::Volume& volume : volumes) {
+        VoxelSpans spans(volume);
+        if (spans.start(ray, t0, t1)) {
+            const SampledSpectrum scattering = volume.scattering(lambda);
+            active.push_back({spans, scattering, volume.absorption(lambda) + scattering, volume.anisotropy});
+        }
+    }
+    return active;
+}
+
+// visit(t, end, rate) on each span of [t0, t1) with every density constant, rate the summed extinction per t; false stops the walk.
+template <typename Visit>
+void forEachSpan(std::vector<Walker>& active, float t0, float t1, Visit&& visit) {
+    // Overlapping media sum their coefficients (Fascione et al. 2018 sec. 3.4): one span ends where any volume's does.
+    for (float t = t0; t < t1;) {
+        float end = t1;
+        SampledSpectrum rate(0.0F);
+        bool beyond = true;
+        for (const Walker& walker : active) {
+            beyond = beyond && walker.spans.past();
+            end = std::min(end, walker.spans.end());
+            rate += walker.spans.rate() * walker.extinction;
+        }
+        // Every support is behind: nothing remains to add, and an unbounded t1 never meets 0 * inf.
+        if (beyond) {
+            return;
+        }
+        end = std::max(end, t);  // a cell face rounded behind t never steps the walk back
+        if (!visit(t, end, rate)) {
+            return;
+        }
+        for (Walker& walker : active) {
+            if (walker.spans.end() <= end) {
+                walker.spans.advance();
+            }
+        }
+        t = end;
+    }
+}
+
+// The scattering volume by its share of throughput-weighted scattering, and that share; nullptr when none scatters a carried lane.
+std::pair<const Walker*, float> pickScatterer(const std::vector<Walker>& active, const SampledSpectrum& throughput, Sampler& sampler) {
+    if (active.size() == 1) {
+        return {active.data(), 1.0F};
+    }
+    const auto mass = [&](const Walker& walker) { return channelMean(throughput * walker.spans.rate() * walker.scattering); };
+    float total = 0.0F;
+    for (const Walker& walker : active) {
+        total += mass(walker);
+    }
+    if (!(total > 0.0F)) {
+        return {nullptr, 0.0F};
+    }
+    // The walker whose cumulative mass first exceeds the draw; past the float sum, the last with positive mass.
+    float pick = sampler.next1D() * total;
+    std::pair<const Walker*, float> chosen{nullptr, 0.0F};
+    for (const Walker& walker : active) {
+        const float m = mass(walker);
+        if (m > 0.0F) {
+            chosen = {&walker, m / total};
+            if (pick < m) {
+                break;
+            }
+            pick -= m;
+        }
+    }
+    return chosen;
+}
+
+// Past this optical depth exp(-depth) may round to 0; below it, it cannot, so the exact zero test is skipped.
+const float kUnderflowDepth = -std::log(std::numeric_limits<float>::denorm_min());
 
 // The named grid as a FloatGrid; nullptr and `error` when the file, the name or the value type is wrong.
 openvdb::FloatGrid::Ptr readGrid(const std::string& path, const std::string& name, std::string& error) {
@@ -164,8 +224,23 @@ glm::dmat4 indexFromWorldOf(const openvdb::FloatGrid& grid, const pathtracer::co
     return glm::inverse(worldFromGrid * gridFromIndex);
 }
 
-// Each volume's tracker and its next tentative collision, reused per thread so a free flight allocates nothing per segment.
-thread_local std::vector<std::pair<Tracker, glm::vec2>> pendingCollisions;
+// Every value finite and non-negative, inactive ones included, as the walk reads them all; the bounds of those above 0.
+std::optional<openvdb::CoordBBox> densitySupport(const openvdb::FloatGrid& density, std::string& error) {
+    openvdb::CoordBBox support;
+    for (auto it = density.tree().cbeginValueAll(); it; ++it) {
+        const float value = *it;
+        if (!(value >= 0.0F) || !std::isfinite(value)) {
+            const openvdb::Coord at = it.getCoord();
+            error = "density " + std::to_string(value) + " at (" + std::to_string(at.x()) + ", " + std::to_string(at.y()) + ", " +
+                    std::to_string(at.z()) + ") is negative or not finite";
+            return std::nullopt;
+        }
+        if (value > 0.0F) {
+            support.expand(it.getBoundingBox());
+        }
+    }
+    return support;
+}
 
 std::optional<VolumeSet::Volume> loadVolume(const pathtracer::config::VolumeConfig& config, const std::string& assetRoot,
                                             std::string& error) {
@@ -189,84 +264,35 @@ std::optional<VolumeSet::Volume> loadVolume(const pathtracer::config::VolumeConf
         error = path + ": grid '" + config.grid + "' has a non-linear (frustum) transform";
         return std::nullopt;
     }
-    const openvdb::FloatGrid::Ptr majorant = buildMajorantGrid(*grid, error);
-    if (majorant == nullptr) {
+    const std::optional<openvdb::CoordBBox> support = densitySupport(*grid, error);
+    if (!support) {
         error = path + ": " + error;
         return std::nullopt;
     }
-    if (majorant->empty()) {
+    if (support->empty()) {
         error = path + ": grid '" + config.grid + "' holds no density";
         return std::nullopt;
     }
 
     const glm::dmat4 indexFromWorld = indexFromWorldOf(*grid, config);
-    // Bounding boxes are the only stats the tracker reads (the majorant root's, for clipping); no checksum, as nothing verifies one.
+    // No stats: a stats pass flags nodes without active voxels to be skipped, which would hide their inactive density from getDim.
     VolumeSet::Volume volume{
-        nanovdb::tools::createNanoGrid(*grid, nanovdb::tools::StatsMode::BBox, nanovdb::CheckMode::Disable),
-        nanovdb::tools::createNanoGrid(*majorant, nanovdb::tools::StatsMode::BBox, nanovdb::CheckMode::Disable),
-        nullptr,
+        nanovdb::tools::createNanoGrid(*grid, nanovdb::tools::StatsMode::Disable, nanovdb::CheckMode::Disable),
         nullptr,
         glm::mat3(glm::dmat3(indexFromWorld)),
-        glm::vec3(indexFromWorld[3]),
+        glm::vec3(indexFromWorld[3]) + 0.5F,
+        nanovdb::CoordBBox(nanovdb::Coord(support->min().x(), support->min().y(), support->min().z()),
+                           nanovdb::Coord(support->max().x(), support->max().y(), support->max().z())),
         1.0F / config.scale,
         fitUnbounded(material->density * material->absorption),
         fitUnbounded(material->density * material->scattering),
-        0.0F,
         material->anisotropy,
     };
-    volume.extinctionBound = volume.absorption.maxValue() + volume.scattering.maxValue();
-    volume.density = volume.densityHandle.grid<float>();
-    volume.majorant = volume.majorantHandle.grid<float>();
+    volume.density = volume.handle.grid<float>();
     return volume;
 }
 
 }  // namespace
-
-openvdb::FloatGrid::Ptr buildMajorantGrid(const openvdb::FloatGrid& density, std::string& error) {
-    openvdb::FloatGrid::Ptr majorant = openvdb::FloatGrid::create(0.0F);
-    openvdb::FloatGrid::Accessor cells = majorant->getAccessor();
-    for (auto it = density.tree().cbeginValueAll(); it; ++it) {
-        const float value = *it;
-        if (!(value >= 0.0F) || !std::isfinite(value)) {
-            const openvdb::Coord at = it.getCoord();
-            error = "density " + std::to_string(value) + " at (" + std::to_string(at.x()) + ", " + std::to_string(at.y()) + ", " +
-                    std::to_string(at.z()) + ") is negative or not finite";
-            return nullptr;
-        }
-        if (value == 0.0F) {
-            continue;
-        }
-        const openvdb::CoordBBox box = it.getBoundingBox();
-        // Cells c with [8c-1, 8c+9] meeting [a, b]; those with it inside [a, b] read this value alone, so a tile fills them as one block.
-        const openvdb::Coord lo = floorDiv(box.min() - openvdb::Coord(2), kMajorantCellVoxels);
-        const openvdb::Coord hi = floorDiv(box.max() + openvdb::Coord(1), kMajorantCellVoxels);
-        const openvdb::Coord innerLo = floorDiv(box.min() + openvdb::Coord(kMajorantCellVoxels), kMajorantCellVoxels);
-        const openvdb::Coord innerHi = floorDiv(box.max() - openvdb::Coord(kMajorantCellVoxels + 1), kMajorantCellVoxels);
-        const openvdb::CoordBBox inner(innerLo, innerHi);
-        if (!inner.empty()) {
-            majorant->tree().fill(inner, value, /*active=*/true);
-            cells.clear();  // fill may replace nodes the accessor has cached
-        }
-        // The shell: every other cell max-merges, since neighbouring values reach it too. O(surface), even for a root-level tile.
-        for (int x = lo.x(); x <= hi.x(); ++x) {
-            for (int y = lo.y(); y <= hi.y(); ++y) {
-                const bool innerColumn = !inner.empty() && x >= innerLo.x() && x <= innerHi.x() && y >= innerLo.y() && y <= innerHi.y();
-                for (int z = lo.z(); z <= hi.z(); ++z) {
-                    if (innerColumn && z == innerLo.z()) {
-                        z = innerHi.z();
-                        continue;
-                    }
-                    const openvdb::Coord cell(x, y, z);
-                    if (cells.getValue(cell) < value) {
-                        cells.setValue(cell, value);
-                    }
-                }
-            }
-        }
-    }
-    openvdb::tools::prune(majorant->tree());
-    return majorant;
-}
 
 float henyeyGreenstein(float cosTheta, float g) {
     const float denominator = 1.0F + (g * g) - (2.0F * g * cosTheta);
@@ -304,76 +330,64 @@ bool VolumeSet::empty() const { return volumes_ == nullptr || volumes_->empty();
 
 FreeFlight VolumeSet::sampleFreeFlight(const Ray& ray, float t0, float t1, const SampledSpectrum& throughput, const SampledWavelengths& lambda,
                                         Sampler& sampler) const {
-    // Overlapping volumes are independent Poisson processes of tentative collisions; their union is met in t order, earliest first.
-    std::vector<std::pair<Tracker, glm::vec2>>& pending = pendingCollisions;
-    pending.clear();
-    for (const Volume& volume : *volumes_) {
-        Tracker tracker(volume);
-        if (tracker.start(ray, t0, t1)) {
-            if (const std::optional<glm::vec2> collision = tracker.next(sampler)) {
-                pending.emplace_back(tracker, *collision);
-            }
-        }
-    }
     FreeFlight flight{FreeFlightEvent::Escaped, t1, 0.0F, SampledSpectrum(1.0F)};
-    while (!pending.empty()) {
-        const auto earliest = std::min_element(pending.begin(), pending.end(), [](const auto& a, const auto& b) { return a.second.x < b.second.x; });
-        Tracker& tracker = earliest->first;
-        const Volume& volume = tracker.volume();
-        const float density = tracker.density();
-        const float bound = tracker.majorant() * volume.extinctionBound;
-        const SampledSpectrum absorption = density * volume.absorption(lambda);
-        const SampledSpectrum scattering = density * volume.scattering(lambda);
-        const SampledSpectrum null = max(SampledSpectrum(bound) - absorption - scattering, SampledSpectrum(0.0F));
-        // History-aware probabilities (Kutz et al. 2017 sec. 5.1): each event's share of the throughput-weighted collision rate.
-        const SampledSpectrum history = throughput * flight.weight;
-        const float pa = channelMean(history * absorption);
-        const float ps = channelMean(history * scattering);
-        const float pn = channelMean(history * null);
-        const float total = pa + ps + pn;
-        // Zero history is a path carrying nothing, as a hero path rrMinProb keeps alive can be: ending it is exact.
-        const float pick = earliest->second.y * total;
-        if (!(total > 0.0F) || pick < pa) {
-            flight.event = FreeFlightEvent::Absorbed;
-            return flight;
-        }
-        // Each kept event weighs (sigma_x/bound)/P_x, so the expectation over events sums sigma_x/bound, 1 per lane; 1 when grey.
-        if (pick < pa + ps) {
-            flight.event = FreeFlightEvent::Scattered;
-            flight.t = earliest->second.x;
-            flight.g = volume.anisotropy;
-            flight.weight *= (scattering / bound) / (ps / total);
-            return flight;
-        }
-        flight.weight *= (null / bound) / (pn / total);
-        if (const std::optional<glm::vec2> collision = tracker.next(sampler)) {
-            earliest->second = *collision;
-        } else {
-            *earliest = pending.back();
-            pending.pop_back();
-        }
+    std::vector<Walker>& active = startWalkers(*volumes_, ray, t0, t1, lambda);
+    if (active.empty()) {
+        return flight;
     }
+    // The lane odds, fixed before the walk, from the coefficients summed at unit density: the homogeneous walk's rule for one volume.
+    HomogeneousMedium unit;
+    for (const Walker& walker : active) {
+        unit.absorption += walker.extinction - walker.scattering;
+        unit.scattering += walker.scattering;
+    }
+    const bool canScatter = scatters(unit);
+    const SampledSpectrum odds = channelOdds(unit, throughput);
+    SampledSpectrum depth(0.0F);
+    SampledSpectrum extinction(0.0F);  // the summed rate at the collision
+    int lane = -1;  // undrawn until a span that can scatter, so a ray through empty space consumes nothing
+    float target = 0.0F;
+    forEachSpan(active, t0, t1, [&](float t, float end, const SampledSpectrum& rate) {
+        if (lane < 0 && canScatter && !isBlack(rate)) {
+            const glm::vec2 u = sampler.next2D();
+            lane = sampleLane(odds, u.x);
+            target = -std::log1p(-u.y);
+        }
+        // Constant rates make each lane's optical depth linear in t, so the drawn lane's crossing of its target is exact.
+        if (lane < 0 || !(rate[lane] > 0.0F) || depth[lane] + (rate[lane] * (end - t)) <= target) {
+            depth += rate * (end - t);
+            return true;
+        }
+        flight.t = std::min(t + ((target - depth[lane]) / rate[lane]), end);
+        depth += rate * (flight.t - t);
+        extinction = rate;
+        flight.event = FreeFlightEvent::Scattered;
+        return false;
+    });
+    if (flight.event == FreeFlightEvent::Escaped) {
+        // Undrawn, escape was certain and the weight is T itself: 1 through empty space, the attenuation of a medium that cannot scatter.
+        flight.weight = lane < 0 ? exp(-depth) : passWeight(odds, exp(-depth));
+        return flight;
+    }
+    const auto [chosen, share] = pickScatterer(active, throughput, sampler);
+    // No volume scatters a lane the path still carries, so every continuation is exactly 0.
+    if (chosen == nullptr) {
+        flight.weight = SampledSpectrum(0.0F);
+        return flight;
+    }
+    flight.g = chosen->anisotropy;
+    flight.weight = collisionWeight(odds, exp(-depth), chosen->spans.rate() * chosen->scattering, extinction) / share;
     return flight;
 }
 
-SampledSpectrum VolumeSet::transmittance(const Ray& ray, float t0, float t1, const SampledWavelengths& lambda, Sampler& sampler) const {
-    SampledSpectrum transmittance(1.0F);
-    // Independent media multiply: each volume's ratio-tracking estimate is unbiased on its own, and so is their product.
-    for (const Volume& volume : *volumes_) {
-        Tracker tracker(volume);
-        if (!tracker.start(ray, t0, t1)) {
-            continue;
-        }
-        const SampledSpectrum extinction = volume.absorption(lambda) + volume.scattering(lambda);
-        while (tracker.next(sampler)) {
-            const float bound = tracker.majorant() * volume.extinctionBound;
-            transmittance *= max(SampledSpectrum(1.0F) - (tracker.density() * extinction / bound), SampledSpectrum(0.0F));
-            if (isBlack(transmittance)) {
-                return transmittance;
-            }
-        }
-    }
-    return transmittance;
+SampledSpectrum VolumeSet::transmittance(const Ray& ray, float t0, float t1, const SampledWavelengths& lambda) const {
+    SampledSpectrum depth(0.0F);
+    forEachSpan(startWalkers(*volumes_, ray, t0, t1, lambda), t0, t1, [&](float t, float end, const SampledSpectrum& rate) {
+        depth += rate * (end - t);
+        // Once every lane's transmittance is exactly 0 in float, the rest of the ray cannot change it.
+        return !(minChannel(depth) > kUnderflowDepth && isBlack(exp(-depth)));
+    });
+    return exp(-depth);
 }
 
 }  // namespace pathtracer::scene

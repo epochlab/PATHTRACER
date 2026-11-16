@@ -163,20 +163,6 @@ UnboundedSpectrum fitUnbounded(const Rgb& rgb) {
     return {rgbSigmoid(positive * (kMidScale / peak)), peak / kMidScale};
 }
 
-float UnboundedSpectrum::maxValue() const {
-    const auto lo = static_cast<float>(cie::kLambdaMinNm);
-    const auto hi = static_cast<float>(cie::kLambdaMaxNm);
-    float peak = std::max(shape(lo), shape(hi));
-    // A concave quadratic's vertex -c1 / (2 c0) inside the range is its interior maximum.
-    if (shape.c.x < 0.0F) {
-        const float vertex = -shape.c.y / (2.0F * shape.c.x);
-        if (vertex > lo && vertex < hi) {
-            peak = std::max(peak, shape(vertex));
-        }
-    }
-    return scale * peak;
-}
-
 SampledSpectrum illuminantSpectrum(const Rgb& rgb, const SampledWavelengths& lambda) {
     const UnboundedSpectrum spectrum = fitUnbounded(rgb);
     return spectrum(lambda) * lambda.white;

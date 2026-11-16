@@ -1,4 +1,4 @@
-// Correctness checks for volume.cpp and medium.cpp: VDB loading, the majorant grid, tracking, bounded media, Henyey-Greenstein.
+// Correctness checks for volume.cpp and medium.cpp: VDB loading, regular tracking, bounded media, Henyey-Greenstein.
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -11,7 +11,6 @@
 #include <fstream>
 #include <limits>
 #include <optional>
-#include <random>
 #include <string>
 #include <utility>
 #include <vector>
@@ -35,7 +34,6 @@
 #include "pathtracer/scene/volume.h"
 #include "medium.h"
 #include "stats.h"
-#include "volume_majorant.h"
 
 namespace {
 
@@ -105,7 +103,7 @@ openvdb::FloatGrid::Ptr makeGrid(double voxelSize) {
     return grid;
 }
 
-// Density 1 over index voxels [0, n)^3: the trilinear field is 1 inside and ramps to 0 over one voxel past each face.
+// Density 1 over index voxels [0, n)^3: box-reconstructed, 1 over [-1/2, n - 1/2) per index axis and 0 outside.
 openvdb::FloatGrid::Ptr makeBox(int n, double voxelSize) {
     openvdb::FloatGrid::Ptr grid = makeGrid(voxelSize);
     grid->tree().fill(openvdb::CoordBBox(openvdb::Coord(0), openvdb::Coord(n - 1)), 1.0F, /*active=*/true);
@@ -132,61 +130,14 @@ glm::mat4 worldFromGrid(const VolumeConfig& config) {
            glm::scale(glm::mat4(1.0F), glm::vec3(config.scale));
 }
 
-// Every value the trilinear stencil at index point p reads must sit at or below the majorant of p's cell, floor(p/8).
-PT_CHECK(majorant_bounds_every_trilinear_stencil, Slow, Exact) {
-    openvdb::initialize();
-    openvdb::FloatGrid::Ptr grid = makeGrid(1.0);
-    openvdb::FloatGrid::Accessor accessor = grid->getAccessor();
-    std::mt19937 rng(static_cast<std::uint32_t>(ctx.seed()));
-    std::uniform_int_distribution<int> coordinate(-40, 40);
-    std::uniform_real_distribution<float> value(0.0F, 1.0F);
-    for (int i = 0; i < 400; ++i) {
-        accessor.setValue(openvdb::Coord(coordinate(rng), coordinate(rng), coordinate(rng)), value(rng));
-    }
-    // Spikes on both sides of leaf faces, at negative coordinates too, where truncating division would misplace them.
-    for (const int c : {-17, -16, -9, -8, -1, 0, 7, 8, 15, 16}) {
-        accessor.setValue(openvdb::Coord(c, c, -c), 4.0F);
-    }
-    accessor.setValueOff(openvdb::Coord(-30, 5, 22), 8.0F);  // inactive, but the sampler still reads it
-    // A 128^3 tile clear of the rest, so its interior cells come from the fill and its shell from the max-merge.
-    grid->tree().fill(openvdb::CoordBBox(openvdb::Coord(64), openvdb::Coord(191)), 0.5F, /*active=*/true);
-
-    std::string error;
-    const openvdb::FloatGrid::Ptr majorant = pathtracer::scene::buildMajorantGrid(*grid, error);
-    openvdb::FloatGrid::ConstAccessor cells = majorant->getConstAccessor();
-    openvdb::FloatGrid::ConstAccessor density = grid->getConstAccessor();
-    const int cell = pathtracer::scene::kMajorantCellVoxels;
-    long long violations = 0;
-    long long stencils = 0;
-    const openvdb::CoordBBox span(openvdb::Coord(-7), openvdb::Coord(25));
-    // A stencil depends only on floor(p) - 8c, which over the guaranteed [8c-1, 8c+9) takes exactly the ten bases -1..8: all of them.
-    const openvdb::CoordBBox bases(openvdb::Coord(-1), openvdb::Coord(cell));
-    for (auto it = span.begin(); it; ++it) {
-        const openvdb::Coord c = *it;
-        const float bound = cells.getValue(c);
-        for (auto offset = bases.begin(); offset; ++offset) {
-            const openvdb::Coord base = openvdb::Coord(c.x() * cell, c.y() * cell, c.z() * cell) + *offset;
-            for (int corner = 0; corner < 8; ++corner) {
-                const openvdb::Coord read = base + openvdb::Coord(corner & 1, (corner >> 1) & 1, (corner >> 2) & 1);
-                violations += density.getValue(read) > bound ? 1 : 0;
-            }
-            ++stencils;
-        }
-    }
-    ctx.plan(3);
-    PT_EXPECT(ctx, majorant != nullptr, error);
-    PT_EXPECT(ctx, violations == 0, std::to_string(violations) + " stencil reads above their cell's majorant");
-    PT_EXPECT(ctx, stencils > 0, "no stencils visited");
-}
-
-// One ray through a chromatic box and a linear ramp, placed, rotated, scaled and with a non-unit direction: ratio tracking's mean.
-PT_CHECK(transmittance_matches_closed_form, Slow, Statistical) {
+// One ray through a chromatic box and a staircase ramp, placed, rotated, scaled and with a non-unit direction: regular tracking's exact T.
+PT_CHECK(transmittance_matches_closed_form, Fast, Exact) {
     const Scratch scratch(ctx);
     constexpr int kVoxels = 64;
     constexpr double kVoxelSize = 0.5;
     openvdb::FloatGrid::Ptr ramp = makeBox(kVoxels, kVoxelSize);
     ramp->setName("ramp");
-    // Density i/63 at voxel column i: linear inside, so trilinear is exact there, and 0.5 * 1 * one voxel past the dense face.
+    // Density i/63 at voxel column i, held over the voxel: the row's sum is 32 voxels of density 1.
     openvdb::FloatGrid::Accessor rampAccessor = ramp->getAccessor();
     for (auto it = openvdb::CoordBBox(openvdb::Coord(0), openvdb::Coord(kVoxels - 1)).begin(); it; ++it) {
         rampAccessor.setValue(*it, static_cast<float>((*it).x()) / static_cast<float>(kVoxels - 1));
@@ -201,11 +152,11 @@ PT_CHECK(transmittance_matches_closed_form, Slow, Statistical) {
     struct Row {
         std::string grid;
         std::string material;
-        double voxels;  // optical depth along x in voxels: box 63 + 2 * 0.5, ramp 31.5 + 0.5
+        double voxels;  // optical depth along x in voxels of density 1: the box's 64, the ramp's sum of i/63
     };
     const std::array<Row, 3> rows{{{"density", material, 64.0}, {"ramp", material, 32.0}, {"density", halved, 64.0}}};
-
-    constexpr int kTrials = 4096;
+    // Recursive summation of at most kVoxels + 2 span terms (Higham 2002 eq. 4.4), each span's length one more rounding.
+    constexpr double kTolerance = 2.0 * (kVoxels + 2) * std::numeric_limits<float>::epsilon();
     ctx.plan(3 * kSpectrumSamples);
     for (const auto& [name, materialPath, voxels] : rows) {
         VolumeConfig config = volumeConfig(vdb, materialPath);
@@ -226,64 +177,81 @@ PT_CHECK(transmittance_matches_closed_form, Slow, Statistical) {
         const SampledWavelengths& lambda = tools::fixtures::pinnedWavelengths();
         const SampledSpectrum extinction = pathtracer::scene::unboundedSpectrum(Rgb(absorption), lambda) +
                                            pathtracer::scene::unboundedSpectrum(Rgb(scattering), lambda);
-        std::array<tools::stats::Welford, kSpectrumSamples> estimate;
-        for (int i = 0; i < kTrials; ++i) {
-            Sampler sampler(0, 0, i, kTrials, static_cast<std::uint32_t>(ctx.subSeed(name + materialPath)));
-            const SampledSpectrum t = set.transmittance(ray, 0.0F, std::numeric_limits<float>::infinity(), lambda, sampler);
-            for (int c = 0; c < kSpectrumSamples; ++c) {
-                estimate[c].add(t[c]);
-            }
-        }
+        const SampledSpectrum transmittance = set.transmittance(ray, 0.0F, std::numeric_limits<float>::infinity(), lambda);
         for (int c = 0; c < kSpectrumSamples; ++c) {
-            const double expected = std::exp(-static_cast<double>(extinction[c]) * depth);
-            const double half = tools::stats::studentTTwoSided(ctx.alpha(), static_cast<double>(kTrials - 1)) * estimate[c].standardError();
-            PT_EXPECT(ctx, std::abs(estimate[c].mean() - expected) <= half,
-                      name + " " + materialPath + " lane " + std::to_string(c) + ": " + std::to_string(estimate[c].mean()) + " vs " + std::to_string(expected));
+            const double expected = static_cast<double>(extinction[c]) * depth;
+            const double measured = -std::log(static_cast<double>(transmittance[c]));
+            PT_EXPECT(ctx, std::abs(measured - expected) <= kTolerance * expected,
+                      name + " " + materialPath + " lane " + std::to_string(c) + ": depth " + std::to_string(measured) + " vs " +
+                          std::to_string(expected));
         }
     }
 }
 
-// Spectral tracking from inside a chromatic box: E[w 1{escape}] = T and E[w 1{scatter}] = (sigma_s/sigma_t)(1 - T) per lane.
-PT_CHECK(spectral_tracking_is_unbiased, Slow, Statistical) {
+// Regular tracking through a chromatic staircase: E[w 1{scatter in voxel i}] = (s/t) T(entry) (1 - exp(-t d_i)), E[w 1{escape}] = T.
+PT_CHECK(regular_tracking_is_unbiased, Slow, Statistical) {
     const Scratch scratch(ctx);
-    const std::string vdb = scratch.writeGrids("box", {makeBox(64, 1.0)});
-    const glm::vec3 absorption(0.01F, 0.05F, 0.02F);
-    const glm::vec3 scattering(0.06F, 0.01F, 0.03F);
-    const VolumeSet set = loadOrDie({volumeConfig(vdb, scratch.writeMaterial("medium", absorption, scattering, 0.0F))}, scratch.root());
-    // Starts and ends inside, where the density is exactly 1, as a camera inside the medium and a surface hit within it.
-    constexpr float kLength = 40.0F;
-    const Ray ray{glm::vec3(10.0F, 31.0F, 31.0F), glm::vec3(1.0F, 0.0F, 0.0F), 0.0F, kLength};
-    // A coloured history, which the probabilities follow and the weights undo.
+    constexpr int kVoxels = 64;
+    openvdb::FloatGrid::Ptr ramp = makeBox(kVoxels, 1.0);
+    // Density (i + 1)/64 at voxel column i: every span a different rate, so a weight right only on average over the ray fails a bin.
+    openvdb::FloatGrid::Accessor accessor = ramp->getAccessor();
+    for (auto it = openvdb::CoordBBox(openvdb::Coord(0), openvdb::Coord(kVoxels - 1)).begin(); it; ++it) {
+        accessor.setValue(*it, static_cast<float>((*it).x() + 1) / kVoxels);
+    }
+    const glm::vec3 absorption(0.02F, 0.10F, 0.04F);
+    const glm::vec3 scattering(0.12F, 0.02F, 0.06F);
+    const VolumeSet set =
+        loadOrDie({volumeConfig(scratch.writeGrids("ramp", {ramp}), scratch.writeMaterial("medium", absorption, scattering, 0.0F))}, scratch.root());
+    // From x = -4, outside, to x = 70, past the far face: voxel i spans t in [i + 3.5, i + 4.5).
+    constexpr float kStart = -4.0F;
+    constexpr float kLength = 74.0F;
+    const Ray ray{glm::vec3(kStart, 31.0F, 31.0F), glm::vec3(1.0F, 0.0F, 0.0F), 0.0F, kLength};
+    // A coloured history, which the lane odds follow and the weights undo.
     const SampledSpectrum throughput(glm::vec4(0.7F, 1.0F, 0.4F, 0.85F));
     const SampledWavelengths& lambda = tools::fixtures::pinnedWavelengths();
     const SampledSpectrum sigmaA = pathtracer::scene::unboundedSpectrum(Rgb(absorption), lambda);
     const SampledSpectrum sigmaS = pathtracer::scene::unboundedSpectrum(Rgb(scattering), lambda);
-
-    constexpr int kTrials = 1 << 15;
+    constexpr int kBins = 8;  // eight voxel columns each
+    constexpr int kTrials = 1 << 16;
     std::array<tools::stats::Welford, kSpectrumSamples> escaped;
-    std::array<tools::stats::Welford, kSpectrumSamples> scattered;
-    tools::stats::Welford inside;
+    std::array<std::array<tools::stats::Welford, kSpectrumSamples>, kBins> scattered;
+    bool inside = true;
     for (int i = 0; i < kTrials; ++i) {
         Sampler sampler(0, 0, i, kTrials, static_cast<std::uint32_t>(ctx.seed()));
         const pathtracer::scene::FreeFlight flight = set.sampleFreeFlight(ray, 0.0F, kLength, throughput, lambda, sampler);
+        const bool scatter = flight.event == FreeFlightEvent::Scattered;
+        const int voxel = scatter ? static_cast<int>(std::floor(kStart + flight.t + 0.5F)) : -1;
+        inside = inside && (!scatter || (voxel >= 0 && voxel < kVoxels));
         for (int c = 0; c < kSpectrumSamples; ++c) {
-            escaped[c].add(flight.event == FreeFlightEvent::Escaped ? flight.weight[c] : 0.0F);
-            scattered[c].add(flight.event == FreeFlightEvent::Scattered ? flight.weight[c] : 0.0F);
+            escaped[c].add(scatter ? 0.0F : flight.weight[c]);
+            for (int b = 0; b < kBins; ++b) {
+                scattered[static_cast<std::size_t>(b)][c].add(scatter && voxel / (kVoxels / kBins) == b ? flight.weight[c] : 0.0F);
+            }
         }
-        inside.add(flight.event != FreeFlightEvent::Scattered || (flight.t >= 0.0F && flight.t < kLength) ? 1.0 : 0.0);
     }
-    ctx.plan((2 * kSpectrumSamples) + 1);
+    ctx.plan((kBins + 1) * kSpectrumSamples + 1);
     const double t = tools::stats::studentTTwoSided(ctx.alpha(), static_cast<double>(kTrials - 1));
     for (int c = 0; c < kSpectrumSamples; ++c) {
         const double extinction = static_cast<double>(sigmaA[c] + sigmaS[c]);
-        const double transmittance = std::exp(-extinction * kLength);
-        const double scatter = (static_cast<double>(sigmaS[c]) / extinction) * (1.0 - transmittance);
-        PT_EXPECT(ctx, std::abs(escaped[c].mean() - transmittance) <= t * escaped[c].standardError(),
-                  "escape lane " + std::to_string(c) + ": " + std::to_string(escaped[c].mean()) + " vs " + std::to_string(transmittance));
-        PT_EXPECT(ctx, std::abs(scattered[c].mean() - scatter) <= t * scattered[c].standardError(),
-                  "scatter lane " + std::to_string(c) + ": " + std::to_string(scattered[c].mean()) + " vs " + std::to_string(scatter));
+        double depth = 0.0;
+        std::array<double, kBins> bins{};
+        for (int i = 0; i < kVoxels; ++i) {
+            const double density = static_cast<double>(i + 1) / kVoxels;
+            bins[static_cast<std::size_t>(i / (kVoxels / kBins))] +=
+                (static_cast<double>(sigmaS[c]) / extinction) * std::exp(-depth) * -std::expm1(-extinction * density);
+            depth += extinction * density;
+        }
+        const std::string lane = "lane " + std::to_string(c);
+        PT_EXPECT(ctx, std::abs(escaped[c].mean() - std::exp(-depth)) <= t * escaped[c].standardError(),
+                  lane + " escape " + std::to_string(escaped[c].mean()) + " vs " + std::to_string(std::exp(-depth)));
+        for (int b = 0; b < kBins; ++b) {
+            const tools::stats::Welford& bin = scattered[static_cast<std::size_t>(b)][c];
+            PT_EXPECT(ctx, std::abs(bin.mean() - bins[static_cast<std::size_t>(b)]) <= t * bin.standardError(),
+                      lane + " bin " + std::to_string(b) + " scatter " + std::to_string(bin.mean()) + " vs " +
+                          std::to_string(bins[static_cast<std::size_t>(b)]));
+        }
     }
-    PT_EXPECT(ctx, inside.mean() == 1.0, "a scattering fell outside [t0, t1)");
+    PT_EXPECT(ctx, inside, "a scattering fell outside the ramp's voxels");
 }
 
 // A bounded medium's chromatic free flight over [0, L): E[escape weight] = T(L) and E[collision weight] = (sigma_s/sigma_t)(1 - T(L)).
@@ -310,8 +278,11 @@ PT_CHECK(bounded_medium_free_flight_is_unbiased, Slow, Statistical) {
         for (int i = 0; i < kTrials; ++i) {
             Sampler sampler(0, 0, i, kTrials, static_cast<std::uint32_t>(ctx.subSeed(testCase.name)));
             const float d = pathtracer::scene::sampleCollision(medium, odds, sampler.next2D());
-            const SampledSpectrum escape = d < kLength ? SampledSpectrum(0.0F) : pathtracer::scene::passWeight(medium, odds, kLength);
-            const SampledSpectrum scatter = d < kLength ? pathtracer::scene::collisionWeight(medium, odds, d) : SampledSpectrum(0.0F);
+            const SampledSpectrum escape =
+                d < kLength ? SampledSpectrum(0.0F) : pathtracer::scene::passWeight(odds, pathtracer::scene::transmittance(medium, kLength));
+            const SampledSpectrum scatter = d < kLength ? pathtracer::scene::collisionWeight(odds, pathtracer::scene::transmittance(medium, d),
+                                                                                             medium.scattering, medium.absorption + medium.scattering)
+                                                        : SampledSpectrum(0.0F);
             for (int c = 0; c < kSpectrumSamples; ++c) {
                 escaped[c].add(escape[c]);
                 scattered[c].add(scatter[c]);
@@ -389,7 +360,8 @@ PT_CHECK(free_flight_distance_distribution, Slow, Statistical) {
         Sampler sampler(0, 0, i, kTrials, static_cast<std::uint32_t>(ctx.seed()));
         const pathtracer::scene::FreeFlight flight =
             set.sampleFreeFlight(ray, 0.0F, kLength, SampledSpectrum(1.0F), tools::fixtures::pinnedWavelengths(), sampler);
-        unitWeights = unitWeights && flight.weight == SampledSpectrum(1.0F);
+        // A grey albedo-1 weight is T sigma / sum_c p_c T sigma: 1 up to the 4-term sum's 3u and the division's u (Higham 2002 eq. 4.4).
+        unitWeights = unitWeights && maxChannel(abs(flight.weight - 1.0F)) <= 2.0F * std::numeric_limits<float>::epsilon();
         const int bin = flight.event == FreeFlightEvent::Scattered
                             ? std::min(static_cast<int>(flight.t / kLength * static_cast<float>(kBins)), kBins - 1)
                             : kBins;
@@ -405,7 +377,155 @@ PT_CHECK(free_flight_distance_distribution, Slow, Statistical) {
     }
     ctx.plan(2);
     PT_EXPECT(ctx, tools::stats::chiSquareUpperTail(chi2, kBins) > ctx.alpha(), "chi2 " + std::to_string(chi2));
-    PT_EXPECT(ctx, unitWeights, "a grey medium's spectral weight left 1");
+    PT_EXPECT(ctx, unitWeights, "a grey scattering medium's weight left 1");
+}
+
+// A chromatic medium's flight distances binned against the lane mixture sum_c p_c sigma_c exp(-sigma_c t): the pdf regular tracking has.
+PT_CHECK(free_flight_matches_lane_mixture, Slow, Statistical) {
+    const Scratch scratch(ctx);
+    const glm::vec3 absorption(0.01F, 0.05F, 0.02F);
+    const glm::vec3 scattering(0.06F, 0.01F, 0.03F);
+    const VolumeSet set =
+        loadOrDie({volumeConfig(scratch.writeGrids("box", {makeBox(64, 1.0)}), scratch.writeMaterial("medium", absorption, scattering, 0.0F))},
+                  scratch.root());
+    constexpr float kLength = 40.0F;
+    const Ray ray{glm::vec3(10.0F, 31.0F, 31.0F), glm::vec3(1.0F, 0.0F, 0.0F), 0.0F, kLength};
+    const SampledSpectrum throughput(glm::vec4(0.7F, 1.0F, 0.4F, 0.85F));
+    const SampledWavelengths& lambda = tools::fixtures::pinnedWavelengths();
+    const pathtracer::scene::HomogeneousMedium unit{pathtracer::scene::unboundedSpectrum(Rgb(absorption), lambda),
+                                                    pathtracer::scene::unboundedSpectrum(Rgb(scattering), lambda), 0.0F};
+    const SampledSpectrum odds = pathtracer::scene::channelOdds(unit, throughput);
+    constexpr int kBins = 16;  // equal-width in t, plus one bin for the escapes
+    constexpr int kTrials = 1 << 15;
+    std::array<int, kBins + 1> counts{};
+    for (int i = 0; i < kTrials; ++i) {
+        Sampler sampler(0, 0, i, kTrials, static_cast<std::uint32_t>(ctx.seed()));
+        const pathtracer::scene::FreeFlight flight = set.sampleFreeFlight(ray, 0.0F, kLength, throughput, lambda, sampler);
+        const int bin = flight.event == FreeFlightEvent::Scattered
+                            ? std::min(static_cast<int>(flight.t / kLength * static_cast<float>(kBins)), kBins - 1)
+                            : kBins;
+        ++counts[static_cast<std::size_t>(bin)];
+    }
+    // Each lane's exponential survival to t, mixed by the odds the tracker drew its lane with.
+    const auto survival = [&](double t) {
+        double mixed = 0.0;
+        for (int c = 0; c < kSpectrumSamples; ++c) {
+            mixed += static_cast<double>(odds[c]) * std::exp(-static_cast<double>(unit.absorption[c] + unit.scattering[c]) * t);
+        }
+        return mixed;
+    };
+    double chi2 = 0.0;
+    for (int b = 0; b <= kBins; ++b) {
+        const double lo = static_cast<double>(b) * kLength / kBins;
+        const double hi = static_cast<double>(b + 1) * kLength / kBins;
+        const double expected = (b < kBins ? survival(lo) - survival(hi) : survival(kLength)) * kTrials;
+        chi2 += (counts[static_cast<std::size_t>(b)] - expected) * (counts[static_cast<std::size_t>(b)] - expected) / expected;
+    }
+    ctx.plan(1);
+    PT_EXPECT(ctx, tools::stats::chiSquareUpperTail(chi2, kBins) > ctx.alpha(), "chi2 " + std::to_string(chi2));
+}
+
+// Two overlapping chromatic boxes sum their coefficients: T in closed form, each volume's scattering E[w] its integral of T sigma_s.
+PT_CHECK(overlapping_volumes_sum_coefficients, Slow, Statistical) {
+    const Scratch scratch(ctx);
+    const std::string vdb = scratch.writeGrids("box", {makeBox(64, 1.0)});
+    struct Medium {
+        glm::vec3 absorption;
+        glm::vec3 scattering;
+        float g;  // distinct per volume, so a scattering names the volume chosen
+    };
+    const std::array<Medium, 2> media{{{glm::vec3(0.01F, 0.03F, 0.02F), glm::vec3(0.05F, 0.02F, 0.04F), 0.3F},
+                                       {glm::vec3(0.02F, 0.01F, 0.0F), glm::vec3(0.01F, 0.06F, 0.03F), -0.5F}}};
+    VolumeConfig first = volumeConfig(vdb, scratch.writeMaterial("first", media[0].absorption, media[0].scattering, media[0].g));
+    VolumeConfig second = volumeConfig(vdb, scratch.writeMaterial("second", media[1].absorption, media[1].scattering, media[1].g));
+    second.position = glm::vec3(32.0F, 0.0F, 0.0F);
+    const VolumeSet set = loadOrDie({first, second}, scratch.root());
+    // Along x from 10 to 90: the first box alone to 31.5, both to 63.5, the second alone to 90.
+    constexpr float kLength = 80.0F;
+    const Ray ray{glm::vec3(10.0F, 31.0F, 31.0F), glm::vec3(1.0F, 0.0F, 0.0F), 0.0F, kLength};
+    const std::array<std::array<double, 2>, 3> coverage{{{21.5, 0.0}, {32.0, 32.0}, {0.0, 26.5}}};  // each span's length in each box
+    const SampledSpectrum throughput(glm::vec4(0.7F, 1.0F, 0.4F, 0.85F));
+    const SampledWavelengths& lambda = tools::fixtures::pinnedWavelengths();
+    std::array<SampledSpectrum, 2> sigmaS{};
+    std::array<SampledSpectrum, 2> sigmaT{};
+    for (std::size_t v = 0; v < 2; ++v) {
+        sigmaS[v] = pathtracer::scene::unboundedSpectrum(Rgb(media[v].scattering), lambda);
+        sigmaT[v] = pathtracer::scene::unboundedSpectrum(Rgb(media[v].absorption), lambda) + sigmaS[v];
+    }
+    constexpr int kTrials = 1 << 16;
+    std::array<tools::stats::Welford, kSpectrumSamples> escaped;
+    std::array<std::array<tools::stats::Welford, kSpectrumSamples>, 2> scattered;
+    for (int i = 0; i < kTrials; ++i) {
+        Sampler sampler(0, 0, i, kTrials, static_cast<std::uint32_t>(ctx.seed()));
+        const pathtracer::scene::FreeFlight flight = set.sampleFreeFlight(ray, 0.0F, kLength, throughput, lambda, sampler);
+        for (int c = 0; c < kSpectrumSamples; ++c) {
+            escaped[c].add(flight.event == FreeFlightEvent::Escaped ? flight.weight[c] : 0.0F);
+            for (std::size_t v = 0; v < 2; ++v) {
+                scattered[v][c].add(flight.event == FreeFlightEvent::Scattered && flight.g == media[v].g ? flight.weight[c] : 0.0F);
+            }
+        }
+    }
+    // Recursive summation of at most kLength + 2 span terms per volume (Higham 2002 eq. 4.4), each span's length one more rounding.
+    constexpr double kTolerance = 2.0 * 2.0 * (static_cast<double>(kLength) + 2.0) * std::numeric_limits<float>::epsilon();
+    const SampledSpectrum transmittance = set.transmittance(ray, 0.0F, kLength, lambda);
+    ctx.plan(4 * kSpectrumSamples);
+    const double t = tools::stats::studentTTwoSided(ctx.alpha(), static_cast<double>(kTrials - 1));
+    for (int c = 0; c < kSpectrumSamples; ++c) {
+        // Span by span: sum_v sigma_s,v T(a) (1 - exp(-mu L)) / mu with mu the span's summed extinction, T(a) its entry transmittance.
+        double depth = 0.0;
+        std::array<double, 2> scatter{};
+        for (const auto& lengths : coverage) {
+            const double mu = (lengths[0] > 0.0 ? sigmaT[0][c] : 0.0) + (lengths[1] > 0.0 ? sigmaT[1][c] : 0.0);
+            const double length = std::max(lengths[0], lengths[1]);
+            for (std::size_t v = 0; v < 2; ++v) {
+                if (lengths[v] > 0.0) {
+                    scatter[v] += static_cast<double>(sigmaS[v][c]) * std::exp(-depth) * -std::expm1(-mu * length) / mu;
+                }
+            }
+            depth += mu * length;
+        }
+        const std::string where = "lane " + std::to_string(c) + ": ";
+        PT_EXPECT(ctx, std::abs(-std::log(static_cast<double>(transmittance[c])) - depth) <= kTolerance * depth,
+                  where + "depth " + std::to_string(-std::log(static_cast<double>(transmittance[c]))) + " vs " + std::to_string(depth));
+        PT_EXPECT(ctx, std::abs(escaped[c].mean() - std::exp(-depth)) <= t * escaped[c].standardError(),
+                  where + "escape " + std::to_string(escaped[c].mean()) + " vs " + std::to_string(std::exp(-depth)));
+        for (std::size_t v = 0; v < 2; ++v) {
+            PT_EXPECT(ctx, std::abs(scattered[v][c].mean() - scatter[v]) <= t * scattered[v][c].standardError(),
+                      where + "volume " + std::to_string(v) + " scatter " + std::to_string(scattered[v][c].mean()) + " vs " +
+                          std::to_string(scatter[v]));
+        }
+    }
+}
+
+// Inactive density is density: a leaf of only inactive, varying voxels walks voxel by voxel, and an inactive tile as one span.
+PT_CHECK(inactive_density_is_walked, Fast, Exact) {
+    const Scratch scratch(ctx);
+    openvdb::FloatGrid::Ptr grid = makeGrid(1.0);
+    openvdb::FloatGrid::Accessor accessor = grid->getAccessor();
+    constexpr int kRow = 16;
+    for (int x = 0; x < kRow; ++x) {
+        accessor.setValueOff(openvdb::Coord(x, 0, 0), static_cast<float>(x + 1) / kRow);
+    }
+    grid->tree().fill(openvdb::CoordBBox(openvdb::Coord(32, 0, 0), openvdb::Coord(39, 7, 7)), 0.5F, /*active=*/false);
+    const glm::vec3 absorption(0.1F, 0.2F, 0.05F);
+    const VolumeSet set = loadOrDie(
+        {volumeConfig(scratch.writeGrids("inactive", {grid}), scratch.writeMaterial("ink", absorption, glm::vec3(0.0F), 0.0F))}, scratch.root());
+    // Along the voxels' row from x = -4 to 44: sum_x (x + 1)/16 = 8.5, then the tile's 8 voxels at 0.5.
+    constexpr float kLength = 48.0F;
+    const Ray ray{glm::vec3(-4.0F, 0.0F, 0.0F), glm::vec3(1.0F, 0.0F, 0.0F), 0.0F, kLength};
+    constexpr double kVoxels = 8.5 + 4.0;
+    // Recursive summation of at most kLength + 2 span terms (Higham 2002 eq. 4.4), each span's length one more rounding.
+    constexpr double kTolerance = 2.0 * (static_cast<double>(kLength) + 2.0) * std::numeric_limits<float>::epsilon();
+    const SampledWavelengths& lambda = tools::fixtures::pinnedWavelengths();
+    const SampledSpectrum sigma = pathtracer::scene::unboundedSpectrum(Rgb(absorption), lambda);
+    const SampledSpectrum transmittance = set.transmittance(ray, 0.0F, kLength, lambda);
+    ctx.plan(kSpectrumSamples);
+    for (int c = 0; c < kSpectrumSamples; ++c) {
+        const double expected = static_cast<double>(sigma[c]) * kVoxels;
+        const double measured = -std::log(static_cast<double>(transmittance[c]));
+        PT_EXPECT(ctx, std::abs(measured - expected) <= kTolerance * expected,
+                  "lane " + std::to_string(c) + ": depth " + std::to_string(measured) + " vs " + std::to_string(expected));
+    }
 }
 
 // The pdf integrates to 1, E[cos] = g pins the sign convention, and drawn cosines bin to the pdf's own mass, for g across its range.
@@ -458,7 +578,7 @@ PT_CHECK(henyey_greenstein_sampling, Slow, Statistical) {
     }
 }
 
-// A ray between two blobs crosses only empty majorant cells: transmittance and the flight weight are exactly 1, and nothing is drawn.
+// A ray between two blobs, inside their joint support, crosses only empty tiles: T and the flight weight are exactly 1, nothing drawn.
 PT_CHECK(empty_space_draws_nothing, Fast, Exact) {
     const Scratch scratch(ctx);
     openvdb::FloatGrid::Ptr grid = makeGrid(1.0);
@@ -467,11 +587,11 @@ PT_CHECK(empty_space_draws_nothing, Fast, Exact) {
     const VolumeSet set =
         loadOrDie({volumeConfig(scratch.writeGrids("blobs", {grid}), scratch.writeMaterial("medium", glm::vec3(1.0F), glm::vec3(1.0F), 0.0F))},
                   scratch.root());
-    // From the first blob's far side to the second's near side, one cell of margin clear of each majorant's dilated support.
+    // From well past the first blob's far face to well short of the second's near face.
     const Ray ray{glm::vec3(8.0F, 8.0F, 40.0F), glm::vec3(0.0F, 0.0F, 1.0F), 0.0F, 140.0F};
     Sampler used(0, 0, 0, 1, 7U);
     const SampledWavelengths& lambda = tools::fixtures::pinnedWavelengths();
-    const SampledSpectrum transmittance = set.transmittance(ray, 0.0F, 140.0F, lambda, used);
+    const SampledSpectrum transmittance = set.transmittance(ray, 0.0F, 140.0F, lambda);
     const pathtracer::scene::FreeFlight flight = set.sampleFreeFlight(ray, 0.0F, 140.0F, SampledSpectrum(1.0F), lambda, used);
     Sampler fresh(0, 0, 0, 1, 7U);
     ctx.plan(3);
@@ -609,31 +729,17 @@ std::array<tools::stats::Welford, 3> pixelMeans(const pathtracer::gfx::HdrImage&
     return means;
 }
 
-// Density 1 over x, y in [0, 512) and z in [0, 8): optical depth along z is 8 voxels, the trilinear ramps adding half a voxel a face.
+// Density 1 over voxels x, y in [0, 512) and z in [0, 8): box-reconstructed, 1 over z in [-1/2, 15/2), optical depth 8 along z.
 openvdb::FloatGrid::Ptr makeSlab() {
     openvdb::FloatGrid::Ptr grid = makeGrid(1.0);
     grid->tree().fill(openvdb::CoordBBox(openvdb::Coord(0), openvdb::Coord(511, 511, 7)), 1.0F, true);
     return grid;
 }
 
-// The slab's trilinear profile integrated from below: f is 0 under -1, ramps over [-1, 0], is 1 over [0, 7], ramps back over [7, 8].
-double slabDepthBelow(double z) {
-    if (z <= -1.0) {
-        return 0.0;
-    }
-    if (z <= 0.0) {
-        return 0.5 * (z + 1.0) * (z + 1.0);
-    }
-    if (z <= 7.0) {
-        return 0.5 + z;
-    }
-    if (z <= 8.0) {
-        return 8.0 - (0.5 * (8.0 - z) * (8.0 - z));
-    }
-    return 8.0;
-}
+// The slab's optical depth below z at density 1, and its density at z: the box profile's integral and value, closed at both faces.
+double slabDepthBelow(double z) { return std::clamp(z + 0.5, 0.0, 8.0); }
 
-double slabDensity(double z) { return std::clamp(std::min(z + 1.0, 8.0 - z), 0.0, 1.0); }
+double slabDensity(double z) { return z >= -0.5 && z <= 7.5 ? 1.0 : 0.0; }
 
 // White furnace: albedo 1 in every channel, chromatic extinction, a uniform unit sky and an absent plane inside: every pixel reads 1.
 PT_CHECK(white_furnace_with_chromatic_extinction, Slow, Statistical) {
@@ -709,10 +815,8 @@ PT_CHECK(single_scattering_matches_slab_quadrature, Slow, Statistical) {
                 return std::exp(-sigmaT * (8.0 - slabDepthBelow(z))) * sigmaS * slabDensity(z) * sky;
             };
             double reference = std::exp(-sigmaT * 8.0);
-            for (const auto& [a, b] : {std::pair{-1.0, 0.0}, std::pair{0.0, 7.0}, std::pair{7.0, 8.0}}) {
-                // Simpson is exact on cubics, so on the slab's piecewise-quadratic depths between its knots.
-                reference += tools::stats::simpson(a, b, 256, inScatter);
-            }
+            // The integrand is smooth across the slab's one span of constant density, where Simpson converges at fourth order.
+            reference += tools::stats::simpson(-0.5, 7.5, 256, inScatter);
             return reference;
         };
         namespace cie = pathtracer::scene::cie;
