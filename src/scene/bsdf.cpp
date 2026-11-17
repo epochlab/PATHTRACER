@@ -967,12 +967,12 @@ SampledSpectrum passThrough(const NormalMappedBsdf& bsdf) {
 
 namespace {
 
-// All orders toward wiLocal, the later resumed from revisit; given weighted, each vertex's exits also by powerHeuristic(lightPdf, p_k).
+// All orders toward wiLocal, the later resumed from revisit; given orders, each facet vertex's unweighted exits appended in walk order.
 BsdfEval walkedOrders(const NormalMappedBsdf& bsdf, const glm::vec3& wiLocal, const std::optional<WalkVertex>& revisit, Sampler& walk,
-                      float lightPdf, BsdfEval* weighted) {
+                      std::vector<WalkOrder>* orders) {
     BsdfEval eval = evaluateFirstScattering(bsdf, wiLocal, &walk);
-    if (weighted != nullptr) {
-        addScaled(*weighted, eval, SampledSpectrum(powerHeuristic(lightPdf, eval.pdf)), 0.0F);
+    if (orders != nullptr) {
+        orders->push_back({eval, SampledSpectrum(1.0F)});
     }
     if (!revisit) {
         return eval;
@@ -985,8 +985,8 @@ BsdfEval walkedOrders(const NormalMappedBsdf& bsdf, const glm::vec3& wiLocal, co
         const BsdfClosure vertex = returnedTo(bsdf, direction);
         const BsdfEval exits = exitsAt(bsdf, vertex, sigma, wiLocal, &walk);
         addScaled(eval, exits, weight, 0.0F);
-        if (weighted != nullptr) {
-            addScaled(*weighted, exits, weight * powerHeuristic(lightPdf, exits.pdf), 0.0F);
+        if (orders != nullptr) {
+            orders->push_back({exits, weight});
         }
         const std::optional<Leg> leg = leave(bsdf, vertex, sigma, weight, walk, walk);
         if (!leg || leg->escaped || weight == SampledSpectrum(0.0F)) {
@@ -1000,14 +1000,20 @@ BsdfEval walkedOrders(const NormalMappedBsdf& bsdf, const glm::vec3& wiLocal, co
 
 BsdfEval evaluateBsdfSplit(const NormalMappedBsdf& bsdf, const glm::vec3& wiLocal, const std::optional<WalkVertex>& revisit,
                            Sampler& walk) {
-    return walkedOrders(bsdf, wiLocal, revisit, walk, 0.0F, nullptr);
+    return walkedOrders(bsdf, wiLocal, revisit, walk, nullptr);
 }
 
-NeeEval evaluateForLight(const NormalMappedBsdf& bsdf, const glm::vec3& wiLocal, const std::optional<WalkVertex>& revisit, Sampler& walk,
-                         float lightPdf) {
-    NeeEval nee{};
-    nee.value = walkedOrders(bsdf, wiLocal, revisit, walk, lightPdf, &nee.weighted);
-    return nee;
+BsdfEval evaluateForLight(const NormalMappedBsdf& bsdf, const glm::vec3& wiLocal, const std::optional<WalkVertex>& revisit, Sampler& walk,
+                          std::vector<WalkOrder>& orders) {
+    return walkedOrders(bsdf, wiLocal, revisit, walk, &orders);
+}
+
+BsdfEval weighOrders(std::span<const WalkOrder> orders, float lightPdf) {
+    BsdfEval weighted{};
+    for (const WalkOrder& order : orders) {
+        addScaled(weighted, order.exits, order.weight * powerHeuristic(lightPdf, order.exits.pdf), 0.0F);
+    }
+    return weighted;
 }
 
 // Algorithm 2: the first facet by lambda, then facet draws until the ray escapes the facet or the wall; weight is the walk's throughput.

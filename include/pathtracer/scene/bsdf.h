@@ -4,6 +4,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
+#include <vector>
 
 #include <glm/glm.hpp>
 
@@ -295,14 +297,16 @@ struct WalkVertex {
 // The first scattering plus the later orders, resumed from a draw's revisit: unbiased, as the draw's first leg is the walk's own.
 [[nodiscard]] BsdfEval evaluateBsdfSplit(const NormalMappedBsdf& bsdf, const glm::vec3& wiLocal, const std::optional<WalkVertex>& revisit,
                                          Sampler& walk);
-// NEE's evaluation toward a light of density lightPdf: the plain value, and each walk vertex's exits weighted against that vertex's draw.
-struct NeeEval {
-    BsdfEval value;
-    BsdfEval weighted;  // sum over vertices of powerHeuristic(lightPdf, p_k) * exits_k; pdf zero, the weights being applied
+// One facet vertex's exits toward a light and the walk's throughput reaching it; the first scattering's weight is 1.
+struct WalkOrder {
+    BsdfEval exits;
+    SampledSpectrum weight;
 };
-// Veach 1997 ch. 9 at every facet vertex: the light weighed against the exit density sampleBsdf reports for a walk leaving there.
-[[nodiscard]] NeeEval evaluateForLight(const NormalMappedBsdf& bsdf, const glm::vec3& wiLocal, const std::optional<WalkVertex>& revisit,
-                                       Sampler& walk, float lightPdf);
+// evaluateBsdfSplit's value, appending each facet vertex's unweighted exits to orders: MIS weighs them after construction.
+[[nodiscard]] BsdfEval evaluateForLight(const NormalMappedBsdf& bsdf, const glm::vec3& wiLocal, const std::optional<WalkVertex>& revisit,
+                                        Sampler& walk, std::vector<WalkOrder>& orders);
+// Veach 1997 ch. 9 at every facet vertex: each order's exits by powerHeuristic(lightPdf, its exit density); pdf zero, weights applied.
+[[nodiscard]] BsdfEval weighOrders(std::span<const WalkOrder> orders, float lightPdf);
 // Algorithm 2 to termination, weighted by its throughput, pdf its exit vertex's, delta as its exit leg; revisit: its first facet return.
 [[nodiscard]] std::optional<BsdfSample> sampleBsdf(const NormalMappedBsdf& bsdf, Sampler& sampler, Sampler& walk,
                                                    std::optional<WalkVertex>& revisit);

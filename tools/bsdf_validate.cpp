@@ -3686,6 +3686,7 @@ PT_CHECK(normal_map_sampling_matches_evaluation, Slow, Statistical) {
         }
         std::vector<tools::stats::Welford> evaluated(kBins);
         double maxEvaluated = 0.0;
+        std::vector<pathtracer::scene::WalkOrder> orders;
         for (int b = 0; b < kBins; ++b) {
             const double z0 = -1.0 + (2.0 * (b / kPhiBins) / kCosBins);
             const double phi0 = 2.0 * kPiDouble * (b % kPhiBins) / kPhiBins;
@@ -3699,8 +3700,9 @@ PT_CHECK(normal_map_sampling_matches_evaluation, Slow, Statistical) {
                 pathtracer::scene::Sampler walk(0, 0, 0, 1, rng());
                 std::optional<pathtracer::scene::WalkVertex> revisit;
                 static_cast<void>(pathtracer::scene::sampleBsdf(bsdf, sampler, walk, revisit));
-                const pathtracer::scene::NeeEval nee = pathtracer::scene::evaluateForLight(bsdf, wi, revisit, walk, lightPdf);
-                const double value = area * static_cast<double>(nee.weighted.total()[0]);
+                orders.clear();
+                static_cast<void>(pathtracer::scene::evaluateForLight(bsdf, wi, revisit, walk, orders));
+                const double value = area * static_cast<double>(pathtracer::scene::weighOrders(orders, lightPdf).total()[0]);
                 evaluated[static_cast<std::size_t>(b)].add(value);
                 maxEvaluated = std::max(maxEvaluated, value);
             }
