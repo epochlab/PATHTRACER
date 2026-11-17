@@ -20,6 +20,7 @@
 #include "pathtracer/scene/sampler.h"
 #include "pathtracer/scene/shading_scene.h"
 #include "medium.h"
+#include "path_graph.h"
 #include "shading_math.h"
 
 namespace pathtracer::scene {
@@ -262,8 +263,73 @@ void writeMean(pathtracer::gfx::HdrImage& image, int x, int y, const glm::vec3& 
 void writeMean(pathtracer::gfx::HdrImage& image, int x, int y, float sum, float n) { writeTexel(image, x, y, sum / n); }
 void writeMean(pathtracer::gfx::HdrImage& image, int x, int y, int sum, float n) { writeTexel(image, x, y, static_cast<float>(sum) / n); }
 
-// A path's transport bucket: set at bounce 0's lobe, then a transmission sample makes it Refraction unless it is Subsurface.
-enum class PathBucket { Diffuse, SpecularReflection, Refraction, Volume, Subsurface };
+// Routes a contribution into bucket's direct or indirect lane; unset is background radiance, deliberately unbucketed.
+void addToBucket(TraceResult& result, std::optional<PathBucket> bucket, const Rgb& contribution, bool isDirect) {
+    if (!bucket.has_value()) {
+        return;
+    }
+    switch (*bucket) {
+        case PathBucket::Refraction:
+            result.refraction += contribution;
+            break;
+        case PathBucket::Diffuse:
+            (isDirect ? result.directDiffuse : result.indirectDiffuse) += contribution;
+            break;
+        case PathBucket::SpecularReflection:
+            (isDirect ? result.directSpecular : result.indirectSpecular) += contribution;
+            break;
+        case PathBucket::Volume:
+            (isDirect ? result.directVolume : result.indirectVolume) += contribution;
+            break;
+        case PathBucket::Subsurface:
+            (isDirect ? result.directSubsurface : result.indirectSubsurface) += contribution;
+            break;
+    }
+}
+
+// The path's MIS after construction: each node weighed from its cached densities, added to Beauty and its route in insertion order.
+void evaluatePathGraph(const PathGraph& graph, const SampledWavelengths& lambda, TraceResult& result) {
+    for (const LightNode& node : graph.lights) {
+        BsdfEval weighted{};
+        Rgb rgb{0.0F};
+        switch (node.technique) {
+            case LightTechnique::BsdfHit: {
+                // Power heuristic (Veach 1997): full weight after the camera or a delta draw, neither having a density to balance.
+                const PathVertex& parent = graph.vertices[static_cast<std::size_t>(node.parent)];
+                const float weight = parent.delta ? 1.0F : powerHeuristic(parent.pdf, node.lightPdf);
+                rgb = toScene(node.radiance * weight, lambda);
+                break;
+            }
+            case LightTechnique::Emission:
+                rgb = toScene(node.radiance, lambda);
+                break;
+            case LightTechnique::SurfaceNee:
+                weighted = weighOrders({graph.orders.data() + node.ordersBegin, node.ordersEnd - node.ordersBegin}, node.lightPdf);
+                rgb = toScene((node.farSide ? weighted.transmission : weighted.diffuse + weighted.specular) * node.radiance, lambda);
+                break;
+            case LightTechnique::VolumeNee:
+                rgb = toScene(node.radiance * (node.phase * powerHeuristic(node.lightPdf, node.phase) / node.lightPdf), lambda);
+                break;
+        }
+        result.radiance += rgb;
+        switch (node.route) {
+            case Route::Bucket:
+                addToBucket(result, node.bucket, rgb, node.direct);
+                break;
+            case Route::DirectVolume:
+                result.directVolume += rgb;
+                break;
+            case Route::DirectRefraction:
+                result.refraction += rgb;
+                break;
+            case Route::DirectLobes:
+                // Bounce 0 splits NEE by the lobe that carried it, not the continuation's lobe.
+                result.directDiffuse += toScene(weighted.diffuse * node.radiance, lambda);
+                result.directSpecular += toScene(weighted.specular * node.radiance, lambda);
+                break;
+        }
+    }
+}
 
 // One interior the path is inside: its instance, its medium and the bulk index its boundary refracts against.
 struct MediumEntry {
@@ -413,7 +479,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
                        const PassThroughScene& scene, const std::vector<int>& instanceLightIndex, const LightSet& lights,
                        bool showSky, const PathTraceSettings& settings, const SampledWavelengths& lambda,
                        Sampler& sampler, Sampler& volumeSampler, Sampler& walkSampler, glm::vec2 aoSample, glm::vec2 fresnelSample,
-                       std::vector<MediumEntry>& mediumStack, pathtracer::debug::RayCounts& __restrict rays) {
+                       std::vector<MediumEntry>& mediumStack, PathGraph& graph, pathtracer::debug::RayCounts& __restrict rays) {
     const EmbreeAccel& accel = scene.accel;
     TraceResult result;
     result.ao = 1.0F;  // background is fully unoccluded, matching the polarity in PathTraceResult
@@ -441,29 +507,6 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
     int primaryWalk = -1;
     // The ray leaving that walk, until its next vertex: its emitter or sky hit is direct subsurface light too.
     bool leftPrimaryWalk = false;
-    // Routes a projected contribution into the path's bucket; a no-op when unset, that background radiance being deliberately unbucketed.
-    const auto addToBucket = [&](const Rgb& contribution, bool isDirect) {
-        if (!pathBucket.has_value()) {
-            return;
-        }
-        switch (*pathBucket) {
-            case PathBucket::Refraction:
-                result.refraction += contribution;
-                break;
-            case PathBucket::Diffuse:
-                (isDirect ? result.directDiffuse : result.indirectDiffuse) += contribution;
-                break;
-            case PathBucket::SpecularReflection:
-                (isDirect ? result.directSpecular : result.indirectSpecular) += contribution;
-                break;
-            case PathBucket::Volume:
-                (isDirect ? result.directVolume : result.indirectVolume) += contribution;
-                break;
-            case PathBucket::Subsurface:
-                (isDirect ? result.directSubsurface : result.indirectSubsurface) += contribution;
-                break;
-        }
-    };
     // A hit ending a segment is direct when its segment leaves bounce 0's vertex, or for Subsurface the primary walk.
     const auto directHit = [&] { return pathBucket == PathBucket::Subsurface ? leftPrimaryWalk : bounce == 1; };
     // Shadow's lanes take a bounce-0 light estimator without its MIS weight: alone it estimates all direct light, occluded or not.
@@ -471,19 +514,20 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
         result.shadowUnoccluded = luminance(toScene(direct, lambda));
         result.shadowLost = luminance(toScene(direct * (1.0F - visibility), lambda));
     };
-    // A radiance reaching the camera: into Beauty and the path's bucket, as scene RGB.
-    const auto addRadiance = [&](const SampledSpectrum& radiance, bool isDirect) {
-        const Rgb rgb = toScene(radiance, lambda);
-        result.radiance += rgb;
-        addToBucket(rgb, isDirect);
+    // Techniques append to the graph and weigh nothing; the camera is vertex 0, a delta with no density for a hit to balance.
+    graph.clear();
+    graph.vertices.push_back({glm::vec3(0.0F), 0.0F, true});
+    // The vertex whose drawn continuation the current ray is: a hit's MIS weighs against NEE from its shading position.
+    int misParent = 0;
+    const auto addVertex = [&](const glm::vec3& position, float pdf, bool delta) {
+        graph.vertices.push_back({position, pdf, delta});
+        return static_cast<int>(graph.vertices.size()) - 1;
     };
-
-    // MIS state for the previous bounce's BSDF sample: reweights this bounce's miss against NEE's pdf so neither double-counts.
-    float lastBsdfPdf = 0.0F;
-    // No NEE density to double-count, so the next hit takes full weight: a delta lobe, the camera, a walk collision (which skips NEE).
-    bool lastSampleWasDelta = true;
-    // The previous vertex's shading position, not ray.origin: MIS needs the pdf NEE would have had, taken from shading.position.
-    glm::vec3 lastShadingPosition(0.0F);
+    // A light the continuation met: its density as NEE from misParent would have drawn it, needed only when misParent has a density.
+    const auto addHit = [&](LightTechnique technique, const SampledSpectrum& radiance, float lightPdf) {
+        graph.lights.push_back({technique, misParent, radiance, lightPdf, 0.0F, false, 0, 0, Route::Bucket, pathBucket, directHit()});
+    };
+    const auto parentDelta = [&] { return graph.vertices[static_cast<std::size_t>(misParent)].delta; };
 
     // Denoiser features (OIDN): followed through deltas and sub-pixel lobes to the first rough vertex, apart from `throughput`.
     SampledSpectrum featureWeight(1.0F);
@@ -581,6 +625,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
             if (featurePending) {
                 recordFeatures(featureWeight, glm::vec3(0.0F));
             }
+            const int vertex = addVertex(position, 0.0F, false);
             // NEE from the scattering point, against the phase-sampled continuation by the power heuristic on directional pdfs.
             if (const std::optional<LightSample> lightSample = lights.sample(position, sampler, lambda)) {
                 const float phase = henyeyGreenstein(glm::dot(dir, lightSample->direction), flight->g);
@@ -592,28 +637,22 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
                     recordShadow(throughput * lightSample->radiance * (phase / lightSample->pdf), visibility);
                 }
                 if (!isBlack(visibility)) {
-                    const float misWeightLight = powerHeuristic(lightSample->pdf, phase);
-                    const Rgb neeContribution =
-                        toScene(visibility * throughput * lightSample->radiance * (phase * misWeightLight / lightSample->pdf), lambda);
-                    result.radiance += neeContribution;
-                    if (bounce == 0) {
-                        result.directVolume += neeContribution;
-                    } else {
-                        addToBucket(neeContribution, /*isDirect=*/false);
-                    }
+                    graph.lights.push_back({LightTechnique::VolumeNee, vertex, visibility * throughput * lightSample->radiance,
+                                            lightSample->pdf, phase, false, 0, 0, bounce == 0 ? Route::DirectVolume : Route::Bucket,
+                                            pathBucket, false});
                 }
             }
             // The phase sample weighs f/pdf = 1; its pdf is what this ray's miss or emitter hit is MIS-weighted against.
             const glm::vec3 wi = sampleHenyeyGreenstein(dir, flight->g, sampler.next2D());
-            lastBsdfPdf = henyeyGreenstein(glm::dot(dir, wi), flight->g);
-            lastSampleWasDelta = false;
-            lastShadingPosition = position;
+            const float phasePdf = henyeyGreenstein(glm::dot(dir, wi), flight->g);
+            graph.vertices[static_cast<std::size_t>(vertex)].pdf = phasePdf;
+            misParent = vertex;
             leftPrimaryWalk = false;
             if (!survivesRoulette(false)) {
                 break;
             }
             coneWidth += coneSpread * flight->t;
-            coneSpread = lobeSpread(coneSpread, invSamples / lastBsdfPdf);
+            coneSpread = lobeSpread(coneSpread, invSamples / phasePdf);
             ray = Ray{position, wi, 0.0F, std::numeric_limits<float>::max()};
             segmentStart = 0.0F;
             continue;
@@ -629,8 +668,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
             // The phase sample weighs f/pdf = 1; with no NEE beside it, its miss or emitter hit takes full weight.
             const glm::vec3 dir = glm::normalize(ray.dir);
             const glm::vec3 wi = sampleHenyeyGreenstein(dir, medium->anisotropy, sampler.next2D());
-            lastSampleWasDelta = true;
-            lastShadingPosition = position;
+            misParent = addVertex(position, 0.0F, true);
             if (!survivesRoulette(true)) {
                 break;
             }
@@ -651,14 +689,9 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
             // Filtered only at full MIS weight: NEE reads the sky at a point, and the strategies MIS blends must estimate one integrand.
             const SampledSpectrum envRadiance =
                 bounce == 0          ? lights.environmentRadiance(ray.dir, dirFootprint, lambda)
-                : lastSampleWasDelta ? lights.environmentRadiance(ray.dir, spreadAcross(glm::normalize(ray.dir), coneSpread), lambda)
+                : parentDelta()      ? lights.environmentRadiance(ray.dir, spreadAcross(glm::normalize(ray.dir), coneSpread), lambda)
                                      : lights.environmentRadiance(ray.dir, lambda);
-            // Power heuristic (Veach 1997): full weight after the camera or a delta sample, neither having a density to balance.
-            float misWeight = 1.0F;
-            if (!lastSampleWasDelta) {
-                misWeight = powerHeuristic(lastBsdfPdf, lights.pdfEnvironment(ray.dir));
-            }
-            addRadiance(throughput * envRadiance * misWeight, directHit());
+            addHit(LightTechnique::BsdfHit, throughput * envRadiance, parentDelta() ? 0.0F : lights.pdfEnvironment(ray.dir));
             break;
         }
 
@@ -675,11 +708,8 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
                 recordFeatures(SampledSpectrum(0.0F), lightNormal);
             }
             const SampledSpectrum emitted = lights.radianceToward(lightIndex, ray.dir, lightNormal, lambda);
-            float misWeight = 1.0F;
-            if (!lastSampleWasDelta) {
-                misWeight = powerHeuristic(lastBsdfPdf, lights.pdfArea(lightIndex, lastShadingPosition, point, lightNormal));
-            }
-            addRadiance(throughput * emitted * misWeight, directHit());
+            const glm::vec3& from = graph.vertices[static_cast<std::size_t>(misParent)].position;
+            addHit(LightTechnique::BsdfHit, throughput * emitted, parentDelta() ? 0.0F : lights.pdfArea(lightIndex, from, point, lightNormal));
             break;
         }
 
@@ -708,7 +738,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
         // Surface emission, absent from LightSet, so the hit takes MIS weight 1. Before the depth cap, as an emitter hit.
         const SampledSpectrum emitted = emittedRadiance(material, triangle, shading, -ray.dir, footprint, lambda);
         if (!isBlack(emitted)) {
-            addRadiance(throughput * emitted, directHit());
+            addHit(LightTechnique::Emission, throughput * emitted, 0.0F);
         }
 
         // Depth cap. The extra iteration exists only so the final BSDF ray can collect its MIS-weighted miss or emitter hit.
@@ -813,7 +843,11 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
             }
         }
 
-        // NEE: sample a light, evaluate the BSDF toward it, add it MIS-weighted if unoccluded. Fired whatever lobe `sample` drew.
+        // A passed-through or failed draw continues no density, so the vertex is NEE's parent only; a drawn one is the next hit's too.
+        const bool continues = sample.has_value() && !sample->passThrough;
+        const int vertex = addVertex(shading.position, continues ? sample->pdf : 0.0F, !continues || sample->delta);
+
+        // NEE: sample a light, evaluate the BSDF toward it, append it unweighted if unoccluded. Fired whatever lobe `sample` drew.
         const std::optional<LightSample> lightSample = lights.sample(shading.position, sampler, lambda);
         if (lightSample.has_value()) {
             const float geoCos = glm::dot(lightSample->direction, geoNormal);
@@ -821,9 +855,11 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
             const bool farSide = (geoCos > 0.0F) != woAbove;
             if (!farSide || transmits(closure)) {
                 const glm::vec3 wiLocalLight = lightSample->direction * frame;
-                // One evaluation for the value and per-lobe split, each lobe cosine-weighted about its own normal, MIS-weighted per vertex.
-                const NeeEval nee = evaluateForLight(closure, wiLocalLight, revisit, walkSampler, lightSample->pdf);
-                const SampledSpectrum bsdfValue = farSide ? nee.value.transmission : nee.value.diffuse + nee.value.specular;
+                // One evaluation for the value and per-lobe split, each lobe cosine-weighted about its own normal, its orders kept for MIS.
+                const std::size_t nodes = graph.lights.size();
+                const std::size_t ordersBegin = graph.orders.size();
+                const BsdfEval value = evaluateForLight(closure, wiLocalLight, revisit, walkSampler, graph.orders);
+                const SampledSpectrum bsdfValue = farSide ? value.transmission : value.diffuse + value.specular;
                 if (maxChannel(bsdfValue) > 0.0F) {
                     const glm::vec3 shadowOrigin = spawnOrigin(triangle, hit->u, hit->v, geoNormal, geoCos > 0.0F);
                     // pbrt's SpawnRayTo: re-formed from the offset origin to the sampled point, which a back-off along wi cannot reach.
@@ -849,23 +885,16 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
                         recordShadow(bsdfValue * throughput * lightSample->radiance / lightSample->pdf, visibility);
                     }
                     if (!isBlack(visibility)) {
-                        const SampledSpectrum common = visibility * throughput * lightSample->radiance / lightSample->pdf;
-                        const BsdfEval& weighted = nee.weighted;
-                        const Rgb neeContribution = toScene((farSide ? weighted.transmission : weighted.diffuse + weighted.specular) * common, lambda);
-                        result.radiance += neeContribution;
-                        if (bounce == 0) {
-                            // Bounce 0 splits NEE by the lobe that carried it, not sample->type, which names the continuation.
-                            if (farSide) {
-                                result.refraction += neeContribution;
-                            } else {
-                                result.directDiffuse += toScene(weighted.diffuse * common, lambda);
-                                result.directSpecular += toScene(weighted.specular * common, lambda);
-                            }
-                        } else {
-                            // Deeper bounces keep the sticky bucket; only the primary walk's boundary takes direct light past bounce 0.
-                            addToBucket(neeContribution, /*isDirect=*/primaryWalk >= 0);
-                        }
+                        // Deeper bounces keep the sticky bucket; only the primary walk's boundary takes direct light past bounce 0.
+                        const Route route = bounce > 0 ? Route::Bucket : farSide ? Route::DirectRefraction : Route::DirectLobes;
+                        graph.lights.push_back({LightTechnique::SurfaceNee, vertex, visibility * throughput * lightSample->radiance / lightSample->pdf,
+                                                lightSample->pdf, 0.0F, farSide, ordersBegin, graph.orders.size(), route, pathBucket,
+                                                primaryWalk >= 0});
                     }
+                }
+                // Orders no node took: dropped, so the buffer holds only what the evaluation reads.
+                if (graph.lights.size() == nodes) {
+                    graph.orders.resize(ordersBegin);
                 }
             }
         }
@@ -880,10 +909,8 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
         }
 
         // A window's undeviated transmission is a null vertex: MIS keeps the last scattering vertex, whose density this ray still carries.
-        if (!sample->passThrough) {
-            lastBsdfPdf = sample->pdf;
-            lastSampleWasDelta = sample->delta;
-            lastShadingPosition = shading.position;
+        if (continues) {
+            misParent = vertex;
         }
 
         const SampledSpectrum weight = crosses ? sample->transmitWeight : sample->throughputWeight - sample->transmitWeight;
@@ -942,6 +969,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
     }
 
     result.terminationBounce = bounce;
+    evaluatePathGraph(graph, lambda, result);
     return result;
 }
 
@@ -1027,6 +1055,8 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
         // Reserved once per chunk: a path's pushes never exceed it, so no path allocates.
         std::vector<MediumEntry> mediumStack;
         mediumStack.reserve(interiors);
+        // Reused by every path in the chunk: its buffers keep their capacity, so a path allocates only past the chunk's deepest.
+        PathGraph graph;
 
         const auto samples = static_cast<float>(settings.samplesPerPass);
         for (std::size_t i = chunkBegin; i < chunkEnd; ++i) {
@@ -1079,7 +1109,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                     primary ? tracePath(primary->ray, dirFootprint, 1.0F / estimateSamples,
                                         settings.denoiseFeatures ? footprintSolidAngle() : 0.0F, scene, instanceLightIndex, lights,
                                         showSky, settings, lambda, sampler, volumeSampler, walkSampler, aoSample, fresnelSample, mediumStack,
-                                        chunkRays)
+                                        graph, chunkRays)
                             : TraceResult{};
                 std::apply([&](const auto&... lane) { ((sum.*lane.first += trace.*lane.first), ...); }, kTraceLanes);
             }

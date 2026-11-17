@@ -1,6 +1,6 @@
 # PBR Pathtracer
 
-*A physically-based spectral, unidirectional Monte Carlo path tracer with progressive sampling: hero-wavelength transport projected to ACEScg, Embree-accelerated, stochastic BSDF combined with environment and area-light NEE via MIS, behind a thin OpenGL display/HUD layer.*
+*A physically-based spectral, unidirectional Monte Carlo path tracer with progressive sampling: hero-wavelength transport projected to ACEScg, Embree-accelerated, stochastic BSDF combined with environment and area-light NEE via MIS over a per-path vertex graph, behind a thin OpenGL display/HUD layer.*
 
 ![Sample](sample.png)
 
@@ -95,8 +95,7 @@ frame["depth"]    # (64, 128, 1) float32, camera-space Z
 
 | Area | Item | Detail | Complexity | ETA | Status |
 | --- | --- | --- | --- | --- | --- |
-| Sampling | Path vertex graph | MIS weights are computed inside each technique. Techniques only append vertices to a per-path acyclic graph that caches BSDF and pdf evaluations, and weights are evaluated after construction, so a new technique needs no recursive weights (Fascione et al. 2018). Output unchanged. | medium | 3 h | ready |
-| Sampling | Bidirectional paths | Light and eye subpaths joined by MIS (Veach and Guibas 1995) over the path vertex graph so caustics converge. Vertex connection and merging and photon methods are not planned: costly, biased, and they fail in hair (Fascione et al. 2018). Waits for the path vertex graph. | high | 8 h | blocked |
+| Sampling | Bidirectional paths | Light and eye subpaths joined by MIS (Veach and Guibas 1995) over the path vertex graph so caustics converge. Vertex connection and merging and photon methods are not planned: costly, biased, and they fail in hair (Fascione et al. 2018). | high | 8 h | ready |
 | Light | Emission spectra | Lights are a kelvin or an RGB colour. Measured spectral power distributions (spectroradiometer CSV) and CIE F-series and LED illuminants (CIE 015:2018) per light, and gel tint functions per light (Langlands and Fascione 2020). | medium | 3 h | ready |
 | Camera | Camera spectral sensitivity | Renders are ACEScg, not camera RGB. Measured camera sensitivities give camera-native RGB, then the camera's IDT to ACEScg, so CG matches the plate (Langlands and Fascione 2020). RGB upsampling refit to the camera's responsivities; HDRIs reconstructed with the capture camera's sensitivities (Fascione et al. 2018). | high | 3 h | ready |
 | Colour | Spectral data | Metals are RGB fits. Measured conductor eta/k, and reflectance and illuminant databases as material and light inputs. | medium | 2 h | ready |

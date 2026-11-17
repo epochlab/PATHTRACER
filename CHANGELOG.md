@@ -3,6 +3,24 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Path vertex graph
+
+Each MIS weight was computed inside its technique while the path was traced. Now techniques only append to a per-path acyclic
+graph that caches their unweighted values and densities, and every weight is applied after construction, as Manuka does (Fascione
+et al. 2018 sec. 3.3). A new technique then adds a node rather than re-deriving another's weight. Evidence is in
+`results/path_vertex_graph`.
+
+- refactor: **path vertex graph** (`path_graph.h`).
+  - `tracePath` appends scattering vertices (the camera, surface vertices, volume scatterings and walk collisions) and light nodes:
+    BSDF hits on lights or the sky, surface emission, and surface and volume NEE.
+  - `evaluatePathGraph` weighs each node from its cached densities and routes it to Beauty and its transport bucket, in insertion
+    order with the original expression trees.
+  - One graph per chunk is reused across its paths, so a path allocates nothing once the buffers are warm.
+- refactor: `evaluateForLight` returns its walk orders unweighted; `weighOrders` applies their power heuristic, for the integrator
+  and `bsdf_validate` alike.
+- Output is unchanged: 126/126 lanes bit-identical on seven scenes. Pass time is unchanged within paired-run resolution.
+- docs: the Path vertex graph roadmap row is removed; Bidirectional paths no longer waits on it.
+
 ## Regular tracking
 
 VDB free flight drew collisions by spectral tracking (Kutz et al. 2017) against an 8^3 majorant grid, and shadow rays estimated
