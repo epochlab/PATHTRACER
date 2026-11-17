@@ -3,6 +3,19 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Roadmap without on-set data
+
+PATHTRACER follows Manuka's spectral pipeline but does not match plates shot on set, so rows that existed only to match on-set
+data are reframed. The ColorChecker (macbeth scene) is the colour, luminance and white-balance reference instead.
+
+- docs: Camera spectral sensitivity becomes Sensor spectral sensitivity: published camera curves with the camera's IDT, or
+  photoreceptor templates for a synthetic eye. The plate-matching upsampling refit and capture-camera HDRI reconstruction are dropped.
+- docs: gel tints leave Emission spectra; a filtered light is its lamp's spectrum times the filter's transmission.
+- docs: the macbeth scene checks colour, luminance and white balance (grey patches read neutral); a custom UV/IR scene checks
+  Infrared and ultraviolet.
+- docs: Bidirectional paths and Manifold next event estimation move to Queued, the latter noting its measured cost: a prototype
+  ran 1.5x per pass on cornell and 25x on a choppy ocean, and lost on time to equal noise.
+
 ## Path vertex graph
 
 Each MIS weight was computed inside its technique while the path was traced. Now techniques only append to a per-path acyclic
