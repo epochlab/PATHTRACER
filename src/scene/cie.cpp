@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <vector>
 
 namespace pathtracer::scene::cie {
 
@@ -208,6 +209,56 @@ Spectrum resample(std::span<const glm::dvec2> samples) {
         const glm::dvec2& a = samples[k];
         const glm::dvec2& b = samples[k + 1];
         out[static_cast<std::size_t>(i)] = glm::mix(a.y, b.y, (nm - a.x) / (b.x - a.x));
+    }
+    return out;
+}
+
+Spectrum resampleSprague(double firstNm, double intervalNm, std::span<const double> samples) {
+    // CIE 167:2005 eqs 6-7 coefficients (over 209), synthesising the two points beyond each end that the stencil reads.
+    constexpr std::array<std::array<double, kSpragueStencil>, 4> kBoundary{{
+        {884.0, -1960.0, 3033.0, -2648.0, 1080.0, -180.0},
+        {508.0, -540.0, 488.0, -367.0, 144.0, -24.0},
+        {-24.0, 144.0, -367.0, 488.0, -540.0, 508.0},
+        {-180.0, 1080.0, -2648.0, 3033.0, -1960.0, 884.0},
+    }};
+    const auto boundaryPoint = [](const std::array<double, kSpragueStencil>& coefficients, std::span<const double> six) {
+        double sum = 0.0;
+        for (std::size_t i = 0; i < kSpragueStencil; ++i) {
+            sum += coefficients[i] * six[i];
+        }
+        return sum / 209.0;
+    };
+    const std::size_t n = samples.size();
+    // Padded so stencil index k reads samples k-2..k+3 for the interval [k, k+1].
+    std::vector<double> padded(n + 4);
+    padded[0] = boundaryPoint(kBoundary[0], samples.first(kSpragueStencil));
+    padded[1] = boundaryPoint(kBoundary[1], samples.first(kSpragueStencil));
+    std::ranges::copy(samples, padded.begin() + 2);
+    padded[n + 2] = boundaryPoint(kBoundary[2], samples.last(kSpragueStencil));
+    padded[n + 3] = boundaryPoint(kBoundary[3], samples.last(kSpragueStencil));
+
+    const double lastNm = firstNm + (intervalNm * static_cast<double>(n - 1));
+    Spectrum out{};
+    for (int i = 0; i < kSampleCount; ++i) {
+        const double nm = wavelengthNm(i);
+        const auto at = static_cast<std::size_t>(i);
+        // Nearest-value extension (CIE 015:2018, ASTM E308): the observer's 360-830 nm reaches past what a spectrophotometer measures.
+        if (nm <= firstNm || nm >= lastNm) {
+            out[at] = nm <= firstNm ? samples.front() : samples.back();
+            continue;
+        }
+        const double t = (nm - firstNm) / intervalNm;
+        // Clamped: on a non-integer grid t can round up to n - 1 just below lastNm, whose stencil would read past the padding.
+        const std::size_t k = std::min(static_cast<std::size_t>(t), n - 2);
+        const double x = t - static_cast<double>(k);
+        const double* r = &padded[k];
+        // CIE 167:2005 eq 5: the quintic's coefficients over the stencil r[0..5] = y(k-2)..y(k+3), each over 24.
+        const double a1 = ((2.0 * r[0]) - (16.0 * r[1]) + (16.0 * r[3]) - (2.0 * r[4])) / 24.0;
+        const double a2 = (-r[0] + (16.0 * r[1]) - (30.0 * r[2]) + (16.0 * r[3]) - r[4]) / 24.0;
+        const double a3 = ((-9.0 * r[0]) + (39.0 * r[1]) - (70.0 * r[2]) + (66.0 * r[3]) - (33.0 * r[4]) + (7.0 * r[5])) / 24.0;
+        const double a4 = ((13.0 * r[0]) - (64.0 * r[1]) + (126.0 * r[2]) - (124.0 * r[3]) + (61.0 * r[4]) - (12.0 * r[5])) / 24.0;
+        const double a5 = ((-5.0 * r[0]) + (25.0 * r[1]) - (50.0 * r[2]) + (50.0 * r[3]) - (25.0 * r[4]) + (5.0 * r[5])) / 24.0;
+        out[at] = r[2] + (x * (a1 + (x * (a2 + (x * (a3 + (x * (a4 + (x * a5)))))))));
     }
     return out;
 }

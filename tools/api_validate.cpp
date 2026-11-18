@@ -896,7 +896,7 @@ PT_CHECK(render_rejects_invalid_display_optics, Fast, Exact) {
     const std::filesystem::path root = std::filesystem::temp_directory_path() / "engine_api_denoiser_off_assets";
     std::filesystem::remove_all(root);
     std::filesystem::create_directories(root / "config");
-    for (const char* directory : {"scenes", "geometry", "materials", "textures"}) {
+    for (const char* directory : {"scenes", "geometry", "materials", "spectra", "textures"}) {
         std::filesystem::create_directory_symlink(assets / directory, root / directory);
     }
     for (const std::filesystem::directory_entry& entry : std::filesystem::directory_iterator(assets / "config")) {
@@ -976,7 +976,7 @@ PT_CHECK(open_takes_the_named_preset, Fast, Exact) {
     const std::filesystem::path root = std::filesystem::temp_directory_path() / "engine_api_posed_assets";
     std::filesystem::remove_all(root);
     std::filesystem::create_directories(root / "scenes");
-    for (const char* directory : {"config", "geometry", "materials", "textures"}) {
+    for (const char* directory : {"config", "geometry", "materials", "spectra", "textures"}) {
         std::filesystem::create_directory_symlink(std::filesystem::path(ASSET_ROOT_DIR) / directory, root / directory);
     }
     std::ofstream(root / "scenes" / "posed.json") << scene.dump();

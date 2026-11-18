@@ -44,6 +44,22 @@ struct SpectralOf<Rgb> {
 template <typename T>
 using Spectral = typename SpectralOf<T>::type;
 
+// Fraunhofer d, F and C lines as OpenPBR states them (587.6, 486.1, 656.3 nm), where V_d = (n_d - 1)/(n_F - n_C) is defined.
+inline constexpr float kLambdaDNm = 587.6F;
+inline constexpr float kLambdaFNm = 486.1F;
+inline constexpr float kLambdaCNm = 656.3F;
+
+// Measured tables a shading point reads in place of its RGB upsampling or Abbe dispersion; null where the authored value stands.
+struct MeasuredInputs {
+    const TabulatedSpectrum* baseColor = nullptr;
+    const TabulatedSpectrum* specularColor = nullptr;
+    const TabulatedSpectrum* transmissionColor = nullptr;
+    const TabulatedSpectrum* specularIor = nullptr;  // n(lambda), read at the hero wavelength as dispersion
+    const TabulatedSpectrum* conductorEta = nullptr;  // the metal's measured complex index, which its film reads
+    const TabulatedSpectrum* conductorKappa = nullptr;
+    Rgb baseColorTint = Rgb(1.0F);  // the vertex colour, multiplying a measured base_color as it does an authored one
+};
+
 // OpenPBR Surface v1.1.1 inputs at their specification defaults; In<T> is T for constants or a constant-or-texture for a bound material.
 template <template <typename> typename In>
 struct OpenPbrInputs {
@@ -85,6 +101,8 @@ struct OpenPbrInputs {
     In<float> geometryOpacity = 1.0F;
     // Uniform in MaterialX, so never textured and outside forEachInput: a bound material reads it before its textures bind.
     bool geometryThinWalled = false;
+    // Views into the owning material's measured data, outside forEachInput: the authored RGB and index stay their projections.
+    MeasuredInputs measured;
 };
 
 // A shading point's inputs at the path's wavelengths, each colour upsampled by its physical kind (Jakob & Hanika 2019).

@@ -1,17 +1,16 @@
 #include "pathtracer/config/scene_config.h"
 
 #include <algorithm>
-#include <charconv>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <fstream>
 #include <initializer_list>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <string>
 #include <string_view>
-#include <system_error>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -19,6 +18,7 @@
 #include <nlohmann/json.hpp>
 
 #include "json_glm.h"
+#include "pathtracer/config/spectral_data.h"
 #include "pathtracer/scene/cie.h"
 
 namespace pathtracer::config {
@@ -103,74 +103,16 @@ std::optional<std::map<std::string, std::map<std::string, TextureConfig>>> parse
     return textures;
 }
 
+// The prefix a light's data-file fault is logged under.
+std::string lightCaller(const std::string& path, std::size_t index) {
+    return "loadSceneConfig: " + path + ": lights[" + std::to_string(index) + "]";
+}
+
 // Logs lights[index]'s authoring error and yields nullopt, for the caller to return.
 template <typename... Why>
 std::nullopt_t rejectLight(const std::string& path, std::size_t index, const Why&... why) {
     ((std::cerr << "loadSceneConfig: " << path << ": lights[" << index << "] ") << ... << why) << '\n';
     return std::nullopt;
-}
-
-// One "nm,value" row, whitespace around each field allowed; nullopt unless both parse whole as finite numbers.
-std::optional<glm::dvec2> spectrumRow(std::string_view line) {
-    const auto number = [](std::string_view field) -> std::optional<double> {
-        const auto first = field.find_first_not_of(" \t");
-        const auto last = field.find_last_not_of(" \t");
-        if (first == std::string_view::npos) {
-            return std::nullopt;
-        }
-        field = field.substr(first, last - first + 1);
-        double value = 0.0;
-        const auto [end, error] = std::from_chars(field.data(), field.data() + field.size(), value);
-        if (error != std::errc{} || end != field.data() + field.size() || !std::isfinite(value)) {
-            return std::nullopt;
-        }
-        return value;
-    };
-    const auto comma = line.find(',');
-    if (comma == std::string_view::npos) {
-        return std::nullopt;
-    }
-    const std::optional<double> nm = number(line.substr(0, comma));
-    const std::optional<double> value = number(line.substr(comma + 1));
-    if (!nm || !value) {
-        return std::nullopt;
-    }
-    return glm::dvec2(*nm, *value);
-}
-
-// A spectral CSV as the CIE datasets lay theirs out: headerless nm,value rows, nm rising, values in [0, maxValue]; resampled to the grid.
-std::optional<pathtracer::scene::cie::Spectrum> loadSpectrumCsv(const std::string& file, double maxValue, const std::string& path,
-                                                               std::size_t index) {
-    const auto reject = [&](const auto&... why) { return rejectLight(path, index, file, ": ", why...); };
-    std::ifstream stream(file);
-    if (!stream) {
-        return reject("cannot be opened");
-    }
-    std::vector<glm::dvec2> samples;
-    std::string line;
-    for (int number = 1; std::getline(stream, line); ++number) {
-        if (!line.empty() && line.back() == '\r') {
-            line.pop_back();
-        }
-        if (line.empty()) {
-            continue;
-        }
-        const std::optional<glm::dvec2> sample = spectrumRow(line);
-        if (!sample || !(sample->x > 0.0)) {
-            return reject("line ", number, " is not a positive nm and a finite value, comma-separated");
-        }
-        if (!samples.empty() && !(sample->x > samples.back().x)) {
-            return reject("line ", number, " does not rise in nm");
-        }
-        if (!(sample->y >= 0.0 && sample->y <= maxValue)) {
-            return reject("line ", number, " value ", sample->y, " lies outside [0, ", maxValue, "]");
-        }
-        samples.push_back(*sample);
-    }
-    if (samples.size() < 2) {
-        return reject("needs two or more rows");
-    }
-    return pathtracer::scene::cie::resample(samples);
 }
 
 // A light's unit-luminance spectrum (its source times its filter), the filter, and the locus a kelvin override resolves on.
@@ -204,7 +146,8 @@ std::optional<pathtracer::scene::cie::Spectrum> sourcePower(const nlohmann::json
         return rejectLight(path, index, value, " K is not positive or radiates no luminance");
     }
     if (const auto spectrum = light.find("spectrum"); spectrum != light.end()) {
-        return loadSpectrumCsv(assetRoot + "/" + spectrum->get<std::string>(), std::numeric_limits<double>::infinity(), path, index);
+        return loadSpectrumCsv(assetRoot + "/" + spectrum->get<std::string>(), std::numeric_limits<double>::infinity(), Beyond::Zero,
+                               lightCaller(path, index));
     }
     const auto name = light.at("illuminant").get<std::string>();
     std::optional<cie::Spectrum> power = cie::lampSpectrum(name);
@@ -237,7 +180,8 @@ std::optional<LightColor> lightColor(const nlohmann::json& light, const std::str
     }
     cie::Spectrum filter = cie::kUnitSpectrum;
     if (const auto it = light.find("filter"); it != light.end()) {
-        std::optional<cie::Spectrum> transmittance = loadSpectrumCsv(assetRoot + "/" + it->get<std::string>(), 1.0, path, index);
+        std::optional<cie::Spectrum> transmittance =
+            loadSpectrumCsv(assetRoot + "/" + it->get<std::string>(), 1.0, Beyond::Zero, lightCaller(path, index));
         if (!transmittance) {
             return std::nullopt;
         }
@@ -435,6 +379,135 @@ bool addRandomChecker(const pathtracer::scene::InputSpec& spec, const nlohmann::
     return true;
 }
 
+// The colour inputs a measured spectrum may stand in for: where its data lands, and the constant its scene RGB fills.
+struct MeasuredColourInput {
+    std::string_view name;
+    std::optional<pathtracer::scene::MeasuredColour> pathtracer::scene::MeasuredMaterial::*data;
+    pathtracer::scene::Rgb pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant>::*constant;
+};
+constexpr std::array<MeasuredColourInput, 3> kMeasuredColours{{
+    {"base_color", &pathtracer::scene::MeasuredMaterial::baseColor, &MaterialConfig::baseColor},
+    {"specular_color", &pathtracer::scene::MeasuredMaterial::specularColor, &MaterialConfig::specularColor},
+    {"transmission_color", &pathtracer::scene::MeasuredMaterial::transmissionColor, &MaterialConfig::transmissionColor},
+}};
+
+// Logs the material input's authoring error and yields false, for the caller to return.
+template <typename... Why>
+bool rejectInput(const std::string& path, std::string_view input, const Why&... why) {
+    ((std::cerr << "loadMaterialConfig: " << path << ": " << input << ' ') << ... << why) << '\n';
+    return false;
+}
+
+// {"spectrum": csv} or {"chart": {"spectra", "columns", "rows"}} on a colour input: reflectances or transmittances in [0, 1].
+bool addMeasuredColour(const MeasuredColourInput& input, const nlohmann::json& binding, pathtracer::scene::MeasuredMaterial& measured,
+                       const std::string& path, const std::string& assetRoot) {
+    const std::string caller = "loadMaterialConfig: " + path + ": " + std::string(input.name);
+    if (const auto spectrum = binding.find("spectrum"); spectrum != binding.end()) {
+        const std::optional<pathtracer::scene::cie::Spectrum> values =
+            loadSpectrumCsv(assetRoot + "/" + spectrum->get<std::string>(), 1.0, Beyond::Nearest, caller);
+        if (!values) {
+            return false;
+        }
+        measured.*input.data = pathtracer::scene::measuredColour({*values}, 1, 1);
+        return true;
+    }
+    const nlohmann::json& chart = binding.at("chart");
+    if (!onlyKnownKeys(chart, {"spectra", "columns", "rows"}, path, "chart")) {
+        return false;
+    }
+    const int columns = chart.at("columns").get<int>();
+    const int rows = chart.at("rows").get<int>();
+    const std::optional<std::vector<ChartPatch>> patches = loadChartCsv(assetRoot + "/" + chart.at("spectra").get<std::string>(), caller);
+    if (!patches) {
+        return false;
+    }
+    if (columns < 1 || rows < 1 || patches->size() != static_cast<std::size_t>(columns) * static_cast<std::size_t>(rows)) {
+        return rejectInput(path, input.name, "chart has ", patches->size(), " patches, not columns x rows ", columns, " x ", rows);
+    }
+    std::vector<pathtracer::scene::cie::Spectrum> spectra;
+    for (const ChartPatch& patch : *patches) {
+        spectra.push_back(patch.reflectance);
+    }
+    measured.*input.data = pathtracer::scene::measuredColour(spectra, columns, rows);
+    return true;
+}
+
+// {"nk": csv} on base_color: the conductor's measured complex index sets base_color and specular_color, F82's two points, per wavelength.
+bool addConductor(const nlohmann::json& file, pathtracer::scene::MeasuredMaterial& measured, const std::string& path, const std::string& assetRoot) {
+    const std::optional<ComplexIndexSpectrum> index = loadNkCsv(assetRoot + "/" + file.get<std::string>(), "loadMaterialConfig: " + path + ": base_color");
+    if (!index) {
+        return false;
+    }
+    const pathtracer::scene::ConductorColours colours = pathtracer::scene::conductorColours(index->n, index->k);
+    measured.baseColor = pathtracer::scene::measuredColour({colours.f0}, 1, 1);
+    measured.specularColor = pathtracer::scene::measuredColour({colours.tint}, 1, 1);
+    measured.conductorEta = pathtracer::scene::tabulate(index->n);
+    measured.conductorKappa = pathtracer::scene::tabulate(index->k);
+    return true;
+}
+
+// {"sellmeier": {"b": [B1, B2, B3], "c": [C1, C2, C3]}} on specular_ior, C in um^2: the glass's catalogue dispersion.
+bool addSellmeier(const nlohmann::json& binding, pathtracer::scene::MeasuredMaterial& measured, const std::string& path) {
+    if (!onlyKnownKeys(binding, {"b", "c"}, path, "sellmeier")) {
+        return false;
+    }
+    const pathtracer::scene::cie::Spectrum index =
+        pathtracer::scene::sellmeierIndex(binding.at("b").get<std::array<double, 3>>(), binding.at("c").get<std::array<double, 3>>());
+    // A resonance inside the grid makes a neighbouring sample imaginary, or n <= 1: no transparent glass's index.
+    if (!std::ranges::all_of(index, [](double n) { return std::isfinite(n) && n > 1.0; })) {
+        return rejectInput(path, "specular_ior", "sellmeier has no real index above 1 over ", pathtracer::scene::cie::kLambdaMinNm, "-",
+                           pathtracer::scene::cie::kLambdaMaxNm, " nm");
+    }
+    measured.specularIor = pathtracer::scene::tabulate(index);
+    return true;
+}
+
+// One object binding in place of spec's constant: a random checker, or measured data where that input takes it.
+bool addBinding(const pathtracer::scene::InputSpec& spec, const nlohmann::json& binding, MaterialConfig& material,
+                pathtracer::scene::MeasuredMaterial& measured, const std::string& path, const std::string& assetRoot) {
+    if (binding.size() != 1) {
+        return rejectInput(path, spec.name, "binding needs exactly one of randomChecker, spectrum, chart, nk or sellmeier");
+    }
+    const std::string& kind = binding.items().begin().key();
+    if (kind == "randomChecker") {
+        return addRandomChecker(spec, binding, material, path);
+    }
+    if (kind == "nk" && spec.name == "base_color") {
+        return addConductor(binding.at("nk"), measured, path, assetRoot);
+    }
+    if (kind == "sellmeier" && spec.name == "specular_ior") {
+        return addSellmeier(binding.at("sellmeier"), measured, path);
+    }
+    const auto colour = std::ranges::find(kMeasuredColours, spec.name, &MeasuredColourInput::name);
+    if ((kind == "spectrum" || kind == "chart") && colour != kMeasuredColours.end()) {
+        return addMeasuredColour(*colour, binding, measured, path, assetRoot);
+    }
+    return rejectInput(path, spec.name, "cannot take a '", kind, "' binding");
+}
+
+// Measured data's constants (scene RGB, n_d) and views; false where an authored input contradicts what the data sets.
+bool applyMeasured(pathtracer::scene::MeasuredMaterial measured, const nlohmann::json& j, MaterialConfig& material, const std::string& path) {
+    if (measured.conductorEta && j.contains("specular_color")) {
+        return rejectInput(path, "specular_color", "is set by base_color's nk");
+    }
+    if (measured.specularIor && (j.contains("transmission_dispersion_scale") || j.contains("transmission_dispersion_abbe_number"))) {
+        return rejectInput(path, "transmission_dispersion", "is set by specular_ior's sellmeier");
+    }
+    for (const MeasuredColourInput& input : kMeasuredColours) {
+        const std::optional<pathtracer::scene::MeasuredColour>& colour = measured.*input.data;
+        if (colour && colour->spectra.size() == 1) {
+            material.*input.constant = colour->rgb.front();
+        }
+    }
+    if (measured.specularIor) {
+        material.specularIor = pathtracer::scene::sampleTabulated(*measured.specularIor, pathtracer::scene::kLambdaDNm);
+    }
+    auto data = std::make_shared<const pathtracer::scene::MeasuredMaterial>(std::move(measured));
+    material.measured = pathtracer::scene::uniformView(*data);
+    material.measuredData = std::move(data);
+    return true;
+}
+
 }  // namespace
 
 std::optional<SceneConfig> loadSceneConfig(const std::string& path, const std::string& assetRoot) {
@@ -566,7 +639,7 @@ std::optional<VolumeMaterialConfig> loadVolumeMaterialConfig(const std::string& 
     }
 }
 
-std::optional<MaterialConfig> loadMaterialConfig(const std::string& path) {
+std::optional<MaterialConfig> loadMaterialConfig(const std::string& path, const std::string& assetRoot) {
     const std::optional<nlohmann::json> parsed = readJson(path, "loadMaterialConfig");
     if (!parsed) {
         return std::nullopt;
@@ -587,6 +660,7 @@ std::optional<MaterialConfig> loadMaterialConfig(const std::string& path) {
         }
         MaterialConfig material;
         material.geometryThinWalled = j.value("geometry_thin_walled", false);
+        pathtracer::scene::MeasuredMaterial measured;
         bool ok = true;
         pathtracer::scene::forEachInput(
             [&](const pathtracer::scene::InputSpec& spec, auto& value) {
@@ -595,7 +669,7 @@ std::optional<MaterialConfig> loadMaterialConfig(const std::string& path) {
                     return;
                 }
                 if (it->is_object()) {
-                    ok = addRandomChecker(spec, *it, material, path) && ok;
+                    ok = addBinding(spec, *it, material, measured, path, assetRoot) && ok;
                     return;
                 }
                 if constexpr (std::is_same_v<std::decay_t<decltype(value)>, float>) {
@@ -606,7 +680,8 @@ std::optional<MaterialConfig> loadMaterialConfig(const std::string& path) {
                 ok = validInput(spec, value, path) && ok;
             },
             material);
-        if (!ok) {
+        const bool anyMeasured = measured.baseColor || measured.specularColor || measured.transmissionColor || measured.specularIor;
+        if (!ok || (anyMeasured && !applyMeasured(std::move(measured), j, material, path))) {
             return std::nullopt;
         }
         return material;

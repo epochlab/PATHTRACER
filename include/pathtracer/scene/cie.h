@@ -69,6 +69,12 @@ inline constexpr double kDaylightMaxKelvin = 25000.0;
 // (nm, value) samples at strictly increasing nm, two or more: linear between them, zero outside (the CIE datasets' convention).
 [[nodiscard]] Spectrum resample(std::span<const glm::dvec2> samples);
 
+// Sprague's quintic reads six samples about each interval, so fewer cannot seed it.
+inline constexpr std::size_t kSpragueStencil = 6;
+
+// Sprague (1880) quintic through kSpragueStencil or more uniform samples (CIE 167:2005); nearest value beyond their ends (CIE 015:2018).
+[[nodiscard]] Spectrum resampleSprague(double firstNm, double intervalNm, std::span<const double> samples);
+
 // A CIE 015:2018 tabulated lamp by CIE name: FL1-FL12, FL3.1-FL3.15, HP1-HP5, LED-B1-B5, LED-BH1, LED-RGB1, LED-V1, LED-V2.
 [[nodiscard]] std::optional<Spectrum> lampSpectrum(std::string_view name);
 

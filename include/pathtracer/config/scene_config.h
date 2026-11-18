@@ -1,6 +1,7 @@
 #pragma once
 
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <variant>
@@ -11,6 +12,7 @@
 #include "pathtracer/config/profile_config.h"
 #include "pathtracer/scene/cie.h"
 #include "pathtracer/scene/material.h"
+#include "pathtracer/scene/measured.h"
 #include "pathtracer/scene/rgb.h"
 #include "pathtracer/scene/spectrum.h"
 
@@ -119,6 +121,7 @@ struct VolumeConfig {
 // A material file: OpenPBR Surface v1.1.1 constants under their specification names, every omitted input at its default.
 struct MaterialConfig : pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant> {
     pathtracer::scene::RandomCheckerInputs randomCheckers;  // inputs a {"randomChecker": {...}} object drives; their constants stay default
+    std::shared_ptr<const pathtracer::scene::MeasuredMaterial> measuredData;  // what measured views; null where nothing is measured
 };
 
 // The asset to load and how to shade and light it: what is specific to this scene, as against ProfileConfig's session-wide defaults.
@@ -145,8 +148,8 @@ struct SceneConfig {
 // Puts scene.camera, where the scene names one, over profile.camera: the one place a scene overrides the session's camera.
 void applySceneCamera(const SceneConfig& scene, ProfileConfig& profile);
 
-// Reads and parses a standalone material file (e.g. assets/materials/clay.json). Same failure contract as loadSceneConfig.
-[[nodiscard]] std::optional<MaterialConfig> loadMaterialConfig(const std::string& path);
+// Reads and parses a material file (e.g. assets/materials/clay.json), its spectral data from assetRoot. Fails as loadSceneConfig.
+[[nodiscard]] std::optional<MaterialConfig> loadMaterialConfig(const std::string& path, const std::string& assetRoot);
 
 // Reads and validates a volume material file (e.g. assets/materials/volume.json). Same failure contract as loadSceneConfig.
 [[nodiscard]] std::optional<VolumeMaterialConfig> loadVolumeMaterialConfig(const std::string& path);

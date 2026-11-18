@@ -1,9 +1,11 @@
-// Gate for CIE 1931 (scene/cie.cpp), the metal fit, and the Fresnel shading chrome.
+// Gate for CIE 1931 (scene/cie.cpp), measured spectral data (config/spectral_data.cpp, scene/measured.cpp) and how they shade.
 
 #include <algorithm>
 #include <cfloat>
 #include <array>
 #include <cmath>
+#include <complex>
+#include <cstddef>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -17,21 +19,50 @@
 #include "check.h"
 #include "conductor_reference.h"
 #include "pathtracer/config/scene_config.h"
+#include "pathtracer/config/spectral_data.h"
 #include "pathtracer/gfx/ocio_display_transform.h"
 #include "pathtracer/scene/bsdf.h"
 #include "pathtracer/scene/cie.h"
+#include "pathtracer/scene/measured.h"
 #include "pathtracer/scene/spectrum.h"
-#include "colorchecker.h"
-#include "metal_fit.h"
 
 namespace {
 
 namespace cie = pathtracer::scene::cie;
-using tools::colorchecker::Patch;
-using tools::metal_fit::Interpolation;
+using pathtracer::config::ChartPatch;
 
-const std::string kChromiumTable = std::string(TOOLS_DATA_DIR) + "/chromium_johnson_christy_1974.csv";
-const std::string kColorCheckerTable = std::string(TOOLS_DATA_DIR) + "/colorchecker_babelcolor_average.csv";
+const std::string kSpectra = std::string(ASSET_ROOT_DIR) + "/spectra/";
+const std::string kColorCheckerTable = kSpectra + "colorchecker_babelcolor_average.csv";
+
+// The Classic chart's patch count, 6 x 4.
+constexpr std::size_t kPatchCount = 24;
+
+// Wavelengths on the 1 nm grid, where a tabulated spectrum is its double sample rounded once to float.
+pathtracer::scene::SampledWavelengths gridWavelengths(const glm::vec4& nm) {
+    pathtracer::scene::SampledWavelengths lambda = pathtracer::scene::sampleWavelengths(0.5F);
+    lambda.nm = nm;
+    return lambda;
+}
+
+// Rows "lambda_um,n,k" as written, linear in nm at one wavelength: the oracle reads the file apart from loadNkCsv.
+std::complex<double> nkAt(const std::string& file, double nm) {
+    std::ifstream in(file);
+    std::string line;
+    glm::dvec3 below(0.0);
+    while (std::getline(in, line)) {
+        glm::dvec3 row(0.0);
+        if (line.empty() || line.front() == '#' || std::sscanf(line.c_str(), "%lf,%lf,%lf", &row.x, &row.y, &row.z) != 3) {
+            continue;
+        }
+        row.x *= 1000.0;
+        if (row.x >= nm) {
+            const double t = (nm - below.x) / (row.x - below.x);
+            return {std::lerp(below.y, row.y, t), std::lerp(below.z, row.z, t)};
+        }
+        below = row;
+    }
+    return {0.0, 0.0};
+}
 
 // Two 3x3 double inversions on O(1) entries round at ~1e-15; three orders of headroom still resolves any real defect.
 constexpr double kDoubleRoundoff = 1e-12;
@@ -387,7 +418,7 @@ glm::dvec3 sigmoidToScene(const pathtracer::scene::RgbSigmoid& sigmoid) {
 
 // Measured ColorChecker reflectances' scene RGB under D65 round-trip through the table within a tenth of a JND.
 PT_CHECK(rgb_spectrum_table_round_trips_measured_reflectances, Fast, Exact) {
-    const std::optional<std::vector<Patch>> patches = tools::colorchecker::loadColorChecker(kColorCheckerTable);
+    const std::optional<std::vector<ChartPatch>> patches = pathtracer::config::loadChartCsv(kColorCheckerTable, "colour_validate");
     ctx.plan(1);
     if (!patches) {
         PT_EXPECT(ctx, false, "ColorChecker table unavailable");
@@ -403,9 +434,10 @@ PT_CHECK(rgb_spectrum_table_round_trips_measured_reflectances, Fast, Exact) {
     const glm::dmat3 toXyz = glm::inverse(cie::xyzToScene());
     double worst = 0.0;
     std::string worstName;
-    for (const Patch& patch : *patches) {
-        const glm::dvec3 rendered = sigmoidToScene(pathtracer::scene::rgbSigmoid(pathtracer::scene::Rgb(glm::vec3(patch.scene))));
-        const double error = deltaE2000(lab(toXyz * patch.scene, white), lab(toXyz * rendered, white));
+    for (const ChartPatch& patch : *patches) {
+        const glm::dvec3 scene = cie::reflectanceToScene(patch.reflectance);
+        const glm::dvec3 rendered = sigmoidToScene(pathtracer::scene::rgbSigmoid(pathtracer::scene::Rgb(glm::vec3(scene))));
+        const double error = deltaE2000(lab(toXyz * scene, white), lab(toXyz * rendered, white));
         if (error > worst) {
             worst = error;
             worstName = patch.name;
@@ -476,78 +508,113 @@ PT_CHECK(sensor_projects_the_scene_white_to_one, Fast, Exact) {
     PT_EXPECT(ctx, maxAbs(reflectance - glm::dvec3(1.0)) <= 1e-4, detail);
 }
 
-// A material must be metal_fit's exact output; shading it must meet CIE-projected measurement at mu = 1 and, uncapped, mu-bar = 1/7.
-void expectMeasuredMetal(tools::check::Context& ctx, const std::string& table, const char* materialFile) {
-    // Per channel the material against the fit and the fit's misfit; per lane the shading Fresnel against F82 of the upsampled colours.
-    constexpr int kExpectations = (3 * 3) + (2 * pathtracer::scene::kSpectrumSamples);
-    ctx.plan(kExpectations);
-    const auto nk = tools::metal_fit::loadNkTable(table);
-    const auto material =
-        pathtracer::config::loadMaterialConfig((std::filesystem::path(ASSET_ROOT_DIR) / "materials" / materialFile).string());
-    const auto fit = nk ? tools::metal_fit::fitF82(*nk, Interpolation::Wavelength) : std::nullopt;
-    if (!fit || !material) {
-        for (int i = 0; i < kExpectations; ++i) {
-            PT_EXPECT(ctx, false, "table, fit or material unavailable");
-        }
-        return;
-    }
-    const pathtracer::scene::SampledWavelengths lambda = pathtracer::scene::sampleWavelengths(0.5F);
-    const pathtracer::scene::BsdfClosure closure =
-        pathtracer::scene::makeBsdfClosure(pathtracer::scene::toSpectral(*material, lambda), glm::vec3(0.0F, 0.0F, 1.0F), lambda.nm);
+// Grid wavelengths spanning the visible: lane j's table entry is that wavelength's double sample, rounded once.
+constexpr glm::vec4 kGridNm(420.0F, 510.0F, 580.0F, 690.0F);
+
+// A conductor's shading at mu = 1 and mu-bar = 1/7 meets exact Fresnel of the file's n,k (F82's two points), uncapped lanes to float.
+void expectMeasuredConductor(tools::check::Context& ctx, const std::string& table, const pathtracer::scene::BsdfClosure& closure) {
     const pathtracer::scene::SampledSpectrum normal = pathtracer::scene::fresnelAtViewAngle(closure, 1.0F);
-    const pathtracer::scene::SampledSpectrum grazing =
-        pathtracer::scene::fresnelAtViewAngle(closure, static_cast<float>(tools::reference::kMuBar));
-    const pathtracer::scene::SampledSpectrum base = pathtracer::scene::reflectanceSpectrum(material->baseColor, lambda);
-    const pathtracer::scene::SampledSpectrum edge = pathtracer::scene::reflectanceSpectrum(material->specularColor, lambda);
+    const pathtracer::scene::SampledSpectrum grazing = pathtracer::scene::fresnelAtViewAngle(closure, static_cast<float>(tools::reference::kMuBar));
     char detail[200];
     for (int lane = 0; lane < pathtracer::scene::kSpectrumSamples; ++lane) {
-        const double normalError = std::abs(normal[lane] - base[lane]);
-        std::snprintf(detail, sizeof(detail), "lane %d renderer R(mu=1) off the upsampled base_color by %.3e", lane, normalError);
-        PT_EXPECT(ctx, normalError <= kFloatResolution, detail);
-        const double model = tools::reference::referenceF82(base[lane], edge[lane], tools::reference::kMuBar);
-        const double grazingError = std::abs(grazing[lane] - model);
-        std::snprintf(detail, sizeof(detail), "lane %d renderer R(mu=1/7) off the F82 model by %.3e", lane, grazingError);
-        PT_EXPECT(ctx, grazingError <= kFloatResolution, detail);
-    }
-    for (int c = 0; c < 3; ++c) {
-        std::snprintf(detail, sizeof(detail), "%s base_color[%d] %.9g != metal_fit %.9g; re-run metal_fit", materialFile, c,
-                      material->baseColor[c], static_cast<float>(fit->baseColor[c]));
-        PT_EXPECT(ctx, material->baseColor[c] == static_cast<float>(fit->baseColor[c]), detail);
-        std::snprintf(detail, sizeof(detail), "%s specular_color[%d] %.9g != metal_fit %.9g; re-run metal_fit", materialFile, c,
-                      material->specularColor[c], static_cast<float>(fit->specularColor[c]));
-        PT_EXPECT(ctx, material->specularColor[c] == static_cast<float>(fit->specularColor[c]), detail);
-        const double model = tools::reference::referenceF82(fit->baseColor[c], fit->specularColor[c], tools::reference::kMuBar);
-        const double misfit = std::abs(model - fit->atMuBar[c]);
-        std::snprintf(detail, sizeof(detail), "channel %d F82 misses the CIE target at mu-bar by %.3e", c, misfit);
-        PT_EXPECT(ctx, !fit->specularCapped[c] && misfit <= kFloatResolution, detail);
+        const std::complex<double> eta = nkAt(table, kGridNm[lane]);
+        const double exactNormal = tools::reference::referenceConductorFresnelAt(eta, 1.0);
+        const double exactGrazing = tools::reference::referenceConductorFresnelAt(eta, tools::reference::kMuBar);
+        const double schlick = exactNormal + ((1.0 - exactNormal) * std::pow(1.0 - tools::reference::kMuBar, 5.0));
+        // A tint past OpenPBR's 1 caps there: F82 then meets Schlick at mu-bar, its closest in range.
+        const double target = std::min(exactGrazing, schlick);
+        std::snprintf(detail, sizeof(detail), "%s %.0f nm: R(1) %.9g vs exact %.9g", table.c_str(), kGridNm[lane], normal[lane], exactNormal);
+        PT_EXPECT(ctx, std::abs(normal[lane] - exactNormal) <= kFloatResolution, detail);
+        std::snprintf(detail, sizeof(detail), "%s %.0f nm: R(1/7) %.9g vs exact %.9g", table.c_str(), kGridNm[lane], grazing[lane], target);
+        PT_EXPECT(ctx, std::abs(grazing[lane] - target) <= kFloatResolution, detail);
     }
 }
 
-PT_CHECK(chrome_matches_measured_chromium, Fast, Exact) { expectMeasuredMetal(ctx, kChromiumTable, "chrome.json"); }
-
-std::optional<std::vector<tools::metal_fit::NkSample>> loadText(const char* name, const std::string& text) {
-    const std::filesystem::path path = std::filesystem::temp_directory_path() / name;
-    std::ofstream(path) << text;
-    return tools::metal_fit::loadNkTable(path.string());
+// A metal material shades from its nk file: chrome (chromium) and gold, each at the file's exact Fresnel.
+PT_CHECK(measured_metal_materials_meet_exact_fresnel, Fast, Exact) {
+    const std::array<std::pair<const char*, const char*>, 2> metals{{{"chrome.json", "chromium_johnson_christy_1974.csv"},
+                                                                     {"gold.json", "gold_johnson_christy_1972.csv"}}};
+    ctx.plan(static_cast<int>(metals.size()) * (1 + (2 * pathtracer::scene::kSpectrumSamples)));
+    for (const auto& [materialFile, table] : metals) {
+        const auto material = pathtracer::config::loadMaterialConfig(std::string(ASSET_ROOT_DIR) + "/materials/" + materialFile, ASSET_ROOT_DIR);
+        PT_EXPECT(ctx, material.has_value() && material->measured.conductorEta != nullptr, std::string(materialFile) + " binds no nk");
+        if (!material || material->measured.conductorEta == nullptr) {
+            continue;
+        }
+        const pathtracer::scene::SampledWavelengths lambda = gridWavelengths(kGridNm);
+        expectMeasuredConductor(ctx, kSpectra + table,
+                                pathtracer::scene::makeBsdfClosure(pathtracer::scene::toSpectral(*material, lambda), glm::vec3(0.0F, 0.0F, 1.0F), lambda.nm));
+    }
 }
 
-// Each row is a table some real transcription or sourcing mistake produces; the shipped row proves the rejections reject only those.
-PT_CHECK(nk_table_and_fit_reject_invalid_input, Fast, Exact) {
-    ctx.plan(9);
-    PT_EXPECT(ctx, tools::metal_fit::loadNkTable(kChromiumTable).has_value(), "shipped chromium table rejected");
-    PT_EXPECT(ctx, loadText("engine_colour_crlf.csv", "0.30,1,1\r\n0.90,1,1\r\n").has_value(), "CRLF table rejected");
-    PT_EXPECT(ctx, !loadText("engine_colour_gap.csv", "0.30,1,1\n0.80,1,1\n"), "table ending at 800 nm accepted");
-    PT_EXPECT(ctx, !loadText("engine_colour_order.csv", "0.30,1,1\n0.50,1,1\n0.50,1,1\n0.90,1,1\n"),
-                  "repeated wavelength accepted");
-    PT_EXPECT(ctx, !loadText("engine_colour_k.csv", "0.30,1,1\n0.90,1,-0.1\n"), "negative k accepted");
-    PT_EXPECT(ctx, !loadText("engine_colour_n.csv", "0.30,0,1\n0.90,1,1\n"), "zero n accepted");
-    PT_EXPECT(ctx, !loadText("engine_colour_row.csv", "0.30,1,1\n0.90 1 1\n"), "malformed row accepted");
-    // n = 0.01, k = 100 reflects 1 - 4e-6 at normal incidence: F82 has no reflectivity domain to leave, so a near-perfect mirror fits.
-    const auto mirror = loadText("engine_colour_mirror.csv", "0.30,0.01,100\n0.90,0.01,100\n");
-    PT_EXPECT(ctx, mirror && tools::metal_fit::fitF82(*mirror, Interpolation::Wavelength), "a near-perfect mirror was rejected");
-    // Black but for a mirror band at 510-520 nm, bluer-green than AP1's green primary: its red projects below 0, which no base_color holds.
-    const auto band = loadText("engine_colour_band.csv", "0.30,1,0\n0.50,1,0\n0.51,0.01,100\n0.52,0.01,100\n0.53,1,0\n0.90,1,0\n");
-    PT_EXPECT(ctx, band && !tools::metal_fit::fitF82(*band, Interpolation::Wavelength), "an out-of-gamut base_color was accepted");
+// Every shipped conductor table, bound bare (metalness 1, specular_weight 1, smooth), shades at its exact Fresnel.
+PT_CHECK(measured_conductor_tables_meet_exact_fresnel, Fast, Exact) {
+    const std::array<const char*, 5> tables{"chromium_johnson_christy_1974.csv", "gold_johnson_christy_1972.csv", "silver_johnson_christy_1972.csv",
+                                            "copper_johnson_christy_1972.csv", "aluminium_rakic_1995.csv"};
+    ctx.plan(static_cast<int>(tables.size()) * (1 + (2 * pathtracer::scene::kSpectrumSamples)));
+    for (const char* table : tables) {
+        const std::optional<pathtracer::config::ComplexIndexSpectrum> index = pathtracer::config::loadNkCsv(kSpectra + table, "colour_validate");
+        PT_EXPECT(ctx, index.has_value(), std::string(table) + " rejected");
+        if (!index) {
+            continue;
+        }
+        pathtracer::scene::MeasuredMaterial measured;
+        const pathtracer::scene::ConductorColours colours = pathtracer::scene::conductorColours(index->n, index->k);
+        measured.baseColor = pathtracer::scene::measuredColour({colours.f0}, 1, 1);
+        measured.specularColor = pathtracer::scene::measuredColour({colours.tint}, 1, 1);
+        pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant> inputs;
+        inputs.baseMetalness = 1.0F;
+        inputs.specularRoughness = 0.0F;
+        inputs.measured = pathtracer::scene::uniformView(measured);
+        const pathtracer::scene::SampledWavelengths lambda = gridWavelengths(kGridNm);
+        expectMeasuredConductor(ctx, kSpectra + table,
+                                pathtracer::scene::makeBsdfClosure(pathtracer::scene::toSpectral(inputs, lambda), glm::vec3(0.0F, 0.0F, 1.0F), lambda.nm));
+    }
+}
+
+// SCHOTT states N-BK7's n_d 1.5168 and V_d 64.17 (4 and 2 decimals) beside its Sellmeier terms: glass.json's must reproduce them.
+PT_CHECK(glass_sellmeier_reproduces_the_catalogue, Fast, Exact) {
+    ctx.plan(5);
+    const auto glass = pathtracer::config::loadMaterialConfig(std::string(ASSET_ROOT_DIR) + "/materials/glass.json", ASSET_ROOT_DIR);
+    PT_EXPECT(ctx, glass.has_value() && glass->measured.specularIor != nullptr && glass->measured.transmissionColor != nullptr,
+              "glass.json binds no sellmeier index or transmittance");
+    if (!glass || glass->measured.specularIor == nullptr || glass->measured.transmissionColor == nullptr) {
+        return;
+    }
+    // He d 587.5618, H F 486.1327, H C 656.2725 nm: the lines the catalogue's n_d and V_d are stated at.
+    const auto index = [&](float nm) { return static_cast<double>(pathtracer::scene::sampleTabulated(*glass->measured.specularIor, nm)); };
+    const double nd = index(587.5618F);
+    const double vd = (nd - 1.0) / (index(486.1327F) - index(656.2725F));
+    char detail[160];
+    std::snprintf(detail, sizeof(detail), "n_d %.6f vs the catalogue's 1.5168", nd);
+    PT_EXPECT(ctx, std::abs(nd - 1.5168) <= 0.5e-4, detail);
+    std::snprintf(detail, sizeof(detail), "V_d %.4f vs the catalogue's 64.17", vd);
+    PT_EXPECT(ctx, std::abs(vd - 64.17) <= 0.5e-2, detail);
+    // The 25 mm transmittance at 400 nm and 546 nm, rows the catalogue states: the interior absorbs as measured, at transmission_depth.
+    const pathtracer::scene::SampledSpectrum transmittance =
+        pathtracer::scene::toSpectral(*glass, gridWavelengths(glm::vec4(400.0F, 546.0F, 400.0F, 546.0F))).transmissionColor;
+    std::snprintf(detail, sizeof(detail), "25 mm transmittance %.4f at 400 nm, %.4f at 546 nm vs the catalogue's 0.992, 0.996 at depth %.4f m",
+                  transmittance[0], transmittance[1], glass->transmissionDepth);
+    PT_EXPECT(ctx, std::abs(transmittance[0] - 0.992F) <= FLT_EPSILON && std::abs(transmittance[1] - 0.996F) <= FLT_EPSILON, detail);
+    PT_EXPECT(ctx, glass->transmissionDepth == 0.025F, detail);
+}
+
+// Each row is a table some real transcription or sourcing mistake produces; the shipped table proves the rejections reject only those.
+PT_CHECK(nk_table_rejects_invalid_input, Fast, Exact) {
+    const auto load = [](const char* name, const std::string& text) {
+        const std::filesystem::path path = std::filesystem::temp_directory_path() / name;
+        std::ofstream(path) << text;
+        return pathtracer::config::loadNkCsv(path.string(), "colour_validate").has_value();
+    };
+    ctx.plan(7);
+    PT_EXPECT(ctx, pathtracer::config::loadNkCsv(kSpectra + "chromium_johnson_christy_1974.csv", "colour_validate").has_value(),
+              "shipped chromium table rejected");
+    PT_EXPECT(ctx, load("engine_colour_crlf.csv", "0.30,1,1\r\n0.90,1,1\r\n"), "CRLF table rejected");
+    PT_EXPECT(ctx, !load("engine_colour_gap.csv", "0.30,1,1\n0.80,1,1\n"), "table ending at 800 nm accepted");
+    PT_EXPECT(ctx, !load("engine_colour_order.csv", "0.30,1,1\n0.50,1,1\n0.50,1,1\n0.90,1,1\n"), "repeated wavelength accepted");
+    PT_EXPECT(ctx, !load("engine_colour_k.csv", "0.30,1,1\n0.90,1,-0.1\n"), "negative k accepted");
+    PT_EXPECT(ctx, !load("engine_colour_n.csv", "0.30,0,1\n0.90,1,1\n"), "zero n accepted");
+    PT_EXPECT(ctx, !load("engine_colour_row.csv", "0.30,1,1\n0.90 1 1\n"), "malformed row accepted");
 }
 
 // Interior property: two intervals from either end, where no boundary point enters the stencil, Sprague reproduces any quartic exactly.
@@ -566,7 +633,7 @@ PT_CHECK(sprague_reproduces_quartics, Fast, Exact) {
     for (int i = 0; i < kSamples; ++i) {
         samples.push_back(quartic(kFirstNm + (kIntervalNm * i)));
     }
-    const cie::Spectrum resampled = tools::colorchecker::resampleSprague(kFirstNm, kIntervalNm, samples);
+    const cie::Spectrum resampled = cie::resampleSprague(kFirstNm, kIntervalNm, samples);
     double worst = 0.0;
     for (int i = 0; i < cie::kSampleCount; ++i) {
         const double nm = cie::wavelengthNm(i);
@@ -582,7 +649,7 @@ PT_CHECK(sprague_reproduces_quartics, Fast, Exact) {
 // Oracle: colorchecker_oracle.py, colour-science 0.4.6 Sprague align, Integration XYZ, AP1 NPM, Bradford, fed cie_1931.inc's CIE CSVs.
 PT_CHECK(colorchecker_matches_colour_science, Fast, Exact) {
     // Printed to 12 decimals, so each oracle entry carries 5e-13 of quantisation on top of either side's double roundoff.
-    const std::array<glm::dvec3, tools::colorchecker::kPatchCount> oracle{{
+    const std::array<glm::dvec3, kPatchCount> oracle{{
         {0.136914534534, 0.089621054728, 0.062821513397},  // dark skin
         {0.447685891163, 0.314892111832, 0.232738721435},  // light skin
         {0.150315350402, 0.192552069902, 0.316023818371},  // blue sky
@@ -609,15 +676,15 @@ PT_CHECK(colorchecker_matches_colour_science, Fast, Exact) {
         {0.032046858247, 0.031949207125, 0.032511305585},  // black 2 (1.5 D)
 
     }};
-    const auto patches = tools::colorchecker::loadColorChecker(kColorCheckerTable);
-    ctx.plan(1 + tools::colorchecker::kPatchCount);
-    PT_EXPECT(ctx, patches.has_value(), "shipped ColorChecker table rejected");
-    if (!patches) {
+    const auto patches = pathtracer::config::loadChartCsv(kColorCheckerTable, "colour_validate");
+    ctx.plan(1 + static_cast<int>(kPatchCount));
+    PT_EXPECT(ctx, patches.has_value() && patches->size() == kPatchCount, "shipped ColorChecker table rejected");
+    if (!patches || patches->size() != kPatchCount) {
         return;
     }
-    for (int i = 0; i < tools::colorchecker::kPatchCount; ++i) {
-        const Patch& patch = (*patches)[static_cast<std::size_t>(i)];
-        const double error = maxAbs(patch.scene - oracle[static_cast<std::size_t>(i)]);
+    for (std::size_t i = 0; i < kPatchCount; ++i) {
+        const ChartPatch& patch = (*patches)[i];
+        const double error = maxAbs(cie::reflectanceToScene(patch.reflectance) - oracle[i]);
         char detail[200];
         std::snprintf(detail, sizeof(detail), "%s: ACEScg off colour-science by %.3e", patch.name.c_str(), error);
         PT_EXPECT(ctx, error <= kDoubleRoundoff, detail);
@@ -629,19 +696,18 @@ PT_CHECK(colorchecker_table_rejects_invalid_input, Fast, Exact) {
     const auto load = [](const char* name, const std::string& text) {
         const std::filesystem::path path = std::filesystem::temp_directory_path() / name;
         std::ofstream(path) << text;
-        return tools::colorchecker::loadColorChecker(path.string()).has_value();
+        return pathtracer::config::loadChartCsv(path.string(), "colour_validate").has_value();
     };
     const std::string header = "patch,400,410,420,430,440,450\n";
     std::string rows;
-    for (int i = 0; i < tools::colorchecker::kPatchCount; ++i) {
+    for (std::size_t i = 0; i < kPatchCount; ++i) {
         rows += "p" + std::to_string(i) + ",0.1,0.2,0.3,0.4,0.5,0.6\n";
     }
     ctx.plan(6);
     PT_EXPECT(ctx, load("engine_colour_cc_valid.csv", header + rows), "well-formed table rejected");
     PT_EXPECT(ctx, !load("engine_colour_cc_uneven.csv", "patch,400,410,420,430,440,460\n" + rows), "non-uniform grid accepted");
     PT_EXPECT(ctx, !load("engine_colour_cc_short.csv", "patch,400,410,420,430,440\n" + rows), "five-sample header accepted");
-    PT_EXPECT(ctx, !load("engine_colour_cc_count.csv", header + rows + "extra,0.1,0.2,0.3,0.4,0.5,0.6\n"),
-                  "25-patch table accepted");
+    PT_EXPECT(ctx, !load("engine_colour_cc_empty.csv", header), "table of no patches accepted");
     PT_EXPECT(ctx, !load("engine_colour_cc_range.csv", header + rows.substr(0, rows.rfind("0.6")) + "1.2\n"),
                   "reflectance above 1 accepted");
     PT_EXPECT(ctx, !load("engine_colour_cc_ragged.csv", header + rows.substr(0, rows.rfind(",0.6")) + "\n"),

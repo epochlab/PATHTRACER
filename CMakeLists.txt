@@ -134,7 +134,7 @@ target_include_directories(vendored_imgui PRIVATE ${IMGUI_DIR} ${IMGUI_DIR}/back
 target_link_libraries(vendored_imgui PRIVATE glfw)
 target_compile_options(vendored_imgui PRIVATE -w)
 
-# Colorimetry, shared by pathtracer_core and metal_fit. No -march=native or IPO: albedo_table's committed output must reproduce exactly.
+# Colorimetry for pathtracer_core and rgb_spectrum_table. No -march=native or IPO: albedo_table's committed output must reproduce.
 add_library(pathtracer_cie OBJECT src/scene/cie.cpp)
 target_include_directories(pathtracer_cie PUBLIC include)
 pathtracer_target_defaults(pathtracer_cie)
@@ -156,6 +156,7 @@ set_source_files_properties(src/scene/rgb_spectrum_data.cpp PROPERTIES OBJECT_DE
 add_library(pathtracer_core STATIC
     src/config/profile_config.cpp
     src/config/scene_config.cpp
+    src/config/spectral_data.cpp
     src/debug/aov.cpp
     src/debug/aov_filters.cpp
     src/debug/bench_log.cpp
@@ -181,6 +182,7 @@ add_library(pathtracer_core STATIC
     src/scene/lens.cpp
     src/scene/light.cpp
     src/scene/material_binding.cpp
+    src/scene/measured.cpp
     src/scene/medium.cpp
     src/scene/microfacet.cpp
     src/scene/path_trace_driver.cpp
@@ -257,17 +259,9 @@ add_executable(bluenoise_mask tools/bluenoise_mask.cpp)
 pathtracer_target_defaults(bluenoise_mask NATIVE IPO)
 target_link_libraries(bluenoise_mask PRIVATE pathtracer_core)
 
-# ColorChecker spectral data to linear Rec.709, shared by its texture generator and colour_validate's colour-science oracle.
-add_library(colorchecker_core OBJECT tools/colorchecker.cpp)
-target_include_directories(colorchecker_core PUBLIC include tools)
-pathtracer_target_defaults(colorchecker_core)
-target_link_libraries(colorchecker_core PRIVATE glm::glm)
-
 # Offline generator for assets/textures/macbeth.exr, a regenerable (gitignored) asset, so it stays out of ctest.
-add_executable(colorchecker_texture tools/colorchecker_texture.cpp $<TARGET_OBJECTS:colorchecker_core>)
-target_compile_definitions(colorchecker_texture PRIVATE
-    ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets"
-    TOOLS_DATA_DIR="${CMAKE_SOURCE_DIR}/tools/data")
+add_executable(colorchecker_texture tools/colorchecker_texture.cpp)
+target_compile_definitions(colorchecker_texture PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
 pathtracer_target_defaults(colorchecker_texture)
 target_link_libraries(colorchecker_texture PRIVATE pathtracer_core)
 
@@ -276,17 +270,6 @@ add_executable(albedo_table tools/albedo_table.cpp)
 target_include_directories(albedo_table PRIVATE include tools)
 pathtracer_target_defaults(albedo_table)
 target_link_libraries(albedo_table PRIVATE glm::glm)
-
-# Measured conductor (lambda, n, k) to a metal JSON's base_color/specular_color. No -march=native or IPO, for albedo_table's reason.
-add_library(metal_fit_core OBJECT tools/metal_fit.cpp)
-target_include_directories(metal_fit_core PUBLIC include tools)
-pathtracer_target_defaults(metal_fit_core)
-target_link_libraries(metal_fit_core PRIVATE glm::glm)
-
-add_executable(metal_fit tools/metal_fit_main.cpp $<TARGET_OBJECTS:metal_fit_core> $<TARGET_OBJECTS:pathtracer_cie>)
-target_include_directories(metal_fit PRIVATE include tools)
-pathtracer_target_defaults(metal_fit)
-target_link_libraries(metal_fit PRIVATE glm::glm)
 
 # Shared validator harness (check.h, stats.h), depending on nothing but glm so the light validators need not link Embree or OIIO.
 add_library(pathtracer_check OBJECT tools/check.cpp)
@@ -343,10 +326,8 @@ target_include_directories(openpbr_reference_report SYSTEM PRIVATE third_party/o
 pathtracer_target_defaults(openpbr_reference_report NATIVE IPO)
 target_link_libraries(openpbr_reference_report PRIVATE pathtracer_core)
 
-# CIE 1931 module and the measured-metal fit, checked end to end against the Fresnel the renderer shades chrome.json with.
-pathtracer_add_check(colour_validate LINK pathtracer_core ASSETS
-                     SOURCES $<TARGET_OBJECTS:metal_fit_core> $<TARGET_OBJECTS:colorchecker_core>)
-target_compile_definitions(colour_validate PRIVATE TOOLS_DATA_DIR="${CMAKE_SOURCE_DIR}/tools/data")
+# CIE 1931 module and measured spectral data, checked end to end against the Fresnel and spectra the renderer shades with.
+pathtracer_add_check(colour_validate LINK pathtracer_core ASSETS)
 
 # The headless render path through HeadlessRenderer: producer dispatch, per-AOV channel counts, agreement with renderPathTraced.
 pathtracer_add_check(api_validate LINK pathtracer_core ASSETS)

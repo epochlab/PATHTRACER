@@ -1282,15 +1282,15 @@ bool sameMaterial(const Material& a, const Material& b) {
 // Material binding: applySceneMaterials gives every instance materialPath's constants and a named node its override, atomically.
 PT_CHECK(material_binding_resolution, Fast, Exact) {
     const std::string assetRoot = ASSET_ROOT_DIR;
-    const std::optional<pathtracer::config::MaterialConfig> clay = pathtracer::config::loadMaterialConfig(assetRoot + "/materials/clay.json");
-    const std::optional<pathtracer::config::MaterialConfig> glass = pathtracer::config::loadMaterialConfig(assetRoot + "/materials/glass.json");
-    ctx.plan(7);
+    const std::optional<pathtracer::config::MaterialConfig> clay = pathtracer::config::loadMaterialConfig(assetRoot + "/materials/clay.json", assetRoot);
+    const std::optional<pathtracer::config::MaterialConfig> glass = pathtracer::config::loadMaterialConfig(assetRoot + "/materials/glass.json", assetRoot);
+    ctx.plan(8);
     PT_EXPECT(ctx, clay.has_value() && glass.has_value(), "materials/clay.json or materials/glass.json failed to load");
     if (!clay.has_value() || !glass.has_value()) {
         return;
     }
-    const Material clayMaterial = pathtracer::scene::materialOf(*clay, clay->randomCheckers);
-    const Material glassMaterial = pathtracer::scene::materialOf(*glass, glass->randomCheckers);
+    const Material clayMaterial = pathtracer::scene::materialOf(*clay, clay->randomCheckers, clay->measuredData);
+    const Material glassMaterial = pathtracer::scene::materialOf(*glass, glass->randomCheckers, glass->measuredData);
     // Non-vacuity: two shipped materials that resolved alike would let a dropped override pass unseen.
     PT_EXPECT(ctx, !sameMaterial(clayMaterial, glassMaterial), "clay.json and glass.json resolve to the same inputs");
 
@@ -1318,6 +1318,13 @@ PT_CHECK(material_binding_resolution, Fast, Exact) {
               !pathtracer::scene::applySceneMaterials(untouched, "materials/does_not_exist.json", {}, assetRoot) &&
                   sameMaterial(untouched[0].material, makeMaterial(1.0F)),
               "an unloadable materialPath was accepted, or a rejected scene still changed an instance");
+    // A measured input is its data at every uv: a texture would change its RGB and leave its spectrum, so binding one is refused.
+    std::vector<MeshInstance> measured = makeInstances();
+    const bool goldApplied = pathtracer::scene::applySceneMaterials(measured, "materials/gold.json", {}, assetRoot);
+    PT_EXPECT(ctx,
+              goldApplied && !pathtracer::scene::bindSceneTextures(measured, {{"alpha", {{"base_color", {.path = "textures/macbeth.exr"}}}}},
+                                                                   assetRoot),
+              "a texture over gold's measured base_color was accepted");
 }
 
 // buildLights places a centred quad emitting local -Z by sceneTransform * T * Rz * Ry * Rx, its edges w and h, perpendicular.

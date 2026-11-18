@@ -95,10 +95,7 @@ frame["depth"]    # (64, 128, 1) float32, camera-space Z
 
 | Area | Item | Detail | Complexity | ETA | Status |
 | --- | --- | --- | --- | --- | --- |
-| Camera | Sensor spectral sensitivity | Renders are ACEScg, not a sensor's response. A chosen sensor's spectral responsivities give its native response: published camera curves, then the camera's IDT to ACEScg (Langlands and Fascione 2020), or photoreceptor templates for a synthetic eye. Colour and luminance checked on the macbeth scene against the chart's reference values. | high | 3 h | ready |
-| Colour | Spectral data | Metals are RGB fits. Measured conductor eta/k and reflectance databases as material inputs. | medium | 2 h | ready |
 | Colour | Infrared and ultraviolet | Visible wavelengths only. Transport over 300-1000 nm, IR and UV sensor and false-colour film sensitivities, measured IR reflectance (Gates et al. 1965). A custom UV/IR scene with known reflectances checks it. | high | 3 h | ready |
-| Camera | White balance | No white balance: lights and the HDRI show their true cast. Per-channel gains on the camera-native response so a chosen kelvin (blackbody or daylight) or grey card reads neutral, before the IDT, as in camera. Never edits lights. Checked on the macbeth scene: its grey patches read neutral. Waits for sensor spectral sensitivity. | medium | 1 h | blocked |
 | Sampling | Adaptive sampling refinements | Every texel's relative error weighs alike. A luminance range of interest, relative variance smoothly reduced in dark regions and above the clip point, variance pooled over 1-32 px circles to catch low-frequency noise, a target standard error after a uniform seed pass, and pixels kept live while inside a live pixel's filter footprint (Fascione et al. 2018). | medium | 2 h | ready |
 | Performance | A/B tuning | Small local speed-ups, kept only on a significant paired-run gain on the proxy profile with output inside calibrated bands. | medium | 3 h | ready |
 
@@ -106,6 +103,10 @@ frame["depth"]    # (64, 128, 1) float32, camera-space Z
 
 | Area | Item | Detail | Complexity | ETA | Status |
 | --- | --- | --- | --- | --- | --- |
+| Camera | Sensor spectral sensitivity | Renders are ACEScg, not a sensor's response. A chosen camera's published spectral responsivities give its native response, then its IDT to ACEScg (Langlands and Fascione 2020). Worth it only against a real camera to match: the CIE observer is already exact colorimetry. Colour and luminance checked on the macbeth scene against the chart's reference values. | high | 3 h | ready |
+| Camera | White balance | No white balance: lights and the HDRI show their true cast. Per-channel gains on the camera-native response so a chosen kelvin (blackbody or daylight) or grey card reads neutral, before the IDT, as in camera. Never edits lights. Checked on the macbeth scene: its grey patches read neutral. Waits for sensor spectral sensitivity. | medium | 1 h | blocked |
+| Camera | Synthetic eye | Renders are colour images. Photoreceptor catches from spectral sensitivity templates (Govardovskii et al. 2000) for a chosen eye, output per receptor rather than through ACEScg. | medium | 2 h | ready |
+| Material | Measured material library | Only chrome, gold, N-BK7 glass and the ColorChecker are measured. Silver, copper and aluminium from their shipped n,k; water (Hale and Querry 1973 index, Pope and Fry 1997 absorption); kaolinite clay (USGS splib07); marble from calcite reflectance with Jensen et al. (2001) scattering. | medium | 2 h | ready |
 | Camera | Lens model | Renders cannot match a calibrated camera. Principal point and pixel aspect on the Kannala and Brandt (2006) model; a measured-lens preset. | medium | 1 h | ready |
 | Camera | Sensor noise model | Images are noise-free. Shot, read and dark noise and quantisation per EMVA 1288, from the calibrated luminance. | medium | 2 h | ready |
 | Material | Dwivedi subsurface walks | Subsurface walks follow the phase function alone. Dwivedi-guided walks (Křivánek and d'Eon 2014), preferred over diffusion profiles in production (Fascione et al. 2018). | medium | 2 h | ready |
@@ -115,7 +116,7 @@ frame["depth"]    # (64, 128, 1) float32, camera-space Z
 | Volume | Rayleigh scattering | Media scatter grey with a phase function chosen per medium. Wavelength-dependent Rayleigh extinction (inverse fourth power) and its phase function for clear air and thin hazes, spectral (Fascione et al. 2018). | medium | 1 h | ready |
 | Light | IES profiles | Lights emit uniformly. Measured distributions (IES LM-63), importance-sampled from the table and scaled by the existing lumens. | medium | 1 h | ready |
 | Camera | Film halation | Highlights have no film halo. Light reflected off the film base re-exposes the red-sensitive layer; a red-weighted glare from the bloom pyramid, picture AOVs only. | medium | 1 h | ready |
-| Texture | Metameric pairs | Patches differ in RGB or not at all. Pairs with different spectra but one RGB under a chosen illuminant, for colour constancy and spectral validation. Waits for spectral data. | medium | 1 h | blocked |
+| Texture | Metameric pairs | Patches differ in RGB or not at all. Pairs with different spectra but one RGB under a chosen illuminant, for colour constancy and spectral validation. | medium | 1 h | ready |
 | Texture | Calibration targets | Only the ColorChecker. Slanted edge (ISO 12233), Siemens star, USAF 1951 resolution chart and a grey step wedge, analytic and footprint-filtered. | medium | 2 h | ready |
 | Output | Geometry AOVs | No material, facing or curvature channels. Material ID beside objectID, facing ratio (N.V) and mean curvature (Meyer et al. 2003), with curvature as a shading input. | medium | 2 h | ready |
 | Texture | Procedural stimuli | Patterns need image files. Sine and square gratings (orientation, spatial frequency, phase, contrast), Gabor patches, plaids, radial, concentric and log-polar gratings, bars, step edges, checkerboards and Mondrians (Land and McCann 1971), box-filtered by the ray footprint. | medium | 3 h | ready |

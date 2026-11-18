@@ -107,6 +107,11 @@ OpenPbrInputs<Constant> resolveInputs(const Material& material, glm::vec2 uv, co
             }
         },
         inputs, material);
+    inputs.measured = material.measured;
+    if (material.measuredData) {
+        resolveGrids(*material.measuredData, uv, inputs.measured, inputs.baseColor, inputs.specularColor, inputs.transmissionColor);
+    }
+    inputs.measured.baseColorTint = vertexColour;
     inputs.baseColor *= vertexColour;
     inputs.geometryThinWalled = material.geometryThinWalled;
     return inputs;
@@ -114,19 +119,26 @@ OpenPbrInputs<Constant> resolveInputs(const Material& material, glm::vec2 uv, co
 
 OpenPbrInputs<Spectral> toSpectral(const OpenPbrInputs<Constant>& inputs, const SampledWavelengths& lambda) {
     const auto reflectance = [&](const Rgb& rgb) { return reflectanceSpectrum(rgb, lambda); };
+    // A measured spectrum is read as tabulated, never through its RGB projection.
+    const auto colour = [&](const TabulatedSpectrum* measured, const Rgb& rgb) {
+        return measured != nullptr ? sampleTabulated(*measured, lambda) : reflectance(rgb);
+    };
+    const SampledSpectrum baseColor = inputs.measured.baseColor != nullptr
+                                          ? sampleTabulated(*inputs.measured.baseColor, lambda) * reflectance(inputs.measured.baseColorTint)
+                                          : reflectance(inputs.baseColor);
     // The radius scale shapes only a bulk subsurface interior: elsewhere zero, which subsurfaceGate reads as no interior, unlooked-up.
     const bool subsurfaceInterior = inputs.subsurfaceWeight > 0.0F && !inputs.geometryThinWalled;
     return {.baseWeight = inputs.baseWeight,
-            .baseColor = reflectance(inputs.baseColor),
+            .baseColor = baseColor,
             .baseMetalness = inputs.baseMetalness,
             .baseDiffuseRoughness = inputs.baseDiffuseRoughness,
             .specularWeight = inputs.specularWeight,
-            .specularColor = reflectance(inputs.specularColor),
+            .specularColor = colour(inputs.measured.specularColor, inputs.specularColor),
             .specularRoughness = inputs.specularRoughness,
             .specularRoughnessAnisotropy = inputs.specularRoughnessAnisotropy,
             .specularIor = inputs.specularIor,
             .transmissionWeight = inputs.transmissionWeight,
-            .transmissionColor = reflectance(inputs.transmissionColor),
+            .transmissionColor = colour(inputs.measured.transmissionColor, inputs.transmissionColor),
             .transmissionDepth = inputs.transmissionDepth,
             .transmissionScatter = unboundedSpectrum(inputs.transmissionScatter, lambda),
             .transmissionScatterAnisotropy = inputs.transmissionScatterAnisotropy,
@@ -153,7 +165,8 @@ OpenPbrInputs<Spectral> toSpectral(const OpenPbrInputs<Constant>& inputs, const 
             .thinFilmThickness = inputs.thinFilmThickness,
             .thinFilmIor = inputs.thinFilmIor,
             .geometryOpacity = inputs.geometryOpacity,
-            .geometryThinWalled = inputs.geometryThinWalled};
+            .geometryThinWalled = inputs.geometryThinWalled,
+            .measured = inputs.measured};
 }
 
 float opacityAt(const Material& material, glm::vec2 uv, const pathtracer::gfx::TextureFootprint& footprint) {
@@ -162,7 +175,7 @@ float opacityAt(const Material& material, glm::vec2 uv, const pathtracer::gfx::T
 
 bool isDispersive(const OpenPbrInputs<Constant>& inputs, bool ambientDisperses) {
     // A thin wall transmits undeviated, so no wavelength bends apart from another; either side's dispersion bends the interior's ray.
-    return !inputs.geometryThinWalled && (inputs.transmissionDispersionScale > 0.0F || ambientDisperses) &&
+    return !inputs.geometryThinWalled && (disperses(inputs) || ambientDisperses) &&
            (inputs.transmissionWeight > 0.0F || inputs.subsurfaceWeight > 0.0F) && inputs.baseMetalness < 1.0F;
 }
 

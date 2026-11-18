@@ -1,0 +1,6 @@
+{
+    "base_color": { "chart": { "spectra": "spectra/colorchecker_babelcolor_average.csv", "columns": 6, "rows": 4 } },
+    "base_diffuse_roughness": 0.3,
+    "specular_roughness": 0.5,
+    "specular_ior": 1.55
+}

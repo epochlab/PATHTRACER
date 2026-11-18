@@ -128,22 +128,34 @@ struct UnboundedSpectrum {
 // An emitted radiance colour in cd/m^2: its unbounded fit times the scene white, so RGB (1, 1, 1) is D65 exactly.
 [[nodiscard]] SampledSpectrum illuminantSpectrum(const Rgb& rgb, const SampledWavelengths& lambda);
 
+// A spectral quantity at the CIE 1 nm samples in float, as the render reads it.
+using TabulatedSpectrum = std::array<float, cie::kSampleCount>;
+
+// A cie::Spectrum rounded to float.
+[[nodiscard]] TabulatedSpectrum tabulate(const cie::Spectrum& spectrum);
+
+// The table at the path's wavelengths by linear interpolation between its 1 nm samples.
+[[nodiscard]] SampledSpectrum sampleTabulated(const TabulatedSpectrum& table, const SampledWavelengths& lambda);
+
+// The table at one wavelength, as sampleTabulated reads each lane.
+[[nodiscard]] float sampleTabulated(const TabulatedSpectrum& table, float nm);
+
 // An emitter's spectral radiance tabulated at the CIE 1 nm samples in W/(sr m^2 nm), evaluated by linear interpolation.
 class EmissionSpectrum {
 public:
     // power's shape at 1 cd/m^2: scaled so its luminance K_m sum S yBar is exactly 1; power must have positive luminance.
     explicit EmissionSpectrum(const cie::Spectrum& power);
-    [[nodiscard]] SampledSpectrum operator()(const SampledWavelengths& lambda) const;
+    [[nodiscard]] SampledSpectrum operator()(const SampledWavelengths& lambda) const { return sampleTabulated(radiance_, lambda); }
     // Scales the radiance, so a unit-luminance spectrum times L reads L cd/m^2.
     EmissionSpectrum& operator*=(float luminance);
     // K_m sum S yBar over the CIE samples: the cd/m^2 a light of this radiance shows a photometer.
     [[nodiscard]] float luminance() const;
     // The tabulated radiance at the CIE samples.
-    [[nodiscard]] const std::array<float, cie::kSampleCount>& samples() const { return radiance_; }
+    [[nodiscard]] const TabulatedSpectrum& samples() const { return radiance_; }
     friend bool operator==(const EmissionSpectrum&, const EmissionSpectrum&) = default;
 
 private:
-    std::array<float, cie::kSampleCount> radiance_;
+    TabulatedSpectrum radiance_;
 };
 
 // An RGB light's relative spectral power: illuminantSpectrum's shape tabulated on the CIE samples, so RGB (1, 1, 1) is D65.

@@ -1,6 +1,5 @@
 {
     "base_metalness": 1.0,
-    "base_color": [0.55201143, 0.555548251, 0.55432874],
-    "specular_color": [0.746943533, 0.749103427, 0.80525732],
+    "base_color": { "nk": "spectra/chromium_johnson_christy_1974.csv" },
     "specular_roughness": 0.05
 }

@@ -65,6 +65,10 @@ struct FilmLayer {
     float coatWeight;      // the medium on the film's ambient side is a statistical mix of the ambient and the coat
     float coatIor;
     glm::vec4 wavelengthNm;  // the path's lanes, at which the film interferes
+    // A measured metal's complex index over the ambient's at the lanes; unmeasured, Gulbrandsen's estimate from its colours stands.
+    bool measuredConductor = false;
+    SampledSpectrum conductorEta;
+    SampledSpectrum conductorKappa;
 };
 
 // OpenPBR's metal slab at one wo: GGX with the F82-tint Fresnel (Hoffman 2023) and its Kulla-Conty lobe (Kulla & Conty 2017).
@@ -82,7 +86,7 @@ struct ConductorSlab {
     float multiEnergy;
     SampledSpectrum albedo;            // E(mu_o) per lane, single plus multiple scattering
     FilmLayer film;
-    SampledSpectrum filmEta;           // the conductor's complex index under the film, Gulbrandsen 2014 from base_color and specular_color
+    SampledSpectrum filmEta;           // the conductor's complex index under the film: measured, or Gulbrandsen 2014 from its colours
     SampledSpectrum filmKappa;
 };
 
@@ -318,8 +322,28 @@ struct WalkOrder {
 // fresnelAtViewAngle at one VNDF half-vector (Dupuy & Benyoub 2023), per Walter 2007. One sample of E[F]: THE CALLER MUST AVERAGE.
 [[nodiscard]] SampledSpectrum fresnelAtMicrofacet(const BsdfClosure& closure, glm::vec2 u);
 
-// An index n_d at the hero wavelength by Cauchy from V_d = abbe / scale; unset or zero scale, n_d itself. Bulks and their ambient alike.
-[[nodiscard]] float dispersedIor(float ior, float abbeNumber, float dispersionScale, std::optional<float> heroNm);
+// A bulk's index: specular_ior n_d with OpenPBR's Abbe dispersion, or a measured n(lambda) in that dispersion's place.
+struct BulkIndex {
+    float ior;              // specular_ior, n_d
+    float abbeNumber;       // transmission_dispersion_abbe_number
+    float dispersionScale;  // transmission_dispersion_scale
+    const TabulatedSpectrum* measured;
+};
+
+template <template <typename> typename In>
+[[nodiscard]] BulkIndex bulkIndexOf(const OpenPbrInputs<In>& inputs) {
+    return {inputs.specularIor, inputs.transmissionDispersionAbbeNumber, inputs.transmissionDispersionScale, inputs.measured.specularIor};
+}
+
+// Whether wavelengths refract apart: a measured index always, an Abbe one at a positive scale.
+[[nodiscard]] inline bool disperses(const BulkIndex& index) { return index.measured != nullptr || index.dispersionScale > 0.0F; }
+template <template <typename> typename In>
+[[nodiscard]] bool disperses(const OpenPbrInputs<In>& inputs) {
+    return disperses(bulkIndexOf(inputs));
+}
+
+// The index at the hero wavelength: measured, or Cauchy from V_d = abbe / scale; no hero or no dispersion, n_d. Bulks and ambients.
+[[nodiscard]] float indexAt(const BulkIndex& index, std::optional<float> heroNm);
 
 // The dielectric's index ratio: the hero wavelength disperses specular_ior, specular_weight modulates it (OpenPBR's epsilon, eta').
 [[nodiscard]] float modulatedIor(const OpenPbrInputs<Constant>& inputs, std::optional<float> heroNm);
