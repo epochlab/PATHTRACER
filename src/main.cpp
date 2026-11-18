@@ -1592,7 +1592,7 @@ int main(int argc, char** argv) {
     }
 
     // The profile's window size must be known before Window is constructed, so config loads first, before any GL object exists.
-    const std::optional<pathtracer::config::SceneConfig> sceneConfig = pathtracer::config::loadSceneConfig(options->scenePath);
+    const std::optional<pathtracer::config::SceneConfig> sceneConfig = pathtracer::config::loadSceneConfig(options->scenePath, ASSET_ROOT_DIR);
     const std::string preset = options->preset.value_or(options->benchLogPath.empty() ? "beauty" : "proxy");
     std::optional<pathtracer::config::ProfileConfig> profileConfig = pathtracer::config::loadPreset(ASSET_ROOT_DIR, preset);
     if (profileConfig && options->size) {

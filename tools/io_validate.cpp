@@ -346,11 +346,11 @@ PT_CHECK(scene_config_accepts_the_shipped_scenes, Fast, Exact) {
     for (const std::filesystem::path& scene : shipped) {
         char detail[256];
         std::snprintf(detail, sizeof(detail), "loadSceneConfig rejected the shipped scene at %s", scene.string().c_str());
-        PT_EXPECT(ctx, pathtracer::config::loadSceneConfig(scene.string()).has_value(), detail);
+        PT_EXPECT(ctx, pathtracer::config::loadSceneConfig(scene.string(), ASSET_ROOT_DIR).has_value(), detail);
     }
     // Anti-vacuity for the textures key itself: macbeth binds its chart only through it, so an unparsed key would leave it empty.
     const std::optional<pathtracer::config::SceneConfig> macbeth =
-        pathtracer::config::loadSceneConfig((scenes / "macbeth.json").string());
+        pathtracer::config::loadSceneConfig((scenes / "macbeth.json").string(), ASSET_ROOT_DIR);
     PT_EXPECT(ctx, macbeth && macbeth->textures.size() == 2, "macbeth.json's textures did not parse to its two grids");
 }
 
@@ -364,7 +364,7 @@ PT_CHECK(scene_config_reads_texture_bindings, Fast, Exact) {
         "\"specular_roughness\":{\"path\":\"orm.exr\",\"channel\":\"g\"},"
         "\"geometry_normal\":{\"path\":\"normal.exr\",\"bump\":{\"path\":\"height.exr\",\"height\":0.005}},"
         "\"base_metalness\":\"metal.exr\"}}}");
-    const std::optional<pathtracer::config::SceneConfig> scene = pathtracer::config::loadSceneConfig(path.string());
+    const std::optional<pathtracer::config::SceneConfig> scene = pathtracer::config::loadSceneConfig(path.string(), ASSET_ROOT_DIR);
     std::filesystem::remove(path);
     ctx.plan(5);
     PT_EXPECT(ctx, scene && scene->environment.colorSpace == "ACEScg", "the environment's colorSpace did not reach SceneConfig");
@@ -388,7 +388,7 @@ PT_CHECK(scene_config_reads_volumes_and_camera_without_a_model, Fast, Exact) {
         "\"volumes\":[{\"vdbPath\":\"cloud.vdb\",\"grid\":\"density\",\"position\":[1,2,3],\"rotation\":[0,90,0],\"scale\":0.5,"
         "\"materialPath\":\"materials/volume.json\"}],"
         "\"camera\":{\"position\":[0,0,2200],\"rotation\":[0,10,0],\"farClip\":4000}}");
-    const std::optional<pathtracer::config::SceneConfig> scene = pathtracer::config::loadSceneConfig(path.string());
+    const std::optional<pathtracer::config::SceneConfig> scene = pathtracer::config::loadSceneConfig(path.string(), ASSET_ROOT_DIR);
     std::filesystem::remove(path);
     std::optional<pathtracer::config::ProfileConfig> profile =
         pathtracer::config::loadProfileConfig((std::filesystem::path(ASSET_ROOT_DIR) / "config" / "profile.json").string());
@@ -574,11 +574,36 @@ PT_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
         {"a daylight kelvin above 25000 K", "engine_io_scene_dayhigh.json",
          scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
                "\"kelvin\":25001,\"illuminant\":\"daylight\",\"nits\":5.0}]")},
+        // A light has one source: a CIE lamp is a spectrum of its own, so a kelvin, colour or CSV beside it is a second.
+        {"a lamp illuminant beside kelvin", "engine_io_scene_lampkelvin.json",
+         scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
+               "\"kelvin\":4000,\"illuminant\":\"FL11\",\"nits\":5.0}]")},
+        {"a lamp illuminant beside color", "engine_io_scene_lampcolor.json",
+         scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
+               "\"color\":[1,1,1],\"illuminant\":\"LED-B3\",\"nits\":5.0}]")},
+        {"a spectrum beside kelvin", "engine_io_scene_spectrumkelvin.json",
+         scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
+               "\"kelvin\":4000,\"spectrum\":\"spectra/lamp.csv\",\"nits\":5.0}]")},
+        {"a locus illuminant without kelvin", "engine_io_scene_locusalone.json",
+         scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
+               "\"illuminant\":\"daylight\",\"nits\":5.0}]")},
+        {"an unknown lamp illuminant", "engine_io_scene_lampname.json",
+         scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
+               "\"illuminant\":\"FL13\",\"nits\":5.0}]")},
+        {"no source at all", "engine_io_scene_nosource.json",
+         scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
+               "\"nits\":5.0}]")},
+        {"a spectrum file that does not exist", "engine_io_scene_nospectrum.json",
+         scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
+               "\"spectrum\":\"spectra/engine_io_missing.csv\",\"nits\":5.0}]")},
+        {"a filter file that does not exist", "engine_io_scene_nofilter.json",
+         scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
+               "\"kelvin\":4000,\"filter\":\"spectra/engine_io_missing.csv\",\"nits\":5.0}]")},
     };
 
     // Anti-vacuity: the base the scene() rows are built from must itself LOAD, or they would prove nothing.
     const std::filesystem::path basePath = writeJson("engine_io_scene_base.json", scene(validLights));
-    const bool baseLoads = pathtracer::config::loadSceneConfig(basePath.string()).has_value();
+    const bool baseLoads = pathtracer::config::loadSceneConfig(basePath.string(), ASSET_ROOT_DIR).has_value();
     std::filesystem::remove(basePath);
 
     // Anti-vacuity for the kelvin rows: a blackbody and a daylight kelvin load, each resolved on its own locus.
@@ -586,7 +611,7 @@ PT_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
         scene(",\"lights\":[{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
               "\"kelvin\":2856,\"nits\":5.0},{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1],"
               "\"kelvin\":6504,\"illuminant\":\"daylight\",\"nits\":5.0}]"));
-    const std::optional<pathtracer::config::SceneConfig> tempScene = pathtracer::config::loadSceneConfig(tempPath.string());
+    const std::optional<pathtracer::config::SceneConfig> tempScene = pathtracer::config::loadSceneConfig(tempPath.string(), ASSET_ROOT_DIR);
     std::filesystem::remove(tempPath);
 
     using pathtracer::scene::cie::Illuminant;
@@ -603,7 +628,7 @@ PT_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
               "a 6504 K daylight light did not load as the daylight spectrum");
     for (const Case& testCase : cases) {
         const std::filesystem::path path = writeJson(testCase.file, testCase.text);
-        const bool accepted = pathtracer::config::loadSceneConfig(path.string()).has_value();
+        const bool accepted = pathtracer::config::loadSceneConfig(path.string(), ASSET_ROOT_DIR).has_value();
         char detail[224];
         std::snprintf(detail, sizeof(detail), "loadSceneConfig accepted a scene with %s", testCase.name);
         PT_EXPECT(ctx, !accepted, detail);
@@ -621,7 +646,7 @@ PT_CHECK(scene_config_reads_every_light_shape, Fast, Exact) {
         "{\"type\":\"mesh\",\"position\":[0,0,1],\"rotation\":[0,90,0],\"gltfPath\":\"mesh.gltf\","
         "\"scale\":0.3,\"color\":[1,1,1],\"lumens\":800.0},"
         "{\"type\":\"mesh\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"gltfPath\":\"m.gltf\",\"color\":[1,1,1],\"nits\":1.0}]}");
-    const std::optional<pathtracer::config::SceneConfig> scene = pathtracer::config::loadSceneConfig(path.string());
+    const std::optional<pathtracer::config::SceneConfig> scene = pathtracer::config::loadSceneConfig(path.string(), ASSET_ROOT_DIR);
     std::filesystem::remove(path);
     ctx.plan(5);
     PT_EXPECT(ctx, scene && scene->lights.size() == 4, "a scene of one disk, one sphere and two mesh lights did not load as four lights");
@@ -650,6 +675,102 @@ PT_CHECK(scene_config_reads_every_light_shape, Fast, Exact) {
     const auto* flux = std::get_if<pathtracer::config::LuminousFlux>(&scene->lights[2].emission);
     PT_EXPECT(ctx, flux && flux->lumens == 800.0F && scene->environment.illuminanceLux == 405.5F,
               "a light's lumens or the environment's illuminance did not read as authored");
+}
+
+// Scene light text over a quad at the origin: each source key and its emission, so a row states only what differs.
+std::string quadLight(const std::string& keys) {
+    return "{\"type\":\"quad\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"size\":[1,1]," + keys + "}";
+}
+
+// A scene of lights alone, written beside its CSVs: the scratch directory is the asset root they resolve against.
+std::optional<pathtracer::config::SceneConfig> loadLightScene(const char* name, const std::string& lights) {
+    const std::filesystem::path path =
+        writeJson(name, "{\"environment\":{\"hdriPath\":\"textures/republiqueHDR_2k.exr\"},\"lights\":[" + lights + "]}");
+    std::optional<pathtracer::config::SceneConfig> scene = pathtracer::config::loadSceneConfig(path.string(), scratchPath("").string());
+    std::filesystem::remove(path);
+    return scene;
+}
+
+// Each source reads as its own spectrum: a CIE lamp by name, a CSV re-export of one equal to it, and a kelvin through a filter.
+PT_CHECK(scene_config_reads_spectral_light_sources, Fast, Exact) {
+    namespace cie = pathtracer::scene::cie;
+    using pathtracer::scene::EmissionSpectrum;
+    const cie::Spectrum ledB3 = *cie::lampSpectrum("LED-B3");
+    std::string ledCsv;
+    for (int nm = 380; nm <= 780; ++nm) {
+        char row[48];
+        std::snprintf(row, sizeof(row), "%d,%.17g\n", nm, ledB3[static_cast<std::size_t>(nm - cie::kLambdaMinNm)]);
+        ledCsv += row;
+    }
+    const std::filesystem::path ledPath = writeJson("engine_io_led_b3.csv", ledCsv);
+    // A 5 nm gel with CRLF endings and spaces after the comma: the interpolation and the tolerated layout in one file.
+    const std::filesystem::path gelPath = writeJson("engine_io_gel.csv", "400, 0.25\r\n405, 0.75\r\n700, 0.5\r\n");
+    const std::optional<pathtracer::config::SceneConfig> scene = loadLightScene(
+        "engine_io_scene_spectral.json", quadLight("\"illuminant\":\"FL11\",\"lumens\":880.3") + "," +
+                                             quadLight("\"illuminant\":\"HP1\",\"nits\":2.0") + "," +
+                                             quadLight("\"spectrum\":\"engine_io_led_b3.csv\",\"nits\":2.0") + "," +
+                                             quadLight("\"kelvin\":3200,\"filter\":\"engine_io_gel.csv\",\"nits\":2.0"));
+    std::filesystem::remove(ledPath);
+    std::filesystem::remove(gelPath);
+    const std::array<glm::dvec2, 3> gelSamples{{{400.0, 0.25}, {405.0, 0.75}, {700.0, 0.5}}};
+    const cie::Spectrum gel = cie::resample(gelSamples);
+    const cie::Spectrum tungsten = *cie::illuminantSpectrum(cie::Illuminant::Blackbody, 3200.0);
+    ctx.plan(5);
+    PT_EXPECT(ctx, scene && scene->lights.size() == 4, "four spectral lights did not load");
+    if (!scene || scene->lights.size() != 4) {
+        return;
+    }
+    const auto& lights = scene->lights;
+    PT_EXPECT(ctx, lights[0].spectrum == EmissionSpectrum(*cie::lampSpectrum("FL11")) && lights[0].filter == cie::kUnitSpectrum &&
+                       lights[1].spectrum == EmissionSpectrum(*cie::lampSpectrum("HP1")),
+              "a CIE lamp illuminant did not load as its table's spectrum, unfiltered");
+    PT_EXPECT(ctx, lights[2].spectrum == EmissionSpectrum(ledB3), "a CSV of LED-B3's 1 nm table did not load as LED-B3 exactly");
+    PT_EXPECT(ctx, lights[3].filter == gel && lights[3].spectrum == *pathtracer::scene::filteredEmission(tungsten, gel) &&
+                       !(lights[3].spectrum == EmissionSpectrum(tungsten)),
+              "a filtered kelvin is not the blackbody times the gel's interpolated transmittance");
+    // PhysLight: nits and lumens include the filter, so the filtered spectrum still carries exactly 1 cd/m^2 before them.
+    PT_EXPECT(ctx, std::abs(lights[3].spectrum.luminance() - 1.0F) <= 4.0F * std::numeric_limits<float>::epsilon(),
+              "a filtered light's unit spectrum does not carry 1 cd/m^2, so its nits would not be the filtered output");
+}
+
+// Each CSV a spectroradiometer or a hand edit plausibly produces wrong is refused, as a lamp spectrum or as a filter.
+PT_CHECK(scene_config_rejects_malformed_spectrum_csv, Fast, Exact) {
+    struct Case {
+        const char* name;
+        const char* key;  // spectrum alone, or filter beside a 4000 K lamp
+        const char* text;
+    };
+    const std::vector<Case> cases = {
+        {"rows without a comma", "spectrum", "380 1\n780 1\n"},
+        {"a header row", "spectrum", "nm,value\n380,1\n780,1\n"},
+        {"text after a number", "spectrum", "380,1x\n780,1\n"},
+        {"a NaN value", "spectrum", "380,nan\n780,1\n"},
+        {"a non-positive wavelength", "spectrum", "0,1\n780,1\n"},
+        {"falling wavelengths", "spectrum", "780,1\n380,1\n"},
+        {"a repeated wavelength", "spectrum", "380,1\n380,1\n780,1\n"},
+        {"a negative power", "spectrum", "380,-0.1\n780,1\n"},
+        {"a single row", "spectrum", "560,1\n"},
+        {"power only in the infrared", "spectrum", "900,1\n1000,1\n"},
+        {"a transmittance above 1", "filter", "380,1.01\n780,1\n"},
+        {"a filter opaque over the visible", "filter", "380,0\n780,0\n"},
+    };
+    const auto light = [](const char* key) {
+        return std::string(key) == "spectrum" ? quadLight("\"spectrum\":\"engine_io_case.csv\",\"nits\":1.0")
+                                              : quadLight("\"kelvin\":4000,\"filter\":\"engine_io_case.csv\",\"nits\":1.0");
+    };
+    const std::filesystem::path csv = scratchPath("engine_io_case.csv");
+    // Anti-vacuity: the same two-row layout, well formed, loads both ways.
+    writeJson("engine_io_case.csv", "380,0.5\n780,0.5\n");
+    const bool validLoads = loadLightScene("engine_io_scene_csv.json", light("spectrum") + "," + light("filter")).has_value();
+    ctx.plan(static_cast<int>(cases.size()) + 1);
+    PT_EXPECT(ctx, validLoads, "a well-formed spectrum and filter must load, or every row below passes vacuously");
+    for (const Case& testCase : cases) {
+        writeJson("engine_io_case.csv", testCase.text);
+        char detail[160];
+        std::snprintf(detail, sizeof(detail), "loadSceneConfig accepted a %s CSV with %s", testCase.key, testCase.name);
+        PT_EXPECT(ctx, !loadLightScene("engine_io_scene_csv.json", light(testCase.key)).has_value(), detail);
+    }
+    std::filesystem::remove(csv);
 }
 
 // Anti-vacuity for the rejection rows below: every material the repo ships must still load once loadMaterialConfig validates.
@@ -1563,11 +1684,11 @@ PT_CHECK(json_float_reads_refuse_float_overflow, Fast, Exact) {
     std::ifstream shippedProfile(std::filesystem::path(ASSET_ROOT_DIR) / "config" / "profile.json");
     const std::vector<Loader> loaders = {
         {"loadSceneConfig", scene,
-         [](const std::string& path) { return pathtracer::config::loadSceneConfig(path).has_value(); },
+         [](const std::string& path) { return pathtracer::config::loadSceneConfig(path, ASSET_ROOT_DIR).has_value(); },
          {"/model/position/0", "/model/rotation/1", "/lights/0/position/2", "/lights/0/rotation/0", "/lights/0/size/1",
           "/lights/0/color/0", "/lights/0/nits", "/environment/lux"}},
         {"loadSceneConfig bump", texturedScene,
-         [](const std::string& path) { return pathtracer::config::loadSceneConfig(path).has_value(); },
+         [](const std::string& path) { return pathtracer::config::loadSceneConfig(path, ASSET_ROOT_DIR).has_value(); },
          {"/textures/node/geometry_normal/bump/height"}},
         {"loadMaterialConfig", material,
          [](const std::string& path) { return pathtracer::config::loadMaterialConfig(path).has_value(); }, {}},
@@ -1619,7 +1740,7 @@ PT_CHECK(json_float_reads_refuse_float_overflow, Fast, Exact) {
         nlohmann::json edited = scene;
         edited["lights"][0]["nits"] = luminance;
         const std::filesystem::path path = writeJson("engine_io_float_boundary.json", edited.dump());
-        const std::optional<pathtracer::config::SceneConfig> loaded = pathtracer::config::loadSceneConfig(path.string());
+        const std::optional<pathtracer::config::SceneConfig> loaded = pathtracer::config::loadSceneConfig(path.string(), ASSET_ROOT_DIR);
         std::filesystem::remove(path);
         return loaded ? std::optional(std::get<pathtracer::config::Luminance>(loaded->lights[0].emission).candelasPerSquareMetre)
                       : std::nullopt;

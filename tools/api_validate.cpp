@@ -949,7 +949,7 @@ PT_CHECK(open_takes_the_named_preset, Fast, Exact) {
               "open(proxy) did not take the proxy preset's size and samples: " + error);
     // The preset supplies lens and lattice, the scene its pose: both must reach the default camera.
     const std::optional<pathtracer::config::SceneConfig> scene =
-        pathtracer::config::loadSceneConfig((std::filesystem::path(ASSET_ROOT_DIR) / "scenes" / "cornell_research.json").string());
+        pathtracer::config::loadSceneConfig((std::filesystem::path(ASSET_ROOT_DIR) / "scenes" / "cornell_research.json").string(), ASSET_ROOT_DIR);
     const auto research = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell_research.json", "research", error);
     PT_EXPECT(ctx, scene && scene->camera && research &&
                        research->defaultCamera().pixelLattice() == pathtracer::gfx::PixelLattice::Hexagonal &&

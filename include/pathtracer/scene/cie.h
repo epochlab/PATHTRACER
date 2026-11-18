@@ -2,6 +2,8 @@
 
 #include <array>
 #include <optional>
+#include <span>
+#include <string_view>
 
 #include <glm/glm.hpp>
 
@@ -17,6 +19,13 @@ inline constexpr int kSampleCount = kLambdaMaxNm - kLambdaMinNm + 1;
 using Spectrum = std::array<double, kSampleCount>;
 
 [[nodiscard]] constexpr double wavelengthNm(int index) { return kLambdaMinNm + index; }
+
+// 1 at every sample: a clear filter's transmittance, which multiplies a spectrum exactly.
+inline constexpr Spectrum kUnitSpectrum = [] {
+    Spectrum unit{};
+    unit.fill(1.0);
+    return unit;
+}();
 
 // One tabulated row: the observer's (xBar, yBar, zBar) and D65's relative power at wavelengthNm(index).
 struct TableRow {
@@ -53,6 +62,15 @@ enum class Illuminant { Blackbody, Daylight };
 // CIE daylight's defined range; the locus polynomial is fitted only within it (CIE 015:2018).
 inline constexpr double kDaylightMinKelvin = 4000.0;
 inline constexpr double kDaylightMaxKelvin = 25000.0;
+
+// The yBar-weighted sum of power over the samples: its luminance up to K_m and the 1 nm interval.
+[[nodiscard]] double luminanceSum(const Spectrum& power);
+
+// (nm, value) samples at strictly increasing nm, two or more: linear between them, zero outside (the CIE datasets' convention).
+[[nodiscard]] Spectrum resample(std::span<const glm::dvec2> samples);
+
+// A CIE 015:2018 tabulated lamp by CIE name: FL1-FL12, FL3.1-FL3.15, HP1-HP5, LED-B1-B5, LED-BH1, LED-RGB1, LED-V1, LED-V2.
+[[nodiscard]] std::optional<Spectrum> lampSpectrum(std::string_view name);
 
 // The illuminant's relative spectral power at kelvin; nullopt outside its domain or where Planck's law underflows to no luminance.
 [[nodiscard]] std::optional<Spectrum> illuminantSpectrum(Illuminant illuminant, double kelvin);

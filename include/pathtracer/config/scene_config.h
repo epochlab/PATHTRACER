@@ -83,11 +83,12 @@ struct LightConfig {
     glm::vec3 position;  // the shape's centre, before the model root transform
     glm::vec3 rotation;  // degrees; Rz*Ry*Rx as ModelConfig::rotation, so X applies first
     std::variant<QuadShape, DiskShape, SphereShape, MeshShape> shape;
-    pathtracer::scene::EmissionSpectrum spectrum;  // at 1 cd/m^2: an authored colour's D65 upsampling, or the illuminant's at a kelvin
+    pathtracer::scene::EmissionSpectrum spectrum;  // at 1 cd/m^2: the source's (colour, kelvin, CIE lamp or CSV) times the filter
     std::variant<Luminance, LuminousFlux> emission;  // exactly one of scene.json's nits or lumens, positive
     bool twoSided = false;  // a sphere's stays false
-    // The locus a kelvin override resolves on; an authored colour keeps the blackbody default.
+    // The locus a kelvin override resolves on; a colour, CIE lamp or CSV source keeps the blackbody default.
     pathtracer::scene::cie::Illuminant illuminant = pathtracer::scene::cie::Illuminant::Blackbody;
+    pathtracer::scene::cie::Spectrum filter = pathtracer::scene::cie::kUnitSpectrum;  // transmittance; a kelvin override keeps it
 };
 
 // A volume material file, MaterialX anisotropic_vdf's inputs: coefficients per unit of the grid's own space at density 1.
@@ -138,8 +139,8 @@ struct SceneConfig {
     std::optional<SceneCameraConfig> camera;
 };
 
-// Reads and parses path; nullopt and a stderr log if missing, unreadable or unparseable. User input: failure is surfaced, not asserted.
-[[nodiscard]] std::optional<SceneConfig> loadSceneConfig(const std::string& path);
+// Reads and parses path, light CSVs from assetRoot; nullopt and a stderr log on any failure. User input: surfaced, not asserted.
+[[nodiscard]] std::optional<SceneConfig> loadSceneConfig(const std::string& path, const std::string& assetRoot);
 
 // Puts scene.camera, where the scene names one, over profile.camera: the one place a scene overrides the session's camera.
 void applySceneCamera(const SceneConfig& scene, ProfileConfig& profile);

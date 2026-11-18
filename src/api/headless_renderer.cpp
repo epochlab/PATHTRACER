@@ -41,7 +41,7 @@ struct SceneInputs {
         return std::nullopt;
     }
     std::optional<pathtracer::config::SceneConfig> scene =
-        pathtracer::config::loadSceneConfig(assetRoot + "/" + scenePath);
+        pathtracer::config::loadSceneConfig(assetRoot + "/" + scenePath, assetRoot);
     if (!scene) {
         error = "failed to load scene " + assetRoot + "/" + scenePath;
         return std::nullopt;
@@ -104,7 +104,7 @@ struct SceneInputs {
     return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
 }
 
-// Each light's unit-luminance spectrum for this request: its kelvin override on the light's own illuminant locus, else the authored one.
+// Each light's unit-luminance spectrum for this request: a kelvin override on its locus through its filter, else the authored one.
 [[nodiscard]] std::optional<std::vector<pathtracer::scene::EmissionSpectrum>> lightSpectra(
     const HeadlessRenderer::Request& request, const std::vector<pathtracer::config::LightConfig>& lights, std::string& error) {
     std::vector<pathtracer::scene::EmissionSpectrum> spectra;
@@ -116,12 +116,14 @@ struct SceneInputs {
         }
         const float kelvin = (*request.lightKelvins)[i];
         const std::optional<pathtracer::scene::cie::Spectrum> power = pathtracer::scene::cie::illuminantSpectrum(lights[i].illuminant, kelvin);
-        if (!power) {
+        std::optional<pathtracer::scene::EmissionSpectrum> spectrum =
+            power ? pathtracer::scene::filteredEmission(*power, lights[i].filter) : std::nullopt;
+        if (!spectrum) {
             error = "light kelvin " + std::to_string(kelvin) + " for light " + std::to_string(i) +
-                    " lies outside its illuminant's domain or radiates no luminance";
+                    " lies outside its illuminant's domain or radiates no luminance through its filter";
             return std::nullopt;
         }
-        spectra.emplace_back(*power);
+        spectra.push_back(*spectrum);
     }
     return spectra;
 }

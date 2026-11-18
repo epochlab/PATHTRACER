@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 
 namespace pathtracer::scene::cie {
 
@@ -27,6 +28,25 @@ struct DaylightComponents {
 constexpr std::array<DaylightComponents, kDaylightKnotCount> kDaylight = {{
 #include "cie_daylight.inc"
 }};
+
+// CIE 015:2018 lamp tables, rows {nm, one value per lamp}: fluorescent (Table 10) and LED (Table 12) at 1 nm, high pressure at 5 nm.
+constexpr std::array<std::array<double, 28>, 401> kFluorescent = {{
+#include "cie_fl.inc"
+}};
+constexpr std::array<std::array<double, 10>, 401> kLed = {{
+#include "cie_led.inc"
+}};
+constexpr std::array<std::array<double, 6>, 81> kHighPressure = {{
+#include "cie_hp.inc"
+}};
+
+// Each table's lamp names: its CIE metadata's column titles after lambda, in column order.
+constexpr std::array<std::string_view, 27> kFluorescentNames = {
+    "FL1", "FL2", "FL3", "FL4", "FL5", "FL6", "FL7", "FL8", "FL9", "FL10", "FL11", "FL12", "FL3.1",
+    "FL3.2", "FL3.3", "FL3.4", "FL3.5", "FL3.6", "FL3.7", "FL3.8", "FL3.9", "FL3.10", "FL3.11", "FL3.12", "FL3.13", "FL3.14", "FL3.15"};
+constexpr std::array<std::string_view, 9> kLedNames = {
+    "LED-B1", "LED-B2", "LED-B3", "LED-B4", "LED-B5", "LED-BH1", "LED-RGB1", "LED-V1", "LED-V2"};
+constexpr std::array<std::string_view, 5> kHighPressureNames = {"HP1", "HP2", "HP3", "HP4", "HP5"};
 
 // ACEScg's AP1 primary and white chromaticities (x, y), SMPTE ST 2065-1 and ACES S-2014-004.
 constexpr glm::dvec2 kScenePrimaryRed(0.713, 0.293);
@@ -147,7 +167,60 @@ Spectrum daylightSpectrum(double kelvin) {
     return power;
 }
 
+// The named lamp's column of a CIE table resampled onto the observer's samples; nullopt when the table has no such lamp.
+template <std::size_t Rows, std::size_t Fields>
+std::optional<Spectrum> lampColumn(const std::array<std::array<double, Fields>, Rows>& table,
+                                   const std::array<std::string_view, Fields - 1>& names, std::string_view name) {
+    const auto it = std::ranges::find(names, name);
+    if (it == names.end()) {
+        return std::nullopt;
+    }
+    const auto field = static_cast<std::size_t>(it - names.begin()) + 1;
+    std::array<glm::dvec2, Rows> samples;
+    for (std::size_t row = 0; row < Rows; ++row) {
+        samples[row] = {table[row][0], table[row][field]};
+    }
+    return resample(samples);
+}
+
 }  // namespace
+
+double luminanceSum(const Spectrum& power) {
+    double sum = 0.0;
+    for (int i = 0; i < kSampleCount; ++i) {
+        sum += power[static_cast<std::size_t>(i)] * kTable[static_cast<std::size_t>(i)].yBar;
+    }
+    return sum;
+}
+
+Spectrum resample(std::span<const glm::dvec2> samples) {
+    Spectrum out{};
+    std::size_t k = 0;
+    for (int i = 0; i < kSampleCount; ++i) {
+        const double nm = wavelengthNm(i);
+        if (nm < samples.front().x || nm > samples.back().x) {
+            continue;
+        }
+        // Wavelengths ascend, so the bracketing segment only moves forward: one pass over both grids.
+        while (samples[k + 1].x < nm) {
+            ++k;
+        }
+        const glm::dvec2& a = samples[k];
+        const glm::dvec2& b = samples[k + 1];
+        out[static_cast<std::size_t>(i)] = glm::mix(a.y, b.y, (nm - a.x) / (b.x - a.x));
+    }
+    return out;
+}
+
+std::optional<Spectrum> lampSpectrum(std::string_view name) {
+    if (std::optional<Spectrum> lamp = lampColumn(kFluorescent, kFluorescentNames, name)) {
+        return lamp;
+    }
+    if (std::optional<Spectrum> lamp = lampColumn(kLed, kLedNames, name)) {
+        return lamp;
+    }
+    return lampColumn(kHighPressure, kHighPressureNames, name);
+}
 
 std::optional<Spectrum> illuminantSpectrum(Illuminant illuminant, double kelvin) {
     if (!(kelvin > 0.0) || !std::isfinite(kelvin)) {
@@ -157,10 +230,7 @@ std::optional<Spectrum> illuminantSpectrum(Illuminant illuminant, double kelvin)
         return std::nullopt;
     }
     const Spectrum power = illuminant == Illuminant::Blackbody ? blackbodySpectrum(kelvin) : daylightSpectrum(kelvin);
-    double luminance = 0.0;
-    for (int i = 0; i < kSampleCount; ++i) {
-        luminance += power[static_cast<std::size_t>(i)] * kTable[static_cast<std::size_t>(i)].yBar;
-    }
+    const double luminance = luminanceSum(power);
     // A blackbody cold enough that Planck's law underflows at every sample has no luminance to normalise a light by.
     if (!(luminance > 0.0) || !std::isfinite(luminance)) {
         return std::nullopt;
