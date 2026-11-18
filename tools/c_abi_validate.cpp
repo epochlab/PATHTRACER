@@ -437,7 +437,7 @@ PT_CHECK(light_temperature_is_per_request, Slow, Exact) {
                    ? std::vector<float>(written.storage.begin(), written.storage.begin() + static_cast<std::ptrdiff_t>(written.extent))
                    : std::vector<float>{};
     };
-    // cornell's one light is authored at 4000 K, so a 2856 K override differs from it.
+    // cornell's one light is authored as LED-B3 (4103 K), so a 2856 K override differs from it.
     constexpr std::array<float, 1> kTungsten{2856.0F};
     const std::vector<float> authored = render(nullptr);
     const std::vector<float> tungsten = render(kTungsten.data());

@@ -642,10 +642,10 @@ def test_env_rotation_turns_the_sky(renderer: Renderer) -> None:
 
 
 def test_light_kelvin_recolours_the_light(renderer: Renderer) -> None:
-    """With the environment off, paths do not depend on the light's spectrum, so a kelvin changes only what they carry.
+    """A kelvin replaces the light's spectrum, rescaling each wavelength, not each RGB channel: warmer is redder over the frame.
 
-    A kelvin replaces the light's spectrum, rescaling each wavelength, not each RGB channel: the lit pixels stay lit, warmer
-    is redder over the frame, and returning to None restores the authored floats exactly.
+    The scene's wavelength density follows its lights' spectral flux, so a kelvin also moves which wavelengths paths carry, and
+    the glass's dispersion and Russian roulette, both spectral, may then light other pixels. None restores the authored floats exactly.
     """
     common = {"aovs": ("beauty",), "width": 32, "height": 18, "samples": 2, "seed": 1, "env_light_enabled": False}
     authored = renderer.render(**common)["beauty"].astype(np.float64)
@@ -653,7 +653,6 @@ def test_light_kelvin_recolours_the_light(renderer: Renderer) -> None:
     red_over_blue = []
     for kelvin in (2856.0, 6504.0):
         recoloured = renderer.render(**common, light_kelvins=(kelvin,))["beauty"].astype(np.float64)
-        assert np.array_equal(recoloured.sum(axis=-1) > 0.0, lit), f"{kelvin} K: the light's colour changed which pixels it reaches"
         mean = recoloured[lit].mean(axis=0)
         red_over_blue.append(mean[0] / mean[2])
     assert red_over_blue[0] > red_over_blue[1]
@@ -675,18 +674,46 @@ def test_invalid_light_kelvin_is_rejected_by_name(renderer: Renderer, kelvin: tu
         renderer.render(aovs=("beauty",), width=8, height=8, light_kelvins=kelvin)
 
 
-def test_light_kelvins_keep_each_lights_illuminant() -> None:
-    """2AFC's spheres are daylight at 6504 K, so overriding them with 6504 K must reproduce the authored render bit for bit.
+def _light_variant(tmp_path: Path, scene: str, lights: list[dict]) -> str:
+    """An asset root of symlinks plus `scene` re-authored with these light sources, so a test sets a light without editing assets."""
+    assets = REPO_ROOT / "assets"
+    for entry in assets.iterdir():
+        (tmp_path / entry.name).symlink_to(entry)
+    authored = json.loads((assets / scene).read_text())
+    for light, source in zip(authored["lights"], lights, strict=True):
+        for key in ("color", "kelvin", "illuminant", "spectrum", "filter"):
+            light.pop(key, None)
+        light.update(source)
+    (tmp_path / "variant.json").write_text(json.dumps(authored))
+    return "variant.json"
+
+
+def test_light_kelvins_keep_each_lights_illuminant(tmp_path: Path) -> None:
+    """2AFC's spheres as daylight at 6504 K: overriding them with 6504 K must reproduce the authored render bit for bit.
 
     A blackbody override would resolve 6504 K off the daylight locus and recolour them; below 4000 K daylight is undefined.
     """
     common = {"aovs": ("beauty",), "width": 32, "height": 18, "samples": 1, "seed": 1}
-    with Renderer("scenes/2AFC.json", preset=PRESET) as daylight:
+    daylit = _light_variant(tmp_path, "scenes/2AFC.json", [{"kelvin": 6504, "illuminant": "daylight"}] * 2)
+    with Renderer(daylit, asset_root=str(tmp_path), preset=PRESET) as daylight:
         authored = daylight.render(**common)["beauty"]
         assert np.any(authored > 0.0), "the spheres must be in frame, or equality holds vacuously"
         assert np.array_equal(daylight.render(**common, light_kelvins=(6504.0, 6504.0))["beauty"], authored)
         with pytest.raises(RuntimeError, match="outside its illuminant's domain"):
             daylight.render(**common, light_kelvins=(3999.0, 6504.0))
+
+
+def test_light_kelvins_keep_each_lights_filter(tmp_path: Path) -> None:
+    """A kelvin override swaps the lamp, not the gel: 4000 K through a filter, overridden to 4000 K, is bit for bit the same."""
+    (tmp_path / "gel.csv").write_text("380,0.1\n500,0.3\n600,0.9\n780,0.9\n")
+    common = {"aovs": ("beauty",), "width": 32, "height": 18, "samples": 1, "seed": 1}
+    with Renderer(SCENE, preset=PRESET) as clear:
+        unfiltered = clear.render(**common, light_kelvins=(4000.0,))["beauty"]
+    filtered_scene = _light_variant(tmp_path, SCENE, [{"kelvin": 4000, "filter": "gel.csv"}])
+    with Renderer(filtered_scene, asset_root=str(tmp_path), preset=PRESET) as filtered:
+        authored = filtered.render(**common)["beauty"]
+        assert not np.array_equal(authored, unfiltered), "the gel must recolour the render, or equality holds vacuously"
+        assert np.array_equal(filtered.render(**common, light_kelvins=(4000.0,))["beauty"], authored)
 
 
 @pytest.mark.parametrize(

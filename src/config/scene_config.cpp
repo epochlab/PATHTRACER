@@ -1,14 +1,17 @@
 #include "pathtracer/config/scene_config.h"
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <fstream>
 #include <initializer_list>
 #include <iostream>
 #include <limits>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -100,59 +103,151 @@ std::optional<std::map<std::string, std::map<std::string, TextureConfig>>> parse
     return textures;
 }
 
-// A light's unit-luminance spectrum and the locus a kelvin override resolves on.
+// Logs lights[index]'s authoring error and yields nullopt, for the caller to return.
+template <typename... Why>
+std::nullopt_t rejectLight(const std::string& path, std::size_t index, const Why&... why) {
+    ((std::cerr << "loadSceneConfig: " << path << ": lights[" << index << "] ") << ... << why) << '\n';
+    return std::nullopt;
+}
+
+// One "nm,value" row, whitespace around each field allowed; nullopt unless both parse whole as finite numbers.
+std::optional<glm::dvec2> spectrumRow(std::string_view line) {
+    const auto number = [](std::string_view field) -> std::optional<double> {
+        const auto first = field.find_first_not_of(" \t");
+        const auto last = field.find_last_not_of(" \t");
+        if (first == std::string_view::npos) {
+            return std::nullopt;
+        }
+        field = field.substr(first, last - first + 1);
+        double value = 0.0;
+        const auto [end, error] = std::from_chars(field.data(), field.data() + field.size(), value);
+        if (error != std::errc{} || end != field.data() + field.size() || !std::isfinite(value)) {
+            return std::nullopt;
+        }
+        return value;
+    };
+    const auto comma = line.find(',');
+    if (comma == std::string_view::npos) {
+        return std::nullopt;
+    }
+    const std::optional<double> nm = number(line.substr(0, comma));
+    const std::optional<double> value = number(line.substr(comma + 1));
+    if (!nm || !value) {
+        return std::nullopt;
+    }
+    return glm::dvec2(*nm, *value);
+}
+
+// A spectral CSV as the CIE datasets lay theirs out: headerless nm,value rows, nm rising, values in [0, maxValue]; resampled to the grid.
+std::optional<pathtracer::scene::cie::Spectrum> loadSpectrumCsv(const std::string& file, double maxValue, const std::string& path,
+                                                               std::size_t index) {
+    const auto reject = [&](const auto&... why) { return rejectLight(path, index, file, ": ", why...); };
+    std::ifstream stream(file);
+    if (!stream) {
+        return reject("cannot be opened");
+    }
+    std::vector<glm::dvec2> samples;
+    std::string line;
+    for (int number = 1; std::getline(stream, line); ++number) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        if (line.empty()) {
+            continue;
+        }
+        const std::optional<glm::dvec2> sample = spectrumRow(line);
+        if (!sample || !(sample->x > 0.0)) {
+            return reject("line ", number, " is not a positive nm and a finite value, comma-separated");
+        }
+        if (!samples.empty() && !(sample->x > samples.back().x)) {
+            return reject("line ", number, " does not rise in nm");
+        }
+        if (!(sample->y >= 0.0 && sample->y <= maxValue)) {
+            return reject("line ", number, " value ", sample->y, " lies outside [0, ", maxValue, "]");
+        }
+        samples.push_back(*sample);
+    }
+    if (samples.size() < 2) {
+        return reject("needs two or more rows");
+    }
+    return pathtracer::scene::cie::resample(samples);
+}
+
+// A light's unit-luminance spectrum (its source times its filter), the filter, and the locus a kelvin override resolves on.
 struct LightColor {
     pathtracer::scene::EmissionSpectrum spectrum;
+    pathtracer::scene::cie::Spectrum filter;
     pathtracer::scene::cie::Illuminant illuminant;
 };
 
-// Exactly one of an authored scene-space color or a kelvin, on the blackbody or (illuminant daylight) the CIE daylight locus.
-std::optional<LightColor> lightColor(const nlohmann::json& light, const std::string& path, std::size_t index) {
-    using pathtracer::scene::cie::Illuminant;
-    const auto color = light.find("color");
-    const auto kelvin = light.find("kelvin");
-    const auto illuminantKey = light.find("illuminant");
-    if ((color == light.end()) == (kelvin == light.end())) {
-        std::cerr << "loadSceneConfig: " << path << ": lights[" << index << "] needs exactly one of color or kelvin\n";
-        return std::nullopt;
-    }
-    if (color != light.end()) {
-        if (illuminantKey != light.end()) {
-            std::cerr << "loadSceneConfig: " << path << ": lights[" << index << "] illuminant needs kelvin, not color\n";
-            return std::nullopt;
-        }
+// The source's relative spectral power: a scene-space color, a kelvin on onLocus, a CIE lamp illuminant or a measured spectrum CSV.
+std::optional<pathtracer::scene::cie::Spectrum> sourcePower(const nlohmann::json& light, const std::string& path, std::size_t index,
+                                                            const std::string& assetRoot, pathtracer::scene::cie::Illuminant onLocus) {
+    namespace cie = pathtracer::scene::cie;
+    if (const auto color = light.find("color"); color != light.end()) {
         const auto rgb = color->get<pathtracer::scene::Rgb>();
         // Negative radiance is unrepresentable and would propagate through NEE as a permanent bias no downstream clamp removes.
-        const float luminance = pathtracer::scene::luminance(rgb);
-        if (pathtracer::scene::minChannel(rgb) < 0.0F || !(luminance > 0.0F)) {
-            std::cerr << "loadSceneConfig: " << path << ": lights[" << index << "] color is negative or black\n";
-            return std::nullopt;
+        if (pathtracer::scene::minChannel(rgb) < 0.0F || !(pathtracer::scene::luminance(rgb) > 0.0F)) {
+            return rejectLight(path, index, "color is negative or black");
         }
-        return LightColor{pathtracer::scene::rgbEmission(rgb), Illuminant::Blackbody};
+        return pathtracer::scene::rgbPower(rgb);
     }
-    Illuminant illuminant = Illuminant::Blackbody;
-    if (illuminantKey != light.end()) {
-        const auto name = illuminantKey->get<std::string>();
-        if (name != "blackbody" && name != "daylight") {
-            std::cerr << "loadSceneConfig: " << path << ": lights[" << index << "] has unknown illuminant '" << name
-                      << "', expected blackbody or daylight\n";
-            return std::nullopt;
+    if (const auto kelvin = light.find("kelvin"); kelvin != light.end()) {
+        const double value = kelvin->get<double>();
+        std::optional<cie::Spectrum> power = cie::illuminantSpectrum(onLocus, value);
+        if (power) {
+            return power;
         }
-        illuminant = name == "daylight" ? Illuminant::Daylight : Illuminant::Blackbody;
+        if (onLocus == cie::Illuminant::Daylight) {
+            return rejectLight(path, index, value, " K lies outside CIE daylight's ", cie::kDaylightMinKelvin, "-", cie::kDaylightMaxKelvin, " K");
+        }
+        return rejectLight(path, index, value, " K is not positive or radiates no luminance");
     }
-    const double value = kelvin->get<double>();
-    const std::optional<pathtracer::scene::cie::Spectrum> power = pathtracer::scene::cie::illuminantSpectrum(illuminant, value);
+    if (const auto spectrum = light.find("spectrum"); spectrum != light.end()) {
+        return loadSpectrumCsv(assetRoot + "/" + spectrum->get<std::string>(), std::numeric_limits<double>::infinity(), path, index);
+    }
+    const auto name = light.at("illuminant").get<std::string>();
+    std::optional<cie::Spectrum> power = cie::lampSpectrum(name);
     if (!power) {
-        std::cerr << "loadSceneConfig: " << path << ": lights[" << index << "] " << value << " K ";
-        if (illuminant == Illuminant::Daylight) {
-            std::cerr << "lies outside CIE daylight's " << pathtracer::scene::cie::kDaylightMinKelvin << "-"
-                      << pathtracer::scene::cie::kDaylightMaxKelvin << " K\n";
-        } else {
-            std::cerr << "is not positive or radiates no luminance\n";
-        }
+        return rejectLight(path, index, "has unknown illuminant '", name,
+                           "', expected blackbody or daylight with kelvin, or a CIE 015:2018 lamp: FL1-FL12, FL3.1-FL3.15, HP1-HP5, "
+                           "LED-B1-B5, LED-BH1, LED-RGB1, LED-V1, LED-V2");
+    }
+    return power;
+}
+
+// Exactly one source (sourcePower's) and an optional filter CSV, a transmittance the light's nits or lumens include (PhysLight).
+std::optional<LightColor> lightColor(const nlohmann::json& light, const std::string& path, std::size_t index, const std::string& assetRoot) {
+    namespace cie = pathtracer::scene::cie;
+    const std::optional<std::string> illuminant = optionalString(light, "illuminant");
+    const bool locus = illuminant == "blackbody" || illuminant == "daylight";
+    const bool hasKelvin = light.contains("kelvin");
+    const int sources = static_cast<int>(light.contains("color")) + static_cast<int>(hasKelvin) +
+                        static_cast<int>(light.contains("spectrum")) + static_cast<int>(illuminant && !locus);
+    if (sources != 1) {
+        return rejectLight(path, index, "needs exactly one of color, kelvin, spectrum or a CIE lamp illuminant");
+    }
+    if (locus && !hasKelvin) {
+        return rejectLight(path, index, "illuminant ", *illuminant, " needs kelvin");
+    }
+    const cie::Illuminant onLocus = illuminant == "daylight" ? cie::Illuminant::Daylight : cie::Illuminant::Blackbody;
+    const std::optional<cie::Spectrum> power = sourcePower(light, path, index, assetRoot, onLocus);
+    if (!power) {
         return std::nullopt;
     }
-    return LightColor{pathtracer::scene::EmissionSpectrum(*power), illuminant};
+    cie::Spectrum filter = cie::kUnitSpectrum;
+    if (const auto it = light.find("filter"); it != light.end()) {
+        std::optional<cie::Spectrum> transmittance = loadSpectrumCsv(assetRoot + "/" + it->get<std::string>(), 1.0, path, index);
+        if (!transmittance) {
+            return std::nullopt;
+        }
+        filter = *transmittance;
+    }
+    std::optional<pathtracer::scene::EmissionSpectrum> emission = pathtracer::scene::filteredEmission(*power, filter);
+    if (!emission) {
+        return rejectLight(path, index, "passes no luminance: its spectrum or filter is dark over the visible range");
+    }
+    return LightColor{*emission, filter, onLocus};
 }
 
 // Exactly one of nits (luminance, cd/m^2) or lumens (luminous flux), positive: a zero light is an authoring error, not a dark one.
@@ -187,7 +282,7 @@ std::optional<std::variant<QuadShape, DiskShape, SphereShape, MeshShape>> lightS
     };
     // Each extent is a measure: zero subtends no solid angle, and a negative size would mirror a quad and flip which face emits.
     if (type == "quad") {
-        if (!onlyKnownKeys(light, {"type", "position", "rotation", "size", "color", "kelvin", "illuminant", "nits", "lumens", "twoSided"}, path,
+        if (!onlyKnownKeys(light, {"type", "position", "rotation", "size", "color", "kelvin", "illuminant", "spectrum", "filter", "nits", "lumens", "twoSided"}, path,
                            "light")) {
             return std::nullopt;
         }
@@ -198,7 +293,7 @@ std::optional<std::variant<QuadShape, DiskShape, SphereShape, MeshShape>> lightS
         return quad;
     }
     if (type == "disk") {
-        if (!onlyKnownKeys(light, {"type", "position", "rotation", "radius", "color", "kelvin", "illuminant", "nits", "lumens", "twoSided"}, path,
+        if (!onlyKnownKeys(light, {"type", "position", "rotation", "radius", "color", "kelvin", "illuminant", "spectrum", "filter", "nits", "lumens", "twoSided"}, path,
                            "light")) {
             return std::nullopt;
         }
@@ -209,7 +304,7 @@ std::optional<std::variant<QuadShape, DiskShape, SphereShape, MeshShape>> lightS
         return disk;
     }
     if (type == "sphere") {
-        if (!onlyKnownKeys(light, {"type", "position", "rotation", "radius", "color", "kelvin", "illuminant", "nits", "lumens"}, path,
+        if (!onlyKnownKeys(light, {"type", "position", "rotation", "radius", "color", "kelvin", "illuminant", "spectrum", "filter", "nits", "lumens"}, path,
                            "light")) {
             return std::nullopt;
         }
@@ -220,7 +315,7 @@ std::optional<std::variant<QuadShape, DiskShape, SphereShape, MeshShape>> lightS
         return sphere;
     }
     if (type == "mesh") {
-        if (!onlyKnownKeys(light, {"type", "position", "rotation", "gltfPath", "scale", "color", "kelvin", "illuminant", "nits", "lumens",
+        if (!onlyKnownKeys(light, {"type", "position", "rotation", "gltfPath", "scale", "color", "kelvin", "illuminant", "spectrum", "filter", "nits", "lumens",
                                    "twoSided"},
                            path, "light")) {
             return std::nullopt;
@@ -238,7 +333,7 @@ std::optional<std::variant<QuadShape, DiskShape, SphereShape, MeshShape>> lightS
 }
 
 // Parses and validates the optional "lights" array. Separate so each stays one screen, and every check is an authoring boundary.
-std::optional<std::vector<LightConfig>> parseLights(const nlohmann::json& j, const std::string& path) {
+std::optional<std::vector<LightConfig>> parseLights(const nlohmann::json& j, const std::string& path, const std::string& assetRoot) {
     std::vector<LightConfig> lights;
     const auto it = j.find("lights");
     if (it == j.end()) {
@@ -250,7 +345,7 @@ std::optional<std::vector<LightConfig>> parseLights(const nlohmann::json& j, con
         if (!shape) {
             return std::nullopt;
         }
-        const std::optional<LightColor> color = lightColor(light, path, index);
+        const std::optional<LightColor> color = lightColor(light, path, index, assetRoot);
         if (!color) {
             return std::nullopt;
         }
@@ -266,6 +361,7 @@ std::optional<std::vector<LightConfig>> parseLights(const nlohmann::json& j, con
             *emission,
             light.value("twoSided", false),
             color->illuminant,
+            color->filter,
         });
     }
     return lights;
@@ -341,7 +437,7 @@ bool addRandomChecker(const pathtracer::scene::InputSpec& spec, const nlohmann::
 
 }  // namespace
 
-std::optional<SceneConfig> loadSceneConfig(const std::string& path) {
+std::optional<SceneConfig> loadSceneConfig(const std::string& path, const std::string& assetRoot) {
     const std::optional<nlohmann::json> parsed = readJson(path, "loadSceneConfig");
     if (!parsed) {
         return std::nullopt;
@@ -373,7 +469,7 @@ std::optional<SceneConfig> loadSceneConfig(const std::string& path) {
             materialOverrides = it->get<std::map<std::string, std::string>>();
         }
         std::optional<std::map<std::string, std::map<std::string, TextureConfig>>> textures = parseTextures(j, path);
-        std::optional<std::vector<LightConfig>> lights = parseLights(j, path);
+        std::optional<std::vector<LightConfig>> lights = parseLights(j, path, assetRoot);
         std::optional<std::vector<VolumeConfig>> volumes = parseVolumes(j, path);
         if (!textures || !lights || !volumes) {
             return std::nullopt;

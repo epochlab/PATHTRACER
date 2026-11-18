@@ -1097,9 +1097,9 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                 const glm::vec2 fresnelSample = fresnelSampler.next2D();
                 Sampler volumeSampler(x, y, sampleIndex, replicateCount, seed ^ kVolumeSeedOffset, lattice);
                 Sampler walkSampler(x, y, sampleIndex, replicateCount, seed ^ kWalkSeedOffset, lattice);
-                // The hero's CDF position, stratified across the pixel's samples like any first dimension of a stream.
+                // The hero's CDF position in the scene's wavelength density, stratified over the pixel's samples like any first dimension.
                 Sampler wavelengthSampler(x, y, sampleIndex, replicateCount, seed ^ kWavelengthSeedOffset, lattice);
-                const SampledWavelengths lambda = sampleWavelengths(wavelengthSampler.next1D());
+                const SampledWavelengths lambda = sampleWavelengths(wavelengthSampler.next1D(), lights.wavelengthPdf());
                 // The pixel's footprint on the unit sphere, read only by the feature chain where a ray exists; a facet's is its lobe's.
                 const auto footprintSolidAngle = [&] {
                     return kappa > 0.0F ? lobeSolidAngle : pixelSolidAngle(primary->dirPerNdc, ndcPerPixel);

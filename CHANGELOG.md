@@ -3,6 +3,28 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Emission spectra
+
+Lights were a kelvin or an RGB colour. Each light now takes a real lamp's spectrum: CIE 015:2018's tabulated lamps, a measured
+spectral power distribution, and an optional filter, following PhysLight's emitter times tint (Langlands and Fascione 2020).
+The shipped cornell scenes use LED-B3 and 2AFC uses LED-B5. Evidence is in `results/emission_spectra`.
+
+- feat: **CIE lamps** by `"illuminant"`: FL1-FL12, FL3.1-FL3.15, LED-B1-B5, LED-BH1, LED-RGB1, LED-V1, LED-V2 (CIE's 1 nm
+  tables) and HP1-HP5 (5 nm). The CSVs are copied verbatim from CIE's datasets (DOIs and sha256 in each `.inc` header).
+  `blackbody` and `daylight` still name the kelvin locus.
+- feat: **measured spectra** by `"spectrum": "<csv>"` and **filters** by `"filter": "<csv>"`, paths under the asset root. Rows are
+  headerless `nm,value`, rising nm, any spacing, CRLF allowed, filter values in [0, 1]. The data is interpolated linearly onto the
+  1 nm grid and is zero outside its range, as the CIE datasets state. Malformed files are refused with file and line.
+- feat: a light has exactly one source (color, kelvin, spectrum or a CIE lamp). `nits` and `lumens` include the filter
+  (PhysLight), so changing a gel keeps the light's brightness; a filter that passes no visible light is refused.
+- feat: **wavelength sampling follows the lights**. The hero density is half the sensor's and half the sensor's times the area
+  lights' spectral flux (defensive one-sample MIS, Hesterberg 1995). Line-spectrum colour variance against a blackbody drops from
+  2.60x to 1.20x (FL11). Scenes without area lights keep the sensor density bit for bit.
+- feat: `light_kelvins` keeps each light's filter. `loadSceneConfig` takes the asset root.
+- refactor: `fluxPerRadiance` (pi A sides) replaces `emittingArea`, shared by lumens and the spectral flux; `luminanceSum`
+  and `rgbPower` are shared by every light source.
+- docs: the Emission spectra roadmap row is removed; Spectral data keeps only its material inputs.
+
 ## Roadmap without on-set data
 
 PATHTRACER follows Manuka's spectral pipeline but does not match plates shot on set, so rows that existed only to match on-set

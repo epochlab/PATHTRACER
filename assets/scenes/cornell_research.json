@@ -19,7 +19,7 @@
             "position": [0.0, 0.49, 0.0],
             "rotation": [-90.0, 0.0, 0.0],
             "size": [0.3, 0.3],
-            "kelvin": 4000,
+            "illuminant": "LED-B3",
             "lumens": 880.3
         }
     ],

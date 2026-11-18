@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <span>
 
@@ -22,11 +23,27 @@ constexpr int kBins = cie::kSampleCount - 1;  // 1 nm bins between the CIE sampl
 struct Sensor {
     std::array<glm::vec3, cie::kSampleCount> sensitivity;  // K_m xyzToScene cmf: scene RGB in cd/m^2 per W/(sr m^2 nm) over 1 nm
     std::array<float, cie::kSampleCount> white;            // D65 / (K_m sum D65 yBar), the scene white at unit luminance
-    std::array<float, cie::kSampleCount> cdf;              // kBins + 1 knots from 0 to 1, for invertCdf
-    std::array<float, kBins> pdf;                          // each bin's density per nm
+    std::array<double, cie::kSampleCount> weight;  // sum_c |s_c|, the density's shape at each sample
+    WavelengthPdf density;
 };
 
-// p ~ sum_c |s_c|, piecewise constant per bin at its knots' mean: |s_c| / p is bounded by one constant, so no channel's weight spikes.
+// mass normalised to a density per 1 nm bin and its CDF.
+WavelengthPdf densityOf(const std::array<double, kBins>& mass) {
+    WavelengthPdf density{};
+    double total = 0.0;
+    for (const double m : mass) {
+        total += m;
+    }
+    double running = 0.0;
+    for (std::size_t b = 0; b < mass.size(); ++b) {
+        density.cdf[b] = static_cast<float>(running / total);
+        running += mass[b];
+        density.pdf[b] = static_cast<float>(mass[b] / total);
+    }
+    density.cdf.back() = 1.0F;
+    return density;
+}
+
 Sensor buildSensor() {
     Sensor sensor{};
     double d65Luminance = 0.0;
@@ -34,28 +51,19 @@ Sensor buildSensor() {
         const cie::TableRow row = cie::tableRow(i);
         d65Luminance += row.d65 * row.colourMatching.y;
     }
-    std::array<double, cie::kSampleCount> weight{};
     for (int i = 0; i < cie::kSampleCount; ++i) {
         const cie::TableRow row = cie::tableRow(i);
         const glm::dvec3 s = static_cast<double>(kLuminousEfficacy) * (cie::xyzToScene() * row.colourMatching);
         const auto at = static_cast<std::size_t>(i);
         sensor.sensitivity[at] = glm::vec3(s);
         sensor.white[at] = static_cast<float>(row.d65 / (static_cast<double>(kLuminousEfficacy) * d65Luminance));
-        weight[at] = std::abs(s.x) + std::abs(s.y) + std::abs(s.z);
+        sensor.weight[at] = std::abs(s.x) + std::abs(s.y) + std::abs(s.z);
     }
     std::array<double, kBins> mass{};
-    double total = 0.0;
     for (std::size_t b = 0; b < mass.size(); ++b) {
-        mass[b] = 0.5 * (weight[b] + weight[b + 1]);
-        total += mass[b];
+        mass[b] = 0.5 * (sensor.weight[b] + sensor.weight[b + 1]);
     }
-    double running = 0.0;
-    for (std::size_t b = 0; b < mass.size(); ++b) {
-        sensor.cdf[b] = static_cast<float>(running / total);
-        running += mass[b];
-        sensor.pdf[b] = static_cast<float>(mass[b] / total);
-    }
-    sensor.cdf.back() = 1.0F;
+    sensor.density = densityOf(mass);
     return sensor;
 }
 
@@ -82,15 +90,36 @@ T sigmoid(const T& x) {
 
 }  // namespace
 
-SampledWavelengths sampleWavelengths(float u) {
+const WavelengthPdf& sensorWavelengthPdf() { return sensor().density; }
+
+WavelengthPdf emitterWavelengthPdf(const cie::Spectrum& spectralFlux) {
+    const Sensor& s = sensor();
+    std::array<double, kBins> emitted{};
+    double emittedTotal = 0.0;
+    for (std::size_t b = 0; b < emitted.size(); ++b) {
+        emitted[b] = 0.5 * ((s.weight[b] * spectralFlux[b]) + (s.weight[b + 1] * spectralFlux[b + 1]));
+        emittedTotal += emitted[b];
+    }
+    // No area light the sensor sees: the sensor's own density, exactly.
+    if (!(emittedTotal > 0.0)) {
+        return s.density;
+    }
+    std::array<double, kBins> mixture{};
+    for (std::size_t b = 0; b < mixture.size(); ++b) {
+        mixture[b] = (0.5 * static_cast<double>(s.density.pdf[b])) + (0.5 * emitted[b] / emittedTotal);
+    }
+    return densityOf(mixture);
+}
+
+SampledWavelengths sampleWavelengths(float u, const WavelengthPdf& density) {
     const Sensor& s = sensor();
     SampledWavelengths lambda{};
     for (int j = 0; j < kSpectrumSamples; ++j) {
         float uj = u + (static_cast<float>(j) / kSpectrumSamples);
         uj = uj < 1.0F ? uj : uj - 1.0F;
-        const CdfSample bin = invertCdf(s.cdf.data(), kBins, uj);
+        const CdfSample bin = invertCdf(density.cdf.data(), kBins, uj);
         const auto at = static_cast<std::size_t>(bin.index);
-        const float pdf = s.pdf[at];
+        const float pdf = density.pdf[at];
         const glm::vec3 sensitivity = glm::mix(s.sensitivity[at], s.sensitivity[at + 1], bin.fraction);
         lambda.nm[j] = static_cast<float>(cie::kLambdaMinNm + bin.index) + bin.fraction;
         lambda.pdf[j] = pdf;
@@ -169,11 +198,7 @@ SampledSpectrum illuminantSpectrum(const Rgb& rgb, const SampledWavelengths& lam
 }
 
 EmissionSpectrum::EmissionSpectrum(const cie::Spectrum& power) {
-    double luminance = 0.0;
-    for (int i = 0; i < cie::kSampleCount; ++i) {
-        luminance += power[static_cast<std::size_t>(i)] * cie::tableRow(i).colourMatching.y;
-    }
-    const double scale = 1.0 / (static_cast<double>(kLuminousEfficacy) * luminance);
+    const double scale = 1.0 / (static_cast<double>(kLuminousEfficacy) * cie::luminanceSum(power));
     for (std::size_t i = 0; i < radiance_.size(); ++i) {
         radiance_[i] = static_cast<float>(power[i] * scale);
     }
@@ -205,11 +230,21 @@ SampledSpectrum EmissionSpectrum::operator()(const SampledWavelengths& lambda) c
     return out;
 }
 
-EmissionSpectrum rgbEmission(const Rgb& rgb) {
+cie::Spectrum rgbPower(const Rgb& rgb) {
     const UnboundedSpectrum spectrum = fitUnbounded(rgb);
     cie::Spectrum power{};
     for (int i = 0; i < cie::kSampleCount; ++i) {
         power[static_cast<std::size_t>(i)] = static_cast<double>(spectrum.shape(static_cast<float>(cie::wavelengthNm(i)))) * cie::tableRow(i).d65;
+    }
+    return power;
+}
+
+EmissionSpectrum rgbEmission(const Rgb& rgb) { return EmissionSpectrum(rgbPower(rgb)); }
+
+std::optional<EmissionSpectrum> filteredEmission(cie::Spectrum power, const cie::Spectrum& filter) {
+    std::ranges::transform(power, filter, power.begin(), std::multiplies<>());
+    if (!(cie::luminanceSum(power) > 0.0)) {
+        return std::nullopt;
     }
     return EmissionSpectrum(power);
 }

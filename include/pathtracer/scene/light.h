@@ -78,6 +78,9 @@ struct MeshLight {
 // Every light shape with a surface, so every one is hittable; point, spot and distant lights have none and are absent.
 using AreaLight = std::variant<QuadLight, DiskLight, SphereLight, MeshLight>;
 
+// pi A sides: a Lambertian emitter's flux per unit radiance (A one face's world area; a sphere's one side is its outside).
+[[nodiscard]] float fluxPerRadiance(const AreaLight& light);
+
 // Guillen et al. (EGSR 2017) radial map: an exact constant-pdf solid-angle sampler for a disk, the cone it subtends being elliptic.
 struct SphericalEllipse {
     glm::vec3 referencePoint;
@@ -115,6 +118,9 @@ public:
 
     [[nodiscard]] int count() const;
 
+    // The hero-wavelength density: the sensor's mixed with the area lights' spectral flux, so line spectra are drawn where they emit.
+    [[nodiscard]] const WavelengthPdf& wavelengthPdf() const { return wavelengthPdf_; }
+
     // nullopt iff count() == 0, or the area light selected subtends no solid angle at p or meets the sample edge-on.
     [[nodiscard]] std::optional<LightSample> sample(const glm::vec3& p, Sampler& sampler, const SampledWavelengths& lambda) const;
 
@@ -142,6 +148,7 @@ private:
     const std::vector<AreaLight>& lights_;
     // Any mesh light draws a triangle dimension whichever light is picked, so the budget per vertex is the scene's, never the pick's.
     bool drawsTriangle_;
+    WavelengthPdf wavelengthPdf_;
 };
 
 }  // namespace pathtracer::scene

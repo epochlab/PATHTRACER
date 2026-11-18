@@ -10,6 +10,7 @@
 #include <limits>
 #include <optional>
 #include <string>
+#include <utility>
 
 #include <OpenColorIO/OpenColorIO.h>
 
@@ -208,28 +209,106 @@ PT_CHECK(daylight_resolves_and_refuses_outside_its_range, Fast, Exact) {
     }
 }
 
-// The sensor's estimate of a kelvin light's spectrum is xyzToScene XYZ / Y: the scene RGB it emitted before transport was spectral.
-PT_CHECK(sensor_reads_kelvin_lights_as_their_tristimulus_colour, Fast, Exact) {
+// XYZ of power's linear interpolant times the observer's, integrated exactly per 1 nm bin: what the sensor's estimator converges to.
+glm::dvec3 interpolantXyz(const cie::Spectrum& power) {
+    glm::dvec3 xyz(0.0);
+    for (int i = 0; i + 1 < cie::kSampleCount; ++i) {
+        const double a = power[static_cast<std::size_t>(i)];
+        const double b = power[static_cast<std::size_t>(i) + 1];
+        const glm::dvec3 ca = cie::tableRow(i).colourMatching;
+        const glm::dvec3 cb = cie::tableRow(i + 1).colourMatching;
+        xyz += (((a * ca) + (b * cb)) / 3.0) + (((a * cb) + (b * ca)) / 6.0);
+    }
+    return xyz;
+}
+
+// The sensor over 2^16 stratified heroes reads a unit-luminance light (CIE summation) at xyzToScene of its interpolant's XYZ.
+void expectSensorReads(tools::check::Context& ctx, const char* name, const cie::Spectrum& power) {
     constexpr int kStrata = 1 << 16;
+    const glm::dvec3 expected = cie::xyzToScene() * (interpolantXyz(power) / spectrumXyz(power).y);
+    const pathtracer::scene::EmissionSpectrum light(power);
+    glm::dvec3 projected(0.0);
+    for (int k = 0; k < kStrata; ++k) {
+        const pathtracer::scene::SampledWavelengths lambda = pathtracer::scene::sampleWavelengths((static_cast<float>(k) + 0.5F) / kStrata);
+        projected += glm::dvec3(pathtracer::scene::toScene(light(lambda), lambda).vec3());
+    }
+    projected /= kStrata;
+    char detail[192];
+    std::snprintf(detail, sizeof(detail), "%s reads (%.5f, %.5f, %.5f), its tristimulus colour is (%.5f, %.5f, %.5f)", name, projected.x,
+                  projected.y, projected.z, expected.x, expected.y, expected.z);
+    PT_EXPECT(ctx, maxAbs(projected - expected) <= 1e-4, detail);
+}
+
+PT_CHECK(sensor_reads_kelvin_lights_as_their_tristimulus_colour, Fast, Exact) {
     const std::array<std::pair<cie::Illuminant, double>, 3> kLights{
         {{cie::Illuminant::Blackbody, 2856.0}, {cie::Illuminant::Blackbody, 4000.0}, {cie::Illuminant::Daylight, 6504.0}}};
     ctx.plan(static_cast<int>(kLights.size()));
     for (const auto& [illuminant, kelvin] : kLights) {
-        const cie::Spectrum power = *cie::illuminantSpectrum(illuminant, kelvin);
-        const glm::dvec3 xyz = spectrumXyz(power);
-        const glm::dvec3 expected = cie::xyzToScene() * (xyz / xyz.y);
-        const pathtracer::scene::EmissionSpectrum light(power);
-        glm::dvec3 projected(0.0);
-        for (int k = 0; k < kStrata; ++k) {
-            const pathtracer::scene::SampledWavelengths lambda = pathtracer::scene::sampleWavelengths((static_cast<float>(k) + 0.5F) / kStrata);
-            projected += glm::dvec3(pathtracer::scene::toScene(light(lambda), lambda).vec3());
-        }
-        projected /= kStrata;
-        char detail[192];
-        std::snprintf(detail, sizeof(detail), "%g K reads (%.5f, %.5f, %.5f), its tristimulus colour is (%.5f, %.5f, %.5f)", kelvin, projected.x,
-                      projected.y, projected.z, expected.x, expected.y, expected.z);
-        PT_EXPECT(ctx, maxAbs(projected - expected) <= 1e-4, detail);
+        char name[32];
+        std::snprintf(name, sizeof(name), "%g K", kelvin);
+        expectSensorReads(ctx, name, *cie::illuminantSpectrum(illuminant, kelvin));
     }
+}
+
+// CIE 015:2018's published xy of its tabulated lamps (Tables 10, 11, 12), as colour-science 0.4.6's CCS_ILLUMINANTS carries them.
+struct LampChromaticity {
+    const char* name;
+    double x;
+    double y;
+    int intervalNm;  // the vendored table's own interval: 1 nm for FL and LED, 5 nm for HP
+};
+constexpr std::array<LampChromaticity, 41> kLamps{{
+    {"FL1", 0.3131, 0.3371, 1}, {"FL2", 0.3721, 0.3751, 1}, {"FL3", 0.4091, 0.3941, 1}, {"FL4", 0.4402, 0.4031, 1},
+    {"FL5", 0.3138, 0.3452, 1}, {"FL6", 0.3779, 0.3882, 1}, {"FL7", 0.3129, 0.3292, 1}, {"FL8", 0.3458, 0.3586, 1},
+    {"FL9", 0.3741, 0.3727, 1}, {"FL10", 0.3458, 0.3588, 1}, {"FL11", 0.3805, 0.3769, 1}, {"FL12", 0.4370, 0.4042, 1},
+    {"FL3.1", 0.4407, 0.4033, 1}, {"FL3.2", 0.3808, 0.3734, 1}, {"FL3.3", 0.3153, 0.3439, 1}, {"FL3.4", 0.4429, 0.4043, 1},
+    {"FL3.5", 0.3749, 0.3672, 1}, {"FL3.6", 0.3488, 0.3600, 1}, {"FL3.7", 0.4384, 0.4045, 1}, {"FL3.8", 0.3820, 0.3832, 1},
+    {"FL3.9", 0.3499, 0.3591, 1}, {"FL3.10", 0.3455, 0.3560, 1}, {"FL3.11", 0.3245, 0.3434, 1}, {"FL3.12", 0.4377, 0.4037, 1},
+    {"FL3.13", 0.3830, 0.3724, 1}, {"FL3.14", 0.3447, 0.3609, 1}, {"FL3.15", 0.3127, 0.3288, 1}, {"HP1", 0.5330, 0.4150, 5},
+    {"HP2", 0.4778, 0.4158, 5}, {"HP3", 0.4302, 0.4075, 5}, {"HP4", 0.3812, 0.3797, 5}, {"HP5", 0.3776, 0.3713, 5},
+    {"LED-B1", 0.4560, 0.4078, 1}, {"LED-B2", 0.4357, 0.4012, 1}, {"LED-B3", 0.3756, 0.3723, 1}, {"LED-B4", 0.3422, 0.3502, 1},
+    {"LED-B5", 0.3118, 0.3236, 1}, {"LED-BH1", 0.4474, 0.4066, 1}, {"LED-RGB1", 0.4557, 0.4211, 1}, {"LED-V1", 0.4548, 0.4044, 1},
+    {"LED-V2", 0.3781, 0.3775, 1}
+}};
+
+// Summed over 380-780 nm at its table's own interval, as CIE computed them, every lamp lands on its published xy to the last digit.
+PT_CHECK(lamps_reproduce_cie_015_chromaticities, Fast, Exact) {
+    constexpr double kPublishedDigit = 1e-4;
+    ctx.plan(static_cast<int>(kLamps.size()) + 1);
+    PT_EXPECT(ctx, !cie::lampSpectrum("FL13") && !cie::lampSpectrum("fl1") && !cie::lampSpectrum("D65"),
+              "an unknown or miscased lamp name resolved to a table column");
+    for (const LampChromaticity& lamp : kLamps) {
+        const std::optional<cie::Spectrum> power = cie::lampSpectrum(lamp.name);
+        glm::dvec3 xyz(0.0);
+        for (int nm = 380; power && nm <= 780; nm += lamp.intervalNm) {
+            const int i = nm - cie::kLambdaMinNm;
+            xyz += (*power)[static_cast<std::size_t>(i)] * cie::tableRow(i).colourMatching;
+        }
+        const glm::dvec2 xy = chromaticity(xyz);
+        char detail[160];
+        std::snprintf(detail, sizeof(detail), "%s sums to xy (%.5f, %.5f), CIE 015:2018 publishes (%.4f, %.4f)", lamp.name, xy.x, xy.y,
+                      lamp.x, lamp.y);
+        PT_EXPECT(ctx, power && std::abs(xy.x - lamp.x) <= kPublishedDigit && std::abs(xy.y - lamp.y) <= kPublishedDigit, detail);
+    }
+}
+
+// The renderer reads every lamp at its tristimulus colour, the 1 nm line spectra (FL3.x, LED-RGB1) included.
+PT_CHECK(sensor_reads_lamps_as_their_tristimulus_colour, Fast, Exact) {
+    ctx.plan(static_cast<int>(kLamps.size()));
+    for (const LampChromaticity& lamp : kLamps) {
+        expectSensorReads(ctx, lamp.name, *cie::lampSpectrum(lamp.name));
+    }
+}
+
+// Linear between samples, exact on them, zero outside: the CIE datasets' stated interpolation and extrapolation.
+PT_CHECK(resample_is_linear_inside_and_zero_outside, Fast, Exact) {
+    const std::array<glm::dvec2, 3> samples{{{400.5, 1.0}, {402.5, 3.0}, {403.0, 5.0}}};
+    const cie::Spectrum out = cie::resample(samples);
+    const auto at = [&](int nm) { return out[static_cast<std::size_t>(nm - cie::kLambdaMinNm)]; };
+    ctx.plan(2);
+    PT_EXPECT(ctx, at(400) == 0.0 && at(404) == 0.0 && at(cie::kLambdaMinNm) == 0.0 && at(cie::kLambdaMaxNm) == 0.0,
+              "a wavelength outside the samples is not zero");
+    PT_EXPECT(ctx, at(401) == 1.5 && at(402) == 2.5 && at(403) == 5.0, "a wavelength inside is not the linear interpolant or the knot");
 }
 
 // CIELAB of XYZ against a white, CIE 015:2018.

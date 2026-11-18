@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <optional>
 
 #include <glm/glm.hpp>
 #include <glm/gtx/component_wise.hpp>
@@ -70,7 +71,7 @@ inline constexpr float kLuminousEfficacy = 683.002F;
 // One path's wavelengths and the per-lane weights that project its spectra onto scene RGB, built once per path.
 struct SampledWavelengths {
     glm::vec4 nm;   // lane wavelengths, kLambdaMinNm to kLambdaMaxNm
-    glm::vec4 pdf;  // each lane's marginal density per nm, the sensor's channel-sensitivity pdf for every lane
+    glm::vec4 pdf;  // each lane's marginal density per nm, the same density for every lane
     // Columns K_m xyzToScene cmf(lambda) / (n pdf): radiance in W/(sr m^2 nm) to scene RGB in cd/m^2, the sensor's estimator.
     glm::mat4x3 toScene;
     // toScene times D65(lambda) / (K_m sum D65 yBar): a reflectance under the scene white, so a flat 1 reads (1, 1, 1).
@@ -79,8 +80,20 @@ struct SampledWavelengths {
     SampledSpectrum white;
 };
 
-// The hero at u and rotations u + j/n mod 1 in CDF space: every lane keeps the pdf p, so each lane's estimator is unbiased.
-[[nodiscard]] SampledWavelengths sampleWavelengths(float u);
+// A hero-wavelength density, piecewise constant over the CIE 1 nm bins, and its CDF at the bin edges.
+struct WavelengthPdf {
+    std::array<float, cie::kSampleCount> cdf;  // kSampleCount - 1 bins' edges from 0 to 1, for invertCdf
+    std::array<float, cie::kSampleCount - 1> pdf;  // each bin's density per nm
+};
+
+// The sensor's: p ~ sum_c |s_c|, each bin at its knots' mean, so |s_c| / p is bounded and no channel's weight spikes.
+[[nodiscard]] const WavelengthPdf& sensorWavelengthPdf();
+
+// Half the sensor's density, half the sensor's times the emitters' spectral flux: defensive one-sample MIS (Hesterberg 1995).
+[[nodiscard]] WavelengthPdf emitterWavelengthPdf(const cie::Spectrum& spectralFlux);
+
+// The hero at u and rotations u + j/n mod 1 in density's CDF: every lane keeps its pdf p, so each lane's estimator is unbiased.
+[[nodiscard]] SampledWavelengths sampleWavelengths(float u, const WavelengthPdf& density = sensorWavelengthPdf());
 
 // A radiance's scene RGB and a reflectance's under the scene white, through the path's sensor weights.
 [[nodiscard]] inline Rgb toScene(const SampledSpectrum& radiance, const SampledWavelengths& lambda) {
@@ -125,13 +138,21 @@ public:
     EmissionSpectrum& operator*=(float luminance);
     // K_m sum S yBar over the CIE samples: the cd/m^2 a light of this radiance shows a photometer.
     [[nodiscard]] float luminance() const;
+    // The tabulated radiance at the CIE samples.
+    [[nodiscard]] const std::array<float, cie::kSampleCount>& samples() const { return radiance_; }
     friend bool operator==(const EmissionSpectrum&, const EmissionSpectrum&) = default;
 
 private:
     std::array<float, cie::kSampleCount> radiance_;
 };
 
-// An RGB light's emission at 1 cd/m^2: illuminantSpectrum's shape tabulated on the CIE samples, so RGB (1, 1, 1) is D65.
+// An RGB light's relative spectral power: illuminantSpectrum's shape tabulated on the CIE samples, so RGB (1, 1, 1) is D65.
+[[nodiscard]] cie::Spectrum rgbPower(const Rgb& rgb);
+
+// rgbPower at 1 cd/m^2.
 [[nodiscard]] EmissionSpectrum rgbEmission(const Rgb& rgb);
+
+// A lamp's power times its filter's transmittance at 1 cd/m^2, the filter inside the photometric unit (PhysLight); nullopt if none passes.
+[[nodiscard]] std::optional<EmissionSpectrum> filteredEmission(cie::Spectrum power, const cie::Spectrum& filter);
 
 }  // namespace pathtracer::scene

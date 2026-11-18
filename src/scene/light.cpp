@@ -370,13 +370,51 @@ MeshLight::MeshLight(std::vector<Triangle> triangles, EmissionSpectrum radiance,
     area = static_cast<float>(total);
 }
 
+float fluxPerRadiance(const AreaLight& light) {
+    return std::visit(
+        [](const auto& emitter) {
+            using T = std::decay_t<decltype(emitter)>;
+            if constexpr (std::is_same_v<T, SphereLight>) {
+                return glm::pi<float>() * (4.0F * glm::pi<float>() * emitter.radius * emitter.radius);
+            } else {
+                const float sides = emitter.twoSided ? 2.0F : 1.0F;
+                if constexpr (std::is_same_v<T, QuadLight>) {
+                    return glm::pi<float>() * glm::length(glm::cross(emitter.edge0, emitter.edge1)) * sides;
+                } else if constexpr (std::is_same_v<T, DiskLight>) {
+                    return glm::pi<float>() * (glm::pi<float>() * emitter.radius * emitter.radius) * sides;
+                } else {
+                    return glm::pi<float>() * emitter.area * sides;
+                }
+            }
+        },
+        light);
+}
+
+namespace {
+
+// The area lights' spectral radiant flux at the CIE samples, sum of L(lambda) pi A sides: what they emit, wavelength by wavelength.
+cie::Spectrum spectralFlux(const std::vector<AreaLight>& lights) {
+    cie::Spectrum flux{};
+    for (const AreaLight& light : lights) {
+        const float k = fluxPerRadiance(light);
+        const auto& radiance = std::visit([](const auto& emitter) -> const EmissionSpectrum& { return emitter.radiance; }, light).samples();
+        for (std::size_t i = 0; i < flux.size(); ++i) {
+            flux[i] += static_cast<double>(k) * static_cast<double>(radiance[i]);
+        }
+    }
+    return flux;
+}
+
+}  // namespace
+
 LightSet::LightSet(const EnvironmentMap* environment, const glm::vec3& envRotationDegrees, float envExposure,
                     const std::vector<AreaLight>& lights)
     : environment_(environment),
       envRotation_(rotationXyz(envRotationDegrees)),
       envExposure_(envExposure),
       lights_(lights),
-      drawsTriangle_(std::ranges::any_of(lights, [](const AreaLight& light) { return std::holds_alternative<MeshLight>(light); })) {}
+      drawsTriangle_(std::ranges::any_of(lights, [](const AreaLight& light) { return std::holds_alternative<MeshLight>(light); })),
+      wavelengthPdf_(emitterWavelengthPdf(spectralFlux(lights))) {}
 
 int LightSet::count() const {
     return (environment_ != nullptr ? 1 : 0) + static_cast<int>(lights_.size());
