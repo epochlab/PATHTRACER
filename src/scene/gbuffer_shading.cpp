@@ -175,7 +175,7 @@ float opacityAt(const Material& material, glm::vec2 uv, const pathtracer::gfx::T
 
 bool isDispersive(const OpenPbrInputs<Constant>& inputs, bool ambientDisperses) {
     // A thin wall transmits undeviated, so no wavelength bends apart from another; either side's dispersion bends the interior's ray.
-    return !inputs.geometryThinWalled && (disperses(inputs) || ambientDisperses) &&
+    return !inputs.geometryThinWalled && (disperses(bulkIndexOf(inputs)) || ambientDisperses) &&
            (inputs.transmissionWeight > 0.0F || inputs.subsurfaceWeight > 0.0F) && inputs.baseMetalness < 1.0F;
 }
 

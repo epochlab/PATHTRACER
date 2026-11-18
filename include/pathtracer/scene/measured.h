@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <optional>
+#include <string_view>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -22,10 +23,12 @@ struct MeasuredColour {
     int columns = 1;
     int rows = 1;
     [[nodiscard]] std::size_t cellAt(glm::vec2 uv) const;
+    // Adds the next cell's spectrum, a reflectance or transmittance in [0, 1], with its scene RGB.
+    void append(const cie::Spectrum& spectrum);
 };
 
-// spectra (reflectances or transmittances in [0, 1]) as a columns x rows grid, each with its scene RGB.
-[[nodiscard]] MeasuredColour measuredColour(const std::vector<cie::Spectrum>& spectra, int columns, int rows);
+// One spectrum over the whole surface.
+[[nodiscard]] MeasuredColour measuredColour(const cie::Spectrum& spectrum);
 
 // The measured data one material file binds, shared by every instance and shading point it serves.
 struct MeasuredMaterial {
@@ -36,6 +39,21 @@ struct MeasuredMaterial {
     std::optional<TabulatedSpectrum> conductorEta;
     std::optional<TabulatedSpectrum> conductorKappa;
 };
+
+// A colour input a measured spectrum may stand in for: its name, where its data lands, and the constant its scene RGB fills.
+struct MeasuredColourInput {
+    std::string_view name;
+    std::optional<MeasuredColour> MeasuredMaterial::*data;
+    Rgb OpenPbrInputs<Constant>::*constant;
+};
+inline constexpr std::array<MeasuredColourInput, 3> kMeasuredColourInputs{{
+    {"base_color", &MeasuredMaterial::baseColor, &OpenPbrInputs<Constant>::baseColor},
+    {"specular_color", &MeasuredMaterial::specularColor, &OpenPbrInputs<Constant>::specularColor},
+    {"transmission_color", &MeasuredMaterial::transmissionColor, &OpenPbrInputs<Constant>::transmissionColor},
+}};
+
+// Whether input's value comes from measured data, which a texture cannot replace.
+[[nodiscard]] bool measures(const MeasuredMaterial& measured, std::string_view input);
 
 // The tables and single-spectrum colours, which hold at every uv; a grid colour stays null until resolveGrids resolves it.
 [[nodiscard]] MeasuredInputs uniformView(const MeasuredMaterial& measured);

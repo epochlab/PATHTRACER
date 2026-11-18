@@ -142,16 +142,6 @@ std::variant<ResolvedBinding, std::string> resolveBinding(const std::string& nam
                            std::nullopt};
 }
 
-// A measured input is its data at every uv: a texture would replace its RGB and leave its spectrum, so it cannot bind there.
-bool isMeasured(const Material& material, std::string_view name) {
-    if (!material.measuredData) {
-        return false;
-    }
-    const MeasuredMaterial& measured = *material.measuredData;
-    return (name == "base_color" && measured.baseColor) || (name == "specular_color" && measured.specularColor) ||
-           (name == "transmission_color" && measured.transmissionColor) || (name == "specular_ior" && measured.specularIor);
-}
-
 // A texture with the extremes of its finest level: every texel lies in an interval input's range iff both extremes do.
 struct OpenedTexture {
     TextureHandle texture;
@@ -257,7 +247,8 @@ bool bindSceneTextures(std::span<MeshInstance> instances,
     for (const MeshInstance& instance : instances) {
         if (const auto it = textures.find(instance.name); it != textures.end()) {
             for (const auto& entry : it->second) {
-                if (isMeasured(instance.material, entry.first)) {
+                // A texture would replace a measured input's RGB and leave its spectrum, so it cannot bind there.
+                if (instance.material.measuredData && measures(*instance.material.measuredData, entry.first)) {
                     std::cerr << "bindSceneTextures: '" << instance.name << "' " << entry.first << " is measured: a texture cannot replace it\n";
                     return false;
                 }

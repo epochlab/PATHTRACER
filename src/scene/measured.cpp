@@ -8,10 +8,9 @@ namespace pathtracer::scene {
 
 namespace {
 
-// F82's second point, mu-bar = 1/7 (~82 deg), where OpenPBR's specular_color is defined.
+// F82's second point, mu-bar = 1/7 (~82 deg), where OpenPBR's specular_color is defined, and Schlick's (1 - mu-bar)^5 there.
 constexpr double kMuBar = 1.0 / 7.0;
-
-double schlick(double f0, double mu) { return f0 + ((1.0 - f0) * std::pow(1.0 - mu, 5.0)); }
+const double kSchlickWeightAtMuBar = std::pow(1.0 - kMuBar, 5.0);
 
 }  // namespace
 
@@ -23,14 +22,23 @@ std::size_t MeasuredColour::cellAt(glm::vec2 uv) const {
     return (static_cast<std::size_t>(row) * static_cast<std::size_t>(columns)) + static_cast<std::size_t>(column);
 }
 
-MeasuredColour measuredColour(const std::vector<cie::Spectrum>& spectra, int columns, int rows) {
-    MeasuredColour colour{{}, {}, columns, rows};
-    for (const cie::Spectrum& spectrum : spectra) {
-        colour.spectra.push_back(tabulate(spectrum));
-        // Into OpenPBR's [0, 1] as a texel is: a saturated spectrum's scene RGB can leave the gamut.
-        colour.rgb.push_back(clamp(Rgb(glm::vec3(cie::reflectanceToScene(spectrum))), 0.0F, 1.0F));
-    }
+void MeasuredColour::append(const cie::Spectrum& spectrum) {
+    spectra.push_back(tabulate(spectrum));
+    // Into OpenPBR's [0, 1] as a texel is: a saturated spectrum's scene RGB can leave the gamut.
+    rgb.push_back(clamp(Rgb(glm::vec3(cie::reflectanceToScene(spectrum))), 0.0F, 1.0F));
+}
+
+MeasuredColour measuredColour(const cie::Spectrum& spectrum) {
+    MeasuredColour colour;
+    colour.append(spectrum);
     return colour;
+}
+
+bool measures(const MeasuredMaterial& measured, std::string_view input) {
+    return (input == "specular_ior" && measured.specularIor) ||
+           std::ranges::any_of(kMeasuredColourInputs, [&](const MeasuredColourInput& colour) {
+               return colour.name == input && (measured.*colour.data).has_value();
+           });
 }
 
 MeasuredInputs uniformView(const MeasuredMaterial& measured) {
@@ -74,7 +82,7 @@ ConductorColours conductorColours(const cie::Spectrum& n, const cie::Spectrum& k
     for (std::size_t i = 0; i < n.size(); ++i) {
         const double f0 = conductorFresnel(n[i], k[i], 1.0);
         colours.f0[i] = f0;
-        colours.tint[i] = std::min(conductorFresnel(n[i], k[i], kMuBar) / schlick(f0, kMuBar), 1.0);
+        colours.tint[i] = std::min(conductorFresnel(n[i], k[i], kMuBar) / (f0 + ((1.0 - f0) * kSchlickWeightAtMuBar)), 1.0);
     }
     return colours;
 }

@@ -379,18 +379,6 @@ bool addRandomChecker(const pathtracer::scene::InputSpec& spec, const nlohmann::
     return true;
 }
 
-// The colour inputs a measured spectrum may stand in for: where its data lands, and the constant its scene RGB fills.
-struct MeasuredColourInput {
-    std::string_view name;
-    std::optional<pathtracer::scene::MeasuredColour> pathtracer::scene::MeasuredMaterial::*data;
-    pathtracer::scene::Rgb pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant>::*constant;
-};
-constexpr std::array<MeasuredColourInput, 3> kMeasuredColours{{
-    {"base_color", &pathtracer::scene::MeasuredMaterial::baseColor, &MaterialConfig::baseColor},
-    {"specular_color", &pathtracer::scene::MeasuredMaterial::specularColor, &MaterialConfig::specularColor},
-    {"transmission_color", &pathtracer::scene::MeasuredMaterial::transmissionColor, &MaterialConfig::transmissionColor},
-}};
-
 // Logs the material input's authoring error and yields false, for the caller to return.
 template <typename... Why>
 bool rejectInput(const std::string& path, std::string_view input, const Why&... why) {
@@ -399,7 +387,7 @@ bool rejectInput(const std::string& path, std::string_view input, const Why&... 
 }
 
 // {"spectrum": csv} or {"chart": {"spectra", "columns", "rows"}} on a colour input: reflectances or transmittances in [0, 1].
-bool addMeasuredColour(const MeasuredColourInput& input, const nlohmann::json& binding, pathtracer::scene::MeasuredMaterial& measured,
+bool addMeasuredColour(const pathtracer::scene::MeasuredColourInput& input, const nlohmann::json& binding, pathtracer::scene::MeasuredMaterial& measured,
                        const std::string& path, const std::string& assetRoot) {
     const std::string caller = "loadMaterialConfig: " + path + ": " + std::string(input.name);
     if (const auto spectrum = binding.find("spectrum"); spectrum != binding.end()) {
@@ -408,7 +396,7 @@ bool addMeasuredColour(const MeasuredColourInput& input, const nlohmann::json& b
         if (!values) {
             return false;
         }
-        measured.*input.data = pathtracer::scene::measuredColour({*values}, 1, 1);
+        measured.*input.data = pathtracer::scene::measuredColour(*values);
         return true;
     }
     const nlohmann::json& chart = binding.at("chart");
@@ -424,11 +412,11 @@ bool addMeasuredColour(const MeasuredColourInput& input, const nlohmann::json& b
     if (columns < 1 || rows < 1 || patches->size() != static_cast<std::size_t>(columns) * static_cast<std::size_t>(rows)) {
         return rejectInput(path, input.name, "chart has ", patches->size(), " patches, not columns x rows ", columns, " x ", rows);
     }
-    std::vector<pathtracer::scene::cie::Spectrum> spectra;
+    pathtracer::scene::MeasuredColour colour{{}, {}, columns, rows};
     for (const ChartPatch& patch : *patches) {
-        spectra.push_back(patch.reflectance);
+        colour.append(patch.reflectance);
     }
-    measured.*input.data = pathtracer::scene::measuredColour(spectra, columns, rows);
+    measured.*input.data = std::move(colour);
     return true;
 }
 
@@ -439,8 +427,8 @@ bool addConductor(const nlohmann::json& file, pathtracer::scene::MeasuredMateria
         return false;
     }
     const pathtracer::scene::ConductorColours colours = pathtracer::scene::conductorColours(index->n, index->k);
-    measured.baseColor = pathtracer::scene::measuredColour({colours.f0}, 1, 1);
-    measured.specularColor = pathtracer::scene::measuredColour({colours.tint}, 1, 1);
+    measured.baseColor = pathtracer::scene::measuredColour(colours.f0);
+    measured.specularColor = pathtracer::scene::measuredColour(colours.tint);
     measured.conductorEta = pathtracer::scene::tabulate(index->n);
     measured.conductorKappa = pathtracer::scene::tabulate(index->k);
     return true;
@@ -478,8 +466,8 @@ bool addBinding(const pathtracer::scene::InputSpec& spec, const nlohmann::json& 
     if (kind == "sellmeier" && spec.name == "specular_ior") {
         return addSellmeier(binding.at("sellmeier"), measured, path);
     }
-    const auto colour = std::ranges::find(kMeasuredColours, spec.name, &MeasuredColourInput::name);
-    if ((kind == "spectrum" || kind == "chart") && colour != kMeasuredColours.end()) {
+    const auto colour = std::ranges::find(pathtracer::scene::kMeasuredColourInputs, spec.name, &pathtracer::scene::MeasuredColourInput::name);
+    if ((kind == "spectrum" || kind == "chart") && colour != pathtracer::scene::kMeasuredColourInputs.end()) {
         return addMeasuredColour(*colour, binding, measured, path, assetRoot);
     }
     return rejectInput(path, spec.name, "cannot take a '", kind, "' binding");
@@ -493,7 +481,7 @@ bool applyMeasured(pathtracer::scene::MeasuredMaterial measured, const nlohmann:
     if (measured.specularIor && (j.contains("transmission_dispersion_scale") || j.contains("transmission_dispersion_abbe_number"))) {
         return rejectInput(path, "transmission_dispersion", "is set by specular_ior's sellmeier");
     }
-    for (const MeasuredColourInput& input : kMeasuredColours) {
+    for (const pathtracer::scene::MeasuredColourInput& input : pathtracer::scene::kMeasuredColourInputs) {
         const std::optional<pathtracer::scene::MeasuredColour>& colour = measured.*input.data;
         if (colour && colour->spectra.size() == 1) {
             material.*input.constant = colour->rgb.front();

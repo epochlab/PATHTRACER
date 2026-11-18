@@ -337,10 +337,6 @@ template <template <typename> typename In>
 
 // Whether wavelengths refract apart: a measured index always, an Abbe one at a positive scale.
 [[nodiscard]] inline bool disperses(const BulkIndex& index) { return index.measured != nullptr || index.dispersionScale > 0.0F; }
-template <template <typename> typename In>
-[[nodiscard]] bool disperses(const OpenPbrInputs<In>& inputs) {
-    return disperses(bulkIndexOf(inputs));
-}
 
 // The index at the hero wavelength: measured, or Cauchy from V_d = abbe / scale; no hero or no dispersion, n_d. Bulks and ambients.
 [[nodiscard]] float indexAt(const BulkIndex& index, std::optional<float> heroNm);

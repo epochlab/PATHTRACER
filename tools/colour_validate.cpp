@@ -560,8 +560,8 @@ PT_CHECK(measured_conductor_tables_meet_exact_fresnel, Fast, Exact) {
         }
         pathtracer::scene::MeasuredMaterial measured;
         const pathtracer::scene::ConductorColours colours = pathtracer::scene::conductorColours(index->n, index->k);
-        measured.baseColor = pathtracer::scene::measuredColour({colours.f0}, 1, 1);
-        measured.specularColor = pathtracer::scene::measuredColour({colours.tint}, 1, 1);
+        measured.baseColor = pathtracer::scene::measuredColour(colours.f0);
+        measured.specularColor = pathtracer::scene::measuredColour(colours.tint);
         pathtracer::scene::OpenPbrInputs<pathtracer::scene::Constant> inputs;
         inputs.baseMetalness = 1.0F;
         inputs.specularRoughness = 0.0F;
