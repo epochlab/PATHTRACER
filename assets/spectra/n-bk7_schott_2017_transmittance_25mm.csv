@@ -1,0 +1,28 @@
+# SCHOTT N-BK7 internal transmittance at 25 mm: SCHOTT Zemax catalog 2017-01-20b, https://refractiveindex.info/download/data/2017/schott_2017-01-20b.agf
+# IT rows copied verbatim (wavelength converted from um to nm), sha256 92a597b6e82e80d1dbf0a7279e63b248eb14c04ff52e32b054021b7bdd080a52
+# nm,internal transmittance
+300,0.05
+310,0.25
+320,0.52
+334,0.78
+350,0.92
+365,0.971
+370,0.977
+380,0.983
+390,0.989
+400,0.992
+405,0.993
+420,0.993
+436,0.992
+460,0.993
+500,0.994
+546,0.996
+580,0.995
+620,0.994
+660,0.994
+700,0.996
+1060,0.997
+1530,0.98
+1970,0.84
+2325,0.56
+2500,0.36

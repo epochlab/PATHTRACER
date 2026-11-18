@@ -335,9 +335,7 @@ void evaluatePathGraph(const PathGraph& graph, const SampledWavelengths& lambda,
 struct MediumEntry {
     int instance;
     HomogeneousMedium medium;
-    float ior;              // specular_ior, n_d
-    float abbeNumber;       // transmission_dispersion_abbe_number
-    float dispersionScale;  // transmission_dispersion_scale
+    BulkIndex index;
 };
 
 // The innermost interior other than instance's own: the medium beyond that instance's boundary; nullptr is vacuum.
@@ -352,7 +350,7 @@ const MediumEntry* enclosingMedium(const std::vector<MediumEntry>& stack, int in
 
 // A medium's index at the path's hero wavelength; vacuum's is 1.
 float indexOf(const MediumEntry* entry, std::optional<float> heroNm) {
-    return entry != nullptr ? dispersedIor(entry->ior, entry->abbeNumber, entry->dispersionScale, heroNm) : 1.0F;
+    return entry != nullptr ? indexAt(entry->index, heroNm) : 1.0F;
 }
 
 // What a ray may cross without scattering: an instance whose opacity may fall below 1, or a thin wall that may transmit undeviated.
@@ -752,7 +750,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
         // The medium beyond this boundary as seen from its inside: its index is the ambient one this interface refracts against.
         const MediumEntry* ambient = enclosingMedium(mediumStack, triangle.instanceIndex);
         // Commit to one lane at the first dispersive interface (Wilkie et al. 2014's limit at a delta); rrMinProb keeps zero sums alive.
-        if (!heroLane.has_value() && isDispersive(authored, ambient != nullptr && ambient->dispersionScale > 0.0F)) {
+        if (!heroLane.has_value() && isDispersive(authored, ambient != nullptr && disperses(ambient->index))) {
             const float sum = channelSum(throughput);
             if (sum > 0.0F) {
                 const float u = sampler.next1D() * sum;
@@ -876,10 +874,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
                     const MediumEntry* here = mediumStack.empty() ? nullptr : &mediumStack.back();
                     const ShadowMedium in = !farSide || !bulk ? ShadowMedium{medium, indexOf(here, heroNm)}
                                             : inside          ? ShadowMedium{ambient != nullptr ? &ambient->medium : nullptr, ambientIor}
-                                                              : ShadowMedium{&*interior, dispersedIor(inputs.specularIor,
-                                                                                                      inputs.transmissionDispersionAbbeNumber,
-                                                                                                      inputs.transmissionDispersionScale,
-                                                                                                      heroNm)};
+                                                              : ShadowMedium{&*interior, indexAt(bulkIndexOf(inputs), heroNm)};
                     const SampledSpectrum visibility = transmittanceAlong(shadowRay, scene, lambda, heroLane, in, rays.shadow);
                     if (bounce == 0) {
                         recordShadow(bsdfValue * throughput * lightSample->radiance / lightSample->pdf, visibility);
@@ -934,8 +929,7 @@ TraceResult tracePath(const Ray& primaryRay, const glm::mat2x3& dirFootprint, fl
                     leftPrimaryWalk = true;
                 }
             } else {
-                mediumStack.push_back({triangle.instanceIndex, *interior, inputs.specularIor, inputs.transmissionDispersionAbbeNumber,
-                                       inputs.transmissionDispersionScale});
+                mediumStack.push_back({triangle.instanceIndex, *interior, bulkIndexOf(inputs)});
             }
         }
 

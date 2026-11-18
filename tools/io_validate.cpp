@@ -348,10 +348,10 @@ PT_CHECK(scene_config_accepts_the_shipped_scenes, Fast, Exact) {
         std::snprintf(detail, sizeof(detail), "loadSceneConfig rejected the shipped scene at %s", scene.string().c_str());
         PT_EXPECT(ctx, pathtracer::config::loadSceneConfig(scene.string(), ASSET_ROOT_DIR).has_value(), detail);
     }
-    // Anti-vacuity for the textures key itself: macbeth binds its chart only through it, so an unparsed key would leave it empty.
+    // Anti-vacuity for the textures key itself: macbeth binds its emissive chart only through it, so an unparsed key would leave it empty.
     const std::optional<pathtracer::config::SceneConfig> macbeth =
         pathtracer::config::loadSceneConfig((scenes / "macbeth.json").string(), ASSET_ROOT_DIR);
-    PT_EXPECT(ctx, macbeth && macbeth->textures.size() == 2, "macbeth.json's textures did not parse to its two grids");
+    PT_EXPECT(ctx, macbeth && macbeth->textures.contains("grid01"), "macbeth.json's textures did not parse to its emissive grid");
 }
 
 // A binding is a path string or {path, colorSpace, channel, bump}, and the environment may name its colour space: all reach SceneConfig.
@@ -775,13 +775,14 @@ PT_CHECK(scene_config_rejects_malformed_spectrum_csv, Fast, Exact) {
 
 // Anti-vacuity for the rejection rows below: every material the repo ships must still load once loadMaterialConfig validates.
 PT_CHECK(material_config_accepts_the_shipped_materials, Fast, Exact) {
-    const std::vector<const char*> shipped = {"checker.json", "chrome.json", "clay.json", "emission.json", "glass.json", "principled.json"};
+    const std::vector<const char*> shipped = {"checker.json",  "chrome.json", "clay.json",      "colorchecker.json",
+                                              "emission.json", "glass.json",  "gold.json", "principled.json"};
     ctx.plan(static_cast<int>(shipped.size()));
     for (const char* name : shipped) {
         const std::filesystem::path path = std::filesystem::path(ASSET_ROOT_DIR) / "materials" / name;
         char detail[256];
         std::snprintf(detail, sizeof(detail), "loadMaterialConfig rejected the shipped material %s", name);
-        PT_EXPECT(ctx, pathtracer::config::loadMaterialConfig(path.string()).has_value(), detail);
+        PT_EXPECT(ctx, pathtracer::config::loadMaterialConfig(path.string(), ASSET_ROOT_DIR).has_value(), detail);
     }
 }
 
@@ -789,7 +790,7 @@ PT_CHECK(material_config_accepts_the_shipped_materials, Fast, Exact) {
 PT_CHECK(material_config_thin_walled, Fast, Exact) {
     const std::filesystem::path path = writeJson("engine_io_material_thin.json",
                                                  "{\"geometry_thin_walled\":true,\"subsurface_weight\":0.5,\"geometry_opacity\":0.25}");
-    const std::optional<pathtracer::config::MaterialConfig> material = pathtracer::config::loadMaterialConfig(path.string());
+    const std::optional<pathtracer::config::MaterialConfig> material = pathtracer::config::loadMaterialConfig(path.string(), ASSET_ROOT_DIR);
     std::filesystem::remove(path);
     ctx.plan(1);
     PT_EXPECT(ctx, material && material->geometryThinWalled && material->subsurfaceWeight == 0.5F && material->geometryOpacity == 0.25F,
@@ -803,7 +804,7 @@ PT_CHECK(material_config_bulk_interior, Fast, Exact) {
                   "{\"subsurface_weight\":{\"randomChecker\":{\"cellSize\":0.1}},\"subsurface_radius\":0.05,"
                   "\"subsurface_radius_scale\":[1,0.5,0],\"transmission_weight\":0.5,\"transmission_depth\":0.2,"
                   "\"transmission_scatter\":[0.1,0.2,0.3],\"transmission_scatter_anisotropy\":0.4}");
-    const std::optional<pathtracer::config::MaterialConfig> material = pathtracer::config::loadMaterialConfig(path.string());
+    const std::optional<pathtracer::config::MaterialConfig> material = pathtracer::config::loadMaterialConfig(path.string(), ASSET_ROOT_DIR);
     std::filesystem::remove(path);
     ctx.plan(2);
     PT_EXPECT(ctx, material && !material->geometryThinWalled && material->subsurfaceRadius == 0.05F &&
@@ -818,10 +819,10 @@ PT_CHECK(material_config_reads_random_checkers, Fast, Exact) {
     const std::filesystem::path path = writeJson("engine_io_material_checker.json",
                                                  "{\"base_color\":{\"randomChecker\":{\"cellSize\":0.01,\"seed\":7}},"
                                                  "\"specular_roughness\":{\"randomChecker\":{\"cellSize\":0.3}},\"base_weight\":0.5}");
-    const std::optional<pathtracer::config::MaterialConfig> material = pathtracer::config::loadMaterialConfig(path.string());
+    const std::optional<pathtracer::config::MaterialConfig> material = pathtracer::config::loadMaterialConfig(path.string(), ASSET_ROOT_DIR);
     std::filesystem::remove(path);
     const pathtracer::scene::Material bound =
-        material ? pathtracer::scene::materialOf(*material, material->randomCheckers) : pathtracer::scene::Material{};
+        material ? pathtracer::scene::materialOf(*material, material->randomCheckers, material->measuredData) : pathtracer::scene::Material{};
     const auto* colour = std::get_if<pathtracer::scene::RandomChecker>(&bound.baseColor);
     const auto* roughness = std::get_if<pathtracer::scene::RandomChecker>(&bound.specularRoughness);
     const auto* weight = std::get_if<float>(&bound.baseWeight);
@@ -829,6 +830,36 @@ PT_CHECK(material_config_reads_random_checkers, Fast, Exact) {
     PT_EXPECT(ctx, colour && colour->cellSize == 0.01F && colour->seed == 7U, "a colour input's random checker did not bind as written");
     PT_EXPECT(ctx, roughness && roughness->cellSize == 0.3F && roughness->seed == 0U, "a scalar input's checker did not default seed 0");
     PT_EXPECT(ctx, weight && *weight == 0.5F, "a constant beside the checkers did not load as written");
+}
+
+// Measured bindings reach the material as views of its data, each authored constant the data's projection (scene RGB, n_d).
+PT_CHECK(material_config_binds_measured_data, Fast, Exact) {
+    const std::filesystem::path materials = std::filesystem::path(ASSET_ROOT_DIR) / "materials";
+    const auto load = [&](const char* name) { return pathtracer::config::loadMaterialConfig((materials / name).string(), ASSET_ROOT_DIR); };
+    const auto gold = load("gold.json");
+    const auto glass = load("glass.json");
+    const auto chart = load("colorchecker.json");
+    ctx.plan(4);
+    PT_EXPECT(ctx,
+              gold && gold->measured.baseColor && gold->measured.specularColor && gold->measured.conductorEta && gold->measured.conductorKappa &&
+                  gold->baseColor == gold->measuredData->baseColor->rgb.front() && gold->baseColor.r > gold->baseColor.b,
+              "gold's nk did not set base_color, specular_color and its complex index, a warm F0");
+    PT_EXPECT(ctx,
+              glass && glass->measured.specularIor && glass->measured.transmissionColor &&
+                  glass->specularIor == pathtracer::scene::sampleTabulated(*glass->measured.specularIor, pathtracer::scene::kLambdaDNm),
+              "glass's sellmeier did not set specular_ior to its n_d, or its transmittance did not bind");
+    // A grid holds no single spectrum: resolveGrids picks the cell at each uv, so the uniform view leaves it null.
+    PT_EXPECT(ctx, chart && chart->measured.baseColor == nullptr && chart->measuredData->baseColor->spectra.size() == 24,
+              "colorchecker's chart did not bind 24 patches as a grid");
+    pathtracer::scene::Rgb base(0.0F);
+    pathtracer::scene::Rgb unused(0.0F);
+    pathtracer::scene::MeasuredInputs view{};
+    if (chart) {
+        // v = 0.9 is the bottom row, u = 0.95 its last column: black, the chart's last patch.
+        pathtracer::scene::resolveGrids(*chart->measuredData, glm::vec2(0.95F, 0.9F), view, base, unused, unused);
+    }
+    PT_EXPECT(ctx, chart && view.baseColor == &chart->measuredData->baseColor->spectra.back() && base == chart->measuredData->baseColor->rgb.back(),
+              "the chart's cell at uv (0.95, 0.9) was not its last patch");
 }
 
 // Each row names the BSDF failure it prevents; without the loader's bounds these reach the integrator as NaN or negative energy.
@@ -842,6 +873,10 @@ PT_CHECK(material_config_rejects_malformed_input, Fast, Exact) {
     const auto material = [](const std::string& overrides) {
         return std::string("{\"base_color\":[1,1,1],\"specular_roughness\":0.5") + overrides + "}";
     };
+    // The base without base_color, for rows that bind it.
+    const auto unbased = [](const std::string& overrides) { return std::string("{\"specular_roughness\":0.5") + overrides + "}"; };
+    const std::string sellmeier = "{\"sellmeier\":{\"b\":[1.03961212,0.231792344,1.01046945],\"c\":[0.00600069867,0.0200179144,103.560653]}}";
+    const std::string chart = "\"spectra\":\"spectra/colorchecker_babelcolor_average.csv\"";
 
     const std::vector<Case> cases = {
         // Closed key set: a pre-OpenPBR file would otherwise load every input at its default, silently.
@@ -891,10 +926,31 @@ PT_CHECK(material_config_rejects_malformed_input, Fast, Exact) {
          material(",\"base_weight\":{\"randomChecker\":{\"cellsize\":0.1}}")},
         {"a key beside randomChecker", "engine_io_material_checkersibling.json",
          material(",\"base_weight\":{\"randomChecker\":{\"cellSize\":0.1},\"seed\":1}")},
+        // Measured data sets an input whole: an authored value beside it would be contradicted silently.
+        {"an nk beside an authored specular_color", "engine_io_material_nkspecular.json",
+         unbased(",\"base_color\":{\"nk\":\"spectra/gold_johnson_christy_1972.csv\"},\"specular_color\":[1,1,1]")},
+        {"a sellmeier beside an Abbe number", "engine_io_material_sellmeierabbe.json",
+         material(",\"specular_ior\":" + sellmeier + ",\"transmission_dispersion_abbe_number\":30")},
+        // Each kind binds where its quantity is that input's: n,k is a conductor's base, n(lambda) a bulk's index, a spectrum a colour.
+        {"an nk on specular_color", "engine_io_material_nkplace.json",
+         material(",\"specular_color\":{\"nk\":\"spectra/gold_johnson_christy_1972.csv\"}")},
+        {"a spectrum on a scalar input", "engine_io_material_spectrumscalar.json",
+         material(",\"base_weight\":{\"spectrum\":\"spectra/n-bk7_schott_2017_transmittance_25mm.csv\"}")},
+        {"a sellmeier on coat_ior", "engine_io_material_sellmeiercoat.json", material(",\"coat_ior\":" + sellmeier)},
+        // C = 0.25 um^2 resonates at 500 nm: n is unbounded there and imaginary just past it.
+        {"a sellmeier resonance inside the grid", "engine_io_material_sellmeierpole.json",
+         material(",\"specular_ior\":{\"sellmeier\":{\"b\":[1,0,0],\"c\":[0.25,0,0]}}")},
+        {"a chart that does not fill its grid", "engine_io_material_chartgrid.json",
+         material(",\"specular_color\":{\"chart\":{" + chart + ",\"columns\":5,\"rows\":4}}")},
+        {"two bindings in one object", "engine_io_material_twobindings.json",
+         material(",\"specular_color\":{\"spectrum\":\"spectra/n-bk7_schott_2017_transmittance_25mm.csv\",\"chart\":{" + chart +
+                  ",\"columns\":6,\"rows\":4}}")},
+        {"a missing spectrum file", "engine_io_material_spectrummissing.json",
+         material(",\"specular_color\":{\"spectrum\":\"spectra/none.csv\"}")},
     };
 
     const std::filesystem::path basePath = writeJson("engine_io_material_base.json", material(""));
-    const bool baseLoads = pathtracer::config::loadMaterialConfig(basePath.string()).has_value();
+    const bool baseLoads = pathtracer::config::loadMaterialConfig(basePath.string(), ASSET_ROOT_DIR).has_value();
     std::filesystem::remove(basePath);
 
     ctx.plan(static_cast<int>(cases.size()) + 1);
@@ -903,7 +959,7 @@ PT_CHECK(material_config_rejects_malformed_input, Fast, Exact) {
         const std::filesystem::path path = writeJson(testCase.file, testCase.text);
         char detail[224];
         std::snprintf(detail, sizeof(detail), "loadMaterialConfig accepted a material with %s", testCase.name);
-        PT_EXPECT(ctx, !pathtracer::config::loadMaterialConfig(path.string()).has_value(), detail);
+        PT_EXPECT(ctx, !pathtracer::config::loadMaterialConfig(path.string(), ASSET_ROOT_DIR).has_value(), detail);
         std::filesystem::remove(path);
     }
 }
@@ -1691,7 +1747,7 @@ PT_CHECK(json_float_reads_refuse_float_overflow, Fast, Exact) {
          [](const std::string& path) { return pathtracer::config::loadSceneConfig(path, ASSET_ROOT_DIR).has_value(); },
          {"/textures/node/geometry_normal/bump/height"}},
         {"loadMaterialConfig", material,
-         [](const std::string& path) { return pathtracer::config::loadMaterialConfig(path).has_value(); }, {}},
+         [](const std::string& path) { return pathtracer::config::loadMaterialConfig(path, ASSET_ROOT_DIR).has_value(); }, {}},
         {"loadProfileConfig", nlohmann::json::parse(shippedProfile),
          [](const std::string& path) { return pathtracer::config::loadProfileConfig(path).has_value(); },
          {"/camera/position/0", "/camera/rotation/0", "/camera/rotation/2", "/camera/focalLengthMm", "/camera/nearClip",

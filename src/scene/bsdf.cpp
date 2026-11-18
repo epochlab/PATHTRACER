@@ -17,11 +17,6 @@ namespace pathtracer::scene {
 
 namespace {
 
-// Fraunhofer d, F and C lines as OpenPBR states them (656.3, 587.6, 486.1 nm), where V_d = (n_d - 1)/(n_F - n_C) is defined.
-constexpr float kLambdaDNm = 587.6F;
-constexpr float kLambdaFNm = 486.1F;
-constexpr float kLambdaCNm = 656.3F;
-
 float& massOf(BsdfClosure& closure, Technique technique) { return closure.mass[static_cast<std::size_t>(technique)]; }
 
 float massOf(const BsdfClosure& closure, Technique technique) { return closure.mass[static_cast<std::size_t>(technique)]; }
@@ -53,9 +48,7 @@ float modulatedRatio(float eta, float specularWeight) {
 }
 
 // specular_ior at the path's hero wavelength: dispersion enters here alone, so every index at the vertex is spectrally consistent.
-float bulkIor(const OpenPbrInputs<Spectral>& inputs, std::optional<float> heroNm) {
-    return dispersedIor(inputs.specularIor, inputs.transmissionDispersionAbbeNumber, inputs.transmissionDispersionScale, heroNm);
-}
+float bulkIor(const OpenPbrInputs<Spectral>& inputs, std::optional<float> heroNm) { return indexAt(bulkIndexOf(inputs), heroNm); }
 
 // What passes beneath the fuzz toward wi, untinted (OpenPBR): 1 - F E_fuzz(wo) from outside, from inside only leaving transmission.
 float underFuzz(const BsdfClosure& closure, const glm::vec3& wi) {
@@ -91,11 +84,23 @@ SampledSpectrum underCoat(const BsdfClosure& closure, const glm::vec3& wi) {
 }
 
 // OpenPBR's thin film over the base's Fresnel at the lanes' wavelengths; a zero thickness is no film at all, its exact limit.
-FilmLayer filmOf(const OpenPbrInputs<Spectral>& inputs, const glm::vec4& wavelengthNm) {
+FilmLayer filmOf(const OpenPbrInputs<Spectral>& inputs, const glm::vec4& wavelengthNm, float ambientIor) {
     FilmLayer film{};
     if (inputs.thinFilmWeight > 0.0F && inputs.thinFilmThickness > 0.0F) {
         // thin_film_thickness is in micrometres.
-        film = {inputs.thinFilmWeight, inputs.thinFilmThickness * 1000.0F, inputs.thinFilmIor, inputs.coatWeight, inputs.coatIor, wavelengthNm};
+        film.weight = inputs.thinFilmWeight;
+        film.thicknessNm = inputs.thinFilmThickness * 1000.0F;
+        film.ior = inputs.thinFilmIor;
+        film.coatWeight = inputs.coatWeight;
+        film.coatIor = inputs.coatIor;
+        film.wavelengthNm = wavelengthNm;
+        if (inputs.measured.conductorEta != nullptr) {
+            film.measuredConductor = true;
+            for (int j = 0; j < kSpectrumSamples; ++j) {
+                film.conductorEta[j] = sampleTabulated(*inputs.measured.conductorEta, wavelengthNm[j]) / ambientIor;
+                film.conductorKappa[j] = sampleTabulated(*inputs.measured.conductorKappa, wavelengthNm[j]) / ambientIor;
+            }
+        }
     }
     return film;
 }
@@ -566,24 +571,30 @@ float cauchyIor(float iorD, float abbe, float lambdaNm) {
     return a + (b / (lambdaNm * lambdaNm));
 }
 
-float dispersedIor(float ior, float abbeNumber, float dispersionScale, std::optional<float> heroNm) {
+float indexAt(const BulkIndex& index, std::optional<float> heroNm) {
+    if (!heroNm.has_value()) {
+        return index.ior;
+    }
+    if (index.measured != nullptr) {
+        return sampleTabulated(*index.measured, *heroNm);
+    }
     // A zero transmission_dispersion_scale is V_d infinite, no dispersion, whatever the Abbe number.
-    if (!heroNm.has_value() || dispersionScale == 0.0F) {
+    const float ior = index.ior;
+    if (index.dispersionScale == 0.0F) {
         return ior;
     }
     // V_d's least value keeping the longest wavelength's index on its side of the surround (the spec allows V_d = 0, unbounded dispersion).
     constexpr auto longest = static_cast<float>(cie::kLambdaMaxNm);
     const float leastAbbe = ((1.0F / (kLambdaDNm * kLambdaDNm)) - (1.0F / (longest * longest))) /
                             ((1.0F / (kLambdaFNm * kLambdaFNm)) - (1.0F / (kLambdaCNm * kLambdaCNm)));
-    const float abbe = std::max(abbeNumber / dispersionScale, leastAbbe);
+    const float abbe = std::max(index.abbeNumber / index.dispersionScale, leastAbbe);
     // A medium rarer than its surround disperses as its reciprocal, the denser side, so short wavelengths still bend the most.
     const float dense = cauchyIor(std::max(ior, 1.0F / ior), abbe, *heroNm);
     return ior >= 1.0F ? dense : 1.0F / dense;
 }
 
 float modulatedIor(const OpenPbrInputs<Constant>& inputs, std::optional<float> heroNm) {
-    return modulatedRatio(dispersedIor(inputs.specularIor, inputs.transmissionDispersionAbbeNumber, inputs.transmissionDispersionScale, heroNm),
-                          inputs.specularWeight);
+    return modulatedRatio(indexAt(bulkIndexOf(inputs), heroNm), inputs.specularWeight);
 }
 
 SampledSpectrum coatTransmittance(const SampledSpectrum& coatColor, float coatIor, float mu) {
@@ -606,7 +617,7 @@ BsdfClosure makeBsdfClosure(const OpenPbrInputs<Spectral>& authored, const glm::
     const SampledSpectrum baseAlbedo = inputs.baseWeight * inputs.baseColor;
     // A thin wall transmits undeviated, so the hero wavelength disperses nothing there.
     const std::optional<float> hero = closure.thinWalled || !heroLane ? std::nullopt : std::optional(wavelengthNm[*heroLane]);
-    const FilmLayer film = filmOf(inputs, wavelengthNm);
+    const FilmLayer film = filmOf(inputs, wavelengthNm, ambientIor);
     // eta_s, the base's coat-aware index ratio to the ambient before specular_weight modulates it: darkening's F_s reads it.
     float specularRatio = bulkIor(inputs, hero) / ambientIor;
     const float ior = modulatedRatio(specularRatio, inputs.specularWeight);

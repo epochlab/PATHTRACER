@@ -219,13 +219,23 @@ EmissionSpectrum& EmissionSpectrum::operator*=(float luminance) {
     return *this;
 }
 
-SampledSpectrum EmissionSpectrum::operator()(const SampledWavelengths& lambda) const {
+TabulatedSpectrum tabulate(const cie::Spectrum& spectrum) {
+    TabulatedSpectrum table{};
+    std::ranges::transform(spectrum, table.begin(), [](double value) { return static_cast<float>(value); });
+    return table;
+}
+
+float sampleTabulated(const TabulatedSpectrum& table, float nm) {
+    const float offset = nm - static_cast<float>(cie::kLambdaMinNm);
+    const int at = std::min(static_cast<int>(offset), kBins - 1);
+    const float f = offset - static_cast<float>(at);
+    return glm::mix(table[static_cast<std::size_t>(at)], table[static_cast<std::size_t>(at) + 1], f);
+}
+
+SampledSpectrum sampleTabulated(const TabulatedSpectrum& table, const SampledWavelengths& lambda) {
     SampledSpectrum out(0.0F);
     for (int j = 0; j < kSpectrumSamples; ++j) {
-        const float offset = lambda.nm[j] - static_cast<float>(cie::kLambdaMinNm);
-        const int at = std::min(static_cast<int>(offset), kBins - 1);
-        const float f = offset - static_cast<float>(at);
-        out[j] = glm::mix(radiance_[static_cast<std::size_t>(at)], radiance_[static_cast<std::size_t>(at) + 1], f);
+        out[j] = sampleTabulated(table, lambda.nm[j]);
     }
     return out;
 }

@@ -540,9 +540,9 @@ ConductorSlab makeConductorSlab(float roughness, float anisotropy, const Sampled
     slab.k = f82Weight(f0, tint);
     slab.scale = scale;
     slab.film = film;
-    // OpenPBR leaves F82 without a complex index; the film needs one, so Gulbrandsen's map takes (base_color, specular_color) to it.
+    // OpenPBR leaves F82 without a complex index; the film needs one: the measured one, else Gulbrandsen's map of (f0, tint).
     if (film.weight > 0.0F) {
-        const ComplexIor ior = conductorIor(f0, tint);
+        const ComplexIor ior = film.measuredConductor ? ComplexIor{film.conductorEta, film.conductorKappa} : conductorIor(f0, tint);
         slab.filmEta = ior.eta;
         slab.filmKappa = ior.kappa;
     }

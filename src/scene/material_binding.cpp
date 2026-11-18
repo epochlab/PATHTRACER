@@ -218,12 +218,13 @@ bool applySceneMaterials(std::span<MeshInstance> instances, const std::string& m
         if (byPath.contains(path)) {
             return true;
         }
-        const std::optional<pathtracer::config::MaterialConfig> constants = pathtracer::config::loadMaterialConfig(assetRoot + "/" + path);
+        const std::optional<pathtracer::config::MaterialConfig> constants =
+            pathtracer::config::loadMaterialConfig(assetRoot + "/" + path, assetRoot);
         if (!constants) {
             std::cerr << "applySceneMaterials: material '" << path << "' failed to load\n";
             return false;
         }
-        byPath.emplace(path, materialOf(*constants, constants->randomCheckers));
+        byPath.emplace(path, materialOf(*constants, constants->randomCheckers, constants->measuredData));
         return true;
     };
     if (!load(materialPath) ||
@@ -242,6 +243,17 @@ bool bindSceneTextures(std::span<MeshInstance> instances,
                        const std::string& assetRoot) {
     if (!everyKeyNamesAnInstance(textures, instances, "bindSceneTextures", "textures")) {
         return false;
+    }
+    for (const MeshInstance& instance : instances) {
+        if (const auto it = textures.find(instance.name); it != textures.end()) {
+            for (const auto& entry : it->second) {
+                // A texture would replace a measured input's RGB and leave its spectrum, so it cannot bind there.
+                if (instance.material.measuredData && measures(*instance.material.measuredData, entry.first)) {
+                    std::cerr << "bindSceneTextures: '" << instance.name << "' " << entry.first << " is measured: a texture cannot replace it\n";
+                    return false;
+                }
+            }
+        }
     }
     // Every binding resolved and every image opened before any instance changes, each distinct image once.
     std::map<std::pair<std::string, std::string>, ResolvedBinding> resolved;

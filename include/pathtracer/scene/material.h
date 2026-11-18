@@ -4,11 +4,13 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <variant>
 
 #include <glm/glm.hpp>
 
 #include "pathtracer/gfx/hdr_image.h"
+#include "pathtracer/scene/measured.h"
 #include "pathtracer/scene/openpbr.h"
 #include "pathtracer/scene/random_checker.h"
 
@@ -33,13 +35,15 @@ struct NormalInput {
 struct Material : OpenPbrInputs<MaterialInput> {
     NormalInput geometryNormal;
     NormalInput geometryCoatNormal;  // unbound, the coat follows the interpolated surface normal, not the base's map or bump
+    std::shared_ptr<const MeasuredMaterial> measuredData;  // what measured views; null for a material of authored values alone
 };
 
 // A material file's random checkers by OpenPBR input name; each replaces that input's constant.
 using RandomCheckerInputs = std::map<std::string, RandomChecker, std::less<>>;
 
-// A material file's constants and random checkers as an unbound Material.
-[[nodiscard]] inline Material materialOf(const OpenPbrInputs<Constant>& constants, const RandomCheckerInputs& randomCheckers) {
+// A material file's constants, random checkers and measured data as an unbound Material.
+[[nodiscard]] inline Material materialOf(const OpenPbrInputs<Constant>& constants, const RandomCheckerInputs& randomCheckers,
+                                         std::shared_ptr<const MeasuredMaterial> measuredData) {
     Material material;
     forEachInput(
         [&](const InputSpec& spec, auto& input, const auto& value) {
@@ -51,6 +55,8 @@ using RandomCheckerInputs = std::map<std::string, RandomChecker, std::less<>>;
         },
         material, constants);
     material.geometryThinWalled = constants.geometryThinWalled;
+    material.measured = constants.measured;
+    material.measuredData = std::move(measuredData);
     return material;
 }
 

@@ -3,6 +3,39 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Spectral data
+
+Metals were RGB F82 fits, glass dispersed by a two-term Cauchy fit through its Abbe number, and the macbeth chart was an RGB
+texture, so every one reached the path's wavelengths through RGB upsampling. Measured data now drives them directly, tabulated on
+the CIE 1 nm grid and read at the path's wavelengths. Under CIE FL11 the chart's patch chromaticity error against
+reflectance x lamp x CIE 1931 drops from a mean 0.0055 du'v' (worst 0.018) to 0.00025, Monte Carlo noise; under daylight both
+were already exact. Evidence is in `results/spectral_data`.
+
+- feat: **measured bindings** in material files, beside `randomChecker`:
+  - `{"spectrum": "<csv>"}` on base_color, specular_color or transmission_color: `nm,value` rows in [0, 1], extended at the
+    nearest value past their range (CIE 015:2018).
+  - `{"chart": {"spectra", "columns", "rows"}}`: a grid of patch spectra over uv, read per cell (a `patch,<nm>...` table,
+    Sprague-resampled per CIE 167:2005).
+  - `{"nk": "<csv>"}` on base_color: a conductor's `lambda_um,n,k` (refractiveindex.info's rows). Exact Fresnel gives base_color
+    = F(0 deg) and specular_color = F(82 deg) / Schlick per wavelength, so OpenPBR's F82 meets the measured reflectance at both
+    angles and its energy tables are unchanged. A thin film reads the measured complex index instead of Gulbrandsen's estimate.
+  - `{"sellmeier": {"b", "c"}}` on specular_ior: n(lambda) from a glass catalogue's terms replaces the Abbe dispersion at the hero
+    wavelength, in the bulk, nested media and shadow rays alike (`BulkIndex` replaces the ior, Abbe and scale triple).
+  - Each authored constant becomes the data's projection (scene RGB clamped to [0, 1], n_d), which AOVs read. An input the data
+    sets is refused beside it (specular_color with nk, an Abbe number with sellmeier), and so is a scene texture over it.
+- feat: **materials**. `chrome.json` is chromium by nk (Johnson and Christy 1974) and the new `gold.json` is gold (Johnson and
+  Christy 1972). `glass.json` is SCHOTT N-BK7: its catalogue Sellmeier terms and its 25 mm internal transmittance as
+  transmission_color at transmission_depth 0.025 m. The new `colorchecker.json` binds BabelColor's 24 averaged spectra, and the
+  macbeth scene's reflective chart uses it; its emissive chart keeps the RGB texture.
+- feat: silver, copper (Johnson and Christy 1972) and aluminium (Rakić 1995) ship as n,k tables, each checked against exact
+  Fresnel; their materials wait for the Measured material library row.
+- refactor: spectral data lives in `assets/spectra/`, each file headed by its source, licence and sha256. The spectrum, n,k and
+  chart loaders are in `config/spectral_data` and are shared by lights and materials; `#` comment lines are now allowed in light
+  CSVs too. Sprague resampling moves into `cie`, and `tools/metal_fit` and `tools/colorchecker` are removed.
+- docs: the Spectral data roadmap row is removed. Sensor spectral sensitivity and White balance move to Queued, since there is no
+  camera to match and the CIE observer is already exact colorimetry. Synthetic eye and Measured material library are queued, and
+  Metameric pairs is unblocked.
+
 ## Emission spectra
 
 Lights were a kelvin or an RGB colour. Each light now takes a real lamp's spectrum: CIE 015:2018's tabulated lamps, a measured

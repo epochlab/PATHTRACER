@@ -1,9 +1,7 @@
 {
     "specular_roughness": 0.0,
-    "specular_ior": 1.5168,
+    "specular_ior": { "sellmeier": { "b": [1.03961212, 0.231792344, 1.01046945], "c": [0.00600069867, 0.0200179144, 103.560653] } },
     "transmission_weight": 1.0,
-    "transmission_color": [0.96, 0.98, 1.0],
-    "transmission_depth": 0.4,
-    "transmission_dispersion_scale": 1.0,
-    "transmission_dispersion_abbe_number": 64.17
+    "transmission_color": { "spectrum": "spectra/n-bk7_schott_2017_transmittance_25mm.csv" },
+    "transmission_depth": 0.025
 }
