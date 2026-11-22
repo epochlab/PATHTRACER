@@ -113,13 +113,12 @@ Sampler::Sampler(int pixelX, int pixelY, int sampleIndex, int sampleCount, std::
     const std::uint64_t tileHash =
         hashSeed(static_cast<int>(x >> tileBits), static_cast<std::uint32_t>(hashSeed(static_cast<int>(y >> tileBits), scrambleSeed)));
     seed_ = static_cast<std::uint32_t>(tileHash);
-    const std::uint64_t tileMask = (std::uint64_t{1} << (2 * tileBits)) - 1U;
-    const std::uint32_t morton = (spreadBits(x & static_cast<std::uint32_t>((1U << tileBits) - 1U)) << 1) |
-                                 spreadBits(y & static_cast<std::uint32_t>((1U << tileBits) - 1U));
+    const std::uint32_t inTile = (1U << tileBits) - 1U;
+    const std::uint32_t morton = (spreadBits(x & inTile) << 1) | spreadBits(y & inTile);
     // Ahmed & Wonka 2020: a base-4-scrambled Morton rank picks the pixel's block, so aligned pixel squares hold aligned blocks.
     const std::uint32_t rank = scrambleBase4(morton, tileBits, static_cast<std::uint32_t>(tileHash >> 32));
     index_ = static_cast<std::uint32_t>((std::uint64_t{rank} << sampleBits) | static_cast<std::uint32_t>(sampleIndex));
-    indexMask_ = static_cast<std::uint32_t>((tileMask << sampleBits) | ((std::uint64_t{1} << sampleBits) - 1U));
+    indexMask_ = static_cast<std::uint32_t>((std::uint64_t{1} << ((2 * tileBits) + sampleBits)) - 1U);
 }
 
 Sampler Sampler::stream(std::uint32_t streamOffset) const {

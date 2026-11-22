@@ -29,7 +29,7 @@ namespace {
 
 // Offsets the AO sampler's seed from the path sampler's so the two streams are independent. 2^32/phi, Knuth's decorrelating constant.
 constexpr std::uint32_t kAoSeedOffset = 0x9E3779B9U;
-// The same for the Fresnel AOV's stream: frac(sqrt 2)*2^32, kAoSeedOffset's sibling. Distinct, non-zero and odd is the whole requirement.
+// The same for the Fresnel AOV's stream: frac(sqrt 2)*2^32, kAoSeedOffset's sibling. Distinct and non-zero is the whole requirement.
 constexpr std::uint32_t kFresnelSeedOffset = 0x6A09E667U;
 // And for volume tracking, whose draw count varies per path: frac(sqrt 3)*2^32, so no BSDF dimension shifts with it.
 constexpr std::uint32_t kVolumeSeedOffset = 0xBB67AE85U;
