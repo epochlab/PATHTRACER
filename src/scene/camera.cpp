@@ -16,11 +16,8 @@ namespace pathtracer::scene {
 
 namespace {
 
-// SOS's display level per lx s of image-plane exposure: sRGB code 118 on the IEC 61966-2-1 power branch (118/255 > 0.04045) over 10/S.
-const double kSosLevelPerExposure = std::pow(((118.0 / 255.0) + 0.055) / 1.055, 2.4) / 10.0;
-
-// ISO 12232's nominal lens q = (pi/4) T v cos^4(theta): transmittance 0.9 and vignetting 0.98 at 10 degrees off axis.
-const double kNominalLensFactor = std::numbers::pi / 4.0 * 0.9 * 0.98 * std::pow(std::cos(std::numbers::pi / 18.0), 4);
+// PhysLight's incident-meter calibration constant C = 100 * 25 / 8 (v1.3 eq 2.6): exact integration, no receptor loss at grazing angles.
+constexpr double kIncidentMeterC = 312.5;
 
 // ISO 2720's reflected-light calibration constant in cd s / m^2, 12.5 as Canon, Nikon and Sekonic meters.
 constexpr float kReflectedMeterK = 12.5F;
@@ -316,7 +313,7 @@ float Camera::exposureGain() const {
 // In double, so only the final narrowing can overflow, and doubling t or S doubles the gain exactly.
 float Camera::exposureGain(float aperture, float shutterSeconds, float iso) {
     const double fNumber = aperture;
-    return static_cast<float>(kSosLevelPerExposure * kNominalLensFactor * shutterSeconds * iso / (fNumber * fNumber));
+    return static_cast<float>(std::numbers::pi / kIncidentMeterC * shutterSeconds * iso / (fNumber * fNumber));
 }
 
 float Camera::meterEv100(float luminance) {

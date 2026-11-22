@@ -518,12 +518,13 @@ def test_display_encode_exposure_is_a_stop() -> None:
 
 
 def test_display_encode_exposes_by_the_camera(renderer: Renderer) -> None:
-    """ISO 12232 SOS: the luminance whose image-plane exposure is 10/S lx s, at the camera's own gain, encodes as code 118."""
+    """PhysLight (v1.3 eq 2.8): a grey card lit at C N^2 / (t S) lx, C = 312.5, encodes as the sRGB code of its albedo."""
     camera = renderer.default_camera
-    q = math.pi / 4.0 * 0.9 * 0.98 * math.cos(math.pi / 18.0) ** 4
-    luminance = 10.0 * camera.aperture ** 2 / (q * camera.shutter_seconds * camera.iso)
+    albedo = 0.18
+    luminance = 312.5 * camera.aperture ** 2 / (camera.shutter_seconds * camera.iso) * albedo / math.pi
+    code = 255.0 * (1.055 * albedo ** (1.0 / 2.4) - 0.055)
     encoded = display_encode(np.full((64, 64, 3), luminance, dtype=np.float32), camera=camera)
-    assert abs(float(encoded.mean()) - 118.0) <= 0.5
+    assert abs(float(encoded.mean()) - code) <= 0.5
 
 
 def test_display_encode_camera_is_the_gain_times_the_trim(renderer: Renderer) -> None:
