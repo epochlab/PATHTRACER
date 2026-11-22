@@ -300,11 +300,11 @@ void addCoat(BsdfClosure& closure, const OpenPbrInputs<Spectral>& inputs, const 
 // Each technique's own density at wi given its discrete branch (facet split, wall side), unscaled by its selection mass.
 using LobePdfs = std::array<float, kTechniqueCount>;
 
-// A walk technique's MIS proxy at wi: order 1's VNDF density, and 2+ orders' cosine lobe by each side's energy (Heitz et al. 2016 5.4).
+// A walk technique's MIS proxy at wi (Heitz et al. 2016 Sec. 9): order 1's VNDF density plus a diffuse lobe for the 2+ orders.
 float walkProxyPdf(const DielectricSlab& slab, const DielectricEval& single, const glm::vec3& wi) {
     const WalkEnergy energy = walkEnergy(slab);
-    const float side = wi.z > 0.0F ? slab.tintMean * slab.multiReflect : slab.refractWeight * slab.multiTransmit;
-    return ((energy.single * single.pdfSingle) + (side * std::abs(wi.z) / kPi)) / energy.total();
+    // |cos| / 2 pi over both sides as their Mitsuba plugin, never the tables' side split, which is 0 where none of its walks exited.
+    return ((energy.single * single.pdfSingle) + (energy.multi * std::abs(wi.z) / (2.0F * kPi))) / energy.total();
 }
 
 // What a walk exit carries out of the slab: specular_color on its side, the transmission weight and colour across.

@@ -3,6 +3,19 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Walk proxy support
+
+The rough dielectric walk's MIS density could be zero where the BSDF has value. Evidence is in `results/walk_proxy_support`.
+
+- fix: **the 2+ order density covers both sides.** `walkProxyPdf` split the 2+ orders' cosine lobe by the escape table's energy
+  per side. In 675 of 131072 cells, smooth dense interfaces past the critical angle, none of the table's walks transmitted, so
+  that side stored 0 while the exact walk still exits there. The density is now order 1's VNDF density plus |cos| / 2 pi over
+  the sphere for the 2+ orders, as Heitz et al. 2016 Sec. 9 and their Mitsuba plugin, normalised.
+  - Unbiased before and after: only MIS weights move. Means stay inside their 99.9% bands over 16 seeds on cornell, macbeth and
+    stump; pixel noise ratio 1.0000, 1.0000 and 0.9985.
+- test: `bsdf.strategy_coverage` calls a direction uncovered only if none of 64 walks finds value there. One fixed walk missed
+  this gap, which had value on 1 to 4 of 64; the check now fails on main's density at 108 directions.
+
 ## A/B tuning
 
 Three local speed-ups found by profiling were measured on the proxy preset. Each run was 20 interleaved paired rounds of
