@@ -177,6 +177,7 @@ bool appendTimingRecord(const Options& options, int argc, char** argv, int passe
                    {"adaptive_confidence", settings.adaptive.confidence},
                    {"adaptive_min_samples", settings.adaptive.minSamples},
                    {"adaptive_mar_slope", settings.adaptive.marSlope},
+                   {"adaptive_dynamic_range", settings.adaptive.dynamicRange},
                    {"denoise_features", settings.denoiseFeatures},
                    {"max_bounces", settings.maxBounces},
                    {"rr_start_bounce", settings.russianRouletteStartBounce},

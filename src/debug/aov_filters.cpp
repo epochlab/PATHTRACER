@@ -81,12 +81,13 @@ HdrImage snrAov(int width, int height, const float* replicateColour, int replica
     threadPool.parallelFor(height, [&](int y) {
         for (int x = 0; x < width; ++x) {
             const std::size_t pixel = (static_cast<std::size_t>(y) * static_cast<std::size_t>(width)) + static_cast<std::size_t>(x);
-            // The adaptive stopping rule's own estimate, so the AOV shows exactly the error the sampler retires texels by.
+            // The adaptive rule's estimate before its luminance window: the level over the worst channel's standard error.
             const pathtracer::scene::ReplicateEstimate estimate =
                 pathtracer::scene::replicateEstimate(replicateColour + (pixel * stride), populated, replicates);
-            const double standardError = std::sqrt(estimate.meanVariance);
+            const double level = estimate.level();
+            const double standardError = std::sqrt(*std::max_element(estimate.variance.begin(), estimate.variance.end()));
             // No signal reads zero; a positive signal every replicate agreed on exactly is known exactly, so its SNR is +inf, not zero.
-            const double ratio = estimate.mean > 0.0 ? estimate.mean / standardError : 0.0;
+            const double ratio = level > 0.0 ? level / standardError : 0.0;
             writeTexel(out, x, y, static_cast<float>(ratio));
         }
     });

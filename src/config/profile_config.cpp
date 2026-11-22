@@ -229,6 +229,7 @@ PathTracerConfig parsePathTracer(const nlohmann::json& pathTracer) {
         toFloat(adaptive.at("confidence")),
         adaptive.at("minSamples").get<int>(),
         toFloat(adaptive.at("foveation").at("marSlope")),
+        toFloat(adaptive.at("dynamicRange")),
     };
 }
 
@@ -251,6 +252,11 @@ bool validPathTracer(const PathTracerConfig& pathTracer, const std::string& path
     // A negative slope would tighten the periphery below the gaze's threshold; NaN or infinity would scale every target to it.
     if (!std::isfinite(pathTracer.adaptiveMarSlope) || pathTracer.adaptiveMarSlope < 0.0F) {
         std::cerr << "loadProfileConfig: " << path << " has an adaptive.foveation.marSlope outside [0, inf)\n";
+        return false;
+    }
+    // Zero puts the floor at the clip, so nothing would be judged relatively; infinity or NaN leaves no floor under a black texel.
+    if (!std::isfinite(pathTracer.adaptiveDynamicRange) || !(pathTracer.adaptiveDynamicRange > 0.0F)) {
+        std::cerr << "loadProfileConfig: " << path << " has an adaptive.dynamicRange outside (0, inf)\n";
         return false;
     }
     return true;

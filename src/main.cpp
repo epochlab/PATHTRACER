@@ -103,6 +103,8 @@ struct PathTraceInputState {
     bool showSky = false;
     bool envLightEnabled = true;
     float envExposureStops = 0.0F;
+    // Adaptive sampling's clip point, which sets each texel's error target; 0 with adaptive off, where exposure never reaches the trace.
+    float adaptiveExposureGain = 0.0F;
 
     bool operator==(const PathTraceInputState&) const = default;
 };
@@ -822,8 +824,9 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const pathtracer::scene
     const ViewInputState view = viewInputState(camera);
     const pathtracer::scene::Camera previousCamera = app.previousFrameCamera;
     app.previousFrameCamera = camera;
+    const bool adaptive = app.scene.baseSettings.adaptive.threshold > 0.0F;
     const PathTraceInputState input{view, app.debugCamera.acceptanceAngleDegrees(), app.envRotationDegrees, app.showSky, app.envLightEnabled,
-                                     app.envExposureStops};
+                                     app.envExposureStops, adaptive ? camera.exposureGain() : 0.0F};
 
     // Interaction is a change in anything but resolution, compared against the inputs alone so the scale promotion cannot re-arm the timer.
     if (input != app.lastPathTraceTrigger.input) {
@@ -1132,6 +1135,7 @@ nlohmann::json benchConfig(const AppResources& app, const BenchCapture& bench) {
             {"adaptive_confidence", app.scene.baseSettings.adaptive.confidence},
             {"adaptive_min_samples", app.scene.baseSettings.adaptive.minSamples},
             {"adaptive_mar_slope", app.scene.baseSettings.adaptive.marSlope},
+            {"adaptive_dynamic_range", app.scene.baseSettings.adaptive.dynamicRange},
             {"denoise_features", app.scene.baseSettings.denoiseFeatures},
             {"denoiser_quality", pathtracer::debug::kDenoiseQualityNames[static_cast<int>(app.denoiserConfig.options.quality)]},
             {"denoiser_prefilter_auxiliary", app.denoiserConfig.options.prefilterAuxiliary},

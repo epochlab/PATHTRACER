@@ -455,7 +455,7 @@ void HeadlessRenderer::accumulatePathTraced(const Request& request) {
         if (pathtracer::scene::adaptiveCheckpoint(pass + 1, baseSettings_)) {
             const pathtracer::scene::FoveatedThreshold fovea(request.camera, bufferWidth_, bufferHeight_,
                                                              baseSettings_.adaptive.marSlope);
-            pathtracer::scene::retireConvergedTexels(activeTexels_, pathTraced_.replicateColour.data(), baseSettings_, fovea,
+            pathtracer::scene::retireConvergedTexels(activeTexels_, pathTraced_, baseSettings_, request.camera.exposureGain(), fovea,
                                                      threadPool_);
         }
     }

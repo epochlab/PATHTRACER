@@ -1085,10 +1085,12 @@ PT_CHECK(render_mode_switch_keeps_the_accumulation, Slow, Exact) {
 // Adaptive sampling on the driver fixture: a cap of 32 passes at K = 4 checks at 4, 8, 16 and 32, the first from minSamples.
 constexpr int kAdaptiveCap = 32;
 constexpr int kAdaptiveMinSamples = 4;
+// The shipped 12 stops, pinned here rather than read from profile.json.
+constexpr float kAdaptiveDynamicRange = 12.0F;
 
 PathTraceDriver::Request makeAdaptiveRequest(float threshold, const Camera& camera) {
     PathTraceDriver::Request request = makeRequest(kAdaptiveCap, camera);
-    request.settings.adaptive = {threshold, 0.95F, kAdaptiveMinSamples};
+    request.settings.adaptive = {threshold, 0.95F, kAdaptiveMinSamples, 0.0F, kAdaptiveDynamicRange};
     return request;
 }
 
@@ -1143,7 +1145,10 @@ PathTraceResult sequentialAdaptiveFold(DriverFixture& fixture, const PathTraceDr
         }
         if (pathtracer::scene::adaptiveCheckpoint(p + 1, settings)) {
             const pathtracer::scene::FoveatedThreshold fovea(request.camera, kImageSize, kImageSize, settings.adaptive.marSlope);
-            pathtracer::scene::retireConvergedTexels(active, mean.replicateColour.data(), settings, fovea, fixture.pool);
+            // The trace stamps its geometry on `pass`, the driver's own retirement input; the fold's mean takes it from there.
+            mean.pixelLattice = pass.pixelLattice;
+            mean.wrapsHorizontally = pass.wrapsHorizontally;
+            pathtracer::scene::retireConvergedTexels(active, mean, settings, request.camera.exposureGain(), fovea, fixture.pool);
         }
     }
     mean.samples = p;
