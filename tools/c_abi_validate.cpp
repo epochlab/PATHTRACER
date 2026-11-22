@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <numbers>
 #include <numeric>
 #include <bit>
 #include <cmath>
@@ -505,7 +506,7 @@ PT_CHECK(display_encode_boundary, Fast, Exact) {
               "null buffers and non-positive extents must fail without writing");
 }
 
-// A camera's SOS gain times 2^ev is render_beauty's product: its bytes are a NULL-camera encode of the image pre-multiplied by it.
+// A camera's exposure gain times 2^ev is render_beauty's product: its bytes are a NULL-camera encode of the image pre-multiplied by it.
 PT_CHECK(display_encode_applies_the_camera_exposure, Fast, Exact) {
     ctx.plan(4);
     constexpr int kW = 8;
@@ -547,9 +548,10 @@ PT_CHECK(display_encode_applies_the_camera_exposure, Fast, Exact) {
     // f/16, 1/128 s, ISO 100 is EV100 15 exactly, and a K = 12.5 meter reads 4096 cd/m^2 there.
     PT_EXPECT(ctx, pt_ev100(16.0F, 1.0F / 128.0F, 100.0F) == 15.0F && pt_meter_ev100(4096.0F) == 15.0F,
               "pt_ev100 or pt_meter_ev100 misses sunny 16's EV100 15");
-    // 0.1811642442 * 0.6515748345 * 0.008 * 400 / (10 * 2.8^2), worked by hand from ISO 12232's SOS and nominal lens.
-    PT_EXPECT(ctx, std::abs(pt_exposure_gain(2.8F, 0.008F, 400.0F) - 0.004818043F) <= 4e-6F * 0.004818043F,
-              "pt_exposure_gain at f/2.8, 1/125 s, ISO 400 departs from 0.004818043");
+    // PhysLight's pi t S / (C N^2) at C = 312.5 (Langlands and Fascione, v1.3 eq 2.7).
+    const double expected = std::numbers::pi * 0.008 * 400.0 / (312.5 * 2.8 * 2.8);
+    PT_EXPECT(ctx, std::abs(pt_exposure_gain(2.8F, 0.008F, 400.0F) - expected) <= 4e-6 * expected,
+              "pt_exposure_gain at f/2.8, 1/125 s, ISO 400 departs from pi t S / (C N^2)");
 }
 
 // One texel per square pixel copies through exactly and no further; null buffers, empty extents and unknown lattices write nothing.

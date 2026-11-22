@@ -3,6 +3,57 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Manuka and PhysLight audit
+
+Every render setting and physical constant is now checked against Manuka (Fascione et al. 2018) and the PhysLight specification
+(Langlands and Fascione 2020; wetadigital/physlight v1.3). One mismatch is fixed: the camera's exposure constant. Every other
+setting matches or differs for a stated reason. Evidence is in `results/physlight_audit`.
+
+- fix: **exposure follows PhysLight's imaging constant.** The display gain on luminance is pi t S / (C N^2) with C = 312.5
+  (v1.3 eq 2.6-2.8). A grey card of albedo rho lit at E_v = C N^2 / (t S) now renders at rho.
+  - ISO 12232's SOS assumed a real lens with 0.9 transmittance and cos^4(10 deg) vignetting (q = 0.6516) and rendered H = 10/S at
+    sRGB code 118. The camera here is an ideal lens that models neither loss.
+  - Lights, scenes and the profile camera keep their physical values, so pictures are 0.23 EV darker. The gain ratio is 0.8517;
+    cornell's display measures 0.8513. Linear EXRs are bit-identical.
+  - `emission.json`'s 207.6 cd/m^2 is a physical luminance: it now reads 0.852 at the profile camera.
+  - A spot meter (ISO 2720, K = 12.5) now places a metered surface at pi K / C = 0.1257.
+- test: camera and display checks follow PhysLight's calculation sheets. These are 5880 lx at f/5.6, 1/60 s, ISO 100 and
+  12000 lx at f/8, and each must render a grey card at its albedo.
+
+| Setting | Reference | Here | Verdict |
+| --- | --- | --- | --- |
+| Display gain | PhysLight eq 2.7, C = 312.5 | pi t S / (C N^2) | Fixed (was SOS, q = 0.6516) |
+| EV100 | eq 2.8, N^2 / t = E S / C | log2(N^2 / t 100 / S) | Match |
+| Spot meter | Defines only the incident C | ISO 2720 K = 12.5 | Kept, a reflected meter's standard |
+| Focus distance | eq 2.17, a = f for o >> f | Infinity focus, no thin lens | Matches the limit; finite focus waits for Lens model |
+| Positional response | eq 2.5, W_pos = 1 / cos | Per-pixel radiance, no falloff | Match |
+| Profile camera | Ch. 3's ISO 100, 24 mm, f/8, 1/60 s is a worked example | 70 mm, f/2.8, 1/125 s, ISO 400 | Kept, authored |
+| Luminous efficacy | K_cd = 683 lm/W | 683.002 (CIE 018:2019) | Kept: 683 holds at 540 THz, 683.002 at V's 555 nm peak; 3e-6 |
+| Observer | CIE 1931 2 deg, 360-830 nm | Same, 1 nm | Match |
+| Scene unit | Bound to SI | Metres | Match |
+| White point | Default 6500 K, CIE D above 4000 K | D65, no white balance | Match; white balance queued |
+| Reflectance upsampling | Illuminant E white | D65 white | Kept: E is dE00 1.24 off on the chart under D65, D65 0.08 |
+| Emission upsampling | Unbounded, D65 round-trips | Unbounded fit times D65 | Match |
+| Upsampling space | Each texture's own | ACEScg after a linear conversion | Equivalent: same XYZ target, all inputs inside AP1 |
+| Upsampling responsivities | The camera's, the HDRI's capture camera's | CIE observer | Differs: no camera to match (Sensor spectral sensitivity) |
+| Wavelengths | Hero wavelength with MIS | 4 lanes, sensor pdf, emitter MIS | Match; 8 lanes measured a loss |
+| Light power | Lumens for finite sources | Lumens on every shipped light | Match |
+| Lumens to radiance | eq 2.31, norm(D) = pi | L = Phi / (pi A sides) | Match |
+| Filter | Included in the stated power | Included | Match |
+| Blackbody | CODATA 2010 h, c, k | c2 = 1.4388e-2 (ITS-90) | Kept: CIE 015's own c2, illuminant A at 2856 K |
+| Kelvin illuminant | Blackbody or D, chosen per light | Blackbody unless `daylight` | Match |
+| Daylight | S0, S1, S2, 4000-25000 K, D65 = 6504 K | Same, M1 and M2 unrounded | Match |
+| Lamps | F1-F12, tabulated | All CIE 015:2018 lamps, CSV | Superset |
+| HDRI brightness | Upper-hemisphere lux, eq 2.34 | `environment.lux` on a +Y plane | Match |
+| Sun, powered cosine, IES | Sec. 2.3.3, 4.3 | Absent | Recorded; IES is on the roadmap |
+| Adaptive seed | Usually 32 of 92-493 progressions | `minSamples` 8 of 64 spp | Kept: 32 would cap the saving at 2x |
+| Adaptive measure | Relative, luminance range, 1-32 px pools | Same | Match |
+| Pixel filter | Splatted, no filter importance sampling | Importance-sampled Blackman-Harris | Kept: one texel per sample keeps the replicate tests independent |
+| Path length | A user parameter | `maxBounces` 8, roulette from 3 | Match; no value given |
+| Denoising | Post-process; the sampler resolves its own noise | OIDN at output; adaptive reads raw samples | Match |
+
+- docs: the README's beauty preset row reads 64 spp, `profile.json`'s value. The audit's roadmap row is removed.
+
 ## Adaptive sampling refinements
 
 Adaptive sampling judged every texel's relative error alike and alone. Following Manuka's image-space sampler (Fascione et al.

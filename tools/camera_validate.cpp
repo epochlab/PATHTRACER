@@ -768,7 +768,7 @@ PT_CHECK(camera_validate_rejects_each_invalid_parameter, Fast, Exact) {
         {"aperture inf", with([&](CameraArgs& a) { a.aperture = kInf; }), false},
         {"aperture 1e30, EV100 overflows", with([](CameraArgs& a) { a.aperture = 1e30F; }), false},
         {"aperture 1e-30, EV100 underflows", with([](CameraArgs& a) { a.aperture = 1e-30F; }), false},
-        {"aperture 1e-20, EV100 finite but the display gain overflows", with([](CameraArgs& a) { a.aperture = 1e-20F; }), false},
+        {"aperture 1e-21, EV100 finite but the display gain overflows", with([](CameraArgs& a) { a.aperture = 1e-21F; }), false},
         {"shutter 0", with([](CameraArgs& a) { a.shutterSeconds = 0.0F; }), false},
         {"shutter -0.008", with([](CameraArgs& a) { a.shutterSeconds = -0.008F; }), false},
         {"shutter NaN", with([&](CameraArgs& a) { a.shutterSeconds = kNaN; }), false},
@@ -801,18 +801,24 @@ PT_CHECK(camera_validate_rejects_each_invalid_parameter, Fast, Exact) {
     }
 }
 
-// SOS against values worked by hand from the standards: q = (pi/4) 0.9 0.98 cos^4(10 deg), sRGB code 118, and ISO 2720's K = 12.5.
-PT_CHECK(sos_gain_and_meter_follow_iso_12232_and_2720, Fast, Exact) {
-    // Hand-computed in double: q = 0.6515748345 and code 118's linear level 0.1811642442, so their product at t S / N^2 = 10.
-    constexpr double kLevelTimesQ = 0.1811642442 * 0.6515748345;
+// PhysLight v1.3's calculation sheets (secs 3.1, 3.4): a grey card lit at E_v = C N^2 / (t S) renders at its albedo; ISO 2720's K = 12.5.
+PT_CHECK(gain_follows_physlight_and_meter_follows_iso_2720, Fast, Exact) {
+    constexpr double kC = 312.5;
+    constexpr double kAlbedo = 0.18;
     // Float arguments round each operand by u: a bound of a few ulps over the exact quotient.
     constexpr double kTolerance = 4.0 * std::numeric_limits<float>::epsilon();
     const auto near = [&](double got, double want) { return std::abs(got - want) <= kTolerance * want; };
+    // The card's luminance under the exposure equation's illuminance, E_v rho / pi.
+    const auto cardLuminance = [&](double aperture, double shutter, double iso) {
+        return kC * aperture * aperture / (shutter * iso) * kAlbedo / std::numbers::pi;
+    };
     ctx.plan(6);
-    PT_EXPECT(ctx, near(Camera::exposureGain(1.0F, 1.0F, 10.0F), kLevelTimesQ),
-              "at H = q L / 1 lx s per cd/m^2 and S = 10, H_SOS = 1 lx s must render at code 118: gain q * level");
-    PT_EXPECT(ctx, near(Camera::exposureGain(2.8F, 0.008F, 400.0F), kLevelTimesQ * 0.008 * 400.0 / (10.0 * 2.8 * 2.8)),
-              "the profile's f/2.8, 1/125 s, ISO 400 gain departs from 0.004818043");
+    // Sec 3.4: S 100, N 5.6, t 1/60 s meters 5880 lx, so the card reads rho.
+    PT_EXPECT(ctx, near(Camera::exposureGain(5.6F, 1.0F / 60.0F, 100.0F) * cardLuminance(5.6, 1.0 / 60.0, 100.0), kAlbedo),
+              "a grey card lit at 5880 lx under f/5.6, 1/60 s, ISO 100 does not render at its albedo");
+    // Sec 3.1: S 100, N 8, t 1/60 s meters 12000 lx, so 687.549 cd/m^2 reads 0.18.
+    PT_EXPECT(ctx, near(Camera::exposureGain(8.0F, 1.0F / 60.0F, 100.0F) * cardLuminance(8.0, 1.0 / 60.0, 100.0), kAlbedo),
+              "a grey card lit at 12000 lx under f/8, 1/60 s, ISO 100 does not render at its albedo");
     const float shutter = 0.008F;
     PT_EXPECT(ctx, Camera::exposureGain(2.8F, 2.0F * shutter, 400.0F) == 2.0F * Camera::exposureGain(2.8F, shutter, 400.0F) &&
                        Camera::exposureGain(2.8F, shutter, 800.0F) == 2.0F * Camera::exposureGain(2.8F, shutter, 400.0F),
@@ -822,9 +828,9 @@ PT_CHECK(sos_gain_and_meter_follow_iso_12232_and_2720, Fast, Exact) {
     // Sunny 16: f/16 at 1/128 s, ISO 100 is EV100 15, which a K = 12.5 meter sets for 2^15 * 12.5 / 100 = 4096 cd/m^2.
     PT_EXPECT(ctx, Camera::ev100(16.0F, 1.0F / 128.0F, 100.0F) == 15.0F && Camera::meterEv100(4096.0F) == 15.0F,
               "sunny 16 is not EV100 15, or 4096 cd/m^2 does not meter to it");
-    // Metered at the camera's own EV100, a surface lands at level q K / 10 = 0.14755, the 0.3 stops SOS keeps below code 118.
-    PT_EXPECT(ctx, near(Camera::exposureGain(16.0F, 1.0F / 128.0F, 100.0F) * 4096.0, kLevelTimesQ * 12.5 / 10.0),
-              "a surface metered at the camera's EV100 does not render at q K level / 10 = 0.14755");
+    // Metered at the camera's own EV100, a surface lands at pi K / C = 0.12566, the albedo whose incident and reflected readings agree.
+    PT_EXPECT(ctx, near(Camera::exposureGain(16.0F, 1.0F / 128.0F, 100.0F) * 4096.0, std::numbers::pi * 12.5 / kC),
+              "a surface metered at the camera's EV100 does not render at pi K / C = 0.12566");
 }
 
 // The over-range readout bins clip luminances 1/gain: every corner of the HUD's exposure sliders must fall strictly inside its window.

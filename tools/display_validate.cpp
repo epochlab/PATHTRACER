@@ -258,14 +258,16 @@ PT_CHECK(encode_of_flat_field_is_unbiased, Fast, Exact) {
     PT_EXPECT(ctx, worst <= kQuadratureBound, detail);
 }
 
-// ISO 12232 SOS end to end: the luminance whose image-plane exposure is 10/S lx s, exposed by the camera's gain, displays as code 118.
-PT_CHECK(sos_luminance_encodes_to_code_118, Fast, Exact) {
+// PhysLight end to end (v1.3 eq 2.8): a grey card lit at E_v = C N^2 / (t S) displays at the sRGB code of its albedo.
+PT_CHECK(grey_card_encodes_to_its_albedo_code, Fast, Exact) {
     constexpr float kAperture = 2.8F;
     constexpr float kShutterSeconds = 0.008F;
     constexpr float kIso = 400.0F;
-    // H = q L t / N^2 with ISO 12232's nominal lens, solved for H = 10 / S, independently of Camera's own constants.
-    const double q = std::numbers::pi / 4.0 * 0.9 * 0.98 * std::pow(std::cos(std::numbers::pi / 18.0), 4);
-    const auto luminance = static_cast<float>(10.0 * kAperture * kAperture / (q * kShutterSeconds * kIso));
+    constexpr double kAlbedo = 0.18;
+    // L = E_v rho / pi with C = 312.5, independently of Camera's own constants.
+    const auto luminance = static_cast<float>(312.5 * kAperture * kAperture / (kShutterSeconds * kIso) * kAlbedo / std::numbers::pi);
+    // IEC 61966-2-1's power branch (0.18 > 0.0031308), in codes of 255.
+    const double expectedCode = 255.0 * (1.055 * std::pow(kAlbedo, 1.0 / 2.4) - 0.055);
     // Neutral: the scene weights sum to one, so this texel's luminance is the level itself.
     const std::vector<float> rgb(static_cast<std::size_t>(kTileTexels) * 3, luminance);
     std::vector<unsigned char> codes(rgb.size());
@@ -273,10 +275,11 @@ PT_CHECK(sos_luminance_encodes_to_code_118, Fast, Exact) {
     pathtracer::gfx::encodeForDisplay(rgb, kTile, kTile, glm::vec3(gain), true, glm::vec3(0.0F), codes);
     const double mean = std::accumulate(codes.begin(), codes.end(), 0.0) / static_cast<double>(codes.size());
     char detail[160];
-    std::snprintf(detail, sizeof(detail), "%.6g cd/m^2 at f/2.8, 1/125 s, ISO 400 encodes to mean code %.3f, not 118", luminance, mean);
+    std::snprintf(detail, sizeof(detail), "%.6g cd/m^2 at f/2.8, 1/125 s, ISO 400 encodes to mean code %.3f, not %.3f", luminance,
+                  mean, expectedCode);
     ctx.plan(1);
-    // The dither is unbiased, so within half a code is the code an undithered quantiser would round to.
-    PT_EXPECT(ctx, std::fabs(mean - 118.0) <= 0.5, detail);
+    // The dither is unbiased, so the mean code sits within half a code of the continuous one.
+    PT_EXPECT(ctx, std::fabs(mean - expectedCode) <= 0.5, detail);
 }
 
 // A flat field's quantization error must be blue at every level: each one's low-band share improbably small for white noise.

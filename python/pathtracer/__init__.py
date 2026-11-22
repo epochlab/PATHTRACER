@@ -166,7 +166,7 @@ class Camera:
     """Pose, lens, exposure and pixel lattice.
 
     ``aperture``, ``shutter_seconds`` and ``iso`` set the photographic exposure, which ``display_encode(camera=)`` applies:
-    ``exposure_gain`` is the ISO 12232 standard-output-sensitivity gain on luminance in cd/m^2, the viewer's own, and ``ev100``
+    ``exposure_gain`` is PhysLight's gain on luminance in cd/m^2, pi t S / (C N^2) with C = 312.5, the viewer's own, and ``ev100``
     the exposure value at ISO 100. No projection produces depth of field, and ``aperture`` is not a lens radius.
 
     ``lens`` selects the projection: ``"rectilinear"`` is the pinhole, ``"fisheye_polynomial"`` is
@@ -226,7 +226,7 @@ class Camera:
 
     @property
     def exposure_gain(self) -> float:
-        """Display gain on luminance in cd/m^2: an image-plane exposure of ``10 / iso`` lx s renders at sRGB code 118."""
+        """Display gain on luminance in cd/m^2: a grey card lit at ``312.5 aperture^2 / (shutter_seconds iso)`` lx reads its albedo."""
         return float(_LIB.pt_exposure_gain(self.aperture, self.shutter_seconds, self.iso))
 
     @property

@@ -118,7 +118,7 @@ public:
     [[nodiscard]] float ev100() const;
     [[nodiscard]] static float ev100(float aperture, float shutterSeconds, float iso);
 
-    // ISO 12232:2019 SOS display gain on luminance in cd/m^2: image-plane H = q L t / N^2 lx s, and H = 10/S renders at sRGB code 118.
+    // PhysLight's display gain on cd/m^2, pi t S / (C N^2) at C = 312.5: a grey card lit at C N^2 / (t S) lx reads its albedo.
     [[nodiscard]] float exposureGain() const;
     [[nodiscard]] static float exposureGain(float aperture, float shutterSeconds, float iso);
 

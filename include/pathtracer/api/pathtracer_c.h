@@ -116,11 +116,11 @@ typedef struct {
 /* Renders every requested AOV. out parallels request->aovs at width * rows * pt_aov_channels(aovs[i]) floats, row-major top-left. */
 int pt_render(PtRenderer* renderer, const PtRenderRequest* request, float* const* out, char* err, int err_cap);
 
-/* Linear cd/m^2 to 8-bit sRGB, the viewer's chain: gain is camera's SOS exposure (1 if NULL) times 2^exposure_ev. Buffers hold w*h*3. */
+/* Linear cd/m^2 to 8-bit sRGB, the viewer's chain: gain is camera's exposure (1 if NULL) times 2^exposure_ev. Buffers hold w*h*3. */
 int pt_display_encode(const float* rgb, int width, int height, const PtCamera* camera, float exposure_ev, int display_transform,
                       unsigned char* out, char* err, int err_cap);
 
-/* ISO 12232 SOS display gain on luminance in cd/m^2, the viewer's exposure: sRGB code 118 at image-plane exposure 10/iso lx s. */
+/* PhysLight's display gain on luminance in cd/m^2, the viewer's exposure: pi t S / (C N^2), C = 312.5 (Langlands and Fascione v1.3). */
 float pt_exposure_gain(float aperture, float shutter_seconds, float iso);
 /* log2(aperture^2 / shutter_seconds * 100 / iso), the exposure value at ISO 100. */
 float pt_ev100(float aperture, float shutter_seconds, float iso);

@@ -57,7 +57,7 @@ public:
     void setPixelLattice(pathtracer::gfx::PixelLattice pixelLattice) { pixelLattice_ = pixelLattice; }
     void setAcceptanceAngleDegrees(float acceptanceAngleDegrees) { acceptanceAngleDegrees_ = acceptanceAngleDegrees; }
 
-    // The live aperture, shutter and ISO's SOS display gain on scene luminance in cd/m^2, applied at the display stage.
+    // The live aperture, shutter and ISO's PhysLight display gain on scene luminance in cd/m^2, applied at the display stage.
     [[nodiscard]] float exposureGain() const { return Camera::exposureGain(aperture_, shutterSeconds_, iso_); }
 
 private:
