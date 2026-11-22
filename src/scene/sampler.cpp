@@ -166,9 +166,12 @@ glm::vec2 Sampler::next2D() {
 }
 
 CdfSample invertCdf(const float* cdf, int count, float u) {
-    // upper_bound finds the first entry > u; the bin before it is u's. cdf[0]==0 is never > u, so searching it is harmless.
-    const float* it = std::upper_bound(cdf, cdf + count + 1, u);
-    const int index = std::clamp(static_cast<int>(it - cdf) - 1, 0, count - 1);
+    // Last knot <= u, upper_bound's bin, by branch-free halving (Khuong & Morin 2017): a select per step, no mispredicted branch.
+    const float* base = cdf;
+    for (int n = count + 1; n > 1; n -= n / 2) {
+        base = base[n / 2] <= u ? base + (n / 2) : base;
+    }
+    const int index = std::min(static_cast<int>(base - cdf), count - 1);
     const float lo = cdf[index];
     const float hi = cdf[index + 1];
     const float fraction = hi > lo ? std::clamp((u - lo) / (hi - lo), 0.0F, 1.0F) : 0.5F;

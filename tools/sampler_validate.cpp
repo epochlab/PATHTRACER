@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <numbers>
 #include <numeric>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -497,6 +498,46 @@ PT_CHECK(replicate_seeds_are_identity_then_far_apart, Fast, Exact) {
     char detail[128];
     std::snprintf(detail, sizeof(detail), "two of %d replicate seeds differ by XOR 0x%08X, under 2^16", kReplicates, closest);
     PT_EXPECT(ctx, closest >= kNearSeeds, detail);
+}
+
+// invertCdf's search is upper_bound's bin, bit for bit: zero-mass bins, ties, every knot and its neighbours, 0, below 1 and past 1.
+PT_CHECK(invert_cdf_matches_upper_bound, Fast, Exact) {
+    constexpr int kMaxBins = 80;  // past 64, so every power-of-two search length and its neighbours occur
+    std::mt19937 rng(kSeed);
+    std::uniform_real_distribution<float> uniform(0.0F, 1.0F);
+    int mismatches = 0;
+    int queries = 0;
+    for (int count = 1; count <= kMaxBins; ++count) {
+        std::vector<float> cdf(static_cast<std::size_t>(count) + 1, 0.0F);
+        for (int b = 1; b <= count; ++b) {
+            const float mass = uniform(rng) < 0.3F ? 0.0F : uniform(rng);
+            cdf[static_cast<std::size_t>(b)] = cdf[static_cast<std::size_t>(b) - 1] + mass;
+        }
+        const float total = cdf.back();
+        for (float& knot : cdf) {
+            knot = total > 0.0F ? knot / total : 0.0F;
+        }
+        cdf.back() = 1.0F;
+        std::vector<float> us = {0.0F, std::nextafter(1.0F, 0.0F), 1.0F, 1.5F};
+        for (const float knot : cdf) {
+            us.insert(us.end(), {knot, std::nextafter(knot, 0.0F), std::nextafter(knot, 2.0F)});
+        }
+        for (int i = 0; i < 64; ++i) {
+            us.push_back(uniform(rng));
+        }
+        for (const float u : us) {
+            const int index = std::clamp(static_cast<int>(std::upper_bound(cdf.begin(), cdf.end(), u) - cdf.begin()) - 1, 0, count - 1);
+            const float lo = cdf[static_cast<std::size_t>(index)];
+            const float hi = cdf[static_cast<std::size_t>(index) + 1];
+            const float fraction = hi > lo ? std::clamp((u - lo) / (hi - lo), 0.0F, 1.0F) : 0.5F;
+            const pathtracer::scene::CdfSample got = pathtracer::scene::invertCdf(cdf.data(), count, u);
+            mismatches += got.index != index || got.fraction != fraction ? 1 : 0;
+            ++queries;
+        }
+    }
+    ctx.plan(1);
+    PT_EXPECT(ctx, mismatches == 0,
+              std::to_string(mismatches) + " of " + std::to_string(queries) + " inversions differ from upper_bound's bin");
 }
 
 }  // namespace
