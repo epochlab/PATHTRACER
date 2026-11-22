@@ -382,20 +382,20 @@ PT_CHECK(strategy_coverage, Fast, Exact) {
                 });
                 for (float ndotV : ndotVs) {
                     const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
+                    const pathtracer::scene::BsdfClosure closure = tools::fixtures::closureOf(params, wo);
                     for (int mi = 0; mi < 2 * kMuNodes; ++mi) {
                         const float z = -1.0F + ((static_cast<float>(mi) + 0.5F) / kMuNodes);
                         const float r = std::sqrt(std::max(0.0F, 1.0F - (z * z)));
                         for (int pi = 0; pi < kPhiNodes; ++pi) {
                             const float phi = 2.0F * kPi * (static_cast<float>(pi) + 0.5F) / kPhiNodes;
                             const glm::vec3 wi(r * std::cos(phi), r * std::sin(phi), z);
-                            const bool hasValue = maxChannel(evaluateSeeded(params, wo, wi).total()) > 0.0F;
+                            const bool hasValue = maxChannel(evaluateSeeded(closure, wi).total()) > 0.0F;
                             valued += hasValue ? 1 : 0;
                             farValued += hasValue && (wi.z * wo.z < 0.0F) ? 1 : 0;
-                            if (tools::fixtures::pdfBsdf(params, wo, wi) > 0.0F) {
+                            if (pathtracer::scene::pdfBsdf(closure, wi) > 0.0F) {
                                 continue;
                             }
                             // The 2+ orders are a walk's estimate, so a direction is uncovered only if one of the walks finds value there.
-                            const pathtracer::scene::BsdfClosure closure = tools::fixtures::closureOf(params, wo);
                             bool anyWalk = hasValue;
                             for (std::uint32_t seed = 2; seed <= kWalkDraws && !anyWalk; ++seed) {
                                 pathtracer::scene::Sampler walk(0, 0, 0, 1, seed);
