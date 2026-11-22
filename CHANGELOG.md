@@ -3,6 +3,26 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## A/B tuning
+
+Three local speed-ups found by profiling were measured on the proxy preset. Each run was 20 interleaved paired rounds of
+`bench_compare`, and each candidate had to keep its output bit-identical. Evidence is in `results/ab_tuning`.
+
+- perf: **branch-free CDF inversion.** `invertCdf` searches by branch-free halving (Khuong and Morin 2017) instead of
+  `std::upper_bound`. It returns the same bin and fraction, so renders are bit-identical. Every CDF inversion uses it: hero
+  wavelengths, the film filter, environment importance sampling and mesh-light areas.
+  - Pass time B/A against main: macbeth 0.912 [0.888, 0.920], 2AFC 0.885 [0.840, 0.909], cloud 0.994 [0.987, 1.000].
+  - Cornell is unresolved at 0.991 [0.976, 1.006], and 0.981 in an earlier run. Inversions are about 7% of its time, under its noise.
+    No scene ran slower.
+- test: `sampler.invert_cdf_matches_upper_bound` checks the result exactly against `upper_bound`'s bin. It covers zero-mass bins,
+  ties, every knot and its float neighbours, and u = 0, just below 1, 1 and 1.5.
+
+| Candidate | Cornell B/A | Verdict |
+| --- | --- | --- |
+| Branch-free `invertCdf` | 0.981 [0.956, 1.001], then 0.991 [0.976, 1.006] | Resolved faster on 4 of 6 scenes, then 3 of 6 |
+| Log-time scale bracket in `rgbSigmoid` | 1.006 [0.994, 1.019] | Rejected: z = 0.5 for every illuminant, so the linear scan always predicts |
+| No `OpenPbrInputs` copy in `makeBsdfClosure` | 0.997 [0.977, 1.009] | Rejected: about 1% of cornell, not measurable |
+
 ## Manuka and PhysLight audit
 
 Every render setting and physical constant is now checked against Manuka (Fascione et al. 2018) and the PhysLight specification
