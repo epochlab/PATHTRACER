@@ -1019,6 +1019,7 @@ PT_CHECK(profile_config_override_replaces_only_named_keys, Fast, Exact) {
                     merged->pathTracer.maxBounces == base->pathTracer.maxBounces &&
                     merged->pathTracer.replicates == base->pathTracer.replicates &&
                     merged->pathTracer.adaptiveMarSlope == base->pathTracer.adaptiveMarSlope &&
+                    merged->pathTracer.adaptiveDynamicRange == base->pathTracer.adaptiveDynamicRange &&
                     merged->denoiser.enabled == base->denoiser.enabled;
     }
     PT_EXPECT(ctx, untouched, "an override changed a key it does not name");
@@ -1441,7 +1442,7 @@ PT_CHECK(profile_config_integer_counts, Fast, Exact) {
         cases.push_back({std::string("render.") + key + " missing", {{"render", {{key, nullptr}}}}, false});
     }
     // Adaptive sampling: every key required; minSamples a power-of-two multiple of replicates; a stopping rule needs two replicates.
-    for (const char* key : {"threshold", "confidence", "minSamples"}) {
+    for (const char* key : {"threshold", "confidence", "minSamples", "dynamicRange"}) {
         cases.push_back({std::string("adaptive.") + key + " missing", pathTracer({{"adaptive", {{key, nullptr}}}}), false});
     }
     cases.push_back({"adaptive missing", pathTracer({{"adaptive", nullptr}}), false});
@@ -1455,6 +1456,9 @@ PT_CHECK(profile_config_integer_counts, Fast, Exact) {
     for (const auto& [count, accepted] : minSamples) {
         cases.push_back({"adaptive.minSamples " + std::to_string(count) + " at replicates 4",
                          pathTracer({{"replicates", 4}, {"adaptive", {{"minSamples", count}}}}), accepted});
+    }
+    for (const auto& [stops, accepted] : std::vector<std::pair<double, bool>>{{12.0, true}, {0.5, true}, {0.0, false}, {-1.0, false}}) {
+        cases.push_back({"adaptive.dynamicRange " + std::to_string(stops), pathTracer({{"adaptive", {{"dynamicRange", stops}}}}), accepted});
     }
     cases.push_back({"adaptive.foveation missing", pathTracer({{"adaptive", {{"foveation", nullptr}}}}), false});
     cases.push_back({"adaptive.foveation.marSlope missing", pathTracer({{"adaptive", {{"foveation", {{"marSlope", nullptr}}}}}}), false});

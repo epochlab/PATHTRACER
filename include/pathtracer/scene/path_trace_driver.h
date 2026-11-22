@@ -154,17 +154,25 @@ void foldRunningMean(const float* previousMean, const float* drawn, float* mean,
 void foldReplicateColour(const float* previousMeans, const float* drawn, std::size_t channels, float* means, std::size_t pixels,
                             int replicates, int replicate, float invCount);
 
-// One texel's replicated colour estimate: its mean channel level and the largest channel's variance of its mean.
+// One texel's replicated colour estimate, per channel: the mean of its replicate means and that mean's variance.
 struct ReplicateEstimate {
-    double mean;          // (R + G + B) / 3 of the replicate means: the scale every channel's error is judged against
-    double meanVariance;  // max over channels of sum (m_r - mbar)^2 / (K(K-1)), each unbiased for Var(mbar) at any replicate counts
+    std::array<double, kReplicateChannels> mean;      // each channel's mean of its replicate means
+    std::array<double, kReplicateChannels> variance;  // each channel's sum (m_r - mbar)^2 / (K(K-1)), unbiased for Var(mbar)
+
+    // (R + G + B) / 3: the level every channel's error is judged against.
+    [[nodiscard]] double level() const { return (mean[0] + mean[1] + mean[2]) / kReplicateChannels; }
 };
 
 // The estimate from `populated` of a texel's replicateStride means, in double: converged deviations are rounding-scale float differences.
 [[nodiscard]] ReplicateEstimate replicateEstimate(const float* texelMeans, int populated, int replicates);
 
-// (K-1) s^2 / (threshold mean)^2 of the worst channel, so every channel's SD(mbar) <= threshold * mean; +inf for no spread, mean or NaN.
-[[nodiscard]] double convergenceStatistic(const ReplicateEstimate& estimate, int replicates, float threshold);
+// Each channel's Var(mbar) / [(l^2 + f^2)(1 + mu_c^2)] exposed: relative mid-range, absolute below floor f, damped past the clip at 1.
+[[nodiscard]] std::array<double, kReplicateChannels> dampedRelativeVariance(const ReplicateEstimate& estimate, double exposureGain,
+                                                                            double floor);
+
+// (K-1) max_c r_c / threshold^2, so every channel's damped SD(mbar) <= threshold; +inf for no spread or a NaN.
+[[nodiscard]] double convergenceStatistic(const std::array<double, kReplicateChannels>& relativeVariance, int replicates,
+                                          float threshold);
 
 // Benjamini & Hochberg 1995 step-up: how many of the smallest of `tests` p-values, given ascending, are rejected at rate alpha.
 [[nodiscard]] std::size_t stepUpRejections(std::span<const double> ascendingP, std::size_t tests, double alpha);
@@ -199,9 +207,53 @@ private:
     float gazeSpan_ = 1.0F;
 };
 
-// Drops the texels of ascending `active` the step-up procedure finds converged at 1 - confidence each at its foveated threshold.
-void retireConvergedTexels(std::vector<std::uint32_t>& active, const float* replicateColour, const PathTraceSettings& settings,
-                           const FoveatedThreshold& fovea, ThreadPool& threadPool);
+// Octave disc radii, in column pitches, that each candidate's variance is pooled over: Manuka's 1-32 px circles (Fascione et al. 2018).
+inline constexpr std::array<int, 6> kPoolRadii{1, 2, 4, 8, 16, 32};
+
+// Texels x + lo .. x + hi of row y + dy, relative to a centre texel (x, y).
+struct RowSpan {
+    int dy;
+    int lo;
+    int hi;
+};
+
+// Spans of the texels whose centres lie within radius of an even [0] or odd [1] row's centre, Euclidean or, if box, Chebyshev.
+[[nodiscard]] std::array<std::vector<RowSpan>, 2> supportSpans(pathtracer::gfx::PixelLattice lattice, double radius, bool box);
+
+// Calls run(row, begin, end) over the frame columns a span covers from (x, y): wrapped or clamped in x, rows past the frame dropped.
+template <typename Run>
+void forEachSpanRun(const RowSpan& span, int x, int y, int width, int height, bool wrapsHorizontally, Run&& run) {
+    const int row = y + span.dy;
+    if (row < 0 || row >= height) {
+        return;
+    }
+    const int lo = x + span.lo;
+    const int length = span.hi - span.lo + 1;
+    if (!wrapsHorizontally) {
+        const int begin = std::max(lo, 0);
+        const int end = std::min(lo + length, width);
+        if (begin < end) {
+            run(row, begin, end);
+        }
+        return;
+    }
+    // A span wider than the frame covers each column once, not twice.
+    if (length >= width) {
+        run(row, 0, width);
+        return;
+    }
+    const int begin = pathtracer::gfx::wrapIndex(lo, width);
+    if (begin + length <= width) {
+        run(row, begin, begin + length);
+        return;
+    }
+    run(row, begin, width);
+    run(row, 0, begin + length - width);
+}
+
+// Drops the step-up's converged texels of ascending `active` unless a pooled disc vetoes or a live filter support covers them.
+void retireConvergedTexels(std::vector<std::uint32_t>& active, const PathTraceResult& result, const PathTraceSettings& settings,
+                           float exposureGain, const FoveatedThreshold& fovea, ThreadPool& threadPool);
 
 // Splits [begin, end) into runs of consecutive texels in ascending `traced`, passed to fold(b, e), and the gaps, passed to carry(b, e).
 template <typename Fold, typename Carry>

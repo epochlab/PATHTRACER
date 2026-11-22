@@ -68,6 +68,7 @@ struct AdaptiveSampling {
     float confidence = 0.0F;  // 1 - the false discovery rate: the expected share of stopped texels whose error is within threshold
     int minSamples = 0;  // first checkpoint, replicates times a power of two
     float marSlope = 0.0F;  // foveation: MAR growth per degree of eccentricity (Guenter et al. 2012 measured 0.022-0.0275); 0 is off
+    float dynamicRange = 0.0F;  // stops below the clip (exposed 1) where relative error gives way to absolute (Fascione et al. 2018)
 };
 
 // samplesPerPass is per renderPathTraced() call: 1 under PathTraceDriver and HeadlessRenderer, whose passes are samples.

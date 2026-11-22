@@ -71,6 +71,7 @@ struct PathTracerConfig {
     float adaptiveConfidence;
     int adaptiveMinSamples;  // the first checkpoint, replicates times a power of two
     float adaptiveMarSlope;  // adaptive.foveation.marSlope: the threshold loosens with eccentricity from the frame centre; 0 is off
+    float adaptiveDynamicRange;  // adaptive.dynamicRange: stops below the exposure's clip where relative error turns absolute
 };
 
 // profile.json's denoiser block: OIDN for the Denoised AOV, and the feature chain its albedo and normal come from.

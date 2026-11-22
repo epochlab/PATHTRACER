@@ -143,8 +143,7 @@ void foldReplicateColour(const float* previousMeans, const float* drawn, std::si
 }
 
 ReplicateEstimate replicateEstimate(const float* texelMeans, int populated, int replicates) {
-    double level = 0.0;
-    double meanVariance = 0.0;
+    ReplicateEstimate estimate{};
     const double inverseDegrees = 1.0 / (static_cast<double>(populated) * static_cast<double>(populated - 1));
     for (int c = 0; c < kReplicateChannels; ++c) {
         const float* means = texelMeans + (static_cast<std::size_t>(c) * static_cast<std::size_t>(replicates));
@@ -153,20 +152,41 @@ ReplicateEstimate replicateEstimate(const float* texelMeans, int populated, int 
         for (int r = 0; r < populated; ++r) {
             squares += (means[r] - mean) * (means[r] - mean);
         }
-        level += mean;
-        meanVariance = std::max(meanVariance, squares * inverseDegrees);
+        estimate.mean[static_cast<std::size_t>(c)] = mean;
+        estimate.variance[static_cast<std::size_t>(c)] = squares * inverseDegrees;
     }
-    return {level / kReplicateChannels, meanVariance};
+    return estimate;
+}
+
+// relMSE's (l^2 + f^2) below the floor (Rousselle et al. 2011); per channel past the clip, as sensor and display saturate per channel.
+std::array<double, kReplicateChannels> dampedRelativeVariance(const ReplicateEstimate& estimate, double exposureGain, double floor) {
+    const double level = exposureGain * estimate.level();
+    const double gainSquared = exposureGain * exposureGain;
+    const double dark = (level * level) + (floor * floor);
+    std::array<double, kReplicateChannels> relative{};
+    for (std::size_t c = 0; c < relative.size(); ++c) {
+        const double channel = exposureGain * estimate.mean[c];
+        relative[c] = gainSquared * estimate.variance[c] / (dark * (1.0 + (channel * channel)));
+    }
+    return relative;
 }
 
 // Normal replicate means make (K-1) s^2 / sigma^2 chi-squared on K-1 dof (Cochran 1934); the worst channel's is the IUT (Berger 1982).
-double convergenceStatistic(const ReplicateEstimate& estimate, int replicates, float threshold) {
-    const double tolerance = static_cast<double>(threshold) * estimate.mean;
+double convergenceStatistic(const std::array<double, kReplicateChannels>& relativeVariance, int replicates, float threshold) {
+    double worst = 0.0;
+    for (const double r : relativeVariance) {
+        // NaN fails every comparison, so it is caught here rather than lost inside a max.
+        if (!(r >= 0.0)) {
+            return std::numeric_limits<double>::infinity();
+        }
+        worst = std::max(worst, r);
+    }
     // Zero spread is no evidence: replicates of a few samples agree exactly when every sample missed a rare path, as at a silhouette.
-    if (!(estimate.meanVariance > 0.0) || !(tolerance > 0.0)) {
+    if (!(worst > 0.0)) {
         return std::numeric_limits<double>::infinity();
     }
-    return (static_cast<double>(replicates) - 1.0) * estimate.meanVariance / (tolerance * tolerance);
+    const auto tolerance = static_cast<double>(threshold);
+    return (static_cast<double>(replicates) - 1.0) * worst / (tolerance * tolerance);
 }
 
 std::size_t stepUpRejections(std::span<const double> ascendingP, std::size_t tests, double alpha) {
@@ -222,26 +242,214 @@ float FoveatedThreshold::scale(std::uint32_t texel) const {
     return pooledSpan(camera_.primaryRayDifferential(basis_, ndc.x, ndc.y)) / gazeSpan_;
 }
 
-// Texels are independent under filter importance sampling, so the step-up holds the stopped set's false share to 1 - confidence.
-void retireConvergedTexels(std::vector<std::uint32_t>& active, const float* replicateColour, const PathTraceSettings& settings,
-                           const FoveatedThreshold& fovea, ThreadPool& threadPool) {
-    const auto stride = replicateStride(settings.replicates);
+std::array<std::vector<RowSpan>, 2> supportSpans(pathtracer::gfx::PixelLattice lattice, double radius, bool box) {
+    const auto pitch = static_cast<double>(pathtracer::gfx::rowPitch(lattice));
+    const int rows = static_cast<int>(std::floor(radius / pitch));
+    const int columns = static_cast<int>(std::ceil(radius)) + 1;
+    std::array<std::vector<RowSpan>, 2> spans;
+    for (int parity = 0; parity < 2; ++parity) {
+        const auto centre = static_cast<double>(pathtracer::gfx::pixelCentre(lattice, 0, parity).x);
+        for (int dy = -rows; dy <= rows; ++dy) {
+            const auto across = static_cast<double>(pathtracer::gfx::pixelCentre(lattice, 0, parity + dy).x) - centre;
+            const double dyFilm = dy * pitch;
+            RowSpan span{dy, columns + 1, -columns - 1};
+            for (int dx = -columns; dx <= columns; ++dx) {
+                const double dxFilm = dx + across;
+                const bool inside = box ? std::max(std::fabs(dxFilm), std::fabs(dyFilm)) <= radius
+                                        : (dxFilm * dxFilm) + (dyFilm * dyFilm) <= radius * radius;
+                if (inside) {
+                    span.lo = std::min(span.lo, dx);
+                    span.hi = std::max(span.hi, dx);
+                }
+            }
+            if (span.lo <= span.hi) {
+                spans[static_cast<std::size_t>(parity)].push_back(span);
+            }
+        }
+    }
+    return spans;
+}
+
+namespace {
+
+// (K-1) n r_c per channel and 1 for a texel with evidence, else zeros: its per-sample damped relative variance, pooled over discs.
+using PoolTerms = std::array<double, kReplicateChannels + 1>;
+
+// A texel's damped relative variance from all its replicates, as every checkpoint reads it.
+std::array<double, kReplicateChannels> texelRelativeVariance(const PathTraceResult& result, std::uint32_t texel, double exposureGain,
+                                                             double floor) {
+    const int replicates = result.replicates;
+    const ReplicateEstimate estimate =
+        replicateEstimate(result.replicateColour.data() + (texel * replicateStride(replicates)), replicates, replicates);
+    return dampedRelativeVariance(estimate, exposureGain, floor);
+}
+
+PoolTerms poolTerms(const PathTraceResult& result, std::uint32_t texel, double exposureGain, double floor) {
+    const int replicates = result.replicates;
+    const std::array<double, kReplicateChannels> relative = texelRelativeVariance(result, texel, exposureGain, floor);
+    PoolTerms terms{};
+    // No spread or a NaN carries no evidence, and an infinite variance would poison the prefix differences: all read +inf here.
+    if (!std::isfinite(convergenceStatistic(relative, replicates, 1.0F))) {
+        return terms;
+    }
+    // Var(mbar) n is the per-sample variance: exact under MC; RQMC's faster decay only overstates neighbours that stopped earlier.
+    const double perSample = (static_cast<double>(replicates) - 1.0) * static_cast<double>(result.texelSamples[texel]);
+    for (std::size_t c = 0; c < relative.size(); ++c) {
+        terms[c] = perSample * relative[c];
+    }
+    terms[kReplicateChannels] = 1.0;
+    return terms;
+}
+
+// Per-row inclusive prefix sums of every texel's pool terms, width + 1 entries a row, so any row run's sum is two lookups.
+std::vector<PoolTerms> poolPrefix(const PathTraceResult& result, double exposureGain, double floor, ThreadPool& threadPool) {
+    const int width = result.beauty.width;
+    const auto stride = static_cast<std::size_t>(width) + 1;
+    std::vector<PoolTerms> prefix(stride * static_cast<std::size_t>(result.beauty.height));
+    threadPool.parallelFor(result.beauty.height, [&](int y) {
+        PoolTerms* row = prefix.data() + (static_cast<std::size_t>(y) * stride);
+        row[0] = PoolTerms{};
+        for (int x = 0; x < width; ++x) {
+            const PoolTerms terms = poolTerms(result, static_cast<std::uint32_t>((y * width) + x), exposureGain, floor);
+            for (std::size_t k = 0; k < terms.size(); ++k) {
+                row[x + 1][k] = row[x][k] + terms[k];
+            }
+        }
+    });
+    return prefix;
+}
+
+// Runs body(i) for every i < count in balanced chunks, as the trace splits its work list.
+template <typename Body>
+void forEachChunked(std::size_t count, ThreadPool& threadPool, const Body& body) {
+    const int chunkTexels = pathTraceChunkTexels(static_cast<int>(count), threadPool.threadCount());
+    const int chunks = (static_cast<int>(count) + chunkTexels - 1) / chunkTexels;
+    threadPool.parallelFor(chunks, [&](int chunk) {
+        const auto begin = static_cast<std::size_t>(chunk) * static_cast<std::size_t>(chunkTexels);
+        const std::size_t end = std::min(begin + static_cast<std::size_t>(chunkTexels), count);
+        for (std::size_t i = begin; i < end; ++i) {
+            body(i);
+        }
+    });
+}
+
+// The alpha quantile of chi-squared on n (K-1) dof for every texel count n a pooled disc can hold, edge-truncated ones included.
+std::vector<double> poolScreens(std::span<const std::array<std::vector<RowSpan>, 2>> discs, std::size_t frameTexels, int replicates,
+                                double alpha, ThreadPool& threadPool) {
+    std::size_t largest = 0;
+    for (const std::array<std::vector<RowSpan>, 2>& disc : discs) {
+        for (const std::vector<RowSpan>& parity : disc) {
+            std::size_t texels = 0;
+            for (const RowSpan& span : parity) {
+                texels += static_cast<std::size_t>(span.hi - span.lo + 1);
+            }
+            largest = std::max(largest, texels);
+        }
+    }
+    std::vector<double> screens(std::min(largest, frameTexels) + 1);
+    threadPool.parallelFor(static_cast<int>(screens.size()) - 1, [&](int index) {
+        const auto count = static_cast<std::size_t>(index) + 1;
+        const double dof = static_cast<double>(count) * (static_cast<double>(replicates) - 1.0);
+        screens[count] = boost::math::quantile(boost::math::chi_squared_distribution<double>(dof), alpha);
+    });
+    return screens;
+}
+
+// Pooled veto, an IUT over discs and channels at alpha: p' = p or 1 is a valid p-value, so BH holds under independence or PRDS.
+void vetoByPooledDiscs(std::span<const std::uint32_t> active, std::span<double> statistics, std::span<const double> targets, double screen,
+                       const PathTraceResult& result, double exposureGain, double floor, double alpha, ThreadPool& threadPool) {
+    const int width = result.beauty.width;
+    const int height = result.beauty.height;
+    std::array<std::array<std::vector<RowSpan>, 2>, kPoolRadii.size()> discs;
+    std::transform(kPoolRadii.begin(), kPoolRadii.end(), discs.begin(),
+                   [&](int radius) { return supportSpans(result.pixelLattice, radius, /*box=*/false); });
+    const std::vector<double> screens =
+        poolScreens(discs, static_cast<std::size_t>(width) * static_cast<std::size_t>(height), result.replicates, alpha, threadPool);
+    const std::vector<PoolTerms> prefix = poolPrefix(result, exposureGain, floor, threadPool);
+    const auto stride = static_cast<std::size_t>(width) + 1;
+    forEachChunked(active.size(), threadPool, [&](std::size_t i) {
+        if (!(statistics[i] <= screen)) {
+            return;
+        }
+        const auto x = static_cast<int>(active[i] % static_cast<std::uint32_t>(width));
+        const auto y = static_cast<int>(active[i] / static_cast<std::uint32_t>(width));
+        for (const std::array<std::vector<RowSpan>, 2>& disc : discs) {
+            PoolTerms sum{};
+            for (const RowSpan& span : disc[static_cast<std::size_t>(y & 1)]) {
+                forEachSpanRun(span, x, y, width, height, result.wrapsHorizontally, [&](int row, int begin, int end) {
+                    const PoolTerms* rowPrefix = prefix.data() + (static_cast<std::size_t>(row) * stride);
+                    for (std::size_t k = 0; k < sum.size(); ++k) {
+                        sum[k] += rowPrefix[end][k] - rowPrefix[begin][k];
+                    }
+                });
+            }
+            // The candidate itself has evidence, so the count is at least 1; the sums are integer-valued, so lround is exact.
+            const double bound = screens[static_cast<std::size_t>(std::lround(sum[kReplicateChannels]))] * targets[i];
+            if (!std::all_of(sum.begin(), sum.begin() + kReplicateChannels, [bound](double channel) { return channel <= bound; })) {
+                statistics[i] = std::numeric_limits<double>::infinity();
+                return;
+            }
+        }
+    });
+}
+
+// Keeps texels above the cutoff, and those below it inside a kept texel's filter support: box for the separable square filter, else disc.
+void keepUnconvergedAndCovered(std::vector<std::uint32_t>& active, std::span<const double> statistics, double cutoff,
+                               const PathTraceResult& result) {
+    const int width = result.beauty.width;
+    const int height = result.beauty.height;
+    // Live are the texels the test kept; restored ones do not extend liveness, or it would chain across every converged region.
+    std::vector<char> live(static_cast<std::size_t>(width) * static_cast<std::size_t>(height), 0);
+    for (std::size_t i = 0; i < active.size(); ++i) {
+        live[active[i]] = statistics[i] > cutoff ? 1 : 0;
+    }
+    const std::array<std::vector<RowSpan>, 2> support =
+        supportSpans(result.pixelLattice, kFilterRadius, /*box=*/result.pixelLattice == pathtracer::gfx::PixelLattice::Square);
+    const auto covered = [&](std::uint32_t texel) {
+        const auto x = static_cast<int>(texel % static_cast<std::uint32_t>(width));
+        const auto y = static_cast<int>(texel / static_cast<std::uint32_t>(width));
+        bool any = false;
+        for (const RowSpan& span : support[static_cast<std::size_t>(y & 1)]) {
+            forEachSpanRun(span, x, y, width, height, result.wrapsHorizontally, [&](int row, int begin, int end) {
+                const char* run = live.data() + (static_cast<std::size_t>(row) * static_cast<std::size_t>(width));
+                any = any || std::any_of(run + begin, run + end, [](char l) { return l != 0; });
+            });
+        }
+        return any;
+    };
+    std::size_t kept = 0;
+    for (std::size_t i = 0; i < active.size(); ++i) {
+        if (statistics[i] > cutoff || covered(active[i])) {
+            active[kept++] = active[i];
+        }
+    }
+    active.resize(kept);
+}
+
+}  // namespace
+
+// Filter importance sampling keeps own tests independent; the step-up bounds its stops' false share at 1 - confidence.
+void retireConvergedTexels(std::vector<std::uint32_t>& active, const PathTraceResult& result, const PathTraceSettings& settings,
+                           float exposureGain, const FoveatedThreshold& fovea, ThreadPool& threadPool) {
+    const int replicates = settings.replicates;
+    const double floor = std::exp2(-static_cast<double>(settings.adaptive.dynamicRange));
     const double alpha = 1.0 - static_cast<double>(settings.adaptive.confidence);
-    const boost::math::chi_squared_distribution<double> chiSquared(static_cast<double>(settings.replicates) - 1.0);
+    const boost::math::chi_squared_distribution<double> chiSquared(static_cast<double>(replicates) - 1.0);
     // p_(k) <= k alpha / m <= alpha, so only statistics at or below the alpha quantile can be rejected; they rank first among all m.
     const double screen = boost::math::quantile(chiSquared, alpha);
     std::vector<double> statistics(active.size());
-    const int chunkTexels = pathTraceChunkTexels(static_cast<int>(active.size()), threadPool.threadCount());
-    const int chunks = (static_cast<int>(active.size()) + chunkTexels - 1) / chunkTexels;
-    threadPool.parallelFor(chunks, [&](int chunk) {
-        const auto begin = static_cast<std::size_t>(chunk) * static_cast<std::size_t>(chunkTexels);
-        const std::size_t end = std::min(begin + static_cast<std::size_t>(chunkTexels), active.size());
-        for (std::size_t i = begin; i < end; ++i) {
-            const float* texelMeans = replicateColour + (active[i] * stride);
-            const ReplicateEstimate estimate = replicateEstimate(texelMeans, settings.replicates, settings.replicates);
-            statistics[i] = convergenceStatistic(estimate, settings.replicates, settings.adaptive.threshold * fovea.scale(active[i]));
-        }
+    // n (threshold * fovea)^2 per active texel: a pooled sum over it is chi-squared on the disc's dof at the texel's own target.
+    std::vector<double> targets(active.size());
+    forEachChunked(active.size(), threadPool, [&](std::size_t i) {
+        const std::uint32_t texel = active[i];
+        const float threshold = settings.adaptive.threshold * fovea.scale(texel);
+        statistics[i] = convergenceStatistic(texelRelativeVariance(result, texel, exposureGain, floor), replicates, threshold);
+        targets[i] = static_cast<double>(result.texelSamples[texel]) * static_cast<double>(threshold) * static_cast<double>(threshold);
     });
+    if (std::none_of(statistics.begin(), statistics.end(), [screen](double x) { return x <= screen; })) {
+        return;
+    }
+    vetoByPooledDiscs(active, statistics, targets, screen, result, exposureGain, floor, alpha, threadPool);
     std::vector<double> candidates;
     std::copy_if(statistics.begin(), statistics.end(), std::back_inserter(candidates), [screen](double x) { return x <= screen; });
     // The CDF is monotone, so sorting statistics sorts p-values; it is evaluated only for the screened few.
@@ -253,14 +461,7 @@ void retireConvergedTexels(std::vector<std::uint32_t>& active, const float* repl
         return;
     }
     // Every texel at or below the k-th smallest statistic is rejected, ties included, as the procedure defines.
-    const double cutoff = candidates[rejected - 1];
-    std::size_t kept = 0;
-    for (std::size_t i = 0; i < active.size(); ++i) {
-        if (statistics[i] > cutoff) {
-            active[kept++] = active[i];
-        }
-    }
-    active.resize(kept);
+    keepUnconvergedAndCovered(active, statistics, candidates[rejected - 1], result);
 }
 
 PathTraceDriver::PathTraceDriver(const EmbreeAccel& accel,
@@ -404,7 +605,7 @@ void PathTraceDriver::finishPass(const std::shared_ptr<PathTraceResult>& pass, s
     }
     if (adaptiveCheckpoint(passIndex, settings)) {
         const FoveatedThreshold fovea(request.camera, pass->beauty.width, pass->beauty.height, settings.adaptive.marSlope);
-        retireConvergedTexels(activeTexels_, pass->replicateColour.data(), settings, fovea, threadPool_);
+        retireConvergedTexels(activeTexels_, *pass, settings, request.camera.exposureGain(), fovea, threadPool_);
     }
     pass->activeTexels = activeTexels_.size();
     const double accumulateMs = millisecondsSince(accumulateStart);

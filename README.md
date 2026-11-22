@@ -96,7 +96,6 @@ frame["depth"]    # (64, 128, 1) float32, camera-space Z
 | Area | Item | Detail | Complexity | ETA | Status |
 | --- | --- | --- | --- | --- | --- |
 | Colour | Infrared and ultraviolet | Visible wavelengths only. Transport over 300-1000 nm, IR and UV sensor and false-colour film sensitivities, measured IR reflectance (Gates et al. 1965). A custom UV/IR scene with known reflectances checks it. | high | 3 h | ready |
-| Sampling | Adaptive sampling refinements | Every texel's relative error weighs alike. A luminance range of interest, relative variance smoothly reduced in dark regions and above the clip point, variance pooled over 1-32 px circles to catch low-frequency noise, a target standard error after a uniform seed pass, and pixels kept live while inside a live pixel's filter footprint (Fascione et al. 2018). | medium | 2 h | ready |
 | Performance | A/B tuning | Small local speed-ups, kept only on a significant paired-run gain on the proxy profile with output inside calibrated bands. | medium | 3 h | ready |
 
 ### Queued
