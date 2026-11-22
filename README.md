@@ -1,4 +1,4 @@
-# PBR Pathtracer
+# PBR Spectral Pathtracer
 
 *A physically-based spectral, unidirectional Monte Carlo path tracer with progressive sampling: hero-wavelength transport projected to ACEScg, Embree-accelerated, stochastic BSDF combined with environment and area-light NEE via MIS over a per-path vertex graph, behind a thin OpenGL display/HUD layer.*
 
