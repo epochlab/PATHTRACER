@@ -357,6 +357,8 @@ glm::vec3 viewAt(float mu) { return {std::sqrt(std::max(0.0F, 1.0F - (mu * mu)))
 PT_CHECK(strategy_coverage, Fast, Exact) {
     constexpr int kMuNodes = 16;
     constexpr int kPhiNodes = 8;
+    // 64 independent walks per zero-density direction: a side split's gap had value on 1 to 4 of 64, which one fixed draw missed.
+    constexpr std::uint32_t kWalkDraws = 64;
     constexpr float kBandStep = 1.0F / 248.0F;
     std::vector<float> roughnesses = {0.05F, 0.25F, 0.5F, 1.0F};
     for (float roughness = 0.12F; roughness <= 0.18F; roughness += kBandStep) {
@@ -386,12 +388,20 @@ PT_CHECK(strategy_coverage, Fast, Exact) {
                         for (int pi = 0; pi < kPhiNodes; ++pi) {
                             const float phi = 2.0F * kPi * (static_cast<float>(pi) + 0.5F) / kPhiNodes;
                             const glm::vec3 wi(r * std::cos(phi), r * std::sin(phi), z);
-                            if (!(maxChannel(evaluateSeeded(params, wo, wi).total()) > 0.0F)) {
+                            const bool hasValue = maxChannel(evaluateSeeded(params, wo, wi).total()) > 0.0F;
+                            valued += hasValue ? 1 : 0;
+                            farValued += hasValue && (wi.z * wo.z < 0.0F) ? 1 : 0;
+                            if (tools::fixtures::pdfBsdf(params, wo, wi) > 0.0F) {
                                 continue;
                             }
-                            ++valued;
-                            farValued += (wi.z * wo.z < 0.0F) ? 1 : 0;
-                            if (tools::fixtures::pdfBsdf(params, wo, wi) > 0.0F) {
+                            // The 2+ orders are a walk's estimate, so a direction is uncovered only if one of the walks finds value there.
+                            const pathtracer::scene::BsdfClosure closure = tools::fixtures::closureOf(params, wo);
+                            bool anyWalk = hasValue;
+                            for (std::uint32_t seed = 2; seed <= kWalkDraws && !anyWalk; ++seed) {
+                                pathtracer::scene::Sampler walk(0, 0, 0, 1, seed);
+                                anyWalk = maxChannel(pathtracer::scene::evaluateBsdfSplit(closure, wi, walk).total()) > 0.0F;
+                            }
+                            if (!anyWalk) {
                                 continue;
                             }
                             if (uncovered++ < 8) {
