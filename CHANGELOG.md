@@ -3,6 +3,51 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Adaptive sampling refinements
+
+Adaptive sampling judged every texel's relative error alike and alone. Following Manuka's image-space sampler (Fascione et al.
+2018), each texel's error is now weighed by a luminance range taken from the camera's exposure, and its stop is checked against
+the pooled variance of its neighbourhood and the filter supports of texels still sampling. Where the old rule stopped texels on
+lucky spreads, low-frequency (16 px) error halves (macbeth and stump at threshold 0.05: 2.6-4.9x efficiency on it). Elsewhere the
+pooling is conservative across material boundaries and costs 25-77% more samples for unchanged error. Evidence is in
+`results/adaptive_refinements`.
+
+- feat: **luminance window**. Each channel's variance of the mean is divided by (l^2 + f^2)(1 + mu_c^2) in exposed units, where l
+  is the mean channel level, mu_c the channel's mean, the clip at exposed 1 (`1 / exposureGain`, the over-range readout's point)
+  and f = 2^-dynamicRange.
+  - Mid-range this is the old relative rule. Below f it becomes an absolute error, relMSE's form (Rousselle et al. 2011).
+  - Past the clip each channel's noise is damped, per channel, as sensor and display saturate.
+  - New required key `pathTracer.adaptive.dynamicRange`, in stops below the clip; shipped 12.
+- feat: **pooled-variance veto**. A texel passing its own test is also tested on the per-sample damped relative variance pooled over
+  discs of radius 1, 2, 4, 8, 16 and 32 px around it. Each disc is chi-squared on its texels' K-1 dof, against the texel's own
+  foveated target; disc and channel tests are combined as an IUT.
+  - A failing disc sets the texel's p-value to 1, which is never below its own, so the step-up's FDR bound stands under
+    independence or PRDS.
+  - Discs follow the lattice (hexagonal rows at sqrt(3)/2), wrap with a lat-long lens and are truncated at the top and bottom.
+  - Zero-spread texels pool nothing.
+- feat: **footprint liveness**. After the step-up, a stopped texel inside the filter support of a texel the test kept keeps
+  sampling. The support is a 1.5 px box for the separable square filter and a disc for the hexagonal radial one. Restored texels do
+  not extend liveness.
+- chore: `profile.json` ships `samplesPerPixel` 64 (was 256).
+- feat: under adaptive sampling, aperture, shutter and ISO are trace inputs, so an exposure change restarts accumulation. With
+  adaptive off they still do not.
+- refactor: `ReplicateEstimate` is per channel (`mean`, `variance`, `level()`), and the SNR AOV reads the worst channel from it.
+  `retireConvergedTexels` takes the `PathTraceResult` and the exposure gain.
+- note: `confidence` is still the step-up's false discovery rate. The footprint only withdraws stops after it, which
+  `filter.retirement_holds_the_false_discovery_rate` now checks one-sided.
+  - At cap 256 and threshold 0.02, wall time after/before is 0.994 [0.972, 1.016] on cornell and 1.008 [0.985, 1.032] on
+    stump (paired, randomised).
+  - In a worst case where every texel is a candidate every 8 passes, retirement is about 1.4% of thread time at 1024x512.
+- tests:
+  - `filter.luminance_window_matches_the_closed_form`
+  - `filter.support_spans_match_brute_force`
+  - `filter.pooling_vetoes_a_lucky_texel`
+  - `filter.footprint_keeps_live_neighbours_live`
+  - `filter.step_up_holds_the_false_discovery_rate`, the sharp equality split from the retirement check
+  - `io.profile_config_integer_counts`, dynamicRange cases
+- docs: the Adaptive sampling refinements roadmap row is removed. Manuka's "target standard error after a uniform seed pass" is
+  `minSamples` and `threshold`, as before; each live texel still takes one sample per pass, so there is no importance map.
+
 ## Spectral data
 
 Metals were RGB F82 fits, glass dispersed by a two-term Cauchy fit through its Abbe number, and the macbeth chart was an RGB
