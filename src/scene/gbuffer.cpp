@@ -305,7 +305,7 @@ void renderPixel(GBuffer& result, const GBufferView& view, const GBufferScene& s
             break;
         }
         if (!presence) {
-            presence = Sampler(x, y, 0, 1, 0U, view.lattice).next1D();
+            presence = Sampler(x, y, 0, 1, 0U).next1D();
         }
         if (*presence < opacity) {
             break;

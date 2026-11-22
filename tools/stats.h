@@ -147,37 +147,6 @@ inline double regularizedBetaI(double a, double b, double x) {
                                           : 1.0 - (front * betaContinuedFraction(b, a, 1.0 - x) / b);
 }
 
-// Pearson r of a against b shifted toroidally by every (dx, dy) of a size x size torus, r[dy * size + dx]; both fields mean-centred.
-inline std::vector<double> toroidalCorrelations(const std::vector<double>& a, const std::vector<double>& b, int size) {
-    const auto dotOf = [](const std::vector<double>& v) {
-        double sum = 0.0;
-        for (const double x : v) {
-            sum += x * x;
-        }
-        return sum;
-    };
-    const double norm = std::sqrt(dotOf(a) * dotOf(b));
-    std::vector<double> r(a.size());
-    for (int dy = 0; dy < size; ++dy) {
-        for (int dx = 0; dx < size; ++dx) {
-            double dot = 0.0;
-            for (int y = 0; y < size; ++y) {
-                const double* rowA = &a[static_cast<std::size_t>(y) * static_cast<std::size_t>(size)];
-                const double* rowB = &b[static_cast<std::size_t>((y + dy) % size) * static_cast<std::size_t>(size)];
-                // The row's shift split at the wrap, so the inner loops carry no modulo.
-                for (int x = 0; x < size - dx; ++x) {
-                    dot += rowA[x] * rowB[x + dx];
-                }
-                for (int x = size - dx; x < size; ++x) {
-                    dot += rowA[x] * rowB[x + dx - size];
-                }
-            }
-            r[(static_cast<std::size_t>(dy) * static_cast<std::size_t>(size)) + static_cast<std::size_t>(dx)] = dot / norm;
-        }
-    }
-    return r;
-}
-
 // P(S <= share) for the power share a field holds at m of its n - 1 nonzero frequencies, under Gaussian white noise: Beta(m/2, (n-1-m)/2).
 inline double whiteNoiseShareLowerTail(double share, int m, int n) { return regularizedBetaI(0.5 * m, 0.5 * (n - 1 - m), share); }
 

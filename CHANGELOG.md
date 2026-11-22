@@ -3,6 +3,47 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Blue noise beyond one dimension
+
+The sampler now spreads error as blue noise in every dimension at the final sample count, not one translated scalar mask that
+faded past 1 spp (Heitz et al. 2019 Sec. 1). Evidence is in `results/blue_noise_sampling`.
+
+- feat: **Z-order Sobol (Ahmed and Wonka 2020), as pbrt-v4's ZSobolSampler and Cycles' Blue-Noise pattern.** Each pixel takes an
+  aligned block of one Owen-scrambled Sobol sequence at its base-4-scrambled Morton rank, so every aligned 2^k x 2^k pixel square
+  holds one aligned block, a (0, 2k + b, 2)-net, and neighbours' errors cancel. Each pixel's own samples stay a perfect net at
+  every power-of-two prefix, the adaptive checkpoints. The Cranley-Patterson shift that broke those nets is gone.
+  - Morton digits take a uniform pick among all 24 child orders per node, keyed by the digits above (pbrt-v4). Vegdahl's base-4
+    hash, as Cycles ships it, was measured non-uniform: the top digit reaches 8 of 24 orders, so quadrants pair 3/8, 3/8, 1/4.
+  - Tiles: the largest square whose pixels x samples fit the 32-bit index (16384^2 at 16 per replicate). Unbounded Progressive
+    leaves one pixel per tile, independent per-pixel sequences with no special case.
+  - The scramble seed now randomises the spatial pattern too, so replicates and generations are independent per pixel.
+  - `Sampler::stream` shares a sample's Morton rank across its AO, Fresnel, volume, walk and wavelength streams. Recomputing it
+    per stream cost macbeth 58% pass time; shared, pass time is unchanged (B/A 0.98, 1.01, 1.05, none resolved).
+- perf: Sobol dimension 1 in closed form. Joe and Kuo's degree-1 matrix is Pascal's triangle mod 2, so by Lucas's theorem digit
+  j is the XOR of index bits b containing j: five masked shifts replace the direction-number loop and table.
+- chore: the 128x128 sampler masks (square and hexagonal, 200 KB) and `blueNoiseDither` are removed; `bluenoise_mask` keeps only
+  the display dither's square mask. Morton order runs over (column, row) on either lattice.
+- test: `sampler_validate` asserts exact nets per pixel prefix, per aligned pixel square, across tile seams and per stream;
+  dimension 1 against the recurrence; an isotropic Morton pairing (chi-square, a third each); and screen-space Heaviside error
+  (Heitz et al. 2019's integrands) rejecting white noise at 1 and 16 spp. Each check fails when its property is broken
+  (`break_tests.txt`). `display_validate`'s mask-independence check goes with the sampler mask.
+- test: `nee.disk_light_sampling_is_uniform_in_solid_angle` adds a 2 eps floor to its band: exact nets shrank the replicate
+  spread to 3e-8, below the float geometry's one rounding that `disk_light_solid_angle` asserts.
+
+Measured on cornell, macbeth and stump at 512x256, 4 seeds, against a 4096-pass reference (after / before):
+
+| Metric | 4 spp | 16 spp | 64 spp | 256 spp |
+| --- | --- | --- | --- | --- |
+| RMSE | 0.95-1.02 | 0.97-1.00 | 0.94-0.98 | 1.00 |
+| Low-band error, x white (before -> after), macbeth | 0.76 -> 0.53 | 0.90 -> 0.48 | 1.06 -> 0.78 | 1.36 -> 0.72 |
+| Low-band error, x white (before -> after), cornell | 0.97 -> 0.83 | 1.00 -> 0.95 | 1.07 -> 0.97 | 1.08 -> 0.96 |
+| RMSE after a sigma 8 px blur | 0.69-0.78 | 0.43-0.97 | 0.56-0.95 | 0.53-0.83 |
+
+- Convergence slopes are unchanged (cornell -0.531 -> -0.534, macbeth -0.638 -> -0.634, stump -0.515 -> -0.505).
+- OIDN-denoised RMSE at 16 spp: 0.93, 1.04 and 0.98, each with seeds on both sides of 1: not resolved.
+- Deep, many-bounce paths stay near white (cornell, stump); low-dimensional direct light gains most (macbeth).
+- Blue noise is aimed at the final per-replicate count: early viewer passes after a camera move are whiter than the old mask.
+
 ## Walk proxy support
 
 The rough dielectric walk's MIS density could be zero where the BSDF has value. Evidence is in `results/walk_proxy_support`.

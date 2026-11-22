@@ -254,7 +254,7 @@ pathtracer_target_defaults(pathtracer NATIVE IPO TIDY)
 target_link_libraries(pathtracer PRIVATE pathtracer_gl "-framework AppKit" "-framework QuartzCore")
 set_source_files_properties(src/platform/display_link.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
 
-# Offline generator for blue_noise_mask.inc: it produces a committed artifact rather than checking one, so it stays out of ctest.
+# Offline generator for display_dither_mask.inc: it produces a committed artifact rather than checking one, so it stays out of ctest.
 add_executable(bluenoise_mask tools/bluenoise_mask.cpp)
 pathtracer_target_defaults(bluenoise_mask NATIVE IPO)
 target_link_libraries(bluenoise_mask PRIVATE pathtracer_core)

@@ -1,4 +1,4 @@
-# PBR Pathtracer
+# PBR Spectral Pathtracer
 
 *A physically-based spectral, unidirectional Monte Carlo path tracer with progressive sampling: hero-wavelength transport projected to ACEScg, Embree-accelerated, stochastic BSDF combined with environment and area-light NEE via MIS over a per-path vertex graph, behind a thin OpenGL display/HUD layer.*
 
@@ -93,7 +93,6 @@ frame["depth"]    # (64, 128, 1) float32, camera-space Z
 
 | Area | Item | Detail | Complexity | ETA | Status |
 | --- | --- | --- | --- | --- | --- |
-| Sampling | Blue noise beyond one dimension | Low-sample noise clumps. Blue-noise Sobol scrambling (Heitz et al. 2019) turns it into fine, even grain that denoises better. | medium | 2 h | ready |
 | Sampling | Many-light sampling | Lights are picked at random. A light tree (Conty Estevez and Kulla 2018) picks by power, distance and facing, glowing surfaces too. | high | 6 h | ready |
 | Light | IES profiles | Lights shine equally in all directions. Loads measured beam shapes from IES LM-63 files, scaled to the light's lumens. | medium | 1 h | ready |
 | Light | Image-textured area lights | Area lights emit one flat colour. Plays an image across the light, sampled by brightness, for screens and stimulus displays. | medium | 2 h | ready |

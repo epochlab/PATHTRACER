@@ -29,7 +29,7 @@ namespace {
 
 // Offsets the AO sampler's seed from the path sampler's so the two streams are independent. 2^32/phi, Knuth's decorrelating constant.
 constexpr std::uint32_t kAoSeedOffset = 0x9E3779B9U;
-// The same for the Fresnel AOV's stream: frac(sqrt 2)*2^32, kAoSeedOffset's sibling. Distinct, non-zero and odd is the whole requirement.
+// The same for the Fresnel AOV's stream: frac(sqrt 2)*2^32, kAoSeedOffset's sibling. Distinct and non-zero is the whole requirement.
 constexpr std::uint32_t kFresnelSeedOffset = 0x6A09E667U;
 // And for volume tracking, whose draw count varies per path: frac(sqrt 3)*2^32, so no BSDF dimension shifts with it.
 constexpr std::uint32_t kVolumeSeedOffset = 0xBB67AE85U;
@@ -1065,7 +1065,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
             for (int s = 0; s < settings.samplesPerPass; ++s) {
                 // replicateBase + s is this sample's position in its replicate's sequence: it must advance across passes to stratify.
                 const int sampleIndex = replicateBase + s;
-                Sampler sampler(x, y, sampleIndex, replicateCount, seed, lattice);
+                Sampler sampler(x, y, sampleIndex, replicateCount, seed);
                 // Dimension set 0 places the sample: on film through the filter, or on the sphere through the facet's lobe.
                 const glm::vec2 placement = sampler.next2D();
                 std::optional<Camera::RayDifferential> primary;
@@ -1085,14 +1085,14 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                     dirFootprint = primary ? primary->dirPerNdc * ndcPerStratum : glm::mat2x3(0.0F);
                 }
                 // AO and Fresnel draw from their own stream: taking dimensions from `sampler` would shift every later dimension.
-                Sampler aoSampler(x, y, sampleIndex, replicateCount, seed ^ kAoSeedOffset, lattice);
+                Sampler aoSampler = sampler.stream(kAoSeedOffset);
                 const glm::vec2 aoSample = aoSampler.next2D();
-                Sampler fresnelSampler(x, y, sampleIndex, replicateCount, seed ^ kFresnelSeedOffset, lattice);
+                Sampler fresnelSampler = sampler.stream(kFresnelSeedOffset);
                 const glm::vec2 fresnelSample = fresnelSampler.next2D();
-                Sampler volumeSampler(x, y, sampleIndex, replicateCount, seed ^ kVolumeSeedOffset, lattice);
-                Sampler walkSampler(x, y, sampleIndex, replicateCount, seed ^ kWalkSeedOffset, lattice);
+                Sampler volumeSampler = sampler.stream(kVolumeSeedOffset);
+                Sampler walkSampler = sampler.stream(kWalkSeedOffset);
                 // The hero's CDF position in the scene's wavelength density, stratified over the pixel's samples like any first dimension.
-                Sampler wavelengthSampler(x, y, sampleIndex, replicateCount, seed ^ kWavelengthSeedOffset, lattice);
+                Sampler wavelengthSampler = sampler.stream(kWavelengthSeedOffset);
                 const SampledWavelengths lambda = sampleWavelengths(wavelengthSampler.next1D(), lights.wavelengthPdf());
                 // The pixel's footprint on the unit sphere, read only by the feature chain where a ray exists; a facet's is its lobe's.
                 const auto footprintSolidAngle = [&] {

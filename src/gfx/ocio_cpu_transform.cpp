@@ -22,7 +22,7 @@ namespace {
 // RGBA float, OCIO's native packed layout, which its CPU processor transforms in place without a conversion pass.
 constexpr std::size_t kScratchLanes = 4;
 
-// Seed 2, not the sampler's seed 1: dither must be independent of the signal (Lipshitz et al. 1992), its render noise included.
+// Dither must be independent of the signal (Lipshitz et al. 1992); render noise is, its sampler pattern moving with the scramble seed.
 constexpr std::array<std::uint16_t, kDitherMaskTexels> kDitherRanks = {{
 #include "display_dither_mask.inc"
 }};
