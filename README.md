@@ -32,7 +32,7 @@ patch over it. Select one with `-preset NAME`, `render_beauty --preset NAME`, `R
 
 | Preset | Size | spp | Interactive scale | Camera |
 | --- | --- | --- | --- | --- |
-| beauty (default) | 2048x1152 | 256 | 0.1 | square pixels, rectilinear lens |
+| beauty (default) | 2048x1152 | 64 | 0.1 | square pixels, rectilinear lens |
 | `proxy` | 512x256 | 16 | 1.0 | as beauty |
 | `research` | 64x32 | 64 | 1.0 | hexagonal pixels, omnidirectional lens |
 
@@ -93,7 +93,6 @@ frame["depth"]    # (64, 128, 1) float32, camera-space Z
 
 | Area | Item | Detail | Complexity | ETA | Status |
 | --- | --- | --- | --- | --- | --- |
-| Settings | Manuka and PhysLight audit | Render settings were never checked against the references. Every setting and default (units, exposure, white point, wavelength sampling, light and camera defaults) checked against the Manuka (Fascione et al. 2018) and PhysLight (Langlands and Fascione 2020) papers; each mismatch fixed or recorded with the reason it differs. | medium | 2 h | ready |
 | Performance | A/B tuning | Small local speed-ups, kept only on a significant paired-run gain on the proxy profile with output inside calibrated bands. | medium | 3 h | ready |
 | Camera | Sensor spectral sensitivity | Renders are ACEScg, not a sensor's response. A chosen camera's published spectral responsivities give its native response, then its IDT to ACEScg (Langlands and Fascione 2020). Worth it only against a real camera to match: the CIE observer is already exact colorimetry. Colour and luminance checked on the macbeth scene against the chart's reference values. | high | 3 h | ready |
 | Camera | White balance | No white balance: lights and the HDRI show their true cast. Per-channel gains on the camera-native response so a chosen kelvin (blackbody or daylight) or grey card reads neutral, before the IDT, as in camera. Never edits lights. Checked on the macbeth scene: its grey patches read neutral. Waits for sensor spectral sensitivity. | medium | 1 h | blocked |
