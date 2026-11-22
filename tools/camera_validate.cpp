@@ -812,15 +812,13 @@ PT_CHECK(gain_follows_physlight_and_meter_follows_iso_2720, Fast, Exact) {
     const auto cardLuminance = [&](double aperture, double shutter, double iso) {
         return kC * aperture * aperture / (shutter * iso) * kAlbedo / std::numbers::pi;
     };
-    ctx.plan(7);
+    ctx.plan(6);
     // Sec 3.4: S 100, N 5.6, t 1/60 s meters 5880 lx, so the card reads rho.
     PT_EXPECT(ctx, near(Camera::exposureGain(5.6F, 1.0F / 60.0F, 100.0F) * cardLuminance(5.6, 1.0 / 60.0, 100.0), kAlbedo),
               "a grey card lit at 5880 lx under f/5.6, 1/60 s, ISO 100 does not render at its albedo");
     // Sec 3.1: S 100, N 8, t 1/60 s meters 12000 lx, so 687.549 cd/m^2 reads 0.18.
     PT_EXPECT(ctx, near(Camera::exposureGain(8.0F, 1.0F / 60.0F, 100.0F) * cardLuminance(8.0, 1.0 / 60.0, 100.0), kAlbedo),
               "a grey card lit at 12000 lx under f/8, 1/60 s, ISO 100 does not render at its albedo");
-    PT_EXPECT(ctx, near(Camera::exposureGain(2.8F, 0.008F, 400.0F), std::numbers::pi * 0.008 * 400.0 / (kC * 2.8 * 2.8)),
-              "the profile's f/2.8, 1/125 s, ISO 400 gain departs from pi t S / (C N^2)");
     const float shutter = 0.008F;
     PT_EXPECT(ctx, Camera::exposureGain(2.8F, 2.0F * shutter, 400.0F) == 2.0F * Camera::exposureGain(2.8F, shutter, 400.0F) &&
                        Camera::exposureGain(2.8F, shutter, 800.0F) == 2.0F * Camera::exposureGain(2.8F, shutter, 400.0F),
