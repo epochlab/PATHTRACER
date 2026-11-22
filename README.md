@@ -93,7 +93,6 @@ frame["depth"]    # (64, 128, 1) float32, camera-space Z
 
 | Area | Item | Detail | Complexity | ETA | Status |
 | --- | --- | --- | --- | --- | --- |
-| Camera | Film halation | Adds film's red halo around highlights: light reflecting off the film base back into the red layer, built from the bloom. | medium | 1 h | ready |
 | Sampling | Blue noise beyond one dimension | Low-sample noise clumps. Blue-noise Sobol scrambling (Heitz et al. 2019) turns it into fine, even grain that denoises better. | medium | 2 h | ready |
 | Sampling | Many-light sampling | Lights are picked at random. A light tree (Conty Estevez and Kulla 2018) picks by power, distance and facing, glowing surfaces too. | high | 6 h | ready |
 | Light | IES profiles | Lights shine equally in all directions. Loads measured beam shapes from IES LM-63 files, scaled to the light's lumens. | medium | 1 h | ready |
@@ -129,6 +128,7 @@ frame["depth"]    # (64, 128, 1) float32, camera-space Z
 | Camera | Anamorphic and distortion | Lenses are distortion-free. Adds anamorphic squeeze and barrel or pincushion distortion (Brown 1966). | high | 2 h | ready |
 | Camera | Event camera output | Simulates neuromorphic sensors that report only per-pixel brightness changes, timed between frames (Rebecq et al. 2018). | medium | 3 h | ready |
 | Camera | Multi-viewpoint compound eyes | Compound-eye facets share one viewpoint. Gives each its own position, direction and acceptance (Millward et al. 2022). | high | 3 h | ready |
+| Camera | Film halation | Adds film's red halo around highlights: light reflecting off the film base back into the red layer, built from the bloom. | medium | 1 h | ready |
 | Sampling | Splat-time outlier rejection | Rare bright samples (fireflies) leave speckles. Drops outliers as samples land (DeCoro et al. 2010); opt-in, as it biases. | low | 1 h | ready |
 | Sampling | Path guiding | Hard-to-reach light stays noisy. Learns where light comes from in each region and samples it more (Müller et al. 2017), unbiased. | high | 6 h | ready |
 | Sampling | Manifold next event estimation | Caustics through glass converge slowly. Solves the glass path to the light directly (Hanika et al. 2015); a prototype was too slow. | high | 4 h | ready |
