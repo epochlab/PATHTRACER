@@ -694,10 +694,12 @@ void expectUniform(tools::check::Context& ctx, const char* label, double oracle,
         replicates.add(sum / kPerReplicate);
     }
     const tools::stats::Band band = tools::stats::meanBand(replicates, ctx.alpha());
+    // Float geometry matches the light to one rounding (disk_light_solid_angle's bound), so the mean may sit eps sup|probe| = 2 eps off.
+    const double floor = 2.0 * std::numeric_limits<float>::epsilon();
     char detail[192];
-    std::snprintf(detail, sizeof(detail), "%s: sampled mean %.6f, band [%.6f, %.6f], solid-angle average %.6f", label, replicates.mean(), band.lo,
-                  band.hi, oracle);
-    PT_EXPECT(ctx, band.contains(oracle), detail);
+    std::snprintf(detail, sizeof(detail), "%s: sampled mean %.9f, band [%.9f, %.9f] + floor %.2g, solid-angle average %.9f", label, replicates.mean(),
+                  band.lo, band.hi, floor, oracle);
+    PT_EXPECT(ctx, oracle >= band.lo - floor && oracle <= band.hi + floor, detail);
 }
 
 // The radial map is area-preserving: E[g] over its directions is g's solid-angle average over the disk, from the quadrature oracle.

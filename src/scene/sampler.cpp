@@ -8,7 +8,7 @@ namespace pathtracer::scene {
 
 namespace {
 
-// SplitMix64 finalizer (Vigna). Deliberately not a function of the pixel: the toroidal shift, not the scramble, separates pixels.
+// SplitMix64 finalizer (Vigna): an avalanched 64-bit key from a small integer and a seed, its halves two independent 32-bit seeds.
 std::uint64_t hashSeed(int extra, std::uint32_t runSeed) {
     std::uint64_t h = static_cast<std::uint64_t>(static_cast<std::uint32_t>(extra)) * 0x165667B19E3779F9ULL;
     h ^= static_cast<std::uint64_t>(runSeed);
@@ -20,26 +20,8 @@ std::uint64_t hashSeed(int extra, std::uint32_t runSeed) {
     return h;
 }
 
-// Only two Sobol dimensions exist, which is the point of padding: every draw reuses this stratified pair under a fresh randomization.
-constexpr int kSobolDimensions = 2;
-constexpr int kSobolBits = 32;  // direction vectors are scaled by 2^32, so a 32-bit index spans the sequence's period
-
-using SobolDirections = std::array<std::array<std::uint32_t, kSobolBits>, kSobolDimensions>;
-
-// Van der Corput, then Joe & Kuo 2008's row "2 1 0 1" (degree 1, m_1 = 1), whose recurrence is v_b = v_(b-1) ^ (v_(b-1) >> 1).
-constexpr SobolDirections buildSobolDirections() {
-    SobolDirections directions{};
-    for (int b = 0; b < kSobolBits; ++b) {
-        directions[0][static_cast<std::size_t>(b)] = 1U << (kSobolBits - 1 - b);
-    }
-    directions[1][0] = directions[0][0];
-    for (std::size_t b = 1; b < kSobolBits; ++b) {
-        directions[1][b] = directions[1][b - 1] ^ (directions[1][b - 1] >> 1U);
-    }
-    return directions;
-}
-
-constexpr SobolDirections kSobolDirections = buildSobolDirections();
+// 2^32 points: the index is 32-bit, so a tile's pixels x samples must fit it.
+constexpr int kIndexBits = 32;
 
 std::uint32_t reverseBits(std::uint32_t x) {
 #if defined(__has_builtin)
@@ -68,101 +50,103 @@ std::uint32_t nestedUniformScramble(std::uint32_t x, std::uint32_t seed) {
     return reverseBits(reversedBitOwen(reverseBits(x), seed));
 }
 
-// Sobol point for one dimension (Sobol 1967), random-access form. Dimension 1 is a bit reversal by identity: 62 -> 48 ns/draw.
-std::uint32_t sobolPoint(std::uint32_t index, int dimension) {
-    if (dimension == 0) {
-        return reverseBits(index);
-    }
-    std::uint32_t x = 0;
-    for (std::uint32_t bits = index; bits != 0U; bits &= bits - 1U) {
-        x ^= kSobolDirections[static_cast<std::size_t>(dimension)][static_cast<std::size_t>(std::countr_zero(bits))];
-    }
-    return x;
+// Interleaves a coordinate below 2^16 into the even bits: one axis of a Morton code.
+std::uint32_t spreadBits(std::uint32_t x) {
+    x = (x | (x << 8)) & 0x00FF00FFU;
+    x = (x | (x << 4)) & 0x0F0F0F0FU;
+    x = (x | (x << 2)) & 0x33333333U;
+    return (x | (x << 1)) & 0x55555555U;
 }
 
-// Blue-noise dithering (Georgiev & Fajardo 2016): one point set, toroidally shifted per pixel. Apparent cleanliness, not convergence.
-constexpr int kMaskSize = 128;  // the size Georgiev & Fajardo used for their rendered images
-constexpr int kMaskPixels = kMaskSize * kMaskSize;
-constexpr std::array<std::uint16_t, kMaskPixels> kBlueNoiseRanks = {{
-#include "blue_noise_mask.inc"
-}};
-// The same construction over offset rows: void-and-cluster energy measured on the hexagonal film, not across square indices.
-constexpr std::array<std::uint16_t, kMaskPixels> kHexBlueNoiseRanks = {{
-#include "blue_noise_mask_hex.inc"
-}};
+// All 24 orders of a base-4 digit, lexicographic, so a uniform pick among them is a uniform random child permutation.
+constexpr std::array<std::array<std::uint32_t, 4>, 24> kDigitOrders = [] {
+    std::array<std::array<std::uint32_t, 4>, 24> orders{};
+    std::array<std::uint32_t, 4> order = {0, 1, 2, 3};
+    for (std::array<std::uint32_t, 4>& entry : orders) {
+        entry = order;
+        std::next_permutation(order.begin(), order.end());
+    }
+    return orders;
+}();
 
-// R2 (Roberts 2018): frac(c * (1/phi2, 1/phi2^2)). A hash lands offsets too close, measured |r| = 0.14 between channels 8 and 23.
-constexpr std::uint32_t kR2AlphaX = 0xC13FA9A9U;
-constexpr std::uint32_t kR2AlphaY = 0x91E10DA6U;
-// Keeps the top log2(kMaskSize) bits of the fixed-point fraction, so the offset follows kMaskSize rather than a literal.
-constexpr int kR2Shift = 32 - std::countr_zero(static_cast<unsigned>(kMaskSize));
-
-// The shift in the sampler's 24-bit output space, exactly representable, which lets sampler_validate invert it at zero tolerance.
-std::uint32_t ditherFixed(pathtracer::gfx::PixelLattice lattice, int pixelX, int pixelY, int ditherChannel) {
-    const bool hexagonal = lattice == pathtracer::gfx::PixelLattice::Hexagonal;
-    const auto channel = static_cast<std::uint32_t>(ditherChannel);
-    // An odd row shift moves even and odd rows half a pitch apart, no lattice translation, so the hexagonal mask shifts by even rows.
-    const std::uint32_t rowShift = ((channel * kR2AlphaY) >> kR2Shift) & (hexagonal ? ~1U : ~0U);
-    const auto x = (static_cast<std::uint32_t>(pixelX) + ((channel * kR2AlphaX) >> kR2Shift)) & (kMaskSize - 1U);
-    const auto y = (static_cast<std::uint32_t>(pixelY) + rowShift) & (kMaskSize - 1U);
-    const std::array<std::uint16_t, kMaskPixels>& ranks = hexagonal ? kHexBlueNoiseRanks : kBlueNoiseRanks;
-    return (static_cast<std::uint32_t>(ranks[(y * kMaskSize) + x]) << 10U) | 512U;
+// Base-4 Owen scrambling (Owen 1995) as pbrt-v4's ZSobolSampler: each digit takes one of all 4! orders, hashed from the digits above.
+std::uint32_t scrambleBase4(std::uint32_t code, int digits, std::uint32_t seed) {
+    std::uint32_t scrambled = 0;
+    for (int d = digits - 1; d >= 0; --d) {
+        const int shift = 2 * d;
+        // The digits above behind a sentinel 1, so each tree node has a distinct key whatever its depth.
+        const std::uint32_t node = (1U << (2 * (digits - 1 - d))) | static_cast<std::uint32_t>(std::uint64_t{code} >> (shift + 2));
+        // Lemire's multiply-shift onto [0, 24): bias below 24 / 2^32.
+        const std::uint64_t pick = (static_cast<std::uint64_t>(static_cast<std::uint32_t>(hashSeed(static_cast<int>(node), seed))) * 24U) >> 32U;
+        scrambled |= kDigitOrders[pick][(code >> shift) & 3U] << shift;
+    }
+    return scrambled;
 }
 
-// One dimension set's output: 24 significant bits of the scrambled point, shifted by this pixel's dither for that set.
-float toShiftedUnitFloat(std::uint32_t x, std::uint32_t dither) {
-    return static_cast<float>(((x >> 8) + dither) & 0xFFFFFFU) * 0x1.0p-24F;
+// Owen-scrambled coordinate from its bit-reversed Sobol point, the domain the Laine-Karras hash works in, so no reversal is spent.
+float scrambledUnitFloat(std::uint32_t reversedPoint, std::uint32_t seed) {
+    return static_cast<float>(reverseBits(reversedBitOwen(reversedPoint, seed)) >> 8) * 0x1.0p-24F;
 }
 
 }  // namespace
+
+std::uint32_t reversedSobolDimension1(std::uint32_t index) {
+    // Superset-sum over the 5-bit digit positions, one position bit per step, so each digit gathers every b containing it.
+    index ^= (index >> 1) & 0x55555555U;
+    index ^= (index >> 2) & 0x33333333U;
+    index ^= (index >> 4) & 0x0F0F0F0FU;
+    index ^= (index >> 8) & 0x00FF00FFU;
+    return index ^ ((index >> 16) & 0x0000FFFFU);
+}
 
 std::uint32_t replicateSeed(std::uint32_t scrambleSeed, int replicate) {
     // SplitMix64 of r alone is 0 at r = 0 and avalanched otherwise; XOR is the kAoSeedOffset idiom for an independent stream.
     return scrambleSeed ^ static_cast<std::uint32_t>(hashSeed(replicate, 0U));
 }
 
-float blueNoiseDither(int pixelX, int pixelY, int ditherChannel, pathtracer::gfx::PixelLattice lattice) {
-    return static_cast<float>(ditherFixed(lattice, pixelX, pixelY, ditherChannel)) * 0x1.0p-24F;
+Sampler::Sampler(int pixelX, int pixelY, int sampleIndex, int sampleCount, std::uint32_t scrambleSeed) {
+    const int sampleBits = sampleCount > 0 ? std::bit_width(static_cast<std::uint32_t>(sampleCount) - 1U) : kIndexBits;
+    // The largest square tile whose pixels' blocks fit the index; unbounded leaves 0, one independent sequence per pixel.
+    const int tileBits = (kIndexBits - sampleBits) / 2;
+    const auto x = static_cast<std::uint32_t>(pixelX);
+    const auto y = static_cast<std::uint32_t>(pixelY);
+    const std::uint64_t tileHash =
+        hashSeed(static_cast<int>(x >> tileBits), static_cast<std::uint32_t>(hashSeed(static_cast<int>(y >> tileBits), scrambleSeed)));
+    seed_ = static_cast<std::uint32_t>(tileHash);
+    const std::uint64_t tileMask = (std::uint64_t{1} << (2 * tileBits)) - 1U;
+    const std::uint32_t morton = (spreadBits(x & static_cast<std::uint32_t>((1U << tileBits) - 1U)) << 1) |
+                                 spreadBits(y & static_cast<std::uint32_t>((1U << tileBits) - 1U));
+    // Ahmed & Wonka 2020: a base-4-scrambled Morton rank picks the pixel's block, so aligned pixel squares hold aligned blocks.
+    const std::uint32_t rank = scrambleBase4(morton, tileBits, static_cast<std::uint32_t>(tileHash >> 32));
+    index_ = static_cast<std::uint32_t>((std::uint64_t{rank} << sampleBits) | static_cast<std::uint32_t>(sampleIndex));
+    indexMask_ = static_cast<std::uint32_t>((tileMask << sampleBits) | ((std::uint64_t{1} << sampleBits) - 1U));
 }
 
-// The index mask bounds the sequence to the length drawn: 62 ns/draw unmasked, 14 masked, at 128 samples. sampleCount <= 0 = unbounded.
-Sampler::Sampler(int pixelX, int pixelY, int sampleIndex, int sampleCount, std::uint32_t scrambleSeed,
-                 pathtracer::gfx::PixelLattice lattice)
-    : lattice_(lattice),
-      pixelX_(pixelX),
-      pixelY_(pixelY),
-      sampleIndex_(static_cast<std::uint32_t>(sampleIndex)),
-      indexMask_(sampleCount > 0 ? std::bit_ceil(static_cast<std::uint32_t>(std::max(sampleCount, sampleIndex + 1))) - 1U
-                                 : 0xFFFFFFFFU),
-      scrambleSeed_(scrambleSeed) {}
+Sampler Sampler::stream(std::uint32_t streamOffset) const {
+    Sampler other = *this;
+    // XOR into the avalanched base, the kAoSeedOffset idiom: every set's hash then differs from this stream's.
+    other.seed_ ^= streamOffset;
+    other.dimensionSet_ = 0;
+    return other;
+}
 
 float Sampler::next1D() {
     // Two seeds per set from the halves of one avalanched hash: SplitMix64 already decorrelates them, as kAoSeedOffset also rests on.
-    const int set = dimensionSet_;
-    const std::uint64_t setHash = hashSeed(2 * set, scrambleSeed_);
+    const std::uint64_t setHash = hashSeed(2 * dimensionSet_, seed_);
     ++dimensionSet_;
-    // Shuffling the index per set (Burley 2020 Sec. 5.2) decorrelates sets; Owen-scrambling it keeps a power-of-two prefix stratified.
-    const auto indexSeed = static_cast<std::uint32_t>(setHash);
-    const auto scramble = static_cast<std::uint32_t>(setHash >> 32U);
-    const std::uint32_t shuffled = nestedUniformScramble(sampleIndex_, indexSeed) & indexMask_;
-    return toShiftedUnitFloat(nestedUniformScramble(sobolPoint(shuffled, 0), scramble),
-                               ditherFixed(lattice_, pixelX_, pixelY_, 2 * set));
+    // Shuffling the index per set (Burley 2020 Sec. 5.2) decorrelates sets; nesting maps every aligned block to an aligned block.
+    const std::uint32_t shuffled = nestedUniformScramble(index_, static_cast<std::uint32_t>(setHash)) & indexMask_;
+    return scrambledUnitFloat(shuffled, static_cast<std::uint32_t>(setHash >> 32U));
 }
 
 glm::vec2 Sampler::next2D() {
     // Both coordinates share one shuffled index, being one 2D point; their Owen scrambles differ, per Owen's independence rule (1995).
-    const int set = dimensionSet_;
-    const std::uint64_t setHash = hashSeed(2 * set, scrambleSeed_);
-    const std::uint64_t scrambleHash = hashSeed((2 * set) + 1, scrambleSeed_);
+    const std::uint64_t setHash = hashSeed(2 * dimensionSet_, seed_);
+    const std::uint64_t scrambleHash = hashSeed((2 * dimensionSet_) + 1, seed_);
     ++dimensionSet_;
-    const auto indexSeed = static_cast<std::uint32_t>(setHash);
-    const auto scrambleX = static_cast<std::uint32_t>(setHash >> 32U);
-    const auto scrambleY = static_cast<std::uint32_t>(scrambleHash);
-    const std::uint32_t shuffled = nestedUniformScramble(sampleIndex_, indexSeed) & indexMask_;
-    return {toShiftedUnitFloat(nestedUniformScramble(sobolPoint(shuffled, 0), scrambleX),
-                               ditherFixed(lattice_, pixelX_, pixelY_, 2 * set)),
-            toShiftedUnitFloat(nestedUniformScramble(sobolPoint(shuffled, 1), scrambleY),
-                               ditherFixed(lattice_, pixelX_, pixelY_, (2 * set) + 1))};
+    const std::uint32_t shuffled = nestedUniformScramble(index_, static_cast<std::uint32_t>(setHash)) & indexMask_;
+    return {scrambledUnitFloat(shuffled, static_cast<std::uint32_t>(setHash >> 32U)),
+            scrambledUnitFloat(reversedSobolDimension1(shuffled), static_cast<std::uint32_t>(scrambleHash))};
 }
 
 CdfSample invertCdf(const float* cdf, int count, float u) {

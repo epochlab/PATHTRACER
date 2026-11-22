@@ -28,7 +28,6 @@
 #include "pathtracer/gfx/ocio_cpu_transform.h"
 #include "pathtracer/gfx/viewport.h"
 #include "pathtracer/scene/camera.h"
-#include "pathtracer/scene/sampler.h"
 #include "pathtracer/scene/thread_pool.h"
 #include "stats.h"
 
@@ -284,7 +283,7 @@ PT_CHECK(grey_card_encodes_to_its_albedo_code, Fast, Exact) {
 
 // A flat field's quantization error must be blue at every level: each one's low-band share improbably small for white noise.
 PT_CHECK(encode_error_is_blue_noise, Fast, Statistical) {
-    constexpr int kLowBand = 3;  // everything below an eighth of Nyquist, as sampler_validate's mask_is_blue_noise
+    constexpr int kLowBand = 3;  // everything below an eighth of Nyquist, as sampler_validate's error_is_blue_noise
     const std::array<double, pathtracer::debug::kSpectrumBands> null = pathtracer::debug::whiteNoiseBandShare(kTile, kTile);
     const double expected = std::accumulate(null.begin() + kLowBand, null.end(), 0.0);
     // The white null's share is its frequency count over the tile's kTileTexels - 1 nonzero ones.
@@ -310,34 +309,6 @@ PT_CHECK(encode_error_is_blue_noise, Fast, Statistical) {
                   100.0 * worst, 100.0 * expected, p, ctx.alpha());
     std::printf("  %s\n", detail);
     PT_EXPECT(ctx, p <= ctx.alpha(), detail);
-}
-
-// Every sampler dither channel is a toroidal shift of its mask, so all 128^2 shifts cover every channel: none may correlate past chance.
-PT_CHECK(dither_mask_independent_of_sampler, Fast, Exact) {
-    const std::array<float, kTileTexels>& mask = pathtracer::gfx::displayDitherMask();
-    const std::vector<double> display(mask.begin(), mask.end());
-    std::vector<double> sampler(static_cast<std::size_t>(kTileTexels));
-    for (int y = 0; y < kTile; ++y) {
-        for (int x = 0; x < kTile; ++x) {
-            sampler[(static_cast<std::size_t>(y) * kTile) + static_cast<std::size_t>(x)] =
-                pathtracer::scene::blueNoiseDither(x, y, 0) - 0.5;  // mean-centred: the mask is uniform on [0,1)
-        }
-    }
-    const std::vector<double> r = tools::stats::toroidalCorrelations(display, sampler, kTile);
-    // Over a uniformly random relative shift r has second moment sum P_a P_b / (sum P_a sum P_b), Parseval's random-phase variance.
-    double squares = 0.0;
-    double worst = 0.0;
-    for (const double value : r) {
-        squares += value * value;
-        worst = std::max(worst, std::fabs(value));
-    }
-    const double sigma = std::sqrt(squares / kTileTexels);
-    ctx.plan(1);
-    const double bound = tools::stats::normalQuantile(1.0 - (0.5 * tools::stats::sidak(ctx.alpha(), kTileTexels))) * sigma;
-    char detail[160];
-    std::snprintf(detail, sizeof(detail), "worst |r| = %.4f over all %d shifts, bound %.4f (%.2e random-shift SD)", worst, kTileTexels, bound, sigma);
-    std::printf("  %s\n", detail);
-    PT_EXPECT(ctx, worst <= bound, detail);
 }
 
 // --- Display optics: the CPU path against the viewer's shaders, transcribed here in double precision with GL's own sampling rules.
