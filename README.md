@@ -94,6 +94,8 @@ frame["depth"]    # (64, 128, 1) float32, camera-space Z
 | Area | Item | Detail | Complexity | ETA | Status |
 | --- | --- | --- | --- | --- | --- |
 | Sampling | Many-light sampling | Lights are picked at random. A light tree (Conty Estevez and Kulla 2018) picks by power, distance and facing, glowing surfaces too. | high | 6 h | ready |
+| Sampling | Resampled light sampling | One light is drawn per shadow ray. Draws several from the light tree and keeps one by its unshadowed light (Talbot 2005; Bitterli et al. 2020), unbiased. Waits for many-light sampling. | medium | 2 h | blocked |
+| Sampling | Path guiding | Hard-to-reach light stays noisy. Learns where light comes from in each region and samples it more (Müller et al. 2017; Vorba et al. 2019), unbiased. | high | 6 h | ready |
 | Light | IES profiles | Lights shine equally in all directions. Loads measured beam shapes from IES LM-63 files, scaled to the light's lumens. | medium | 1 h | ready |
 | Light | Image-textured area lights | Area lights emit one flat colour. Plays an image across the light, sampled by brightness, for screens and stimulus displays. | medium | 2 h | ready |
 | Volume | Rayleigh scattering | Haze scatters all colours equally. Rayleigh scattering makes blue scatter far more than red, for clear air and thin haze. | medium | 1 h | ready |
@@ -104,7 +106,7 @@ frame["depth"]    # (64, 128, 1) float32, camera-space Z
 | Texture | Calibration targets | Only the ColorChecker. Adds sharpness and tone charts: slanted edge (ISO 12233), Siemens star, USAF 1951 and a grey step wedge. | medium | 2 h | ready |
 | Texture | Procedural noise | No noise patterns. Adds white, pink and band-pass noise, Perlin, Worley and fBm, filtered to the pixel so they do not shimmer. | medium | 2 h | ready |
 | Texture | Procedural stimuli | Vision-science patterns need image files. Generates gratings, Gabor patches, plaids, bars, edges, checkerboards and Mondrians. | medium | 3 h | ready |
-| Texture | Minification filtering | Distant textures sparkle and show moiré. Mipmaps picked by ray footprint with EWA filtering, LEAN normal maps, filtered checker. | high | 3 h | ready |
+| Texture | Minification filtering | Distant textures sparkle and show moiré. Mipmaps picked by ray footprint, EWA filtered after shading by one stochastic texel (Pharr et al. 2024), LEAN normal maps, filtered checker. | high | 3 h | ready |
 | Colour | Film grading | No film looks. Adds bleach bypass (desaturated, high contrast) and three-strip Technicolor (Kalmus 1938), in print density. | medium | 2 h | ready |
 | Output | Geometry AOVs | Adds outputs for material ID, facing ratio (how squarely a surface faces the camera) and mean curvature (Meyer et al. 2003). | medium | 2 h | ready |
 | Output | Upscaling | Outputs a larger image from a smaller render, spatial or temporal (Xiao et al. 2020). Never replaces the converged Beauty. | medium | 3 h | ready |
@@ -129,7 +131,6 @@ frame["depth"]    # (64, 128, 1) float32, camera-space Z
 | Camera | Multi-viewpoint compound eyes | Compound-eye facets share one viewpoint. Gives each its own position, direction and acceptance (Millward et al. 2022). | high | 3 h | ready |
 | Camera | Film halation | Adds film's red halo around highlights: light reflecting off the film base back into the red layer, built from the bloom. | medium | 1 h | ready |
 | Sampling | Splat-time outlier rejection | Rare bright samples (fireflies) leave speckles. Drops outliers as samples land (DeCoro et al. 2010); opt-in, as it biases. | low | 1 h | ready |
-| Sampling | Path guiding | Hard-to-reach light stays noisy. Learns where light comes from in each region and samples it more (Müller et al. 2017), unbiased. | high | 6 h | ready |
 | Sampling | Manifold next event estimation | Caustics through glass converge slowly. Solves the glass path to the light directly (Hanika et al. 2015); a prototype was too slow. | high | 4 h | ready |
 | Sampling | Bidirectional paths | Paths start only at the camera, so caustics are slow. Also traces from lights and joins both (Veach and Guibas 1995). | high | 8 h | ready |
 | Light | Physical sky | Daylight is only an HDRI. Computes sun and sky from time and place, with spectral air and haze scattering (Wilkie et al. 2021). | high | 4 h | ready |
