@@ -3,6 +3,20 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Guide-table inversion rejected
+
+A guide table (Chen and Asau 1974) for the wavelength and pixel-filter CDF inversions was built, measured and reverted: images
+were bit-identical, but nothing got faster. Evidence is in `results/guide_table`.
+
+- Pass time B/A, 20 interleaved paired rounds: 11 of 12 scene and size pairs unresolved, macbeth and 2AFC among them at both
+  sizes (macbeth interactive 0.993 [0.981, 1.006]). Proxy cloud's 0.946 [0.904, 1.000] is background load, not the change:
+  cloud spends about 2% of its time in these inversions.
+- In isolation the guided search is slower: 11.6 vs 8.1 ns on a 63-bin table. The table sits in L1, so the branch-free halving
+  runs a fixed, always-predicted trip count; the guide adds a dependent load and a trip count that varies per sample.
+- The 18-27% the roadmap row cited was the share of `sampleWavelengths` and the chunk loop, not of the search; the 4 inversions
+  are about 35-50 ns of a 58-95 ns `sampleWavelengths` call. The Manuka paper does not describe its table search.
+- docs: the roadmap drops the Guide-table inversion row.
+
 ## Pass scheduling
 
 Each pass now keeps every core busy to its end, and reports how busy the cores were. Images are bit-identical. Evidence is in
