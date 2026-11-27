@@ -183,10 +183,17 @@ float scatteredSpread(float spread, float width, const glm::vec3& d, const glm::
     return share > 0.0F ? lobeSpread(transferred, share) : std::clamp(transferred, -sphere, sphere);
 }
 
-// floor(texels / wanted) keeps the chunk count at or above wanted; the ceiling caps unit size, the floor of 1 handles tiny lists.
-int pathTraceChunkTexels(int texels, unsigned int threadCount) {
-    const int wanted = static_cast<int>(threadCount) * kChunksPerThread;
-    return std::clamp(texels / wanted, 1, kPathTraceChunkTexels);
+// Factoring, x = 2 (Hummel, Schonberg and Flynn 1992): batches of P chunks of ceil(R / 2P), so each batch hands out half of what remains.
+std::vector<int> pathTraceChunkBounds(int texels, unsigned int threadCount) {
+    const int threads = static_cast<int>(threadCount);
+    std::vector<int> bounds{0};
+    while (bounds.back() < texels) {
+        const int chunk = (texels - bounds.back() + (2 * threads) - 1) / (2 * threads);
+        for (int i = 0; i < threads && bounds.back() < texels; ++i) {
+            bounds.push_back(std::min(bounds.back() + chunk, texels));
+        }
+    }
+    return bounds;
 }
 
 std::vector<std::uint32_t> allTexels(int width, int height) {
@@ -1024,10 +1031,8 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
     const std::uint32_t seed = replicateSeed(scrambleSeed, pass % settings.replicates);
     const int replicateBase = (pass / settings.replicates) * settings.samplesPerPass;
     const int replicateCount = sampleCount > 0 ? (sampleCount + settings.replicates - 1) / settings.replicates : sampleCount;
-    // Chunks of the list, not of the frame: as texels converge the work left stays split evenly over the pool, wherever it lies.
-    const auto texelCount = static_cast<int>(texels.size());
-    const int chunkTexels = pathTraceChunkTexels(texelCount, threadPool.threadCount());
-    const int chunks = (texelCount + chunkTexels - 1) / chunkTexels;
+    // Chunks of the list, not of the frame: as texels converge the work left stays split over the pool, wherever it lies.
+    const std::vector<int> chunkBounds = pathTraceChunkBounds(static_cast<int>(texels.size()), threadPool.threadCount());
     const std::vector<std::uint8_t> mayPassThrough = passThroughInstances(instances);
     const PassThroughScene scene{accel, shadingTriangles, instances, mayPassThrough,
                                  std::any_of(mayPassThrough.begin(), mayPassThrough.end(), [](std::uint8_t may) { return may != 0; }),
@@ -1039,10 +1044,11 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                (!isConstant(material.transmissionWeight, 0.0F) || !isConstant(material.subsurfaceWeight, 0.0F));
     }));
 
+    const auto samples = static_cast<float>(settings.samplesPerPass);
     // One worker owns one chunk: filter importance sampling keeps each sample in its own pixel's estimate, so chunks share no work.
     const auto renderChunk = [&](int chunkIndex) {
-        const auto chunkBegin = static_cast<std::size_t>(chunkIndex) * static_cast<std::size_t>(chunkTexels);
-        const std::size_t chunkEnd = std::min(chunkBegin + static_cast<std::size_t>(chunkTexels), texels.size());
+        const auto chunkBegin = static_cast<std::size_t>(chunkBounds[static_cast<std::size_t>(chunkIndex)]);
+        const auto chunkEnd = static_cast<std::size_t>(chunkBounds[static_cast<std::size_t>(chunkIndex) + 1]);
 
         // Stack-local, not thread_local: zeroed by construction, so the reset boundary is the chunk boundary with no bookkeeping.
         pathtracer::debug::RayCounts chunkRays;
@@ -1052,8 +1058,12 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
         // Reused by every path in the chunk: its buffers keep their capacity, so a path allocates only past the chunk's deepest.
         PathGraph graph;
 
-        const auto samples = static_cast<float>(settings.samplesPerPass);
         for (std::size_t i = chunkBegin; i < chunkEnd; ++i) {
+            // Checked per texel, so a stale pass stops within one path however large the chunk; the caller discards the whole pass.
+            if (generation.load(std::memory_order_relaxed) != requestedGeneration) {
+                stats.addCancelledChunk(chunkRays);  // its rays were paid for, so a cancelled pass must not read as a short one
+                return;
+            }
             const int x = static_cast<int>(texels[i] % static_cast<std::uint32_t>(width));
             const int y = static_cast<int>(texels[i] / static_cast<std::uint32_t>(width));
             const glm::vec2 centre = pathtracer::gfx::pixelCentre(lattice, x, y);
@@ -1114,13 +1124,8 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
         stats.addChunk(chunkRays);
     };
 
-    threadPool.parallelFor(chunks, [&renderChunk, &generation, requestedGeneration, &stats](int chunkIndex) {
-        if (generation.load(std::memory_order_relaxed) != requestedGeneration) {
-            stats.addCancelledChunk();  // counted, not ignored: a cancelled pass must not read as a short one
-            return;  // stale -- caller discards this pass's result entirely
-        }
-        renderChunk(chunkIndex);
-    });
+    threadPool.parallelFor(static_cast<int>(chunkBounds.size()) - 1, renderChunk);
+    stats.setCoreUse(threadPool.lastCoreUse());
 }
 
 }  // namespace pathtracer::scene

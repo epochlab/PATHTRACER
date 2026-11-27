@@ -3,6 +3,30 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Pass scheduling
+
+Each pass now keeps every core busy to its end, and reports how busy the cores were. Images are bit-identical. Evidence is in
+`results/pass_scheduling`.
+
+- perf: **factoring split (Hummel, Schonberg and Flynn 1992).** A pass's texel list was cut into 16 equal chunks for 8 workers,
+  so a pass ended when its slowest chunk did: 14.7% of each trace dispatch was that tail at the interactive scale (205x115).
+  Chunks now go out in batches of one per worker, each ceil(R / 2P) of the R texels left, largest first, down to single texels.
+  The tail falls to 3.2%.
+  - Pass time B/A, 20 interleaved paired rounds: interactive cornell 0.935 [0.923, 0.957], cloud 0.917, cornell_sss 0.930;
+    proxy cornell 0.953 [0.942, 0.964], stump 0.896. 11 of 12 scene and size pairs resolved faster, none slower; interactive
+    macbeth is unresolved.
+  - The retire and foveation passes over the active list use the same split.
+- perf: a stale pass is checked per texel, not per chunk, so cancel latency is one path whatever the chunk size.
+  `kPathTraceChunkTexels` (the 96x96 cap that bounded it) and `kChunksPerThread` are removed. A chunk cut short still counts its rays.
+- feat: **core use per pass.** `ThreadPool::lastCoreUse` is the workers' summed thread CPU time over workers x dispatch wall, so
+  time lost to other processes shows. It appears on the HUD's chunks row, as the `-bench` column `pass_core_use`, and in
+  render_beauty's `--bench-log` and timing output. The spec block drops its chunk-size field.
+- test: `driver.chunk_bounds_factor_the_list`, `driver.core_use_is_a_share_of_the_pool` and `driver.stale_pass_traces_nothing`;
+  each fails under its mutation (`tests.txt`). `render_is_invariant_to_chunk_length` is removed, since chunks now follow the pool
+  size alone and `render_is_invariant_to_thread_count` covers it.
+- docs: the roadmap leads with one Performance area holding every speed row in build order, with two measured rows added (Pass
+  scheduling, Guide-table inversion). The Pass scheduling row is then removed as done.
+
 ## Blue noise beyond one dimension
 
 The sampler now spreads error as blue noise in every dimension at the final sample count, not one translated scalar mask that

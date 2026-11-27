@@ -322,12 +322,10 @@ std::vector<PoolTerms> poolPrefix(const PathTraceResult& result, double exposure
 // Runs body(i) for every i < count in balanced chunks, as the trace splits its work list.
 template <typename Body>
 void forEachChunked(std::size_t count, ThreadPool& threadPool, const Body& body) {
-    const int chunkTexels = pathTraceChunkTexels(static_cast<int>(count), threadPool.threadCount());
-    const int chunks = (static_cast<int>(count) + chunkTexels - 1) / chunkTexels;
-    threadPool.parallelFor(chunks, [&](int chunk) {
-        const auto begin = static_cast<std::size_t>(chunk) * static_cast<std::size_t>(chunkTexels);
-        const std::size_t end = std::min(begin + static_cast<std::size_t>(chunkTexels), count);
-        for (std::size_t i = begin; i < end; ++i) {
+    const std::vector<int> bounds = pathTraceChunkBounds(static_cast<int>(count), threadPool.threadCount());
+    threadPool.parallelFor(static_cast<int>(bounds.size()) - 1, [&](int chunk) {
+        const auto end = static_cast<std::size_t>(bounds[static_cast<std::size_t>(chunk) + 1]);
+        for (auto i = static_cast<std::size_t>(bounds[static_cast<std::size_t>(chunk)]); i < end; ++i) {
             body(i);
         }
     });
@@ -561,6 +559,7 @@ void PathTraceDriver::publishPassRecord(std::uint64_t generation, int passIndex,
                                             passStats_.rays(),
                                             passStats_.chunksCompleted(),
                                             passStats_.chunksCancelled(),
+                                            passStats_.coreUse(),
                                             activeTexels_.size(),
                                             cancelled};
     const std::lock_guard<std::mutex> lock(statsMutex_);

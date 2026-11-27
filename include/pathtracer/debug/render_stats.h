@@ -35,19 +35,23 @@ public:
         shadow_.store(0, std::memory_order_relaxed);
         chunksCompleted_.store(0, std::memory_order_relaxed);
         chunksCancelled_.store(0, std::memory_order_relaxed);
+        coreUse_ = 0.0;
     }
 
     // Worker threads, once per completed chunk.
     void addChunk(const RayCounts& counts) {
-        primary_.fetch_add(counts.primary, std::memory_order_relaxed);
-        bounce_.fetch_add(counts.bounce, std::memory_order_relaxed);
-        ao_.fetch_add(counts.ao, std::memory_order_relaxed);
-        shadow_.fetch_add(counts.shadow, std::memory_order_relaxed);
+        addRays(counts);
         chunksCompleted_.fetch_add(1, std::memory_order_relaxed);
     }
 
-    // Worker threads, on the stale-generation early-out: no rays, but still counted, or a cancelled pass reads as a short one.
-    void addCancelledChunk() { chunksCancelled_.fetch_add(1, std::memory_order_relaxed); }
+    // Worker threads, on the stale-generation early-out: the rays traced before it still count, or a cancelled pass reads as a short one.
+    void addCancelledChunk(const RayCounts& counts) {
+        addRays(counts);
+        chunksCancelled_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    // Driver thread, after the trace dispatch returns: ThreadPool::lastCoreUse of that dispatch.
+    void setCoreUse(double coreUse) { coreUse_ = coreUse; }
 
     // Valid only once parallelFor has returned -- see the ordering argument above.
     [[nodiscard]] RayCounts rays() const {
@@ -57,14 +61,23 @@ public:
 
     [[nodiscard]] std::uint64_t chunksCompleted() const { return chunksCompleted_.load(std::memory_order_relaxed); }
     [[nodiscard]] std::uint64_t chunksCancelled() const { return chunksCancelled_.load(std::memory_order_relaxed); }
+    [[nodiscard]] double coreUse() const { return coreUse_; }
 
 private:
+    void addRays(const RayCounts& counts) {
+        primary_.fetch_add(counts.primary, std::memory_order_relaxed);
+        bounce_.fetch_add(counts.bounce, std::memory_order_relaxed);
+        ao_.fetch_add(counts.ao, std::memory_order_relaxed);
+        shadow_.fetch_add(counts.shadow, std::memory_order_relaxed);
+    }
+
     std::atomic<std::uint64_t> primary_{0};
     std::atomic<std::uint64_t> bounce_{0};
     std::atomic<std::uint64_t> ao_{0};
     std::atomic<std::uint64_t> shadow_{0};
     std::atomic<std::uint64_t> chunksCompleted_{0};
     std::atomic<std::uint64_t> chunksCancelled_{0};
+    double coreUse_ = 0.0;  // written and read on the driver thread only, outside any dispatch
 };
 
 // Immutable snapshot of one finished or cancelled pass, copied wholesale under statsMutex_ exactly as result_ is under resultMutex_.
@@ -81,6 +94,7 @@ struct PassRecord {
     RayCounts rays;
     std::uint64_t chunksCompleted = 0;
     std::uint64_t chunksCancelled = 0;
+    double coreUse = 0.0;  // the trace dispatch's share of the pool's cores busy, ThreadPool::lastCoreUse
     std::size_t activeTexels = 0;  // texels the next pass traces; 0 once adaptive sampling has stopped every one
     bool cancelled = false;  // superseded mid-flight and discarded; its rays were still traced and paid for
 };

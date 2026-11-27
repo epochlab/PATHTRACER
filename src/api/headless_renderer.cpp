@@ -393,6 +393,7 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
     accumulatedLanes_ = accumulatedLanesFor(request.aovs, wantsFilter);
 
     stats_.passMilliseconds.clear();
+    stats_.passCoreUse.clear();
     stats_.gbufferMilliseconds = 0.0;
     stats_.filterMilliseconds = 0.0;
     stats_.opticsMilliseconds = 0.0;
@@ -427,6 +428,7 @@ void HeadlessRenderer::accumulatePathTraced(const Request& request) {
     // Loop-invariant like `lights` above it: the background is a property of the request, not of the pass index.
     const bool showSky = request.showSky.value_or(pathtracer::scene::kDefaultShowSky);
     stats_.passMilliseconds.reserve(static_cast<std::size_t>(request.samples));
+    stats_.passCoreUse.reserve(static_cast<std::size_t>(request.samples));
     // Resolved once: the lane set is fixed for this request, and pathTracedLane is a switch the row loop would otherwise re-run.
     std::vector<const std::vector<float>*> laneSources;
     laneSources.reserve(accumulatedLanes_.size());
@@ -451,6 +453,7 @@ void HeadlessRenderer::accumulatePathTraced(const Request& request) {
                                          /*requestedGeneration=*/1U, threadPool_, stats, pathTraced_);
         stats_.passMilliseconds.push_back(
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - passStart).count());
+        stats_.passCoreUse.push_back(stats.coreUse());
         accumulatePass(pass, laneSources);
         if (pathtracer::scene::adaptiveCheckpoint(pass + 1, baseSettings_)) {
             const pathtracer::scene::FoveatedThreshold fovea(request.camera, bufferWidth_, bufferHeight_,

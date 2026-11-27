@@ -428,7 +428,6 @@ void printStartupSpec(const AppScene& scene, const pathtracer::config::SceneConf
         // Both pools take ThreadPool's default; PathTraceDriver owns its own, unconstructed until AppResources is at its final address.
         pathtracer::scene::ThreadPool::defaultThreadCount(),
         pathtracer::scene::ThreadPool::defaultThreadCount(),
-        pathtracer::scene::kPathTraceChunkTexels,
         static_cast<int>(scene.model.instances.size()),
         static_cast<int>(scene.lights.size()),
         scene.totalTriangles,
@@ -1219,7 +1218,8 @@ nlohmann::json benchSamples(const BenchCapture& bench) {
             {"pass_accumulate_ms", passColumn(&Pass::accumulateMs)},
             {"pass_over_range_ms", passColumn(&Pass::overRangeMs)},
             {"pass_publish_ms", passColumn(&Pass::publishMs)},
-            {"pass_ms", passColumn(&Pass::passMs)}};
+            {"pass_ms", passColumn(&Pass::passMs)},
+            {"pass_core_use", passColumn(&Pass::coreUse)}};
     // Absent without -bench-aovs, so a single-stage record keeps exactly the columns it has always had.
     if (!bench.stageWallMs.empty()) {
         samples["stage_wall_ms"] = bench.stageWallMs;

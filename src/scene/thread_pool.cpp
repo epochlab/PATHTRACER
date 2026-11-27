@@ -1,9 +1,22 @@
 #include "pathtracer/scene/thread_pool.h"
 
 #include <algorithm>
+#include <chrono>
+#include <ctime>
 #include <utility>
 
 namespace pathtracer::scene {
+
+namespace {
+
+// CPU time of the calling thread: time on a core, so a worker preempted mid-dispatch is not counted as using one.
+std::int64_t threadCpuNs() {
+    timespec now{};
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now);
+    return (static_cast<std::int64_t>(now.tv_sec) * 1'000'000'000) + now.tv_nsec;
+}
+
+}  // namespace
 
 ThreadPool::ThreadPool(unsigned int threadCount) {
     const unsigned int count = std::max(1U, threadCount);
@@ -29,11 +42,13 @@ void ThreadPool::parallelFor(int count, const std::function<void(int)>& fn) {
     if (count <= 0) {
         return;
     }
+    const auto dispatchStart = std::chrono::steady_clock::now();
     std::unique_lock<std::mutex> lock(mutex_);
     fn_ = &fn;
     count_ = count;
     nextIndex_.store(0, std::memory_order_relaxed);
     workersRemaining_ = static_cast<unsigned int>(workers_.size());
+    dispatchCpuNs_ = 0;
     ++epoch_;
     lock.unlock();
     dispatchCv_.notify_all();
@@ -41,6 +56,8 @@ void ThreadPool::parallelFor(int count, const std::function<void(int)>& fn) {
     lock.lock();
     doneCv_.wait(lock, [this] { return workersRemaining_ == 0; });
     fn_ = nullptr;
+    const std::chrono::duration<double, std::nano> wall = std::chrono::steady_clock::now() - dispatchStart;
+    lastCoreUse_ = static_cast<double>(dispatchCpuNs_) / (static_cast<double>(workers_.size()) * wall.count());
     // Rethrown on the caller's thread, after every worker is accounted for: the pass is invalid, and swallowing it would publish it.
     if (firstException_) {
         std::rethrow_exception(std::exchange(firstException_, nullptr));
@@ -59,6 +76,7 @@ void ThreadPool::workerLoop() {
         const std::function<void(int)>* fn = fn_;
         const int count = count_;
         lock.unlock();
+        const std::int64_t cpuStart = threadCpuNs();
 
         // A throwing task must still reach the decrement below, which parallelFor waits on -- an escape would hang the caller forever.
         try {
@@ -73,7 +91,9 @@ void ThreadPool::workerLoop() {
             }
         }
 
+        const std::int64_t cpuNs = threadCpuNs() - cpuStart;
         lock.lock();
+        dispatchCpuNs_ += cpuNs;
         --workersRemaining_;
         const bool isLast = workersRemaining_ == 0;
         lock.unlock();
