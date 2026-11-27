@@ -21,7 +21,6 @@ struct EngineSpec {
     float aoMaxDistance;
     unsigned int pathTraceThreads;
     unsigned int gbufferThreads;
-    int chunkTexels;  // the full-load work unit; smaller lists split finer to fill the pool
     int instanceCount;
     int lightCount;
     int triangleCount;

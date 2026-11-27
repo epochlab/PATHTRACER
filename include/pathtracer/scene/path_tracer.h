@@ -23,11 +23,6 @@
 
 namespace pathtracer::scene {
 
-// Texels per work unit at full load, a 96 px tile's area: filter importance sampling makes texels independent, so it sets only granularity.
-inline constexpr int kPathTraceChunkTexels = 96 * 96;
-// Chunks per worker the split aims for: two leaves no worker idle and bounds the straggler tail at half a worker's share.
-inline constexpr int kChunksPerThread = 2;
-
 // Blackman-Harris (Harris 1978) at Arnold's default 1.5 px radius, importance-sampled (Ernst et al. 2006): pdf proportional to f, weight 1.
 inline constexpr float kFilterRadius = 1.5F;
 
@@ -56,8 +51,8 @@ struct AcceptanceSample {
     return glm::length(glm::cross(dirPerPixel[0], dirPerPixel[1]));
 }
 
-// Chunk length renderPathTraced splits `texels` into for `threadCount` workers: kPathTraceChunkTexels unless that leaves the pool idle.
-[[nodiscard]] int pathTraceChunkTexels(int texels, unsigned int threadCount);
+// Chunk i of a `texels` list on `threadCount` workers is [bounds[i], bounds[i + 1]), largest first, by factoring.
+[[nodiscard]] std::vector<int> pathTraceChunkBounds(int texels, unsigned int threadCount);
 
 // Every texel of a width x height image as ascending row-major indices: the work list of a pass that traces them all.
 [[nodiscard]] std::vector<std::uint32_t> allTexels(int width, int height);

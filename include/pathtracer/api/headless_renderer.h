@@ -65,6 +65,8 @@ public:
     struct RenderStats {
         // One entry per path-traced pass. Empty when the request needed no light transport -- not an error; do not assume a pass happened.
         std::vector<double> passMilliseconds;
+        // One entry per pass, beside passMilliseconds: the trace's share of the pool's cores busy, ThreadPool::lastCoreUse.
+        std::vector<double> passCoreUse;
         // Wall clock of the G-buffer and Beauty-filter work, 0 when it did not run; averaging it with passes would mean nothing.
         double gbufferMilliseconds = 0.0;
         double filterMilliseconds = 0.0;

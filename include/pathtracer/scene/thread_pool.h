@@ -35,6 +35,9 @@ public:
     // Worker count, for callers partitioning into per-worker buckets rather than one index per output element.
     [[nodiscard]] unsigned int threadCount() const { return static_cast<unsigned int>(workers_.size()); }
 
+    // The last parallelFor's summed worker CPU time over threadCount x its wall time: the share of the pool's cores it kept busy.
+    [[nodiscard]] double lastCoreUse() const { return lastCoreUse_; }
+
 private:
     void workerLoop();
 
@@ -53,6 +56,9 @@ private:
     unsigned int workersRemaining_ = 0;
     // First exception escaping fn this dispatch, held under mutex_ and rethrown by parallelFor once every worker has decremented.
     std::exception_ptr firstException_;
+    // Worker CPU time this dispatch, summed under mutex_ at each worker's decrement; read by parallelFor once all have decremented.
+    std::int64_t dispatchCpuNs_ = 0;
+    double lastCoreUse_ = 0.0;
 };
 
 }  // namespace pathtracer::scene

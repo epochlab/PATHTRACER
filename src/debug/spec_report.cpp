@@ -93,8 +93,8 @@ void printSpec(const EngineSpec& spec, const GpuInfo& gpu) {
     section("RENDER");
     row("resolution", "%dx%d  scale %.2f (interactive %.2f)  aov %s", spec.imageWidth,
         spec.imageHeight, spec.renderScale, spec.interactiveRenderScale, spec.aovName);
-    row("path trace", "%u threads  %d texel chunks  %d bounces  RR@%d",
-        spec.pathTraceThreads, spec.chunkTexels, spec.maxBounces,
+    row("path trace", "%u threads  %d bounces  RR@%d",
+        spec.pathTraceThreads, spec.maxBounces,
         spec.russianRouletteStartBounce);
     if (spec.samplesPerPixel > 0) {
         row("sampling", "%d spp  ao range %.2f", spec.samplesPerPixel,

@@ -741,30 +741,71 @@ PT_CHECK(over_range_stats_match_serial_scan, Slow, Exact) {
     PT_EXPECT(ctx, stats.rawPeak == serialPeak, peakDetail);
 }
 
-// The chunking is a work split, so it must stay within its unit ceiling and never hand the pool fewer chunks than it can use.
-PT_CHECK(chunk_length_bounds_the_unit_and_fills_the_pool, Fast, Exact) {
-    using pathtracer::scene::kChunksPerThread;
-    using pathtracer::scene::kPathTraceChunkTexels;
-    using pathtracer::scene::pathTraceChunkTexels;
+// Factoring's schedule: an exact partition, largest first, no chunk over half its batch's remainder per worker, ending on single texels.
+PT_CHECK(chunk_bounds_factor_the_list, Fast, Exact) {
+    using pathtracer::scene::pathTraceChunkBounds;
     constexpr std::array<int, 9> kTexels{0, 1, 8, 32, 96, 115, 9216, 1152 * 205, 2048 * 1024};
     constexpr std::array<unsigned int, 5> kThreads{1, 2, 8, 64, 4096};
-    ctx.plan(static_cast<int>(kTexels.size() * kThreads.size() * 2));
+    ctx.plan(static_cast<int>(kTexels.size() * kThreads.size() * 4));
     for (const int texels : kTexels) {
         for (const unsigned int threads : kThreads) {
-            const int chunk = pathTraceChunkTexels(texels, threads);
+            const std::vector<int> bounds = pathTraceChunkBounds(texels, threads);
+            const auto chunks = static_cast<long long>(bounds.size()) - 1;
+            const auto pool = static_cast<std::size_t>(threads);
+            bool partition = bounds.front() == 0 && bounds.back() == texels;
+            bool shrinking = true;
+            bool factored = true;
+            for (std::size_t i = 0; i + 1 < bounds.size(); ++i) {
+                const int size = bounds[i + 1] - bounds[i];
+                partition = partition && size > 0;
+                shrinking = shrinking && (i == 0 || size <= bounds[i] - bounds[i - 1]);
+                const long long remainder = texels - bounds[(i / pool) * pool];
+                factored = factored && size <= (remainder + (2LL * threads) - 1) / (2LL * threads);
+            }
             char detail[192];
-            std::snprintf(detail, sizeof(detail), "%d texels on %u threads gave chunk %d, outside [1, %d]", texels, threads, chunk,
-                          kPathTraceChunkTexels);
-            PT_EXPECT(ctx, chunk >= 1 && chunk <= kPathTraceChunkTexels, detail);
-
-            // Fewer chunks than the pool wants is justified only by the unit ceiling, or by a list shorter than the pool.
-            const long long chunks = (static_cast<long long>(texels) + chunk - 1) / chunk;
-            const long long wanted = static_cast<long long>(threads) * kChunksPerThread;
-            std::snprintf(detail, sizeof(detail), "%d texels on %u threads split into %lld chunks of %d, short of %lld", texels, threads,
-                          chunks, chunk, wanted);
-            PT_EXPECT(ctx, chunks >= wanted || chunk == kPathTraceChunkTexels || texels < wanted, detail);
+            std::snprintf(detail, sizeof(detail), "%d texels on %u threads: %lld chunks do not partition [0, %d)", texels, threads, chunks,
+                          texels);
+            PT_EXPECT(ctx, partition, detail);
+            std::snprintf(detail, sizeof(detail), "%d texels on %u threads: a chunk is larger than the one before it", texels, threads);
+            PT_EXPECT(ctx, shrinking, detail);
+            std::snprintf(detail, sizeof(detail), "%d texels on %u threads: a chunk exceeds ceil(R / 2P) of its batch's remainder R",
+                          texels, threads);
+            PT_EXPECT(ctx, factored, detail);
+            // Fills the pool, ends on one texel, and stays O(P log N): each batch halves what remains until single texels are left.
+            const long long wanted = std::min<long long>(texels, threads);
+            const long long ceiling = static_cast<long long>(threads) * (std::bit_width(static_cast<unsigned int>(texels)) + 2);
+            const bool sized = chunks >= wanted && chunks <= ceiling && (texels == 0 || bounds.back() - bounds[bounds.size() - 2] == 1);
+            std::snprintf(detail, sizeof(detail), "%d texels on %u threads: %lld chunks, outside [%lld, %lld] or not ending on one texel",
+                          texels, threads, chunks, wanted, ceiling);
+            PT_EXPECT(ctx, sized, detail);
         }
     }
+}
+
+// Core use is CPU time over the pool's: one busy index of four reads about a quarter, and no dispatch reads above every core.
+PT_CHECK(core_use_is_a_share_of_the_pool, Fast, Exact) {
+    constexpr unsigned int kWorkers = 4;
+    ctx.plan(2);
+    pathtracer::scene::ThreadPool pool(kWorkers);
+    // Both bounds are upper bounds on CPU time, which preemption only lowers, so they hold under any load.
+    const auto spin = [] {
+        const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(20);
+        while (std::chrono::steady_clock::now() < end) {
+        }
+    };
+    pool.parallelFor(static_cast<int>(kWorkers), [&](int index) {
+        if (index == 0) {
+            spin();
+        }
+    });
+    const double one = pool.lastCoreUse();
+    char detail[160];
+    std::snprintf(detail, sizeof(detail), "one busy index of %u read core use %.3f, outside (0, 0.5)", kWorkers, one);
+    PT_EXPECT(ctx, one > 0.0 && one < 0.5, detail);
+    pool.parallelFor(static_cast<int>(kWorkers), [&](int) { spin(); });
+    const double all = pool.lastCoreUse();
+    std::snprintf(detail, sizeof(detail), "%u busy indices read core use %.3f, outside (0, 1]", kWorkers, all);
+    PT_EXPECT(ctx, all > 0.0 && all <= 1.0, detail);
 }
 
 // Untraced texels are left as they were and traced ones match the full render: a subset pass is the full pass, restricted.
@@ -815,49 +856,38 @@ PT_CHECK(render_of_a_texel_subset_is_the_full_render_restricted, Slow, Exact) {
     PT_EXPECT(ctx, untracedWritten == 0, detail);
 }
 
-// The load-bearing property of a list-derived chunk length: it partitions the work, it must not change the result.
-PT_CHECK(render_is_invariant_to_chunk_length, Slow, Exact) {
-    ctx.plan(2);
+// A pass already stale traces nothing, writes nothing, and counts every chunk cancelled: the per-texel check precedes every path.
+PT_CHECK(stale_pass_traces_nothing, Slow, Exact) {
+    ctx.plan(3);
     std::unique_ptr<DriverFixture> fixture = makeFixture(ctx.threads());
     if (!fixture->valid()) {
         PT_EXPECT(ctx, false, "scene construction failed");
         return;
     }
-    // Chosen so the two thread counts resolve to different chunks on any host: the counts are explicit, not hardware_concurrency.
-    constexpr int kChunkedImageSize = 96;
-    constexpr unsigned int kFewThreads = 1;
-    constexpr unsigned int kManyThreads = 8;
-    const int coarse = pathtracer::scene::pathTraceChunkTexels(kChunkedImageSize * kChunkedImageSize, kFewThreads);
-    const int fine = pathtracer::scene::pathTraceChunkTexels(kChunkedImageSize * kChunkedImageSize, kManyThreads);
-    char sizes[160];
-    std::snprintf(sizes, sizeof(sizes), "both thread counts resolved to chunk %d, so this check would prove nothing", coarse);
-    PT_EXPECT(ctx, coarse != fine, sizes);
-
     const Camera camera = makeCamera();
     const pathtracer::scene::LightSet lights(&fixture->environment, glm::vec3(0.0F), 1.0F, fixture->scene.lights);
-    const std::atomic<std::uint64_t> generation{1};
+    const std::atomic<std::uint64_t> generation{2};
     pathtracer::debug::PassStats stats;
-    const auto renderWith = [&](unsigned int threads) {
-        pathtracer::scene::ThreadPool pool(threads);
-        PathTraceResult out = pathtracer::scene::makePathTraceResult(kChunkedImageSize, kChunkedImageSize, makeSettings().replicates);
-        stats.reset();
-        pathtracer::scene::renderPathTraced(camera, *fixture->accel, fixture->scene.shadingTriangles,
-                                         fixture->scene.instances, fixture->scene.instanceLightIndex, lights, pathtracer::scene::VolumeSet{},
-                                         kChunkedImageSize, kChunkedImageSize, pathtracer::scene::allTexels(kChunkedImageSize, kChunkedImageSize),
-                                         /*showSky=*/true, makeSettings(), /*scrambleSeed=*/1U, /*sampleBase=*/0,
-                                         /*sampleCount=*/1, generation, 1U, pool, stats, out);
-        return out.beauty.texels;
-    };
-    const std::vector<float> coarseImage = renderWith(kFewThreads);
-    const std::vector<float> fineImage = renderWith(kManyThreads);
-    std::size_t differing = 0;
-    for (std::size_t i = 0; i < coarseImage.size(); ++i) {
-        differing += coarseImage[i] != fineImage[i] ? 1 : 0;
-    }
-    char detail[192];
-    std::snprintf(detail, sizeof(detail), "%zu of %zu floats differ between %d- and %d-texel chunks", differing,
-                  coarseImage.size(), coarse, fine);
-    PT_EXPECT(ctx, differing == 0, detail);
+    PathTraceResult out = pathtracer::scene::makePathTraceResult(kImageSize, kImageSize, makeSettings().replicates);
+    std::fill(out.beauty.texels.begin(), out.beauty.texels.end(), -1.0F);
+    const std::vector<std::uint32_t> texels = pathtracer::scene::allTexels(kImageSize, kImageSize);
+    pathtracer::scene::renderPathTraced(camera, *fixture->accel, fixture->scene.shadingTriangles, fixture->scene.instances,
+                                        fixture->scene.instanceLightIndex, lights, pathtracer::scene::VolumeSet{}, kImageSize, kImageSize,
+                                        texels, /*showSky=*/true, makeSettings(), /*scrambleSeed=*/1U, /*sampleBase=*/0,
+                                        /*sampleCount=*/1, generation, /*requestedGeneration=*/1U, fixture->pool, stats, out);
+    const auto written =
+        static_cast<std::size_t>(std::count_if(out.beauty.texels.begin(), out.beauty.texels.end(), [](float v) { return v != -1.0F; }));
+    const std::size_t chunks =
+        pathtracer::scene::pathTraceChunkBounds(static_cast<int>(texels.size()), fixture->pool.threadCount()).size() - 1;
+    char detail[160];
+    std::snprintf(detail, sizeof(detail), "a stale pass wrote %zu floats", written);
+    PT_EXPECT(ctx, written == 0, detail);
+    std::snprintf(detail, sizeof(detail), "a stale pass traced %llu rays", static_cast<unsigned long long>(stats.rays().total()));
+    PT_EXPECT(ctx, stats.rays().total() == 0, detail);
+    std::snprintf(detail, sizeof(detail), "%llu of %zu chunks counted cancelled, %llu completed",
+                  static_cast<unsigned long long>(stats.chunksCancelled()), chunks,
+                  static_cast<unsigned long long>(stats.chunksCompleted()));
+    PT_EXPECT(ctx, stats.chunksCancelled() == chunks && stats.chunksCompleted() == 0, detail);
 }
 
 // Thread-count invariance on renderPathTraced (the pool is private): bit-identical, as chunks are owned outright and sample order is fixed.

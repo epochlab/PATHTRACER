@@ -160,8 +160,8 @@ void reportErrorSpectrum(const pathtracer::gfx::HdrImage& image, const pathtrace
 bool appendTimingRecord(const Options& options, int argc, char** argv, int passes,
                         const std::string& aovName, const pathtracer::scene::PathTraceSettings& settings,
                         bool envLightEnabled, double gbufferMs, double filterMs, double opticsMs,
-                        const std::vector<double>& milliseconds, const pathtracer::debug::RayCounts& rays,
-                        const pathtracer::gfx::HdrImage& accumulated) {
+                        const std::vector<double>& milliseconds, const std::vector<double>& coreUse,
+                        const pathtracer::debug::RayCounts& rays, const pathtracer::gfx::HdrImage& accumulated) {
     pathtracer::debug::BenchRecord record{
         .tool = "render_beauty",
         .argv = std::vector<std::string>(argv, argv + argc),
@@ -198,6 +198,10 @@ bool appendTimingRecord(const Options& options, int argc, char** argv, int passe
     // Absent on a camera, for the same reason.
     if (options.acceptanceAngleDegrees != 0.0F) {
         record.config["acceptance_angle_deg"] = options.acceptanceAngleDegrees;
+    }
+    // Beside pass_ms, one per pass: the share of the pool's cores the trace kept busy.
+    if (!coreUse.empty()) {
+        record.samples["pass_core_use"] = coreUse;
     }
     // A Beauty filter runs once after the passes, so its wall clock is its own column rather than a pass sample.
     if (filterMs > 0.0) {
@@ -657,6 +661,8 @@ int main(int argc, char** argv) {
         std::cout << "render_beauty: best-of-" << passesRun << ": " << *best << " ms/pass  (mean "
                   << totalMs / static_cast<double>(passesRun) << ", worst " << *worst << ", total "
                   << totalMs << ")\n";
+        const double coreUse = std::accumulate(stats.passCoreUse.begin(), stats.passCoreUse.end(), 0.0);
+        std::cout << "render_beauty: mean core use " << 100.0 * coreUse / static_cast<double>(passesRun) << "%\n";
     }
     if (stats.gbufferMilliseconds > 0.0) {
         std::cout << "render_beauty: G-buffer in " << stats.gbufferMilliseconds << " ms\n";
@@ -671,8 +677,7 @@ int main(int argc, char** argv) {
     if (!options.benchLogPath.empty() &&
         !appendTimingRecord(options, argc, argv, passes, aovName, renderer->baseSettings(),
                             envLightEnabled, stats.gbufferMilliseconds, stats.filterMilliseconds, stats.opticsMilliseconds,
-                            milliseconds,
-                            rays, accumulated)) {
+                            milliseconds, stats.passCoreUse, rays, accumulated)) {
         return EXIT_FAILURE;
     }
 
