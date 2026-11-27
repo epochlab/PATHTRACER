@@ -93,7 +93,6 @@ frame["depth"]    # (64, 128, 1) float32, camera-space Z
 
 | Area | Item | Detail | Complexity | ETA | Status |
 | --- | --- | --- | --- | --- | --- |
-| Performance | Guide-table inversion | Each sample searches 471-bin tables for its wavelengths and filter offset, 18-27% of time on spectral scenes. A guide table (Chen and Asau 1974) starts at the right bin, same image. | low | 1 h | ready |
 | Performance | Many-light sampling | Lights are picked at random. A light tree (Conty Estevez and Kulla 2018) picks by power, distance and facing, glowing surfaces too. | high | 6 h | ready |
 | Performance | Resampled light sampling | One light is drawn per shadow ray. Draws several from the light tree and keeps one by its unshadowed light (Talbot 2005; Bitterli et al. 2020), unbiased. Waits for many-light sampling. | medium | 2 h | blocked |
 | Performance | Path guiding | Hard-to-reach light stays noisy. Learns where light comes from in each region and samples it more (Müller et al. 2017; Vorba et al. 2019), unbiased. | high | 6 h | ready |
